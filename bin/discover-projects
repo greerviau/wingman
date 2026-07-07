@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# discover-projects - find the user's real git repos with zero required config
+# and cache a name -> path map to $WINGMAN_HOME/projects.json.
+#
+# Resolution order for candidate roots:
+#   1. Extra roots from an optional gitignored config.local.sh (WM_ROOTS).
+#   2. Wingman's parent directory (the common case: cloned alongside your repos).
+#   3. A short list of common dev roots, if the parent yielded nothing.
+# Repos are found depth-limited and pruned; the basename is the project name.
+#
+# Usage:
+#   discover-projects              refresh the cache and print the roster
+#   discover-projects --quiet      refresh silently (used on startup)
+#   discover-projects --roots      just print the candidate roots and exit
+#   discover-projects <name>       resolve one name to a path (scan on miss)
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+COMMON_ROOTS="$HOME/dev $HOME/src $HOME/code $HOME/projects $HOME/git $HOME/workspace $HOME/Documents/GitHub"
+# NB: do not list .git here - it is the search target; pruning it finds nothing.
+PRUNE_NAMES="node_modules .venv venv vendor dist build target .next .cache Pods"
+
+# Optional user hints: config.local.sh may set WM_ROOTS / WM_IGNORE / WM_PINS.
+WM_ROOTS=""; WM_IGNORE=""; WM_PINS=""
+[ -f "$WM_REPO/config.local.sh" ] && . "$WM_REPO/config.local.sh"
+
+QUIET=0
+MODE=refresh
+LOOKUP=""
+for arg in "$@"; do
+  case "$arg" in
+    --quiet|-q) QUIET=1 ;;
+    --roots)    MODE=roots ;;
+    -h|--help)  echo "usage: discover-projects [--quiet|--roots|<name>]"; exit 0 ;;
+    -*)         wm_die "unknown flag: $arg" ;;
+    *)          MODE=lookup; LOOKUP="$arg" ;;
+  esac
+done
+
+candidate_roots() {
+  # 1. explicit extra roots
+  for r in $WM_ROOTS; do [ -d "$r" ] && echo "$r"; done
+  # 2. wingman's parent
+  parent="$(dirname "$WM_REPO")"
+  [ -d "$parent" ] && echo "$parent"
+  # 3. common roots (only if parent had no repos; we still list, dedupe later)
+  for r in $COMMON_ROOTS; do [ -d "$r" ] && echo "$r"; done
+}
+
+# Print unique existing roots, preserving order.
+uniq_roots() {
+  seen=""
+  candidate_roots | while IFS= read -r r; do
+    rp="$(cd "$r" 2>/dev/null && pwd)" || continue
+    case " $seen " in *" $rp "*) continue ;; esac
+    seen="$seen $rp"
+    echo "$rp"
+  done
+}
+
+if [ "$MODE" = roots ]; then
+  uniq_roots
+  exit 0
+fi
+
+# Build a find prune expression from PRUNE_NAMES.
+build_prune() {
+  expr=""
+  for n in $PRUNE_NAMES; do
+    if [ -z "$expr" ]; then expr="-name $n"; else expr="$expr -o -name $n"; fi
+  done
+  echo "$expr"
+}
+
+# Emit "name<TAB>path" for every git repo under the roots, honoring WM_IGNORE.
+scan_repos() {
+  prune="$(build_prune)"
+  uniq_roots | while IFS= read -r root; do
+    # find .git entries up to depth 3, pruning heavy dirs.
+    # shellcheck disable=SC2086
+    find "$root" -maxdepth 3 \( $prune \) -prune -o -name .git -print 2>/dev/null | while IFS= read -r gitpath; do
+      repo="$(dirname "$gitpath")"
+      name="$(basename "$repo")"
+      # skip wingman itself and any ignored basenames
+      [ "$repo" = "$WM_REPO" ] && continue
+      skip=0
+      for ig in $WM_IGNORE; do [ "$name" = "$ig" ] && skip=1; done
+      [ "$skip" = 1 ] && continue
+      printf '%s\t%s\n' "$name" "$repo"
+    done
+  done
+}
+
+# Refresh the cache: scan, fold in pins, write JSON via the state engine.
+refresh_cache() {
+  tmp_list="$(scan_repos)"
+  # WM_PINS is newline-separated "name|path" entries; they win over scanned dups.
+  pins_list=""
+  if [ -n "$WM_PINS" ]; then
+    pins_list="$(printf '%s\n' "$WM_PINS" | while IFS='|' read -r n p; do
+      [ -n "$n" ] && [ -n "$p" ] && printf '%s\t%s\n' "$n" "$p"
+    done)"
+  fi
+  printf '%s\n%s\n' "$pins_list" "$tmp_list" | python3 -c '
+import sys, json
+m = {}
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line or "\t" not in line:
+        continue
+    name, path = line.split("\t", 1)
+    m.setdefault(name, path)   # first wins (pins are printed first)
+sys.stdout.write(json.dumps(m))
+' | wm_state projects-set --stdin >/dev/null
+}
+
+case "$MODE" in
+  refresh)
+    refresh_cache
+    n="$(wm_state projects-get | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
+    if [ "$QUIET" = 0 ]; then
+      wm_ok "discovered $n project(s):"
+      wm_state projects-get | python3 -c '
+import sys, json
+for k, v in sorted(json.load(sys.stdin).items()):
+    print("  %-24s %s" % (k, v))'
+    fi
+    ;;
+  lookup)
+    # Fast path: cached.
+    if path="$(wm_state projects-lookup --name "$LOOKUP" 2>/dev/null)"; then
+      echo "$path"; exit 0
+    fi
+    # Miss: refresh once and retry.
+    refresh_cache
+    if path="$(wm_state projects-lookup --name "$LOOKUP" 2>/dev/null)"; then
+      echo "$path"; exit 0
+    fi
+    wm_die "no project named '$LOOKUP' under the known roots (add it in config.local.sh WM_PINS, or pass a path)"
+    ;;
+esac

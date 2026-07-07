@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# wingman - optional convenience launcher.
+# cd into the wingman repo and start claude with the discovered project roots
+# added via --add-dir, so wingman's own occasional light cross-project reads
+# don't prompt. Discovery and spawning work with or without this launcher.
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+# Ensure state home + a fresh-enough project cache exist.
+wm_state init >/dev/null
+"$WM_BIN/discover-projects" --quiet >/dev/null 2>&1 || true
+
+# Collect --add-dir args from the discovered roots.
+adddirs=""
+while IFS= read -r root; do
+  [ -n "$root" ] && adddirs="$adddirs --add-dir $root"
+done <<EOF
+$("$WM_BIN/discover-projects" --roots 2>/dev/null)
+EOF
+
+cd "$WM_REPO" || wm_die "cannot cd into wingman repo: $WM_REPO"
+# shellcheck disable=SC2086
+exec claude $adddirs "$@"

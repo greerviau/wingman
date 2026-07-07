@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# crew-say - send a follow-up message (an answer to a blocker, a course
+# correction) into a crew member's live claude session via tmux. The session
+# resumes with full context.
+#
+# Usage: crew-say <id> "<message>"
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+ID="${1:-}"; MSG="${2:-}"
+[ -n "$ID" ] || wm_die "usage: crew-say <id> \"<message>\""
+[ -n "$MSG" ] || wm_die "usage: crew-say <id> \"<message>\""
+
+WINDOW="wm-$ID"
+wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
+  | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (recover: cd <repo> && claude --resume <session-id>)"
+
+wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" -l "$MSG"
+wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" Enter
+wm_ok "delivered to $ID"

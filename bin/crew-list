@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# crew-list - print the roster (merged roster + live status), reconciled against
+# the live tmux windows first so a crew member whose window died shows as 'died'.
+#
+# Usage:
+#   crew-list                 the compact human roster
+#   crew-list --json          machine-readable merged roster
+#   crew-list --active        only working/blocked
+#   crew-list --status <s>    filter by a status
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+# Reconcile liveness before rendering (cheap, zero-token).
+if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+  wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null
+fi
+
+wm_state crew-list "$@"

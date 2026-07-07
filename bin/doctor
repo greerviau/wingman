@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# doctor - dependency preflight for wingman.
+# Checks each dependency, prints a platform-aware report, and offers to install
+# the missing ones. Run on first launch (CLAUDE.md wires this) and any time.
+#
+# Exit 0 when all *required* deps are present, 1 otherwise.
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+AUTO_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) AUTO_YES=1 ;;
+    -h|--help) echo "usage: doctor [-y]"; exit 0 ;;
+  esac
+done
+
+MISSING_REQUIRED=0
+INSTALL_QUEUE=""   # space-separated brew/apt package names
+
+# check <binary> <required|optional> <pkg> [note]
+check() {
+  bin="$1"; level="$2"; pkg="$3"; note="${4:-}"
+  if wm_have "$bin"; then
+    wm_ok "$bin$([ -n "$note" ] && echo " ($note)")"
+    return
+  fi
+  cmd="$(wm_install_cmd "$pkg")"
+  if [ "$level" = required ]; then
+    wm_err "$bin MISSING (required) ${note:+- $note}"
+    MISSING_REQUIRED=1
+  else
+    wm_warn "$bin missing (optional) ${note:+- $note}"
+  fi
+  if [ -n "$cmd" ]; then
+    printf '    install: %s\n' "$cmd"
+    INSTALL_QUEUE="$INSTALL_QUEUE $pkg"
+  else
+    printf '    install: see your package manager for %s\n' "$pkg"
+  fi
+}
+
+wm_info "wingman doctor - platform: $(wm_platform)"
+echo
+
+# Irreducible core: must already exist, we do not offer to install these.
+if wm_have claude; then wm_ok "claude"; else wm_err "claude MISSING - install Claude Code first: https://claude.com/claude-code"; MISSING_REQUIRED=1; fi
+if wm_have git;    then wm_ok "git";    else wm_err "git MISSING - install git first"; MISSING_REQUIRED=1; fi
+
+# Core runtime deps doctor can install with consent.
+check tmux     required tmux
+check python3  required python3 "state engine + JSON"
+check uuidgen  required util-linux "session-id generation"
+
+# Optional / nice-to-have.
+check jq       optional jq "optional; python3 handles JSON already"
+
+# Soft: only flag gh if the ACTIVE build playbook references it.
+build_playbook="$WM_REPO/playbooks/build.md"
+[ -f "$WM_REPO/playbooks/build.local.md" ] && build_playbook="$WM_REPO/playbooks/build.local.md"
+if [ -f "$build_playbook" ] && grep -q '\bgh\b' "$build_playbook" 2>/dev/null; then
+  check gh optional gh "used by the active build playbook for PRs (run 'gh auth login')"
+fi
+
+echo
+# Offer to install queued packages.
+INSTALL_QUEUE="$(echo "$INSTALL_QUEUE" | sed 's/^ *//;s/ *$//')"
+if [ -n "$INSTALL_QUEUE" ]; then
+  pm=""
+  case "$(wm_platform)" in
+    macos) wm_have brew && pm="brew install" ;;
+    linux)
+      if wm_have apt-get; then pm="sudo apt-get install -y"
+      elif wm_have dnf; then pm="sudo dnf install -y"
+      elif wm_have pacman; then pm="sudo pacman -S --noconfirm"; fi ;;
+  esac
+  if [ -z "$pm" ]; then
+    wm_warn "no known package manager detected; install manually: $INSTALL_QUEUE"
+  else
+    full="$pm $INSTALL_QUEUE"
+    do_it=0
+    if [ "$AUTO_YES" = 1 ]; then
+      do_it=1
+    elif [ -t 0 ]; then
+      printf 'Install missing packages now? [%s] (y/N) ' "$full"
+      read ans
+      case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+    else
+      wm_warn "non-interactive; run: $full"
+    fi
+    if [ "$do_it" = 1 ]; then
+      wm_info "running: $full"
+      # shellcheck disable=SC2086
+      if $full; then wm_ok "install complete"; else wm_err "install failed; run manually: $full"; fi
+    fi
+  fi
+fi
+
+echo
+if [ "$MISSING_REQUIRED" = 0 ]; then
+  wm_ok "all required dependencies present"
+  # Make sure the state home exists once we're green.
+  wm_state init >/dev/null
+  exit 0
+else
+  wm_err "required dependencies missing - resolve the items above, then re-run: bin/doctor"
+  exit 1
+fi

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# watch-fleet - the zero-token supervisor. A bash loop wingman starts once per
+# session. It sleeps, watches the crew status files + tmux window liveness, and
+# only signals wingman (edge-triggered) when a member flips to blocked/done/died.
+# It never spends wingman turns polling.
+#
+# Signal channels (both best-effort, the wake file is the reliable one):
+#   - writes $WINGMAN_HOME/wake  with the current attention list (wingman + the
+#     Stop-hook read this)
+#   - if $WINGMAN_TARGET (a tmux "session:window") is set, send-keys a one-line
+#     nudge into wingman's own pane
+#
+# Usage:
+#   watch-fleet            run in the foreground (Ctrl-C to stop)
+#   watch-fleet --start    start detached in the background (idempotent)
+#   watch-fleet --stop     stop the background watcher
+#   watch-fleet --status   report whether a watcher is running
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+wm_state init >/dev/null
+PIDFILE="$WM_HOME/watch.pid"
+WAKEFILE="$WM_HOME/wake"
+INTERVAL="${WM_WATCH_INTERVAL:-5}"
+
+running() {
+  [ -f "$PIDFILE" ] || return 1
+  pid="$(cat "$PIDFILE" 2>/dev/null)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+case "${1:-}" in
+  --status)
+    if running; then wm_ok "watch-fleet running (pid $(cat "$PIDFILE"))"; else wm_info "watch-fleet not running"; fi
+    exit 0 ;;
+  --stop)
+    if running; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; wm_ok "watch-fleet stopped"; else wm_info "watch-fleet not running"; fi
+    exit 0 ;;
+  --start)
+    if running; then wm_info "watch-fleet already running (pid $(cat "$PIDFILE"))"; exit 0; fi
+    # Re-exec ourselves in the background in loop mode.
+    nohup "$0" __loop >"$WM_HOME/watch.log" 2>&1 &
+    echo $! > "$PIDFILE"
+    wm_ok "watch-fleet started (pid $(cat "$PIDFILE"), interval ${INTERVAL}s)"
+    exit 0 ;;
+  __loop|"") : ;;   # fall through to the loop
+  -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+  *) wm_die "unknown arg: $1" ;;
+esac
+
+# --- the loop ---------------------------------------------------------------
+[ "${1:-}" = __loop ] && echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"; exit 0' INT TERM
+
+last_sig=""
+while :; do
+  # Reconcile liveness so a dead window becomes 'died'.
+  if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+    wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null 2>&1
+  fi
+
+  # Who needs the CTO right now?
+  attention="$(wm_state needs-attention 2>/dev/null)"
+  sig="$(printf '%s' "$attention" | cksum | awk '{print $1}')"
+
+  if [ "$sig" != "$last_sig" ]; then
+    last_sig="$sig"
+    if [ -n "$attention" ]; then
+      {
+        echo "# Crew need your attention"
+        echo
+        printf '%s\n' "$attention" | while IFS=$'\t' read -r id st note; do
+          [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
+        done
+      } > "$WAKEFILE"
+      # Best-effort nudge into wingman's own pane, if we know where it is.
+      if [ -n "${WINGMAN_TARGET:-}" ]; then
+        wm_tmux send-keys -t "$WINGMAN_TARGET" -l \
+          "[watch-fleet] crew need you - run /status or read $WAKEFILE" 2>/dev/null || true
+        wm_tmux send-keys -t "$WINGMAN_TARGET" Enter 2>/dev/null || true
+      fi
+    else
+      : > "$WAKEFILE"
+    fi
+  fi
+
+  sleep "$INTERVAL"
+done

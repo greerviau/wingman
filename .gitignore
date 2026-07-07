@@ -1,0 +1,15 @@
+# User customization stays out of git — cannot be accidentally committed, and a
+# `git pull` updates the shipped defaults without touching your overrides.
+# Same convention as Claude Code's settings.json / settings.local.json.
+
+# Per-crew-type playbook overrides (playbooks/build.local.md, spec.local.md, ...)
+*.local.md
+
+# Project-discovery hints (config.local.sh, config.local.json, ...)
+config.local.*
+
+# Local Claude Code settings, if you keep any
+.claude/settings.local.json
+
+# Editor / OS noise
+.DS_Store
