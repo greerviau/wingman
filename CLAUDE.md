@@ -60,8 +60,10 @@ For every directive: **intake → scope → spawn → supervise → report → e
   each member needs. The built-in types are `spec`, `build`, and `lead`; more may
   exist (`bin/spawn-crew --list-types`). Do not over-spawn.
 - **Spawn.** Use `bin/spawn-crew` (recipe below). Announce what you launched.
-- **Supervise.** The watcher is event-driven and zero-token; you do not poll. When
-  it flags a crew member, or when the pilot asks, read `bin/crew-list`.
+- **Supervise.** The watcher is event-driven and zero-token; you do not poll. It
+  also detects a crew frozen on a permission or trust prompt (a terminal-UI stall
+  the status files can't see) and flips it to `blocked`. When it flags a crew
+  member, or when the pilot asks, read `bin/crew-list`.
 - **Report.** Give the pilot a compact status: who is on what, what is blocked, what
   is ready for review. Never dump transcripts.
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it
@@ -85,6 +87,14 @@ The script resolves the repo, resolves the playbook (`<type>.local.md` if presen
 else `<type>.md`), forces a known session id, opens the tmux window, records the
 member in `~/.wingman/crew.json`, and delivers the objective as the session's
 first message. It prints the crew `id`; remember only that id.
+
+Because no human sits at a crew member's terminal, `bin/spawn-crew` launches it
+with `--permission-mode bypassPermissions` by default (`WM_PERMISSION_MODE`) so a
+gated tool call auto-approves instead of hanging on a prompt forever. Two
+interactive gates remain that no flag can bypass: Claude Code's one-time
+Bypass-Permissions acceptance, and the one-time-per-repo workspace-trust dialog.
+The watcher catches both, so the first crew pauses until the pilot approves once
+via `bin/crew-takeover`; after that, crew in that repo run fully unattended.
 
 ## Crew types are open-ended
 

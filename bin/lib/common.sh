@@ -89,6 +89,11 @@ WM_TMUX_SESSION="${WM_TMUX_SESSION:-wingman}"
 
 wm_tmux() { tmux "$@"; }
 
+# Print the visible text of a target's active pane. Used by the watcher to detect
+# a crew member frozen on an interactive prompt (a terminal-UI state that never
+# reaches the status files).
+wm_tmux_pane_text() { wm_tmux capture-pane -p -t "$1" 2>/dev/null; }
+
 # Deliver a message into a live interactive session: type the (possibly large)
 # text, then submit with Enter. The two keystrokes are split by a short settle
 # delay on purpose. An interactive TUI (e.g. Claude Code) ingests a rapid bulk

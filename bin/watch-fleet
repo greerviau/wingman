@@ -53,11 +53,40 @@ esac
 [ "${1:-}" = __loop ] && echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 
+# Signature of an interactive prompt that has frozen a crew member. Covers the
+# three gates a crew can hit: a per-tool permission prompt ("Do you want to
+# proceed?"), the one-time workspace-trust dialog, and the one-time Bypass
+# Permissions mode acceptance. Overridable (e.g. for another harness).
+WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+
 last_sig=""
 while :; do
   # Reconcile liveness so a dead window becomes 'died'.
   if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
     wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null 2>&1
+
+    # Backstop: a crew parked on an interactive permission/trust prompt is frozen,
+    # but that terminal-UI state never reaches its status file (it stays "working").
+    # Detect it from the pane and flip the crew to blocked so it flows through the
+    # normal needs-attention/wake path below. Independent of the crew's permission
+    # mode, so it still catches stalls when bypass is disabled.
+    for _id in $(wm_state crew-list --status working --json 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+for r in data:
+    print(r.get("id", ""))
+' 2>/dev/null); do
+      _win="wm-$_id"
+      wm_tmux_windows | grep -qx "$_win" || continue
+      if wm_tmux_pane_text "$WM_TMUX_SESSION:$_win" | grep -qiE "$WM_PERM_PROMPT_RE"; then
+        wm_state crew-set --id "$_id" --status blocked \
+          --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
+          >/dev/null 2>&1
+      fi
+    done
   fi
 
   # Who needs the pilot right now?

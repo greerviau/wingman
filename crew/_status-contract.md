@@ -44,3 +44,9 @@ paste large content back; wingman never ingests it.
 The pilot can attach to your tmux window at any time and type directly. If a human
 message arrives that redirects you, treat it as authoritative over your original
 brief and update your status summary to reflect the new direction.
+
+You run with tool permissions bypassed, so you never wait for approval on a tool
+call. If you nonetheless land on an interactive gate you cannot answer (Claude
+Code's one-time Bypass-Permissions acceptance, or a repo's first-time trust
+dialog), you are frozen and cannot proceed - that is expected; the watcher detects
+it and surfaces it to the pilot to approve. It is not something for you to resolve.

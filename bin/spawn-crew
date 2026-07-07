@@ -50,6 +50,13 @@ PLAYBOOK="$WM_REPO/crew/$TYPE.md"
 [ -f "$WM_REPO/crew/$TYPE.local.md" ] && PLAYBOOK="$WM_REPO/crew/$TYPE.local.md"
 [ -f "$PLAYBOOK" ] || wm_die "no playbook for crew type '$TYPE'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create crew/$TYPE.md (or $TYPE.local.md)"
 
+# Permission posture for the (unattended) crew session. Default bypassPermissions;
+# explicit empty (WM_PERMISSION_MODE=) disables it and falls back to prompting.
+# Follow-up (out of scope here): rather than blanket bypass, route each individual
+# permission decision up to the pilot as a real blocker via a permission-prompt
+# hook / MCP tool, so the pilot approves specific actions instead of all-or-nothing.
+PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
+
 # --- derive an id / slug -----------------------------------------------------
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
@@ -95,10 +102,16 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # The full state-engine invocation, run through uv (--no-project so it ignores
   # the target repo's own pyproject). Crew run it unquoted so it word-splits.
   echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
-  # WM_AGENT is the agent CLI to launch (default: claude). This is the single
-  # harness-specific line; the flags below are the claude default recipe. Tests
-  # also use WM_AGENT to substitute a stub.
+  # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
+  # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
+  # it to substitute a stub).
   printf 'exec %s' "${WM_AGENT:-claude}"
+  # Crew run unattended, disposably, and scoped to one repo, so the default
+  # bypassPermissions keeps a gated tool call from hanging forever on a prompt no
+  # human is there to answer. (It does NOT clear the one-time workspace-trust
+  # dialog, which no flag bypasses; the watcher surfaces that instead.) Set
+  # WM_PERMISSION_MODE= (empty) to disable and fall back to interactive prompting.
+  [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
   printf ' --session-id %s' "$(quote "$SID")"
   [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
   [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"

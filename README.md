@@ -86,31 +86,18 @@ Project-discovery hints are the same story: an optional gitignored
 (`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`). Absent by
 default; the defaults cover the common case.
 
-## Layout
+## Autonomous by default
 
-```
-CLAUDE.md              the wingman persona + operating loop (activates wingman here)
-crew/
-  spec.md build.md lead.md    built-in crew types (add <type>.md for more)
-  research.md                 example non-dev type (researcher/scientist shape)
-  *.local.md                  your gitignored overrides / private crew types
-  _status-contract.md         the status discipline every crew member is given
-bin/
-  doctor                dependency preflight + consented install
-  discover-projects     zero-config repo discovery → projects.json cache
-  spawn-crew            the core recipe: tmux window → claude in the target repo
-  crew-say              send a follow-up into a crew member's session
-  crew-list             the reconciled roster (human or --json)
-  crew-takeover         print the exact command to take the wheel of a crew member
-  crew-standdown        wrap up + close a crew member
-  watch-fleet           the zero-token, event-driven supervisor
-  wingman               optional launcher (claude + --add-dir <roots>)
-  lib/                  common.sh (shared shell helpers) + wm-state.py (state engine)
-hooks/stop-guard.sh     Stop hook: no going idle blind while crew are in flight
-.claude/
-  settings.json         wires the Stop hook (scoped to this repo)
-  commands/             /spawn (any type) /status /blocked /takeover /standdown
-```
+No human sits at a crew member's terminal, so crew launch with
+`--permission-mode bypassPermissions` (`WM_PERMISSION_MODE`): a gated tool call
+auto-approves instead of hanging on a prompt forever. Set `WM_PERMISSION_MODE=`
+(empty) to fall back to interactive prompting.
+
+Two one-time interactive gates remain that no flag bypasses: Claude Code's
+Bypass-Permissions acceptance (once, ever) and each repo's first-time workspace-trust
+dialog. The watcher detects a crew frozen on either (or on a per-tool prompt when
+bypass is off) and flips it to `blocked`, waking you to approve once with
+`bin/crew-takeover`. After that, crew in that repo run unattended.
 
 ## State home - `~/.wingman/`
 
