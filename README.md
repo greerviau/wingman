@@ -110,10 +110,3 @@ Machine-local runtime state, created on first run, never committed:
 
 All *user-editable* customization lives in this repo as gitignored `*.local.md` /
 `config.local.*`, not here. `~/.wingman/` is pure runtime state you never hand-edit.
-
-## Prior art
-
-Wingman draws on [firstmate](https://github.com/kunchenguid/firstmate) - tmux as
-the crew backend, a spec → build pipeline, event-driven zero-token supervision,
-behavior-as-configuration, and a machine-local state home - but is its own build
-using plain `git` worktrees (no extra worktree tooling) and tmux only.
