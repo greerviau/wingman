@@ -69,8 +69,8 @@ check python3  optional python3 "optional; uv provides the interpreter"
 check jq       optional jq "optional; the state engine handles JSON"
 
 # Soft: only flag gh if the ACTIVE build playbook references it.
-build_playbook="$WM_REPO/playbooks/build.md"
-[ -f "$WM_REPO/playbooks/build.local.md" ] && build_playbook="$WM_REPO/playbooks/build.local.md"
+build_playbook="$WM_REPO/crew/build.md"
+[ -f "$WM_REPO/crew/build.local.md" ] && build_playbook="$WM_REPO/crew/build.local.md"
 if [ -f "$build_playbook" ] && grep -q '\bgh\b' "$build_playbook" 2>/dev/null; then
   check gh optional gh "used by the active build playbook for PRs (run 'gh auth login')"
 fi

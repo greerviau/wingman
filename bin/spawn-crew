@@ -43,12 +43,12 @@ fi
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || wm_die "'$REPO' is not a git checkout"
 
 # --- resolve the playbook (local override wins) ------------------------------
-# A crew type is valid iff a playbook exists for it. Add playbooks/<type>.md
-# (tracked) or playbooks/<type>.local.md (gitignored, survives pulls) to define
+# A crew type is valid iff a playbook exists for it. Add crew/<type>.md
+# (tracked) or crew/<type>.local.md (gitignored, survives pulls) to define
 # a new type - researcher, scientist, reviewer, anything.
-PLAYBOOK="$WM_REPO/playbooks/$TYPE.md"
-[ -f "$WM_REPO/playbooks/$TYPE.local.md" ] && PLAYBOOK="$WM_REPO/playbooks/$TYPE.local.md"
-[ -f "$PLAYBOOK" ] || wm_die "no playbook for crew type '$TYPE'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create playbooks/$TYPE.md (or $TYPE.local.md)"
+PLAYBOOK="$WM_REPO/crew/$TYPE.md"
+[ -f "$WM_REPO/crew/$TYPE.local.md" ] && PLAYBOOK="$WM_REPO/crew/$TYPE.local.md"
+[ -f "$PLAYBOOK" ] || wm_die "no playbook for crew type '$TYPE'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create crew/$TYPE.md (or $TYPE.local.md)"
 
 # --- derive an id / slug -----------------------------------------------------
 slugify() {
@@ -82,7 +82,7 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
   printf -- '---\n\n'
   cat "$PLAYBOOK"
   printf '\n\n---\n\n'
-  cat "$WM_REPO/playbooks/_status-contract.md"
+  cat "$WM_REPO/crew/_status-contract.md"
 } > "$SYSPROMPT"
 
 # --- write the launch script (avoids all in-tmux quoting) --------------------
@@ -122,8 +122,7 @@ wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
 sleep "${WM_SPAWN_DELAY:-2}"
 OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
-wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" -l "$OPENING"
-wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" Enter
+wm_tmux_send_message "$WM_TMUX_SESSION:$WINDOW" "$OPENING"
 
 wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_SESSION" "$WINDOW"

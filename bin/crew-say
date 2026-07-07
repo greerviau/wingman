@@ -16,6 +16,5 @@ WINDOW="wm-$ID"
 wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
   | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (see: bin/crew-takeover $ID)"
 
-wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" -l "$MSG"
-wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" Enter
+wm_tmux_send_message "$WM_TMUX_SESSION:$WINDOW" "$MSG"
 wm_ok "delivered to $ID"

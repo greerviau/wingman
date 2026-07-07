@@ -65,11 +65,11 @@ wm_install_cmd() {
 
 wm_have() { command -v "$1" >/dev/null 2>&1; }
 
-# List available crew types: every playbook basename in playbooks/ (tracked
+# List available crew types: every playbook basename in crew/ (tracked
 # <type>.md or gitignored <type>.local.md), excluding _-prefixed shared partials.
 # Crew types are open-ended - add a playbook and the type exists.
 wm_crew_types() {
-  for f in "$WM_REPO"/playbooks/*.md "$WM_REPO"/playbooks/*.local.md; do
+  for f in "$WM_REPO"/crew/*.md "$WM_REPO"/crew/*.local.md; do
     [ -f "$f" ] || continue
     b="$(basename "$f")"; b="${b%.local.md}"; b="${b%.md}"
     case "$b" in _*) continue ;; esac
@@ -88,6 +88,21 @@ quote() {
 WM_TMUX_SESSION="${WM_TMUX_SESSION:-wingman}"
 
 wm_tmux() { tmux "$@"; }
+
+# Deliver a message into a live interactive session: type the (possibly large)
+# text, then submit with Enter. The two keystrokes are split by a short settle
+# delay on purpose. An interactive TUI (e.g. Claude Code) ingests a rapid bulk
+# burst as a bracketed paste - the "[Pasted text #N]" placeholder - and an Enter
+# fired in the same burst is absorbed as a newline inside that paste instead of
+# submitting it, leaving the message sitting unexecuted in the input box. The
+# delay lets the paste finalize so the following Enter is seen as a submit.
+# Override the settle time (seconds) with WM_SUBMIT_DELAY.
+wm_tmux_send_message() {
+  _target="$1"; _text="$2"
+  wm_tmux send-keys -t "$_target" -l "$_text"
+  sleep "${WM_SUBMIT_DELAY:-1}"
+  wm_tmux send-keys -t "$_target" Enter
+}
 
 # Ensure the shared tmux server + wingman session exist (detached).
 wm_tmux_ensure_session() {

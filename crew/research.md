@@ -6,7 +6,7 @@ Your deliverable is a cited report file, and your handoff is that file's path.
 
 This is an example of a non-dev crew type: wingman's crew types are open-ended, and
 this playbook shows the shape a `researcher`/`scientist`/`analyst` role takes.
-Adapt or duplicate it (e.g. `playbooks/scientist.local.md`) for your own domain.
+Adapt or duplicate it (e.g. `crew/scientist.local.md`) for your own domain.
 
 ## Posture
 

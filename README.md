@@ -37,6 +37,7 @@ Talk to it in plain language, or use the slash commands:
 |---|---|
 | "Implement feature X in `<repo>`" | spawns a **spec** crew → plan → (your review) → **build** crew → PR |
 | "Investigate issue Y in `<repo>`" | spawns a **spec** crew in report mode (reproduces bugs end-to-end first) |
+| `/spawn <type> <repo> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added |
 | `/status` | compact roster: who's on what, what's blocked, what's ready |
 | `/blocked` | each blocked member + the decision it needs |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
@@ -57,19 +58,19 @@ is neutral - is the takeover path.
 
 ## How behavior is configured (playbooks)
 
-A crew type is just a playbook - plain prose in `playbooks/`. The built-ins:
+A crew type is just a playbook - plain prose in `crew/`. The built-ins:
 
-- `playbooks/spec.md` - turn a problem into a plan (or a report).
-- `playbooks/build.md` - the dev cycle: worktree → implement → commit → push → PR.
-- `playbooks/lead.md` - decompose a large effort and spawn/integrate its own crew.
-- `playbooks/research.md` - example non-dev type: gather evidence, write a cited
+- `crew/spec.md` - turn a problem into a plan (or a report).
+- `crew/build.md` - the dev cycle: worktree → implement → commit → push → PR.
+- `crew/lead.md` - decompose a large effort and spawn/integrate its own crew.
+- `crew/research.md` - example non-dev type: gather evidence, write a cited
   report. Shows the shape a `researcher`/`scientist`/`analyst` role takes.
 
-**To customize a type, drop a `playbooks/<type>.local.md` beside the default.** If
+**To customize a type, drop a `crew/<type>.local.md` beside the default.** If
 present it wins.
 
-**To add a new type, create `playbooks/<type>.md`** (tracked) **or
-`playbooks/<type>.local.md`** (yours only) - then spawn it with
+**To add a new type, create `crew/<type>.md`** (tracked) **or
+`crew/<type>.local.md`** (yours only) - then spawn it with
 `--type <name>`. There is no hardcoded list; a type exists iff its playbook does.
 `bin/spawn-crew --list-types` shows what's available. So a `scientist`,
 `reviewer`, or `data-analyst` crew is one file away.
@@ -77,7 +78,8 @@ present it wins.
 `*.local.md` is gitignored, so your customizations and private crew types can't be
 accidentally committed and survive `git pull` of new defaults - the same pattern as
 Claude Code's `settings.json` / `settings.local.json`. Example: to make the spec
-crew use your own `/spec` skill, write `playbooks/spec.local.md` that says so.
+crew follow your own planning skill or checklist, write `crew/spec.local.md` that
+says so.
 
 Project-discovery hints are the same story: an optional gitignored
 `config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list
@@ -88,7 +90,7 @@ default; the defaults cover the common case.
 
 ```
 CLAUDE.md              the wingman persona + operating loop (activates wingman here)
-playbooks/
+crew/
   spec.md build.md lead.md    built-in crew types (add <type>.md for more)
   research.md                 example non-dev type (researcher/scientist shape)
   *.local.md                  your gitignored overrides / private crew types
@@ -107,7 +109,7 @@ bin/
 hooks/stop-guard.sh     Stop hook: no going idle blind while crew are in flight
 .claude/
   settings.json         wires the Stop hook (scoped to this repo)
-  commands/             /status /blocked /spec /build /takeover /standdown
+  commands/             /spawn (any type) /status /blocked /takeover /standdown
 ```
 
 ## State home - `~/.wingman/`
