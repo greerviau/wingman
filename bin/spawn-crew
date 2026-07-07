@@ -64,7 +64,7 @@ WINDOW="wm-$ID"
 
 # --- generate the forced session id ------------------------------------------
 if wm_have uuidgen; then SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"; else
-  SID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+  SID="$(wm_py -c 'import uuid;print(uuid.uuid4())')"
 fi
 
 # --- compose the crew member's appended system prompt ------------------------
@@ -89,7 +89,9 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   echo "cd $(quote "$REPO") || exit 1"
   echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
   echo "export WINGMAN_CREW_ID=$(quote "$ID")"
-  echo "export WINGMAN_STATE_PY=$(quote "$WM_STATE_PY")"
+  # The full state-engine invocation, run through uv (--no-project so it ignores
+  # the target repo's own pyproject). Crew run it unquoted so it word-splits.
+  echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
   # WM_CLAUDE lets tests substitute a stub for the real claude binary.
   printf 'exec %s' "${WM_CLAUDE:-claude}"
   printf ' --session-id %s' "$(quote "$SID")"

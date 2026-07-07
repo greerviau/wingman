@@ -50,11 +50,23 @@ if wm_have git;    then wm_ok "git";    else wm_err "git MISSING - install git f
 
 # Core runtime deps doctor can install with consent.
 check tmux     required tmux
-check python3  required python3 "state engine + JSON"
 check uuidgen  required util-linux "session-id generation"
 
-# Optional / nice-to-have.
-check jq       optional jq "optional; python3 handles JSON already"
+# uv runs the state engine and manages the Python interpreter itself.
+if wm_have uv; then
+  wm_ok "uv (runs the state engine; manages Python)"
+else
+  wm_err "uv MISSING (required) - runs the state engine and manages Python"
+  MISSING_REQUIRED=1
+  case "$(wm_platform)" in
+    macos) printf '    install: brew install uv\n'; INSTALL_QUEUE="$INSTALL_QUEUE uv" ;;
+    *)     printf '    install: curl -LsSf https://astral.sh/uv/install.sh | sh\n' ;;
+  esac
+fi
+
+# Optional / nice-to-have. python3 is not required: uv provides an interpreter.
+check python3  optional python3 "optional; uv provides the interpreter"
+check jq       optional jq "optional; the state engine handles JSON"
 
 # Soft: only flag gh if the ACTIVE build playbook references it.
 build_playbook="$WM_REPO/playbooks/build.md"

@@ -35,10 +35,11 @@ member," not "do it myself."
 
 On the first launch, or any time something looks missing:
 
-1. Run `bin/doctor`. It checks dependencies (`claude`, `git`, `tmux`, `python3`,
+1. Run `bin/doctor`. It checks dependencies (`claude`, `git`, `tmux`, `uv`,
    `uuidgen`, and `gh` only if the active build playbook uses it), prints a
    platform-aware ✓/✗ report, and installs the missing pieces with the CTO's
-   consent. Do not proceed until it exits green.
+   consent. Do not proceed until it exits green. (`uv` runs the state engine and
+   manages the Python interpreter, so a system `python3` is not required.)
 2. Run `bin/discover-projects` to build the project cache (it infers the projects
    root from this repo's parent directory; no config needed in the common case).
 3. Briefly point the CTO at the playbooks: behavior for each crew type lives in

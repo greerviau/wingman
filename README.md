@@ -1,6 +1,6 @@
 # wingman
 
-**Talk to one agent. Ship with a crew.**
+**You're the CTO. Wingman runs the crew.**
 
 Wingman is a long-lived Claude Code session that acts as your **Head of Software**.
 You (the CTO) give it high-level directives — *"implement this feature"*,
@@ -25,8 +25,9 @@ your consent), discovers your sibling repos with zero config, and starts the
 supervisor. Then give it a directive.
 
 The only things you must have before the first run are **`claude`** and **`git`**.
-`doctor` handles `tmux`, `python3`, `uuidgen`, and (only if your build playbook
-uses it) `gh`.
+`doctor` handles `tmux`, `uv`, `uuidgen`, and (only if your build playbook uses
+it) `gh`. `uv` runs the state engine and manages the Python interpreter, so no
+system `python3` is required.
 
 ## Driving wingman
 

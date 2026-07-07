@@ -102,7 +102,7 @@ refresh_cache() {
       [ -n "$n" ] && [ -n "$p" ] && printf '%s\t%s\n' "$n" "$p"
     done)"
   fi
-  printf '%s\n%s\n' "$pins_list" "$tmp_list" | python3 -c '
+  printf '%s\n%s\n' "$pins_list" "$tmp_list" | wm_py -c '
 import sys, json
 m = {}
 for line in sys.stdin:
@@ -118,10 +118,10 @@ sys.stdout.write(json.dumps(m))
 case "$MODE" in
   refresh)
     refresh_cache
-    n="$(wm_state projects-get | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
+    n="$(wm_state projects-get | wm_py -c 'import sys,json;print(len(json.load(sys.stdin)))')"
     if [ "$QUIET" = 0 ]; then
       wm_ok "discovered $n project(s):"
-      wm_state projects-get | python3 -c '
+      wm_state projects-get | wm_py -c '
 import sys, json
 for k, v in sorted(json.load(sys.stdin).items()):
     print("  %-24s %s" % (k, v))'

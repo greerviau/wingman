@@ -11,7 +11,7 @@ Wingman watches a small status file you own: `$WINGMAN_HOME/crew/<your-id>.json`
 Keep it current by running this command (never hand-edit the JSON):
 
 ```
-python3 "$WINGMAN_STATE_PY" crew-set --id "$WINGMAN_CREW_ID" \
+$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
   --status <working|blocked|done> \
   --summary "<=10 lines, plain text, what you're doing / did" \
   [--blocker "the specific decision or input you need from the CTO"] \
@@ -19,8 +19,9 @@ python3 "$WINGMAN_STATE_PY" crew-set --id "$WINGMAN_CREW_ID" \
   [--delivery "branch or PR URL when ready for review"]
 ```
 
-`$WINGMAN_STATE_PY`, `$WINGMAN_CREW_ID`, and `$WINGMAN_HOME` are exported into
-your environment. Only pass the flags that changed.
+`$WINGMAN_STATE` (the full `uv run ... wm-state.py` invocation), `$WINGMAN_CREW_ID`,
+and `$WINGMAN_HOME` are exported into your environment. Run `$WINGMAN_STATE`
+unquoted so it word-splits into the command. Only pass the flags that changed.
 
 Update your status at these moments, without being asked:
 

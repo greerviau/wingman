@@ -16,9 +16,17 @@ export WM_REPO WM_BIN WM_LIB
 WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 export WINGMAN_HOME="$WM_HOME"
 
-# The state engine. python3 is guaranteed on macOS; jq is optional.
+# Python is run through uv, which manages the interpreter and (via --no-project)
+# ignores any pyproject.toml in the current directory — important because crew
+# run inside target repos that have their own projects. wm-state.py declares its
+# requires-python inline (PEP 723), so uv needs no extra config.
+WM_UV="${WM_UV:-uv run --no-project --quiet}"
 WM_STATE_PY="$WM_LIB/wm-state.py"
-wm_state() { python3 "$WM_STATE_PY" "$@"; }
+
+# wm_py runs an inline snippet or `python ...` under the managed interpreter.
+wm_py() { $WM_UV python "$@"; }
+# wm_state runs the state engine.
+wm_state() { $WM_UV "$WM_STATE_PY" "$@"; }
 
 # --- output helpers ---------------------------------------------------------
 if [ -t 1 ]; then

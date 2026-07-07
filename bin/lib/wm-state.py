@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# dependencies = []
+# ///
 """wm-state: the single reader/writer for wingman's machine-local state home.
 
 State home (default ~/.wingman, override with $WINGMAN_HOME):

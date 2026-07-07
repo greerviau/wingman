@@ -12,11 +12,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"
 STATE_PY="$REPO/bin/lib/wm-state.py"
 WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
+# Python via uv (matches the rest of the tool); --no-project so a surrounding
+# pyproject is ignored.
+WM_UV="${WM_UV:-uv run --no-project --quiet}"
 
 INPUT="$(cat)"
 
 # Avoid infinite loops: if we already blocked once this turn, allow the stop.
-active="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;
+active="$(printf '%s' "$INPUT" | $WM_UV python -c 'import sys,json;
 try: print(json.load(sys.stdin).get("stop_hook_active"))
 except Exception: print("None")' 2>/dev/null)"
 if [ "$active" = "True" ]; then
@@ -27,8 +30,8 @@ fi
 [ -f "$STATE_PY" ] || exit 0
 [ -d "$WM_HOME" ] || exit 0
 
-attention="$(WINGMAN_HOME="$WM_HOME" python3 "$STATE_PY" needs-attention 2>/dev/null)"
-active_crew="$(WINGMAN_HOME="$WM_HOME" python3 "$STATE_PY" crew-list --active --json 2>/dev/null | python3 -c 'import sys,json;
+attention="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention 2>/dev/null)"
+active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --json 2>/dev/null | $WM_UV python -c 'import sys,json;
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')"
 
@@ -50,7 +53,7 @@ elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
 fi
 
 if [ -n "$reason" ]; then
-  printf '%s' "$reason" | python3 -c 'import sys,json; print(json.dumps({"decision":"block","reason":sys.stdin.read()}))'
+  printf '%s' "$reason" | $WM_UV python -c 'import sys,json; print(json.dumps({"decision":"block","reason":sys.stdin.read()}))'
   exit 0
 fi
 
