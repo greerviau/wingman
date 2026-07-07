@@ -14,7 +14,7 @@ ID="${1:-}"; MSG="${2:-}"
 
 WINDOW="wm-$ID"
 wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
-  | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (recover: cd <repo> && claude --resume <session-id>)"
+  | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (see: bin/crew-takeover $ID)"
 
 wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" -l "$MSG"
 wm_tmux send-keys -t "$WM_TMUX_SESSION:$WINDOW" Enter

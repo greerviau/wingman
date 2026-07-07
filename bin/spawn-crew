@@ -92,8 +92,10 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # The full state-engine invocation, run through uv (--no-project so it ignores
   # the target repo's own pyproject). Crew run it unquoted so it word-splits.
   echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
-  # WM_CLAUDE lets tests substitute a stub for the real claude binary.
-  printf 'exec %s' "${WM_CLAUDE:-claude}"
+  # WM_AGENT is the agent CLI to launch (default: claude). This is the single
+  # harness-specific line; the flags below are the claude default recipe. Tests
+  # also use WM_AGENT to substitute a stub.
+  printf 'exec %s' "${WM_AGENT:-claude}"
   printf ' --session-id %s' "$(quote "$SID")"
   [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
   [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"

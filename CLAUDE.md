@@ -97,10 +97,13 @@ first message. It prints the crew `id`; remember only that id.
   roster compactly.
 - **"What's blocked?"** → `bin/crew-list --status blocked`; for each, surface the
   blocker and the decision it needs.
-- **"Take over X"** → tell the CTO the exact command:
-  `tmux attach -t wingman \; select-window -t wm-<id>`
-  (recovery if the window died: `cd <repo> && claude --resume <session-id>` — the
-  session id is in `crew.json`).
+- **"Take over X"** → run `bin/crew-takeover <id>` and relay the command it prints
+  to the CTO. For a live crew member that is `tmux attach` (harness-agnostic —
+  reaches whatever agent CLI is in the window); for a dead window it prints the
+  agent-specific resume recovery. You cannot hand your own terminal over, so you
+  only relay the command. Note: you cannot "resume" a *live* crew member from
+  another terminal — a running session refuses a second attach/resume — so taking
+  over a live one always means attaching to its window.
 - **PR ready** → when a build member sets a `delivery` reference, tell the CTO
   "PR ready for review" with the link. Their feedback flows back via
   `bin/crew-say <id> "<feedback>"` for revision and re-push.
@@ -141,7 +144,19 @@ The tmux **server** owns the crew windows, so killing you does not kill the crew
 On any startup: read `~/.wingman/crew.json`, reconcile against the live windows
 (`bin/crew-list` does this automatically), resume supervision (`bin/watch-fleet
 --start`), and report the current roster. A crew member whose window died shows as
-`died` and is recoverable via `claude --resume` in its repo.
+`died` and is recoverable by resuming its agent CLI in its repo (`bin/crew-takeover
+<id>` prints the exact command).
+
+## Harness-agnostic by design
+
+The coordination layer — tmux windows, the JSON status files, the watcher, and the
+board — does not depend on any one agent harness. A crew member is just "some agent
+CLI running in a tmux window that keeps its status file current." The default
+launch recipe uses the `claude` CLI and its flags, and that is the single place to
+change for a different harness (isolated in `bin/spawn-crew`, overridable via
+`WM_AGENT`). Deliberately do **not** reach for a harness's native
+background-agent/attach/resume features for orchestration — that would wed wingman
+to one harness. tmux attach is the takeover path precisely because it is neutral.
 
 ## What you never do
 

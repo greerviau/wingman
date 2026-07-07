@@ -39,12 +39,21 @@ Talk to it in plain language, or use the slash commands:
 | "Investigate issue Y in `<repo>`" | spawns a **spec** crew in report mode (reproduces bugs end-to-end first) |
 | `/status` | compact roster: who's on what, what's blocked, what's ready |
 | `/blocked` | each blocked member + the decision it needs |
-| "Take over X" | prints `tmux attach -t wingman \; select-window -t wm-<id>` |
+| "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 
-Take the wheel of any crew member any time: `tmux attach -t wingman`, select its
-window, type. Detach (`Ctrl-b d`) to hand back. Killing wingman leaves the crew
-running; relaunching it rebuilds the roster.
+Take the wheel of any crew member any time — `bin/crew-takeover <id>` prints the
+exact command (`tmux attach` into its window; select, type, take over). Detach
+(`Ctrl-b d`) to hand back. Killing wingman leaves the crew running; relaunching it
+rebuilds the roster.
+
+**Harness-agnostic.** The coordination layer — tmux windows, JSON status files,
+the watcher, the board — doesn't depend on any one agent harness; a crew member is
+just an agent CLI in a tmux window keeping its status file current. The default
+launch recipe uses `claude` (overridable via `WM_AGENT`, isolated in
+`bin/spawn-crew`). Wingman deliberately avoids a harness's native
+background-agent/attach/resume features for orchestration, so tmux attach — which
+is neutral — is the takeover path.
 
 ## How behavior is configured (playbooks)
 
@@ -79,6 +88,7 @@ bin/
   spawn-crew            the core recipe: tmux window → claude in the target repo
   crew-say              send a follow-up into a crew member's session
   crew-list             the reconciled roster (human or --json)
+  crew-takeover         print the exact command to take the wheel of a crew member
   crew-standdown        wrap up + close a crew member
   watch-fleet           the zero-token, event-driven supervisor
   wingman               optional launcher (claude + --add-dir <roots>)

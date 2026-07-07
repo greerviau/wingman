@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# crew-takeover - print the exact command to take the wheel of a crew member.
+# Wingman is itself an agent session and cannot hand its own terminal over, so
+# this emits the command for the CTO to run in their own shell.
+#
+# Takeover is harness-agnostic: it attaches to the crew member's tmux window, so
+# it works for any agent CLI running there, not just claude. Resume is shown only
+# as a recovery path for a *dead* window and is agent-CLI-specific.
+#
+# Usage: crew-takeover <id>
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+ID="${1:-}"
+[ -n "$ID" ] || wm_die "usage: crew-takeover <id>"
+
+info="$(wm_state crew-get --id "$ID" 2>/dev/null)" || wm_die "no crew member '$ID'"
+fields="$(printf '%s' "$info" | wm_py -c '
+import sys, json
+d = json.load(sys.stdin)
+print("\t".join([d.get("repo",""), d.get("session_id",""), d.get("window","")]))')"
+OLDIFS="$IFS"; IFS=$(printf '\t'); set -- $fields; IFS="$OLDIFS"
+REPO="${1:-}"; SID="${2:-}"; WINDOW="${3:-}"
+
+live=0
+if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+  wm_tmux_windows | grep -qx "$WINDOW" && live=1
+fi
+
+if [ "$live" = 1 ]; then
+  wm_info "Take the wheel of '$ID' (live). Run in your own shell:"
+  printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_SESSION" "$WINDOW"
+  echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
+else
+  wm_warn "'$ID' has no live window (it may have finished or died)."
+  wm_info "If you want to resume it yourself, from its repo:"
+  printf '\n    cd %s && <your-agent-cli> --resume %s\n\n' "$(quote "$REPO")" "$SID"
+  echo "(e.g. with Claude Code: 'claude --resume $SID' — resume is refused if the session is still live.)"
+fi
