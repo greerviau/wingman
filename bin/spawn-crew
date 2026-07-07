@@ -24,15 +24,15 @@ while [ $# -gt 0 ]; do
     --input)     INPUT="$2"; shift 2 ;;
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
+    --list-types) wm_crew_types; exit 0 ;;
     -h|--help)   sed -n '2,12p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
 
-[ -n "$TYPE" ] || wm_die "--type is required (spec|build|lead)"
+[ -n "$TYPE" ] || wm_die "--type is required (a playbook name; see: spawn-crew --list-types)"
 [ -n "$REPO_ARG" ] || wm_die "--repo is required (a path or a discovered project name)"
 [ -n "$OBJECTIVE" ] || wm_die "--objective is required"
-case "$TYPE" in spec|build|lead) ;; *) wm_die "unknown --type '$TYPE' (spec|build|lead)" ;; esac
 
 # --- resolve the target repo -------------------------------------------------
 if [ -d "$REPO_ARG/.git" ] || { [ -d "$REPO_ARG" ] && git -C "$REPO_ARG" rev-parse --git-dir >/dev/null 2>&1; }; then
@@ -43,9 +43,12 @@ fi
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || wm_die "'$REPO' is not a git checkout"
 
 # --- resolve the playbook (local override wins) ------------------------------
+# A crew type is valid iff a playbook exists for it. Add playbooks/<type>.md
+# (tracked) or playbooks/<type>.local.md (gitignored, survives pulls) to define
+# a new type - researcher, scientist, reviewer, anything.
 PLAYBOOK="$WM_REPO/playbooks/$TYPE.md"
 [ -f "$WM_REPO/playbooks/$TYPE.local.md" ] && PLAYBOOK="$WM_REPO/playbooks/$TYPE.local.md"
-[ -f "$PLAYBOOK" ] || wm_die "no playbook for type '$TYPE' at $PLAYBOOK"
+[ -f "$PLAYBOOK" ] || wm_die "no playbook for crew type '$TYPE'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create playbooks/$TYPE.md (or $TYPE.local.md)"
 
 # --- derive an id / slug -----------------------------------------------------
 slugify() {

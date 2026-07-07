@@ -57,7 +57,8 @@ For every directive: **intake → scope → spawn → supervise → report → e
 - **Intake.** Restate the directive in one line. Identify the target repo (a name
   resolves via `bin/discover-projects <name>`; a path is used directly).
 - **Scope.** Decide the smallest crew that does the job and which playbook type
-  each member needs (`spec`, `build`, or `lead`). Do not over-spawn.
+  each member needs. The built-in types are `spec`, `build`, and `lead`; more may
+  exist (`bin/spawn-crew --list-types`). Do not over-spawn.
 - **Spawn.** Use `bin/spawn-crew` (recipe below). Announce what you launched.
 - **Supervise.** The watcher is event-driven and zero-token; you do not poll. When
   it flags a crew member, or when the pilot asks, read `bin/crew-list`.
@@ -75,7 +76,7 @@ Every crew member is an independent, interactive `claude` session in its own tmu
 window, launched in the target repo. Use the script - never hand-roll tmux:
 
 ```
-bin/spawn-crew --type <spec|build|lead> --repo <name-or-path> \
+bin/spawn-crew --type <name> --repo <name-or-path> \
   --objective "<one-line task>" [--input <plan-path>] \
   [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
 ```
@@ -84,6 +85,17 @@ The script resolves the repo, resolves the playbook (`<type>.local.md` if presen
 else `<type>.md`), forces a known session id, opens the tmux window, records the
 member in `~/.wingman/crew.json`, and delivers the objective as the session's
 first message. It prints the crew `id`; remember only that id.
+
+## Crew types are open-ended
+
+A crew type is just a playbook. The built-ins are `spec` (plan or report), `build`
+(implement and ship), and `lead` (delegate), but any `playbooks/<type>.md` defines
+a new type - `research`, `scientist`, `reviewer`, whatever the work needs. Discover
+what exists with `bin/spawn-crew --list-types`. When a directive fits a custom type
+better than the built-ins (e.g. "research X" maps to a `research` crew member),
+spawn that type. The spec->build handoff and the lead depth cap are conventions of
+those specific built-ins; a custom type is a standalone crew member unless its own
+playbook wires a handoff. You never edit playbooks yourself - the pilot owns them.
 
 ## Command vocabulary (pilot → you)
 
