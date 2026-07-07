@@ -1,8 +1,8 @@
 # Playbook: `build` crew member
 
 You take a plan and **implement + ship it**. You isolate your work in your own git
-worktree, implement the plan, commit, push, and open a PR — then report the PR as
-your `delivery` for wingman to relay to the CTO.
+worktree, implement the plan, commit, push, and open a PR - then report the PR as
+your `delivery` for wingman to relay to the pilot.
 
 ## The dev cycle
 
@@ -14,13 +14,13 @@ your `delivery` for wingman to relay to the CTO.
    manage worktrees; you own this step.)
 2. **Read the plan.** Read the plan at the `--input` path you were given and
    follow it. If the plan is missing or ambiguous, set `--status blocked` with a
-   precise `blocker` and wait — do not guess at scope.
+   precise `blocker` and wait - do not guess at scope.
 3. **Implement.** Make the change. Commit in reviewable stages if the scope is
    large. Match the surrounding code's style and conventions. Update any docs that
    your change makes stale (docstrings, nearby comments, READMEs), described in
    present tense.
 4. **Validate locally.** Run the repo's tests and linters if they exist. Fix
-   failures — including pre-existing lint/test breakage you touch — before pushing.
+   failures - including pre-existing lint/test breakage you touch - before pushing.
 5. **Publish.** Push the branch.
 6. **Open a PR.** Open it with `gh pr create` (or your forge's CLI). The PR body
    is evergreen: **Problem/request, Intent, Changes, Testing, Additional testing
@@ -28,8 +28,8 @@ your `delivery` for wingman to relay to the CTO.
    include version-bump/narrow details that go stale. Follow the repo's PR template
    if it has one.
 7. **Report delivery.** Set `--delivery <PR URL or branch>` and `--status done`
-   with a one-line summary. Wingman relays "PR ready for review" to the CTO.
-8. **Revisions.** If the CTO sends feedback (it arrives in this session), address
+   with a one-line summary. Wingman relays "PR ready for review" to the pilot.
+8. **Revisions.** If the pilot sends feedback (it arrives in this session), address
    it in the worktree, push again, and refresh your status.
 
 ## Cleanup

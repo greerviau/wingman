@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # crew-takeover - print the exact command to take the wheel of a crew member.
 # Wingman is itself an agent session and cannot hand its own terminal over, so
-# this emits the command for the CTO to run in their own shell.
+# this emits the command for the pilot to run in their own shell.
 #
 # Takeover is harness-agnostic: it attaches to the crew member's tmux window, so
 # it works for any agent CLI running there, not just claude. Resume is shown only
@@ -36,5 +36,5 @@ else
   wm_warn "'$ID' has no live window (it may have finished or died)."
   wm_info "If you want to resume it yourself, from its repo:"
   printf '\n    cd %s && <your-agent-cli> --resume %s\n\n' "$(quote "$REPO")" "$SID"
-  echo "(e.g. with Claude Code: 'claude --resume $SID' — resume is refused if the session is still live.)"
+  echo "(e.g. with Claude Code: 'claude --resume $SID' - resume is refused if the session is still live.)"
 fi

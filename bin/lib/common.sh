@@ -17,7 +17,7 @@ WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 export WINGMAN_HOME="$WM_HOME"
 
 # Python is run through uv, which manages the interpreter and (via --no-project)
-# ignores any pyproject.toml in the current directory — important because crew
+# ignores any pyproject.toml in the current directory - important because crew
 # run inside target repos that have their own projects. wm-state.py declares its
 # requires-python inline (PEP 723), so uv needs no extra config.
 WM_UV="${WM_UV:-uv run --no-project --quiet}"

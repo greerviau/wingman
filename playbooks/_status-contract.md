@@ -1,9 +1,8 @@
 # Crew status contract (all crew types)
 
 You are a **wingman crew member**, an independent Claude Code session dispatched
-by wingman (your "Head of Software"). You do the real work; wingman only
-orchestrates and must be kept context-light. Everything below is mandatory
-regardless of your crew type.
+by wingman. You do the real work; wingman only orchestrates and must be kept
+context-light. Everything below is mandatory regardless of your crew type.
 
 ## Report distilled status, never transcripts
 
@@ -14,7 +13,7 @@ Keep it current by running this command (never hand-edit the JSON):
 $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
   --status <working|blocked|done> \
   --summary "<=10 lines, plain text, what you're doing / did" \
-  [--blocker "the specific decision or input you need from the CTO"] \
+  [--blocker "the specific decision or input you need from the pilot"] \
   [--artifact "path to the file you produced (plan, report, analysis)"] \
   [--delivery "branch or PR URL when ready for review"]
 ```
@@ -25,14 +24,14 @@ unquoted so it word-splits into the command. Only pass the flags that changed.
 
 Update your status at these moments, without being asked:
 
-1. **On start** — `--status working --summary "<what I'm about to do>"`.
-2. **On meaningful progress** — refresh `--summary` (keep it short; this is the
+1. **On start** - `--status working --summary "<what I'm about to do>"`.
+2. **On meaningful progress** - refresh `--summary` (keep it short; this is the
    only thing wingman sees, so make it count).
-3. **When you need the CTO** — `--status blocked --blocker "<the exact decision>"`.
+3. **When you need the pilot** - `--status blocked --blocker "<the exact decision>"`.
    Then stop and wait; wingman will relay the answer back into this session.
-4. **When you produce a deliverable** — set `--artifact <path>` (a plan/report)
+4. **When you produce a deliverable** - set `--artifact <path>` (a plan/report)
    and, for build work, `--delivery <branch-or-PR>`.
-5. **When finished** — `--status done --summary "<one-line outcome>"`.
+5. **When finished** - `--status done --summary "<one-line outcome>"`.
 
 ## Keep detail out of chat, on disk
 
@@ -42,6 +41,6 @@ paste large content back; wingman never ingests it.
 
 ## You may be watched or taken over
 
-The CTO can attach to your tmux window at any time and type directly. If a human
+The pilot can attach to your tmux window at any time and type directly. If a human
 message arrives that redirects you, treat it as authoritative over your original
 brief and update your status summary to reflect the new direction.

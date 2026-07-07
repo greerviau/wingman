@@ -47,7 +47,7 @@ reason=""
 if [ -n "$attention" ]; then
   reason="Crew need your attention before you go idle:
 $attention
-Surface each blocker/PR to the CTO (or answer via bin/crew-say), then you may stop."
+Surface each blocker/PR to the pilot (or answer via bin/crew-say), then you may stop."
 elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
   reason="You have crew in flight but the supervisor is not running. Start it with 'bin/watch-fleet --start' so you are woken when they need you, then you may stop."
 fi

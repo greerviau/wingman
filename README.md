@@ -1,15 +1,15 @@
 # wingman
 
-**You're the CTO. Wingman runs the crew.**
+**You're the pilot. Wingman runs the crew.**
 
-Wingman is a long-lived Claude Code session that acts as your **Head of Software**.
-You (the CTO) give it high-level directives — *"implement this feature"*,
-*"investigate this issue"*, *"what's my crew doing?"* — and it delegates the real
+Wingman is a long-lived Claude Code session that runs a **crew** of agents for you.
+You (the pilot) give it high-level directives - *"implement this feature"*,
+*"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real
 work to a crew, tracks their status, raises only real decisions to you, and keeps
 its own context clean. It orchestrates; it does not do the heavy lifting.
 
 Each crew member is an **independent `claude` session in its own tmux window**,
-launched in your target repo — so you can watch it, type into it, or take it over
+launched in your target repo - so you can watch it, type into it, or take it over
 live, and it survives even if wingman itself is killed.
 
 ## Quick start
@@ -42,30 +42,30 @@ Talk to it in plain language, or use the slash commands:
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 
-Take the wheel of any crew member any time — `bin/crew-takeover <id>` prints the
+Take the wheel of any crew member any time - `bin/crew-takeover <id>` prints the
 exact command (`tmux attach` into its window; select, type, take over). Detach
 (`Ctrl-b d`) to hand back. Killing wingman leaves the crew running; relaunching it
 rebuilds the roster.
 
-**Harness-agnostic.** The coordination layer — tmux windows, JSON status files,
-the watcher, the board — doesn't depend on any one agent harness; a crew member is
+**Harness-agnostic.** The coordination layer - tmux windows, JSON status files,
+the watcher, the board - doesn't depend on any one agent harness; a crew member is
 just an agent CLI in a tmux window keeping its status file current. The default
 launch recipe uses `claude` (overridable via `WM_AGENT`, isolated in
 `bin/spawn-crew`). Wingman deliberately avoids a harness's native
-background-agent/attach/resume features for orchestration, so tmux attach — which
-is neutral — is the takeover path.
+background-agent/attach/resume features for orchestration, so tmux attach - which
+is neutral - is the takeover path.
 
 ## How behavior is configured (playbooks)
 
 Each crew type's behavior is plain prose in `playbooks/`:
 
-- `playbooks/spec.md` — turn a problem into a plan (or a report).
-- `playbooks/build.md` — the dev cycle: worktree → implement → commit → push → PR.
-- `playbooks/lead.md` — decompose a large effort and spawn/integrate its own crew.
+- `playbooks/spec.md` - turn a problem into a plan (or a report).
+- `playbooks/build.md` - the dev cycle: worktree → implement → commit → push → PR.
+- `playbooks/lead.md` - decompose a large effort and spawn/integrate its own crew.
 
 **To customize, drop a `playbooks/<type>.local.md` beside the default.** If present
 it wins. `*.local.md` is gitignored, so your customizations can't be accidentally
-committed and survive `git pull` of new defaults — the same pattern as Claude
+committed and survive `git pull` of new defaults - the same pattern as Claude
 Code's `settings.json` / `settings.local.json`. Example: to make the spec crew use
 your own `/spec` skill, write `playbooks/spec.local.md` that says so.
 
@@ -99,21 +99,21 @@ hooks/stop-guard.sh     Stop hook: no going idle blind while crew are in flight
   commands/             /status /blocked /spec /build /standdown
 ```
 
-## State home — `~/.wingman/`
+## State home - `~/.wingman/`
 
 Machine-local runtime state, created on first run, never committed:
 
-- `crew.json` — the live roster (id, type, session id, tmux window, repo, status).
-- `crew/<id>.json` — each crew member's distilled status record.
-- `board.md` — the human-readable render of the roster.
-- `projects.json` — the discovered-projects cache.
+- `crew.json` - the live roster (id, type, session id, tmux window, repo, status).
+- `crew/<id>.json` - each crew member's distilled status record.
+- `board.md` - the human-readable render of the roster.
+- `projects.json` - the discovered-projects cache.
 
 All *user-editable* customization lives in this repo as gitignored `*.local.md` /
 `config.local.*`, not here. `~/.wingman/` is pure runtime state you never hand-edit.
 
 ## Prior art
 
-Wingman draws on [firstmate](https://github.com/kunchenguid/firstmate) — tmux as
+Wingman draws on [firstmate](https://github.com/kunchenguid/firstmate) - tmux as
 the crew backend, a spec → build pipeline, event-driven zero-token supervision,
-behavior-as-configuration, and a machine-local state home — but is its own build
+behavior-as-configuration, and a machine-local state home - but is its own build
 using plain `git` worktrees (no extra worktree tooling) and tmux only.

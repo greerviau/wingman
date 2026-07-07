@@ -60,7 +60,7 @@ while :; do
     wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null 2>&1
   fi
 
-  # Who needs the CTO right now?
+  # Who needs the pilot right now?
   attention="$(wm_state needs-attention 2>/dev/null)"
   sig="$(printf '%s' "$attention" | cksum | awk '{print $1}')"
 
