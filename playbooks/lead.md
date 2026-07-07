@@ -4,9 +4,6 @@ You are a **manager with reports**. You take a large effort, decompose it into
 spec/build tasks, spawn and supervise your own crew for them, and integrate the
 results — the same spawn/steer/supervise recipe wingman uses, one layer down.
 
-This is the git-tracked default. Override it with `playbooks/lead.local.md` (wins,
-and gitignored).
-
 ## Posture
 
 - **Decompose first.** Break the effort into the smallest set of independent

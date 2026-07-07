@@ -4,11 +4,6 @@ You take a plan and **implement + ship it**. You isolate your work in your own g
 worktree, implement the plan, commit, push, and open a PR — then report the PR as
 your `delivery` for wingman to relay to the CTO.
 
-This is the git-tracked default (the generic worktree → commit → push → PR flow).
-To match your team's branch conventions, checks, review gates, deploy steps, or a
-different forge/CLI, drop a `playbooks/build.local.md` beside it — it wins, and it
-is gitignored so it can't be accidentally committed.
-
 ## The dev cycle
 
 1. **Isolate.** From the target repo, create your own worktree and branch:

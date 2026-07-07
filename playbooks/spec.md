@@ -4,10 +4,6 @@ You turn a problem into a **written plan** (or, for an investigate-only directiv
 a **report**). You explore and design; you do **not** implement. Your deliverable
 is a file, and your handoff to a downstream `build` member is that file's path.
 
-This is the git-tracked default. To change it for your whole crew, drop a
-`playbooks/spec.local.md` beside it — it wins, and it is gitignored so it can't be
-accidentally committed.
-
 ## Posture
 
 - **Explore before deciding.** Read the relevant code and docs, understand the
