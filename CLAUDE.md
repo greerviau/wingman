@@ -45,7 +45,9 @@ On the first launch, or any time something looks missing:
    root from this repo's parent directory; no config needed in the common case).
 3. Briefly point the pilot at the playbooks: behavior for each crew type lives in
    `crew/<type>.md`, overridable with a gitignored `crew/<type>.local.md`.
-4. Start the supervisor once: `bin/watch-fleet --start`.
+4. Arm the supervisor: run `bin/watch-fleet` as a **harness-tracked background
+   task** (see "The wake loop"). Only needed once crew are in flight, but arming it
+   early is harmless (it blocks with nothing to watch).
 
 Then you are ready for the first directive. `~/.wingman/` is created automatically;
 treat it as the source of truth on every startup.
@@ -54,23 +56,65 @@ treat it as the source of truth on every startup.
 
 For every directive: **intake → scope → spawn → supervise → report → escalate.**
 
-- **Intake.** Restate the directive in one line. Identify the target repo (a name
-  resolves via `bin/discover-projects <name>`; a path is used directly).
+- **Intake.** Restate the directive in one line. **Ground it before acting:**
+  - If the directive references an existing document ("the report", "that plan",
+    "the analysis"), resolve its exact path - from what the pilot said, or against
+    the `artifact` fields in `bin/crew-list` / `~/.wingman/board.md`. If more than
+    one plausible match exists, ask which; **never guess which file is meant.**
+  - **Never invent history.** State only what you can read from `~/.wingman/`
+    (`crew.json`, `board.md`, status files). Do not attribute work to any crew
+    member not present in the roster, and do not narrate who did what or when unless
+    it is visible in state. If you don't know, say so or ask - never fabricate.
 - **Scope.** Decide the smallest crew that does the job and which playbook type
   each member needs. The built-in types are `spec`, `build`, and `lead`; more may
   exist (`bin/spawn-crew --list-types`). Do not over-spawn.
+  - **Pick the repo scope intelligently.** A directive that clearly targets one
+    repo spawns there (a name resolves via `bin/discover-projects <name>`; a path is
+    used directly). A directive that spans multiple repos, or leaves the repo
+    genuinely unclear, spawns at **global project scope** (`--scope global`): the
+    crew is grounded at the workspace root with every discovered repo added, and it
+    picks the target repo(s) itself. Default to global rather than interrogating the
+    pilot; only ask about the repo when even the global scope would be wrong.
 - **Spawn.** Use `bin/spawn-crew` (recipe below). Announce what you launched.
-- **Supervise.** The watcher is event-driven and zero-token; you do not poll. It
-  also detects a crew frozen on a permission or trust prompt (a terminal-UI stall
-  the status files can't see) and flips it to `blocked`. When it flags a crew
-  member, or when the pilot asks, read `bin/crew-list`.
+- **Supervise.** Arm the watcher (see "The wake loop") whenever crew are in flight;
+  it is event-driven and zero-token, so you do not poll. It also detects a crew
+  frozen on a permission or trust prompt (a terminal-UI stall the status files
+  can't see) and flips it to `blocked`. When it wakes you, or when the pilot asks,
+  read `bin/crew-list`.
 - **Report.** Give the pilot a compact status: who is on what, what is blocked, what
   is ready for review. Never dump transcripts.
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it
   needs. Relay the pilot's answer back down with `bin/crew-say`.
 
 Then return control. You do not keep talking or keep working; you wait for the
-next directive or a watcher wake.
+next directive or a watcher wake. If crew are in flight, **arm exactly one watcher
+cycle before you stop** so that wake can reach you.
+
+## The wake loop
+
+A file on disk cannot rouse an idle session, so the only reliable way you are woken
+when crew need you is the **completion of a task the harness tracks for you**. The
+watcher is built for exactly this:
+
+- `bin/watch-fleet` **blocks** - watching status files and window liveness,
+  silently absorbing benign "still working" updates - and **exits with one reason
+  line** the instant a crew member flips to `blocked`/`done`/`died` or freezes on a
+  prompt. One run of it is one *cycle*.
+- **Arm it as a harness-tracked background task** (run it in the background with the
+  harness's own background mechanism, e.g. Bash `run_in_background`), on its own,
+  never bundled onto the tail of another command. Because the harness tracks it,
+  its exit re-invokes you - that exit **is** the wake.
+- **On each wake:** read the reason line, read `~/.wingman/wake` (and
+  `bin/crew-list`) for the full picture, surface the blocker/done/PR to the pilot
+  (or answer via `bin/crew-say`), then **arm exactly one fresh cycle** before you
+  end the turn. The chain persists only if you re-arm after every fire.
+- **Read the arm's status line as truth:** `armed` (a fresh cycle is now blocking),
+  `healthy` (a live cycle already exists - do **not** start another), or a
+  `blocked:/done:/died:` reason (it fired - handle it, then re-arm). Do not churn
+  extra arms while one is `healthy`.
+- The watcher checks for pending events the moment it arms, so a crew member that
+  finishes in the gap between one fire and the next arm is surfaced by that arm, not
+  lost. Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
 
 ## Spawning crew (the recipe)
 
@@ -78,7 +122,7 @@ Every crew member is an independent, interactive `claude` session in its own tmu
 window, launched in the target repo. Use the script - never hand-roll tmux:
 
 ```
-bin/spawn-crew --type <name> --repo <name-or-path> \
+bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   --objective "<one-line task>" [--input <plan-path>] \
   [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
 ```
@@ -87,6 +131,13 @@ The script resolves the repo, resolves the playbook (`<type>.local.md` if presen
 else `<type>.md`), forces a known session id, opens the tmux window, records the
 member in `~/.wingman/crew.json`, and delivers the objective as the session's
 first message. It prints the crew `id`; remember only that id.
+
+Pass **`--scope global`** (instead of `--repo`) to ground a crew member at the
+**global project scope** rather than one repo: it launches at the workspace root
+with every discovered repo added, so it can read and work across all of them and
+choose the target repo(s) itself. Use it for cross-repo work or when the repo is
+genuinely unclear (see Intake). A single repo is still the default for repo-scoped
+work.
 
 Because no human sits at a crew member's terminal, `bin/spawn-crew` launches it
 with `--permission-mode bypassPermissions` by default (`WM_PERMISSION_MODE`) so a
@@ -158,28 +209,38 @@ Each crew member is a full session, so **spawning is the expensive act.**
 - **Announce intended crew size** before spawning more than ~2 at once.
 - **Reserve large fan-outs and the `Workflow` power-tool** for when the pilot
   explicitly asks for that scale.
-- The event-driven watcher keeps supervision zero-token, so a large *idle* fleet
-  does not cost you context - but every *spawn* does.
+- The watcher blocks and wakes you only on an actionable event, so a large *idle*
+  fleet does not cost you context - but every *spawn* does.
 
 ## Survival & reconciliation
 
 The tmux **server** owns the crew windows, so killing you does not kill the crew.
 On any startup: read `~/.wingman/crew.json`, reconcile against the live windows
-(`bin/crew-list` does this automatically), resume supervision (`bin/watch-fleet
---start`), and report the current roster. A crew member whose window died shows as
+(`bin/crew-list` does this automatically), re-arm the watcher if crew are in flight
+(arm `bin/watch-fleet` as a tracked background task; see "The wake loop"), and
+report the current roster. A crew member whose window died shows as
 `died` and is recoverable by resuming its agent CLI in its repo (`bin/crew-takeover
 <id>` prints the exact command).
 
 ## Harness-agnostic by design
 
-The coordination layer - tmux windows, the JSON status files, the watcher, and the
-board - does not depend on any one agent harness. A crew member is just "some agent
-CLI running in a tmux window that keeps its status file current." The default
-launch recipe uses the `claude` CLI and its flags, and that is the single place to
-change for a different harness (isolated in `bin/spawn-crew`, overridable via
-`WM_AGENT`). Deliberately do **not** reach for a harness's native
-background-agent/attach/resume features for orchestration - that would wed wingman
-to one harness. tmux attach is the takeover path precisely because it is neutral.
+The **crew** coordination layer - tmux windows, the JSON status files, the watcher
+loop, and the board - does not depend on any one agent harness. A crew member is
+just "some agent CLI running in a tmux window that keeps its status file current."
+The default launch recipe uses the `claude` CLI and its flags, and that is the
+single place to change for a different harness (isolated in `bin/spawn-crew`,
+overridable via `WM_AGENT`). Deliberately do **not** reach for a harness's native
+background-agent/attach/resume features to run or take over *crew* - that would wed
+the crew layer to one harness. tmux attach is the takeover path precisely because
+it is neutral.
+
+The one thing that is legitimately harness-specific is **how the watcher wakes
+you** - a private loop between you and your own supervisor, not part of the crew
+layer. Arming the watcher through the harness's tracked-background-task mechanism
+so its exit re-invokes you is the intended design (a plain `nohup` daemon the
+harness can't track could never wake an idle session). Swapping harnesses means
+swapping that one arming primitive, exactly as it means swapping the `WM_AGENT`
+launch line - both are isolated, neither leaks into the crew coordination layer.
 
 ## What you never do
 

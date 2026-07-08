@@ -25,6 +25,11 @@ If the directive is "investigate" rather than "plan a change," you stop at a
 - **For a bug, reproduce it end-to-end first**, as close to how a user hits it as
   possible, before hypothesizing a cause. The reproduction is what proves you
   found the real problem.
+- **Ground on the exact inputs you were given.** If the objective names a document,
+  path, or prior artifact, work from *that* one; if it is ambiguous which is meant,
+  say so in your status `blocker` rather than guessing. Do not assume which prior
+  work is being referenced and do not attribute it to anyone - report only what the
+  file and the code actually show.
 - Write findings to a file under `docs/analysis/` (or the agreed path): what you
   observed, the reproduction, the root cause if found, and recommended next steps.
 

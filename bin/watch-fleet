@@ -1,20 +1,38 @@
 #!/usr/bin/env bash
-# watch-fleet - the zero-token supervisor. A bash loop wingman starts once per
-# session. It sleeps, watches the crew status files + tmux window liveness, and
-# only signals wingman (edge-triggered) when a member flips to blocked/done/died.
-# It never spends wingman turns polling.
+# watch-fleet - the zero-token supervisor, armed as a harness-tracked background
+# task (never a detached daemon). One "cycle" is a single run of this script:
+# wingman starts it in the background, it BLOCKS - watching crew status files and
+# tmux window liveness, absorbing benign "still working" updates - and only EXITS
+# (with one reason line on stdout) the moment a crew member flips to
+# blocked/done/died or freezes on a prompt. Because it is a task the agent harness
+# tracks, that exit is the wake: the harness re-invokes wingman, which handles the
+# event and arms exactly one fresh cycle. A file on disk cannot rouse an idle
+# session, so the exit-of-a-tracked-task is the only reliable wake channel; this
+# script therefore never tries to inject keystrokes into wingman's terminal.
 #
-# Signal channels (both best-effort, the wake file is the reliable one):
-#   - writes $WINGMAN_HOME/wake  with the current attention list (wingman + the
-#     Stop-hook read this)
-#   - if $WINGMAN_TARGET (a tmux "session:window") is set, send-keys a one-line
-#     nudge into wingman's own pane
+# Benign wakes are absorbed for free: a crew member merely refreshing its
+# "working" summary never appears in `needs-attention`, so the loop keeps blocking
+# and no wingman turn is spent. Only an actionable event ends the cycle.
+#
+# At-least-once delivery: the loop checks `needs-attention` at the TOP of each
+# iteration (before sleeping), so if something is already pending the instant a
+# fresh cycle is armed, it fires immediately. That covers the gap between one
+# cycle firing and wingman arming the next - a second crew member finishing in
+# that window is surfaced by the next arm, not lost.
+#
+# Singleton: a live cycle (pid alive + fresh beacon) makes a second arm print
+# `watcher: healthy` and exit without starting a rival loop, so wingman can re-arm
+# defensively without spawning duplicates. Read the printed status line - `armed`,
+# `healthy`, or a `blocked:/done:/died:` reason - as the source of truth.
 #
 # Usage:
-#   watch-fleet            run in the foreground (Ctrl-C to stop)
-#   watch-fleet --start    start detached in the background (idempotent)
-#   watch-fleet --stop     stop the background watcher
-#   watch-fleet --status   report whether a watcher is running
+#   watch-fleet            arm one cycle: block until an actionable event, then
+#                          exit with the reason. Run as a harness-tracked
+#                          background task (e.g. Bash run_in_background), never
+#                          bundled onto the tail of another command.
+#   watch-fleet --status   report whether a live cycle exists (pid + beacon).
+#   watch-fleet --stop      stop the current cycle (manual/testing).
+#   watch-fleet --start    deprecated alias for arming; warns, then blocks.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -22,36 +40,60 @@ set -u
 wm_state init >/dev/null
 PIDFILE="$WM_HOME/watch.pid"
 WAKEFILE="$WM_HOME/wake"
+BEATFILE="$WM_HOME/watch.beat"
 INTERVAL="${WM_WATCH_INTERVAL:-5}"
+# A cycle is "live" iff its recorded pid is alive AND its beacon is fresher than
+# this grace window. Touched every loop iteration, so a genuinely blocking watcher
+# always looks live and a crashed/killed one goes stale within the grace.
+GRACE="${WM_WATCH_GRACE:-30}"
 
-running() {
+beat_age() {
+  [ -f "$BEATFILE" ] || { echo 999999; return; }
+  m="$(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$BEATFILE" 2>/dev/null)" || { echo 999999; return; }
+  echo $(( $(date +%s) - m ))
+}
+
+# A live cycle exists iff the pidfile names a live process and its beacon is fresh.
+cycle_live() {
   [ -f "$PIDFILE" ] || return 1
   pid="$(cat "$PIDFILE" 2>/dev/null)"
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  [ "$(beat_age)" -lt "$GRACE" ]
 }
 
 case "${1:-}" in
   --status)
-    if running; then wm_ok "watch-fleet running (pid $(cat "$PIDFILE"))"; else wm_info "watch-fleet not running"; fi
+    if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"
+    else wm_info "no live watch-fleet cycle"; fi
     exit 0 ;;
   --stop)
-    if running; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; wm_ok "watch-fleet stopped"; else wm_info "watch-fleet not running"; fi
+    if [ -f "$PIDFILE" ]; then
+      pid="$(cat "$PIDFILE" 2>/dev/null)"
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null
+      rm -f "$PIDFILE"
+      wm_ok "watch-fleet stopped"
+    else wm_info "no watch-fleet cycle to stop"; fi
     exit 0 ;;
   --start)
-    if running; then wm_info "watch-fleet already running (pid $(cat "$PIDFILE"))"; exit 0; fi
-    # Re-exec ourselves in the background in loop mode.
-    nohup "$0" __loop >"$WM_HOME/watch.log" 2>&1 &
-    echo $! > "$PIDFILE"
-    wm_ok "watch-fleet started (pid $(cat "$PIDFILE"), interval ${INTERVAL}s)"
-    exit 0 ;;
-  __loop|"") : ;;   # fall through to the loop
-  -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    wm_warn "watch-fleet --start is deprecated: arm 'bin/watch-fleet' as a harness-tracked background task instead. Blocking now."
+    ;;
+  arm|__loop|"") : ;;   # fall through to arm
+  -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
   *) wm_die "unknown arg: $1" ;;
 esac
 
-# --- the loop ---------------------------------------------------------------
-[ "${1:-}" = __loop ] && echo $$ > "$PIDFILE"
+# --- singleton guard --------------------------------------------------------
+# If a genuinely live cycle already holds the lock, do not start a rival loop.
+if cycle_live; then
+  wm_ok "watcher: healthy pid=$(cat "$PIDFILE") (beacon $(beat_age)s)"
+  exit 0
+fi
+
+# --- claim the cycle --------------------------------------------------------
+echo $$ > "$PIDFILE"
+: > "$BEATFILE" || true
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
+wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
 # Signature of an interactive prompt that has frozen a crew member. Covers the
 # three gates a crew can hit: a per-tool permission prompt ("Do you want to
@@ -59,8 +101,29 @@ trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 # Permissions mode acceptance. Overridable (e.g. for another harness).
 WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
 
-last_sig=""
+# Emit the wake payload (human-readable, for wingman to read on wake) and the
+# machine reason lines (one per member, "<status>: <id> <note>") to stdout, then
+# exit so the tracked task completes and the harness re-invokes wingman.
+fire() {
+  _attention="$1"
+  {
+    echo "# Crew need your attention"
+    echo
+    printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st note; do
+      [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
+    done
+  } > "$WAKEFILE"
+  printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st note; do
+    [ -n "$id" ] && printf '%s: %s %s\n' "$st" "$id" "$note"
+  done
+  rm -f "$PIDFILE"
+  exit 0
+}
+
+# --- the blocking loop ------------------------------------------------------
 while :; do
+  : > "$BEATFILE" || true   # liveness beacon for the singleton guard + Stop hook
+
   # Reconcile liveness so a dead window becomes 'died'.
   if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
     wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null 2>&1
@@ -68,7 +131,7 @@ while :; do
     # Backstop: a crew parked on an interactive permission/trust prompt is frozen,
     # but that terminal-UI state never reaches its status file (it stays "working").
     # Detect it from the pane and flip the crew to blocked so it flows through the
-    # normal needs-attention/wake path below. Independent of the crew's permission
+    # normal needs-attention/fire path below. Independent of the crew's permission
     # mode, so it still catches stalls when bypass is disabled.
     for _id in $(wm_state crew-list --status working --json 2>/dev/null | wm_py -c '
 import sys, json
@@ -89,30 +152,10 @@ for r in data:
     done
   fi
 
-  # Who needs the pilot right now?
+  # Who needs the pilot right now? Checked at the top of the loop so an event that
+  # is already pending on arm fires immediately (at-least-once across re-arms).
   attention="$(wm_state needs-attention 2>/dev/null)"
-  sig="$(printf '%s' "$attention" | cksum | awk '{print $1}')"
-
-  if [ "$sig" != "$last_sig" ]; then
-    last_sig="$sig"
-    if [ -n "$attention" ]; then
-      {
-        echo "# Crew need your attention"
-        echo
-        printf '%s\n' "$attention" | while IFS=$'\t' read -r id st note; do
-          [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
-        done
-      } > "$WAKEFILE"
-      # Best-effort nudge into wingman's own pane, if we know where it is.
-      if [ -n "${WINGMAN_TARGET:-}" ]; then
-        wm_tmux send-keys -t "$WINGMAN_TARGET" -l \
-          "[watch-fleet] crew need you - run /status or read $WAKEFILE" 2>/dev/null || true
-        wm_tmux send-keys -t "$WINGMAN_TARGET" Enter 2>/dev/null || true
-      fi
-    else
-      : > "$WAKEFILE"
-    fi
-  fi
+  [ -n "$attention" ] && fire "$attention"
 
   sleep "$INTERVAL"
 done

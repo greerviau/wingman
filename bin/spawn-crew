@@ -3,44 +3,72 @@
 # interactive claude session in its own tmux window, in the target repo.
 #
 # Usage:
-#   spawn-crew --type <spec|build|lead> --repo <path-or-name> \
+#   spawn-crew --type <spec|build|lead> (--repo <path-or-name> | --scope global) \
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
 #
-# Prints the crew id on success. All tmux calls are confined to this file and
+# --repo grounds the member in one git checkout (the default). --scope global
+# grounds it at the workspace root with every discovered repo added, so it can work
+# across repos and pick its target(s) itself (for cross-repo work or an unclear
+# repo). Prints the crew id on success. All tmux calls are confined to this file and
 # lib/common.sh so a future session backend is a localized change.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
-TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""
+TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"
 while [ $# -gt 0 ]; do
   case "$1" in
     --type)      TYPE="$2"; shift 2 ;;
     --repo)      REPO_ARG="$2"; shift 2 ;;
+    --scope)     SCOPE="$2"; shift 2 ;;
     --objective) OBJECTIVE="$2"; shift 2 ;;
     --id)        ID="$2"; shift 2 ;;
     --input)     INPUT="$2"; shift 2 ;;
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
     --list-types) wm_crew_types; exit 0 ;;
-    -h|--help)   sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
 
+# Accept --repo global as an alias for --scope global.
+[ "$REPO_ARG" = global ] && { SCOPE="global"; REPO_ARG=""; }
+case "$SCOPE" in repo|global) ;; *) wm_die "--scope must be 'repo' or 'global' (got '$SCOPE')" ;; esac
+
 [ -n "$TYPE" ] || wm_die "--type is required (a playbook name; see: spawn-crew --list-types)"
-[ -n "$REPO_ARG" ] || wm_die "--repo is required (a path or a discovered project name)"
 [ -n "$OBJECTIVE" ] || wm_die "--objective is required"
 
-# --- resolve the target repo -------------------------------------------------
-if [ -d "$REPO_ARG/.git" ] || { [ -d "$REPO_ARG" ] && git -C "$REPO_ARG" rev-parse --git-dir >/dev/null 2>&1; }; then
-  REPO="$(cd "$REPO_ARG" && pwd)"
+# --- resolve the target scope ------------------------------------------------
+# Newline list of every discovered repo path, for --add-dir in global scope.
+GLOBAL_REPO_DIRS=""
+if [ "$SCOPE" = global ]; then
+  [ -z "$REPO_ARG" ] || wm_die "pass either --scope global or --repo <name>, not both"
+  # Ground at the primary workspace root (wingman's parent in the common case).
+  REPO="$("$WM_BIN/discover-projects" --roots 2>/dev/null | head -n1)"
+  [ -n "$REPO" ] && [ -d "$REPO" ] || wm_die "could not resolve a workspace root for global scope (check bin/discover-projects)"
+  # Refresh the cache, then collect every discovered repo path to add-dir.
+  "$WM_BIN/discover-projects" --quiet >/dev/null 2>&1 || true
+  GLOBAL_REPO_DIRS="$(wm_state projects-get 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    m = json.load(sys.stdin)
+except Exception:
+    m = {}
+for p in sorted(set(m.values())):
+    print(p)
+')"
 else
-  REPO="$("$WM_BIN/discover-projects" "$REPO_ARG")" || exit 1
+  [ -n "$REPO_ARG" ] || wm_die "--repo is required (a path or a discovered project name), or use --scope global"
+  if [ -d "$REPO_ARG/.git" ] || { [ -d "$REPO_ARG" ] && git -C "$REPO_ARG" rev-parse --git-dir >/dev/null 2>&1; }; then
+    REPO="$(cd "$REPO_ARG" && pwd)"
+  else
+    REPO="$("$WM_BIN/discover-projects" "$REPO_ARG")" || exit 1
+  fi
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || wm_die "'$REPO' is not a git checkout"
 fi
-git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || wm_die "'$REPO' is not a git checkout"
 
 # --- resolve the playbook (local override wins) ------------------------------
 # A crew type is valid iff a playbook exists for it. Add crew/<type>.md
@@ -82,7 +110,13 @@ wm_state init >/dev/null
 SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
 {
   printf '# Your assignment\n\n'
-  printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$ID" "$TYPE" "$REPO"
+  if [ "$SCOPE" = global ]; then
+    printf 'Crew id: **%s**  |  Type: **%s**  |  Scope: **global project scope**\n\n' "$ID" "$TYPE"
+    printf 'You are grounded at the workspace root `%s`, with every discovered repo available. ' "$REPO"
+    printf 'This work is not tied to one repo: **determine the target repo(s) yourself** from the objective, and `cd` into a specific repo for any repo-local work (branches, commits, PRs). If it turns out the work belongs to a single repo, just operate there.\n\n'
+  else
+    printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$ID" "$TYPE" "$REPO"
+  fi
   if [ -n "$INPUT" ]; then
     printf 'Input handoff: read the plan/spec at `%s` and follow it.\n\n' "$INPUT"
   fi
@@ -117,6 +151,13 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
   printf ' --add-dir %s' "$(quote "$WM_HOME")"
   printf ' --add-dir %s' "$(quote "$WM_REPO")"
+  # Global scope: add every discovered repo so the member can work across all of
+  # them (the cwd is the workspace root, which need not be a git checkout itself).
+  if [ "$SCOPE" = global ]; then
+    printf '%s\n' "$GLOBAL_REPO_DIRS" | while IFS= read -r _d; do
+      [ -n "$_d" ] && printf ' --add-dir %s' "$(quote "$_d")"
+    done
+  fi
   printf ' --append-system-prompt "$(cat %s)"' "$(quote "$SYSPROMPT")"
   printf '\n'
 } > "$LAUNCH"
@@ -128,7 +169,7 @@ wm_tmux new-window -d -t "$WM_TMUX_SESSION" -n "$WINDOW" "bash $(quote "$LAUNCH"
 
 # --- record in the roster ----------------------------------------------------
 wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
-  --repo "$REPO" --window "$WINDOW" --session-id "$SID" >/dev/null
+  --repo "$REPO" --scope "$SCOPE" --window "$WINDOW" --session-id "$SID" >/dev/null
 
 # --- deliver the opening objective as the first user message -----------------
 # Give the interactive session a moment to reach its input prompt, then type.
@@ -137,6 +178,10 @@ OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
 wm_tmux_send_message "$WM_TMUX_SESSION:$WINDOW" "$OPENING"
 
-wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
+if [ "$SCOPE" = global ]; then
+  wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (global scope at $(basename "$REPO"), session $SID)"
+else
+  wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
+fi
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_SESSION" "$WINDOW"
 echo "$ID"

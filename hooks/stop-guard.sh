@@ -35,12 +35,20 @@ active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --j
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')"
 
-# Is the watcher running?
+# Is a watcher cycle live? A cycle is live iff its pid is alive AND its beacon is
+# fresh - a blocking watcher touches the beacon every loop, so a crashed one goes
+# stale within the grace even if a stale pidfile lingers.
 watcher_up=0
 pidfile="$WM_HOME/watch.pid"
-if [ -f "$pidfile" ]; then
+beatfile="$WM_HOME/watch.beat"
+grace="${WM_WATCH_GRACE:-30}"
+if [ -f "$pidfile" ] && [ -f "$beatfile" ]; then
   pid="$(cat "$pidfile" 2>/dev/null)"
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && watcher_up=1
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    beat_m="$($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$beatfile" 2>/dev/null)"
+    now_s="$(date +%s)"
+    if [ -n "$beat_m" ] && [ $(( now_s - beat_m )) -lt "$grace" ]; then watcher_up=1; fi
+  fi
 fi
 
 reason=""
@@ -49,7 +57,7 @@ if [ -n "$attention" ]; then
 $attention
 Surface each blocker/PR to the pilot (or answer via bin/crew-say), then you may stop."
 elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
-  reason="You have crew in flight but the supervisor is not running. Start it with 'bin/watch-fleet --start' so you are woken when they need you, then you may stop."
+  reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
 fi
 
 if [ -n "$reason" ]; then

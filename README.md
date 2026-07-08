@@ -37,7 +37,7 @@ Talk to it in plain language, or use the slash commands:
 |---|---|
 | "Implement feature X in `<repo>`" | spawns a **spec** crew → plan → (your review) → **build** crew → PR |
 | "Investigate issue Y in `<repo>`" | spawns a **spec** crew in report mode (reproduces bugs end-to-end first) |
-| `/spawn <type> <repo> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added |
+| `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added; pass `global` instead of a repo for cross-repo / workspace-wide work |
 | `/status` | compact roster: who's on what, what's blocked, what's ready |
 | `/blocked` | each blocked member + the decision it needs |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
@@ -48,13 +48,17 @@ exact command (`tmux attach` into its window; select, type, take over). Detach
 (`Ctrl-b d`) to hand back. Killing wingman leaves the crew running; relaunching it
 rebuilds the roster.
 
-**Harness-agnostic.** The coordination layer - tmux windows, JSON status files,
-the watcher, the board - doesn't depend on any one agent harness; a crew member is
-just an agent CLI in a tmux window keeping its status file current. The default
-launch recipe uses `claude` (overridable via `WM_AGENT`, isolated in
+**Harness-agnostic.** The crew coordination layer - tmux windows, JSON status
+files, the watcher loop, the board - doesn't depend on any one agent harness; a
+crew member is just an agent CLI in a tmux window keeping its status file current.
+The default launch recipe uses `claude` (overridable via `WM_AGENT`, isolated in
 `bin/spawn-crew`). Wingman deliberately avoids a harness's native
-background-agent/attach/resume features for orchestration, so tmux attach - which
-is neutral - is the takeover path.
+background-agent/attach/resume features to run or take over *crew*, so tmux attach -
+which is neutral - is the takeover path. The one deliberately harness-specific
+piece is how wingman's own supervisor wakes it: the watcher is armed as a
+harness-tracked background task so its exit re-invokes wingman (a detached daemon
+could never rouse an idle session). That is a private wingman↔supervisor concern,
+isolated like the `WM_AGENT` launch line, and it never touches the crew layer.
 
 ## How behavior is configured (playbooks)
 
@@ -106,7 +110,16 @@ Machine-local runtime state, created on first run, never committed:
 - `crew.json` - the live roster (id, type, session id, tmux window, repo, status).
 - `crew/<id>.json` - each crew member's distilled status record.
 - `board.md` - the human-readable render of the roster.
+- `watch.pid` / `watch.beat` - the live watcher cycle's pid and liveness beacon.
+- `wake` - the current attention list the watcher writes when it fires.
 - `projects.json` - the discovered-projects cache.
 
 All *user-editable* customization lives in this repo as gitignored `*.local.md` /
 `config.local.*`, not here. `~/.wingman/` is pure runtime state you never hand-edit.
+
+## Tests
+
+`bash tests/run.sh` runs the bash E2E suites (no real `claude`/tmux fleet needed;
+each test uses an isolated throwaway state home and tmux session name). They cover
+the wake loop (`watch-fleet` blocks, fires on an actionable event, singleton
+guard) and repo-vs-global spawn scope. Requires `bash`, `git`, `tmux`, and `uv`.
