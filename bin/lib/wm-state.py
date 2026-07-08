@@ -117,6 +117,7 @@ def cmd_crew_add(args):
         "type": args.type,
         "objective": args.objective,
         "repo": args.repo,
+        "scope": getattr(args, "scope", "repo") or "repo",
         "window": args.window,
         "session_id": args.session_id,
         "status": "working",
@@ -297,7 +298,8 @@ def render_board():
         for r in active:
             out.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), r.get("id", ""), r.get("status", ""),
-                r.get("window", ""), os.path.basename(r.get("repo", "") or ""),
+                r.get("window", ""),
+                os.path.basename(r.get("repo", "") or "") + (" (global)" if r.get("scope") == "global" else ""),
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
             ))
     else:
@@ -342,6 +344,10 @@ def build_parser():
     a.add_argument("--repo", required=True)
     a.add_argument("--window", required=True)
     a.add_argument("--session-id", required=True, dest="session_id")
+    # "repo" (default): grounded in one git checkout. "global": grounded at the
+    # workspace root with every discovered repo added, so the member works across
+    # repos and picks its target(s) itself.
+    a.add_argument("--scope", default="repo")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
