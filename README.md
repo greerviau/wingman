@@ -15,8 +15,8 @@ live, and it survives even if wingman itself is killed.
 ## Quick start
 
 ```
-git clone <this repo> ~/Documents/GitHub/wingman
-cd ~/Documents/GitHub/wingman
+git clone https://github.com/greerviau/wingman.git
+cd wingman
 claude          # or: bin/wingman   (adds your project roots via --add-dir)
 ```
 
