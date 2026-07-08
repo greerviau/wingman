@@ -62,19 +62,19 @@ isolated like the `WM_AGENT` launch line, and it never touches the crew layer.
 
 ## How behavior is configured (playbooks)
 
-A crew type is just a playbook - plain prose in `crew/`. The built-ins:
+A crew type is just a playbook - plain prose in `playbook/`. The built-ins:
 
-- `crew/spec.md` - turn a problem into a plan (or a report).
-- `crew/build.md` - the dev cycle: worktree → implement → commit → push → PR.
-- `crew/lead.md` - decompose a large effort and spawn/integrate its own crew.
-- `crew/research.md` - example non-dev type: gather evidence, write a cited
+- `playbook/spec.md` - turn a problem into a plan (or a report).
+- `playbook/build.md` - the dev cycle: worktree → implement → commit → push → PR.
+- `playbook/lead.md` - decompose a large effort and spawn/integrate its own crew.
+- `playbook/research.md` - example non-dev type: gather evidence, write a cited
   report. Shows the shape a `researcher`/`scientist`/`analyst` role takes.
 
-**To customize a type, drop a `crew/<type>.local.md` beside the default.** If
+**To customize a type, drop a `playbook/<type>.local.md` beside the default.** If
 present it wins.
 
-**To add a new type, create `crew/<type>.md`** (tracked) **or
-`crew/<type>.local.md`** (yours only) - then spawn it with
+**To add a new type, create `playbook/<type>.md`** (tracked) **or
+`playbook/<type>.local.md`** (yours only) - then spawn it with
 `--type <name>`. There is no hardcoded list; a type exists iff its playbook does.
 `bin/spawn-crew --list-types` shows what's available. So a `scientist`,
 `reviewer`, or `data-analyst` crew is one file away.
@@ -82,7 +82,7 @@ present it wins.
 `*.local.md` is gitignored, so your customizations and private crew types can't be
 accidentally committed and survive `git pull` of new defaults - the same pattern as
 Claude Code's `settings.json` / `settings.local.json`. Example: to make the spec
-crew follow your own planning skill or checklist, write `crew/spec.local.md` that
+crew follow your own planning skill or checklist, write `playbook/spec.local.md` that
 says so.
 
 Project-discovery hints are the same story: an optional gitignored

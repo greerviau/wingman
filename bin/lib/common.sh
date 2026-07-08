@@ -65,11 +65,11 @@ wm_install_cmd() {
 
 wm_have() { command -v "$1" >/dev/null 2>&1; }
 
-# List available crew types: every playbook basename in crew/ (tracked
+# List available crew types: every playbook basename in playbook/ (tracked
 # <type>.md or gitignored <type>.local.md), excluding _-prefixed shared partials.
 # Crew types are open-ended - add a playbook and the type exists.
 wm_crew_types() {
-  for f in "$WM_REPO"/crew/*.md "$WM_REPO"/crew/*.local.md; do
+  for f in "$WM_REPO"/playbook/*.md "$WM_REPO"/playbook/*.local.md; do
     [ -f "$f" ] || continue
     b="$(basename "$f")"; b="${b%.local.md}"; b="${b%.md}"
     case "$b" in _*) continue ;; esac

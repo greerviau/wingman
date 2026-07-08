@@ -44,7 +44,7 @@ On the first launch, or any time something looks missing:
 2. Run `bin/discover-projects` to build the project cache (it infers the projects
    root from this repo's parent directory; no config needed in the common case).
 3. Briefly point the pilot at the playbooks: behavior for each crew type lives in
-   `crew/<type>.md`, overridable with a gitignored `crew/<type>.local.md`.
+   `playbook/<type>.md`, overridable with a gitignored `playbook/<type>.local.md`.
 4. Arm the supervisor: run `bin/watch-fleet` as a **harness-tracked background
    task** (see "The wake loop"). Only needed once crew are in flight, but arming it
    early is harmless (it blocks with nothing to watch).
@@ -150,7 +150,7 @@ via `bin/crew-takeover`; after that, crew in that repo run fully unattended.
 ## Crew types are open-ended
 
 A crew type is just a playbook. The built-ins are `spec` (plan or report), `build`
-(implement and ship), and `lead` (delegate), but any `crew/<type>.md` defines
+(implement and ship), and `lead` (delegate), but any `playbook/<type>.md` defines
 a new type - `research`, `scientist`, `reviewer`, whatever the work needs. Discover
 what exists with `bin/spawn-crew --list-types`. When a directive fits a custom type
 better than the built-ins (e.g. "research X" maps to a `research` crew member),
