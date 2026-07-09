@@ -53,8 +53,18 @@ fi
 
 reason=""
 if [ -n "$attention" ]; then
+  # Blocking the stop is a delivery to wingman, so ack each surfaced (id, updated).
+  # needs-attention emits tab-separated "id status updated note"; the watcher and
+  # this hook share the one ack store, so an event shown by either channel does not
+  # re-surface until the crew's status changes (a new updated).
+  printf '%s\n' "$attention" | while IFS=$'\t' read -r id st upd note; do
+    [ -n "$id" ] && WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" ack --id "$id" --updated "$upd" >/dev/null 2>&1
+  done
+  list="$(printf '%s\n' "$attention" | while IFS=$'\t' read -r id st upd note; do
+    [ -n "$id" ] && printf -- '- %s [%s] %s\n' "$id" "$st" "$note"
+  done)"
   reason="Crew need your attention before you go idle:
-$attention
+$list
 Surface each blocker/PR to the pilot (or answer via bin/crew-say), then you may stop."
 elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
   reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."

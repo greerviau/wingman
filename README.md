@@ -112,6 +112,9 @@ Machine-local runtime state, created on first run, never committed:
 - `board.md` - the human-readable render of the roster.
 - `watch.pid` / `watch.beat` - the live watcher cycle's pid and liveness beacon.
 - `wake` - the current attention list the watcher writes when it fires.
+- `acked.json` - the last `updated` stamp surfaced per crew id, so a terminal
+  event (done/died/blocked) is delivered once instead of on every watcher arm and
+  Stop-hook check. A new `updated` (a genuine state change) re-surfaces.
 - `projects.json` - the discovered-projects cache.
 
 All *user-editable* customization lives in this repo as gitignored `*.local.md` /
@@ -122,4 +125,6 @@ All *user-editable* customization lives in this repo as gitignored `*.local.md` 
 `bash tests/run.sh` runs the bash E2E suites (no real `claude`/tmux fleet needed;
 each test uses an isolated throwaway state home and tmux session name). They cover
 the wake loop (`watch-fleet` blocks, fires on an actionable event, singleton
-guard) and repo-vs-global spawn scope. Requires `bash`, `git`, `tmux`, and `uv`.
+guard), terminal-event de-duplication (an event surfaces once, re-surfaces only on
+a state change), and repo-vs-global spawn scope. Requires `bash`, `git`, `tmux`,
+and `uv`.
