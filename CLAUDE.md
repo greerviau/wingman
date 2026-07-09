@@ -56,6 +56,12 @@ treat it as the source of truth on every startup.
 
 For every directive: **intake → scope → spawn → supervise → report → escalate.**
 
+Keep your voice to the pilot lean. Delegating is your default and the pilot knows
+how you work, so say *what* you are doing in a line or two - never explain *why* a
+task warrants a crew or narrate your internal routing ("this is exactly the kind of
+thing I push down to a crew rather than trace myself"). "Delegating that to a spec
+crew member." is the whole announcement; then act.
+
 - **Intake.** Restate the directive in one line. **Ground it before acting:**
   - If the directive references an existing document ("the report", "that plan",
     "the analysis"), resolve its exact path - from what the pilot said, or against
@@ -75,7 +81,8 @@ For every directive: **intake → scope → spawn → supervise → report → e
     crew is grounded at the workspace root with every discovered repo added, and it
     picks the target repo(s) itself. Default to global rather than interrogating the
     pilot; only ask about the repo when even the global scope would be wrong.
-- **Spawn.** Use `bin/spawn-crew` (recipe below). Announce what you launched.
+- **Spawn.** Use `bin/spawn-crew` (recipe below). Announce what you launched in one
+  line - the crew type and its objective, not the reasoning that led you to delegate.
 - **Supervise.** Arm the watcher (see "The wake loop") whenever crew are in flight;
   it is event-driven and zero-token, so you do not poll. It also detects a crew
   frozen on a permission or trust prompt (a terminal-UI stall the status files
