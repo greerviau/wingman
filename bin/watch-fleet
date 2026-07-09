@@ -104,17 +104,27 @@ WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |trust this folder|Bypass
 # Emit the wake payload (human-readable, for wingman to read on wake) and the
 # machine reason lines (one per member, "<status>: <id> <note>") to stdout, then
 # exit so the tracked task completes and the harness re-invokes wingman.
+#
+# needs-attention emits tab-separated "id status updated note"; the `updated`
+# column is the per-event version stamp we ack below.
 fire() {
   _attention="$1"
   {
     echo "# Crew need your attention"
     echo
-    printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st note; do
+    printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
       [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
     done
   } > "$WAKEFILE"
-  printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st note; do
+  printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && printf '%s: %s %s\n' "$st" "$id" "$note"
+  done
+  # Firing IS the delivery, so ack each surfaced (id, updated). That suppresses
+  # this exact event on subsequent arms while preserving gap-safety: a different
+  # crew - or this crew with a new status (new updated) - is not acked and still
+  # surfaces on the next arm's top-of-loop check.
+  printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
+    [ -n "$id" ] && wm_state ack --id "$id" --updated "$upd" >/dev/null 2>&1
   done
   rm -f "$PIDFILE"
   exit 0

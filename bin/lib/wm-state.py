@@ -10,6 +10,8 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   crew/<id>.json    the distilled status each crew member keeps current itself
   board.md          the human-readable render of the merged roster
   projects.json     the discovered-projects cache: {"name": "path"}
+  acked.json        the last (id -> updated) event surfaced to wingman, so a
+                    terminal state does not re-surface on every needs-attention poll
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
@@ -54,9 +56,16 @@ def projects_path():
     return os.path.join(home(), "projects.json")
 
 
+def acked_path():
+    return os.path.join(home(), "acked.json")
+
+
 def now():
-    # UTC, second precision, ISO-8601 with a trailing Z.
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # UTC, microsecond precision, ISO-8601 with a trailing Z. Microsecond
+    # precision makes `updated` a reliable per-event version stamp for the ack
+    # store: two writes within the same wall-clock second get distinct stamps, so
+    # acking one never suppresses the other.
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def ensure_home():
@@ -239,11 +248,40 @@ def cmd_standdown(args):
 
 
 def cmd_needs_attention(_args):
-    """Print ids of crew that need wingman: blocked, done, or died. Used by the
-    watcher to decide whether to wake wingman."""
+    """Print crew that need wingman: blocked, done, or died, excluding any whose
+    current (id, updated) event has already been acked. Used by the watcher and the
+    Stop hook to decide whether to wake wingman; each deliverer acks what it
+    surfaces (via `ack`), so a terminal state fires once instead of on every poll.
+
+    Output is tab-separated: id, status, updated, note. The `updated` column lets a
+    deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects)."""
+    acked = read_json(acked_path(), {})
+    if not isinstance(acked, dict):
+        acked = {}
     for r in (merged(x) for x in load_roster()):
         if r.get("status") in ("blocked", "done", "died"):
-            print("%s\t%s\t%s" % (r["id"], r["status"], r.get("blocker") or r.get("summary") or ""))
+            if acked.get(r["id"]) == r.get("updated"):
+                continue  # already surfaced this exact event
+            print("%s\t%s\t%s\t%s" % (
+                r["id"], r["status"], r.get("updated") or "",
+                r.get("blocker") or r.get("summary") or ""))
+
+
+def cmd_ack(args):
+    """Record that the (id, updated) event has been surfaced to wingman, so
+    needs-attention suppresses it until the crew's status changes (a new updated).
+
+    Explicit and idempotent: the deliverer passes the exact tuple it surfaced, so
+    the ack never races a state change between the read and the ack - a transition
+    in that window produces a new `updated` that this ack does not cover, and it
+    correctly re-surfaces."""
+    ensure_home()
+    acked = read_json(acked_path(), {})
+    if not isinstance(acked, dict):
+        acked = {}
+    acked[args.id] = args.updated
+    write_json(acked_path(), acked)
+    print(args.id)
 
 
 def cmd_projects_set(args):
@@ -380,6 +418,11 @@ def build_parser():
     a.set_defaults(fn=cmd_standdown)
 
     sub.add_parser("needs-attention").set_defaults(fn=cmd_needs_attention)
+
+    a = sub.add_parser("ack")
+    a.add_argument("--id", required=True)
+    a.add_argument("--updated", required=True)
+    a.set_defaults(fn=cmd_ack)
 
     a = sub.add_parser("projects-set")
     a.add_argument("--data")
