@@ -165,7 +165,14 @@ chmod +x "$LAUNCH"
 
 # --- launch the tmux window --------------------------------------------------
 wm_tmux_ensure_session
-wm_tmux new-window -d -t "$WM_TMUX_SESSION" -n "$WINDOW" "bash $(quote "$LAUNCH")"
+# The target is session-scoped via the trailing colon. `new-window` takes a
+# target-*window*, so a bare "$WM_TMUX_SESSION" is resolved window-first: when
+# the caller's current session holds a window of that same name (e.g. the pilot
+# runs wingman in a tmux window named "wingman"), tmux binds the target to that
+# window's index and fails with "create window failed: index N in use". The
+# trailing colon forces session-scope resolution, so tmux inserts at the next
+# free index in our session regardless of window names elsewhere.
+wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$WINDOW" "bash $(quote "$LAUNCH")"
 
 # --- record in the roster ----------------------------------------------------
 wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
