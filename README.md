@@ -1,7 +1,3 @@
-# wingman
-
-**You're the pilot. Wingman runs the crew.**
-
 ![Wingman Logo](assets/wingman-logo.png)
 
 Wingman is a long-lived Claude Code session that runs a **crew** of agents for you.
