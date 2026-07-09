@@ -2,6 +2,8 @@
 
 **You're the pilot. Wingman runs the crew.**
 
+![Wingman Logo](assets/wingman-logo.png)
+
 Wingman is a long-lived Claude Code session that runs a **crew** of agents for you.
 You (the pilot) give it high-level directives - *"implement this feature"*,
 *"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real
