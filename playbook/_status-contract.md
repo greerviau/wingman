@@ -13,7 +13,7 @@ Keep it current by running this command (never hand-edit the JSON):
 $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
   --status <working|blocked|done> \
   --summary "<=10 lines, plain text, what you're doing / did" \
-  [--blocker "the specific decision or input you need from the pilot"] \
+  [--blocker "the specific decision or input you need to proceed"] \
   [--artifact "path to the file you produced (plan, report, analysis)"] \
   [--delivery "branch or PR URL when ready for review"]
 ```
@@ -27,7 +27,7 @@ Update your status at these moments, without being asked:
 1. **On start** - `--status working --summary "<what I'm about to do>"`.
 2. **On meaningful progress** - refresh `--summary` (keep it short; this is the
    only thing wingman sees, so make it count).
-3. **When you need the pilot** - `--status blocked --blocker "<the exact decision>"`.
+3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`.
    Then stop and wait; wingman will relay the answer back into this session.
 4. **When you produce a deliverable** - set `--artifact <path>` (a plan/report)
    and, for build work, `--delivery <branch-or-PR>`.
@@ -39,9 +39,14 @@ Substantial output (an analysis, a design, a plan) goes in a **file** (under the
 repo's `docs/` or the agreed path), and your status carries only the path. Do not
 paste large content back; wingman never ingests it.
 
+Write these artifacts formally, for a reader outside wingman. Refer to whoever
+requested the work as *the requester* or *the user* - never as *the pilot*. "Pilot"
+is wingman's own private term for the human it flies for; it must not appear in the
+plans, reports, PRs, commit messages, or code comments you produce.
+
 ## You may be watched or taken over
 
-The pilot can attach to your tmux window at any time and type directly. If a human
+A human can attach to your tmux window at any time and type directly. If a human
 message arrives that redirects you, treat it as authoritative over your original
 brief and update your status summary to reflect the new direction.
 
@@ -49,4 +54,4 @@ You run with tool permissions bypassed, so you never wait for approval on a tool
 call. If you nonetheless land on an interactive gate you cannot answer (Claude
 Code's one-time Bypass-Permissions acceptance, or a repo's first-time trust
 dialog), you are frozen and cannot proceed - that is expected; the watcher detects
-it and surfaces it to the pilot to approve. It is not something for you to resolve.
+it and surfaces it for a human to approve. It is not something for you to resolve.

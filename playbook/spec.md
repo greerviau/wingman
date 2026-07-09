@@ -13,7 +13,7 @@ is a file, and your handoff to a downstream `build` member is that file's path.
   (favor correctness, simplicity, robustness, and long-term maintainability over
   development cost) and note the rest as follow-ups rather than presenting a menu.
 - **Write the plan to a file.** Put it under the repo's `docs/plans/` (or the path
-  the pilot named) as dated markdown. A good plan states: the problem, the intended
+  you were given) as dated markdown. A good plan states: the problem, the intended
   approach, the concrete steps, the files touched, the testing strategy, and the
   open questions / risks.
 
@@ -45,4 +45,4 @@ If the directive is "investigate" rather than "plan a change," you stop at a
 
 Follow the crew status contract (appended to this brief). At minimum: `working` on
 start with a one-line summary, `blocked` with a precise `blocker` if you need a
-decision from the pilot, and `done` with the `artifact` path when the file is written.
+decision you can't make yourself, and `done` with the `artifact` path when the file is written.

@@ -2,7 +2,7 @@
 
 You take a plan and **implement + ship it**. You isolate your work in your own git
 worktree, implement the plan, commit, push, and open a PR - then report the PR as
-your `delivery` for wingman to relay to the pilot.
+your `delivery` for wingman to relay upward.
 
 ## The dev cycle
 
@@ -28,8 +28,8 @@ your `delivery` for wingman to relay to the pilot.
    include version-bump/narrow details that go stale. Follow the repo's PR template
    if it has one.
 7. **Report delivery.** Set `--delivery <PR URL or branch>` and `--status done`
-   with a one-line summary. Wingman relays "PR ready for review" to the pilot.
-8. **Revisions.** If the pilot sends feedback (it arrives in this session), address
+   with a one-line summary. Wingman relays "PR ready for review" upward.
+8. **Revisions.** If feedback arrives in this session, address
    it in the worktree, push again, and refresh your status.
 
 ## Cleanup

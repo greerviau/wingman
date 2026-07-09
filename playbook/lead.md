@@ -24,7 +24,7 @@ results - the same spawn/steer/supervise recipe wingman uses, one layer down.
 
 ## Integration
 
-- Watch your crew via `bin/crew-list`; relay their blockers up to the pilot through
+- Watch your crew via `bin/crew-list`; relay their blockers upward through
   your own status `blocker` when the decision is above your pay grade.
 - When your workers deliver, integrate/verify and roll their deliveries into a
   single `delivery` summary (e.g. the set of PRs) for wingman to relay.
