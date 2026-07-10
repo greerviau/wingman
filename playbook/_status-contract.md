@@ -42,8 +42,10 @@ what "seeing it through" means for you (a `build` member watches its PR to
 merge/close; a `spec` member awaits the pilot's review of its plan).
 
 `$WINGMAN_STATE` (the full `uv run ... wm-state.py` invocation), `$WINGMAN_CREW_ID`,
-and `$WINGMAN_HOME` are exported into your environment. Run `$WINGMAN_STATE`
-unquoted so it word-splits into the command. Only pass the flags that changed.
+`$WINGMAN_HOME`, and `$WINGMAN_BIN` (the wingman `bin/` dir, for crew-level tools
+like `$WINGMAN_BIN/pr-watch`) are exported into your environment. Run
+`$WINGMAN_STATE` unquoted so it word-splits into the command. Only pass the flags
+that changed.
 
 Update your status at these moments, without being asked:
 

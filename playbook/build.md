@@ -40,10 +40,11 @@ disposition; you are not finished when the PR opens.
 After announcing the PR you **stay alive and shepherd it**. You cannot rouse
 yourself once your turn ends, so use the same wake primitive wingman uses on
 itself, one level down: arm the crew-level watcher as a **harness-tracked
-background task** (e.g. Bash `run_in_background`), never detached.
+background task** (e.g. Bash `run_in_background`), never detached. It lives in the
+wingman bin dir exported to you as `$WINGMAN_BIN`, so it works from your worktree.
 
 ```
-bin/pr-watch --pr <PR URL or number>
+$WINGMAN_BIN/pr-watch --pr <PR URL or number>
 ```
 
 `pr-watch` blocks, polling the PR, and **exits with one reason line** the instant
