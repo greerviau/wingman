@@ -94,6 +94,27 @@ wm_tmux() { tmux "$@"; }
 # reaches the status files).
 wm_tmux_pane_text() { wm_tmux capture-pane -p -t "$1" 2>/dev/null; }
 
+# Pid of the root process of a window's first pane (the agent CLI itself - spawn-crew
+# execs it as the pane command). Empty if the window is unknown.
+wm_tmux_pane_pid() {
+  wm_tmux list-panes -t "$WM_TMUX_SESSION:$1" -F '#{pane_pid}' 2>/dev/null | head -1
+}
+
+# Seconds since the last output in a window's pane, from tmux's own
+# #{window_activity} (epoch secs), which advances on any pane repaint and is
+# independent of the monitor-activity option. Prints a large number if the window
+# is unknown, so callers treat "can't tell" as "not stale enough to suppress a
+# real flag" - the AND with status-idle guards the flag itself.
+# Harness-neutral: any TUI that repaints while working keeps this fresh.
+wm_tmux_window_activity_age() {
+  _win="$1"
+  _act="$(wm_tmux list-windows -t "$WM_TMUX_SESSION" \
+            -F '#{window_name} #{window_activity}' 2>/dev/null \
+          | awk -v w="$_win" '$1==w {print $2; exit}')"
+  [ -n "$_act" ] || { echo 999999; return; }
+  echo $(( $(date +%s) - _act ))
+}
+
 # Deliver a message into a live interactive session: type the (possibly large)
 # text, then submit with Enter. The two keystrokes are split by a short settle
 # delay on purpose. An interactive TUI (e.g. Claude Code) ingests a rapid bulk
