@@ -22,10 +22,8 @@ On first launch wingman runs `bin/doctor` (installs any missing dependencies wit
 your consent), discovers your sibling repos with zero config, and starts the
 supervisor. Then give it a directive.
 
-The only things you must have before the first run are **`claude`** and **`git`**.
-`doctor` handles `tmux`, `uv`, `uuidgen`, and (only if your build playbook uses
-it) `gh`. `uv` runs the state engine and manages the Python interpreter, so no
-system `python3` is required.
+The only things you must have before the first run are **`claude`** and **`git`**;
+`doctor` handles the rest.
 
 ## Driving wingman
 
@@ -35,94 +33,48 @@ Talk to it in plain language, or use the slash commands:
 |---|---|
 | "Implement feature X in `<repo>`" | spawns a **spec** crew → plan → (your review) → **build** crew → PR |
 | "Investigate issue Y in `<repo>`" | spawns a **spec** crew in report mode (reproduces bugs end-to-end first) |
-| `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added; pass `global` instead of a repo for cross-repo / workspace-wide work |
+| `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added; pass `global` instead of a repo for cross-repo work |
 | `/status` | compact roster: who's on what, what's blocked, what's ready |
 | `/blocked` | each blocked member + the decision it needs |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 
-Take the wheel of any crew member any time - `bin/crew-takeover <id>` prints the
-exact command (`tmux attach` into its window; select, type, take over). Detach
+**Take the wheel any time.** "Let me takeover X" prints the exact command to
+attach to a crew member's tmux window - select, type, take over. Detach
 (`Ctrl-b d`) to hand back. Killing wingman leaves the crew running; relaunching it
 rebuilds the roster.
 
-**Harness-agnostic.** The crew coordination layer - tmux windows, JSON status
-files, the watcher loop, the board - doesn't depend on any one agent harness; a
-crew member is just an agent CLI in a tmux window keeping its status file current.
-The default launch recipe uses `claude` (overridable via `WM_AGENT`, isolated in
-`bin/spawn-crew`). Wingman deliberately avoids a harness's native
-background-agent/attach/resume features to run or take over *crew*, so tmux attach -
-which is neutral - is the takeover path. The one deliberately harness-specific
-piece is how wingman's own supervisor wakes it: the watcher is armed as a
-harness-tracked background task so its exit re-invokes wingman (a detached daemon
-could never rouse an idle session). That is a private wingman↔supervisor concern,
-isolated like the `WM_AGENT` launch line, and it never touches the crew layer.
+## Customizing crew behavior (playbooks)
 
-## How behavior is configured (playbooks)
+A crew type is just a playbook - plain prose in `playbook/`. The built-ins are
+`spec` (plan or report), `build` (worktree → implement → commit → push → PR),
+`lead` (decompose and spawn its own crew), and `research` (an example non-dev type).
 
-A crew type is just a playbook - plain prose in `playbook/`. The built-ins:
+- **Customize a type:** drop a `playbook/<type>.local.md` beside the default; if
+  present it wins.
+- **Add a type:** create `playbook/<type>.md` (tracked) or `.local.md` (yours only),
+  then spawn it with `--type <name>`. There's no hardcoded list - a type exists iff
+  its playbook does. `bin/spawn-crew --list-types` shows what's available.
 
-- `playbook/spec.md` - turn a problem into a plan (or a report).
-- `playbook/build.md` - the dev cycle: worktree → implement → commit → push → PR.
-- `playbook/lead.md` - decompose a large effort and spawn/integrate its own crew.
-- `playbook/research.md` - example non-dev type: gather evidence, write a cited
-  report. Shows the shape a `researcher`/`scientist`/`analyst` role takes.
-
-**To customize a type, drop a `playbook/<type>.local.md` beside the default.** If
-present it wins.
-
-**To add a new type, create `playbook/<type>.md`** (tracked) **or
-`playbook/<type>.local.md`** (yours only) - then spawn it with
-`--type <name>`. There is no hardcoded list; a type exists iff its playbook does.
-`bin/spawn-crew --list-types` shows what's available. So a `scientist`,
-`reviewer`, or `data-analyst` crew is one file away.
-
-`*.local.md` is gitignored, so your customizations and private crew types can't be
-accidentally committed and survive `git pull` of new defaults - the same pattern as
-Claude Code's `settings.json` / `settings.local.json`. Example: to make the spec
-crew follow your own planning skill or checklist, write `playbook/spec.local.md` that
-says so.
-
-Project-discovery hints are the same story: an optional gitignored
-`config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list
-(`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`). Absent by
-default; the defaults cover the common case.
+`*.local.md` is gitignored, so your customizations can't be accidentally committed
+and survive `git pull` of new defaults.
 
 ## Autonomous by default
 
-No human sits at a crew member's terminal, so crew launch with
-`--permission-mode bypassPermissions` (`WM_PERMISSION_MODE`): a gated tool call
-auto-approves instead of hanging on a prompt forever. Set `WM_PERMISSION_MODE=`
-(empty) to fall back to interactive prompting.
-
-Two one-time interactive gates remain that no flag bypasses: Claude Code's
-Bypass-Permissions acceptance (once, ever) and each repo's first-time workspace-trust
-dialog. The watcher detects a crew frozen on either (or on a per-tool prompt when
-bypass is off) and flips it to `blocked`, waking you to approve once with
-`bin/crew-takeover`. After that, crew in that repo run unattended.
-
-## State home - `~/.wingman/`
-
-Machine-local runtime state, created on first run, never committed:
-
-- `crew.json` - the live roster (id, type, session id, tmux window, repo, status).
-- `crew/<id>.json` - each crew member's distilled status record.
-- `board.md` - the human-readable render of the roster.
-- `watch.pid` / `watch.beat` - the live watcher cycle's pid and liveness beacon.
-- `wake` - the current attention list the watcher writes when it fires.
-- `acked.json` - the last `updated` stamp surfaced per crew id, so a terminal
-  event (done/died/blocked) is delivered once instead of on every watcher arm and
-  Stop-hook check. A new `updated` (a genuine state change) re-surfaces.
-- `projects.json` - the discovered-projects cache.
-
-All *user-editable* customization lives in this repo as gitignored `*.local.md` /
-`config.local.*`, not here. `~/.wingman/` is pure runtime state you never hand-edit.
+Crew launch with `--permission-mode bypassPermissions` so gated tool calls
+auto-approve instead of hanging forever with no human at the terminal. Two one-time
+interactive gates remain (Claude Code's Bypass-Permissions acceptance, and each
+repo's first-time workspace-trust dialog); wingman detects a crew frozen on either
+and wakes you to approve once via `bin/crew-takeover`. After that, crew in that repo
+run unattended.
 
 ## Tests
 
-`bash tests/run.sh` runs the bash E2E suites (no real `claude`/tmux fleet needed;
-each test uses an isolated throwaway state home and tmux session name). They cover
-the wake loop (`watch-fleet` blocks, fires on an actionable event, singleton
-guard), terminal-event de-duplication (an event surfaces once, re-surfaces only on
-a state change), and repo-vs-global spawn scope. Requires `bash`, `git`, `tmux`,
-and `uv`.
+`bash tests/run.sh` runs the bash E2E suites (no real `claude`/tmux fleet needed).
+Requires `bash`, `git`, `tmux`, and `uv`.
+
+## Under the hood
+
+The crew coordination layer, the wake loop, machine-local state in `~/.wingman/`,
+and the harness-agnostic design are documented in
+[`docs/architecture.md`](docs/architecture.md).
