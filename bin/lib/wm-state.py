@@ -28,7 +28,9 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
+import time
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "updated")
 # Live = the member is still in flight and stays on the board's Active list.
@@ -36,15 +38,20 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "update
 # wingman once (like `blocked`) but the member keeps running, shepherding that
 # deliverable to its final disposition (a build member watching its PR to
 # merge/close; a spec member awaiting the pilot's review of its plan).
-LIVE_STATES = ("working", "blocked", "review")
+# `stalled` is externally observed and supervisor-flagged (never self-reported):
+# the member shows no sign of life on any channel while claiming `working`; it is
+# an unresolved problem, not a closed engagement - the remedy is takeover or
+# stand-down.
+LIVE_STATES = ("working", "blocked", "review", "stalled")
 # Terminal = the engagement is complete and the member is safe to reap. A ready
 # deliverable is `review`, never `done`; `done` is reached only at the natural end
 # (PR merged/closed) or the pilot's explicit disposition.
 TERMINAL_STATES = ("done", "died", "stood-down")
 # States that wake wingman (surfaced by needs-attention, deduped per (id,updated)
-# via the ack store). `review` and `blocked` are both live AND surfaced: the pilot
-# is pinged once, but the member stays in flight.
-ATTENTION_STATES = ("blocked", "review", "done", "died")
+# via the ack store). `review`, `blocked`, and `stalled` are both live AND
+# surfaced: the pilot is pinged once, but the member stays in flight until
+# someone disposes of it.
+ATTENTION_STATES = ("blocked", "review", "done", "died", "stalled")
 
 
 def home():
@@ -430,8 +437,141 @@ def cmd_prune(args):
     print(len(remove))
 
 
+def _parse_ps_seconds(field):
+    """Seconds from a ps TIME/ETIME field. Handles both formats a single
+    `ps -o time=,etime=` can emit: BSD/macOS 'MM:SS.cc' and procps/Linux
+    '[[DD-]HH:]MM:SS'. Raises ValueError on anything else."""
+    days = 0
+    if "-" in field:
+        d, field = field.split("-", 1)
+        days = int(d)
+    secs = 0.0
+    for part in field.split(":"):
+        secs = secs * 60 + float(part)
+    return days * 86400 + secs
+
+
+def _ps_tree(root_pid):
+    """{pid: (cputime_secs, elapsed_secs)} for root_pid and its descendants, from
+    one `ps -ax -o pid=,ppid=,time=,etime=` pass. Empty dict if the root is gone
+    or ps cannot be read."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-ax", "-o", "pid=,ppid=,time=,etime="],
+            stderr=subprocess.DEVNULL, universal_newlines=True)
+    except Exception:
+        return {}
+    rows = {}
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+            cpu = _parse_ps_seconds(parts[2])
+            elapsed = _parse_ps_seconds(parts[3])
+        except ValueError:
+            continue
+        rows[pid] = (cpu, elapsed)
+        children.setdefault(ppid, []).append(pid)
+    if root_pid not in rows:
+        return {}
+    tree = {}
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in tree:
+            continue
+        tree[pid] = rows[pid]
+        stack.extend(children.get(pid, []))
+    return tree
+
+
+def _probe_execution(root_pid, root_grace, gap, eps):
+    """True if the pane's process tree shows positive evidence of execution or an
+    armed wake source: (a) any descendant whose start lags the root's by more than
+    root_grace seconds (an in-flight tool shell, or an armed background watcher
+    that will exit and wake the session; launch-time children like MCP servers
+    start with the root and do not count), else (b) summed cputime delta over pids
+    present in two samples `gap` seconds apart >= eps. If the tree cannot be read
+    at all, returns False (fall back to the staleness verdict; window liveness is
+    reconcile's job)."""
+    first = _ps_tree(root_pid)
+    if not first:
+        return False
+    root_elapsed = first[root_pid][1]
+    for pid, (_cpu, elapsed) in first.items():
+        # etime arithmetic (root_elapsed - descendant_elapsed), never wall-clock
+        # start-time parsing, so the comparison is locale-safe.
+        if pid != root_pid and (root_elapsed - elapsed) > root_grace:
+            return True
+    time.sleep(gap)
+    second = _ps_tree(root_pid)
+    if not second:
+        return False
+    delta = 0.0
+    for pid in set(first) & set(second):
+        delta += max(0.0, second[pid][0] - first[pid][0])
+    return delta >= eps
+
+
+def cmd_stall_check(args):
+    """Flag a WORKING crew member as 'stalled' iff it shows no external sign of life:
+    BOTH staleness gates (pane_idle from the watcher, status_idle computed here) at
+    or past --threshold, AND the execution probe over --pane-pid finds no evidence.
+
+    Prints 'stalled' if it flipped the member, nothing otherwise. Idempotent and safe
+    to call every poll: gates fail fast, the probe runs only for nominated candidates,
+    and once flipped, status != 'working' so subsequent calls skip."""
+    ensure_home()
+    live = read_json(status_path(args.id), None)
+    if not isinstance(live, dict) or live.get("status") != "working":
+        return
+    updated = _parse_updated(live.get("updated"))
+    if updated is None:
+        return
+    status_idle = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds()
+    if args.pane_idle < args.threshold or status_idle < args.threshold:
+        return
+    if _probe_execution(args.pane_pid, args.root_grace, args.probe_gap, args.cpu_eps):
+        return
+    # The probe slept for the sampling gap; a member that self-reported during it
+    # (a flip to review with an artifact, a real blocker) must win over the
+    # pre-gap snapshot. Re-read and bail unless nothing changed.
+    current = read_json(status_path(args.id), None)
+    if (not isinstance(current, dict) or current.get("status") != "working"
+            or current.get("updated") != live.get("updated")):
+        return
+    live = current
+
+    prior = (live.get("summary") or "").split("\n")[0][:80]
+    reason = ("no pane output, status update, running child process, or CPU activity "
+              "for >%ds while status was 'working'; the agent likely errored or went "
+              "idle. Inspect with `bin/crew-takeover %s` or stand down with "
+              "`bin/crew-standdown %s`." % (int(args.threshold), args.id, args.id))
+    if prior:
+        reason += " (last summary: %s)" % prior
+
+    live["status"] = "stalled"
+    live["summary"] = reason
+    live["updated"] = now()
+    write_json(status_path(args.id), live)
+
+    # Mirror into the roster, as crew-set does, so a later loss of the status
+    # file still tells the truth.
+    roster = load_roster()
+    for r in roster:
+        if r.get("id") == args.id:
+            r["status"] = "stalled"
+            r["updated"] = live["updated"]
+    write_json(crew_json_path(), roster)
+    render_board()
+    print("stalled")
+
+
 def cmd_needs_attention(args):
-    """Print crew that need their owner: blocked, review, done, or died, excluding
+    """Print crew that need their owner: blocked, review, done, died, or stalled, excluding
     any whose current (id, updated) event has already been acked. Used by the watcher
     and the Stop hook to decide whether to wake the owner; each deliverer acks what it
     surfaces (via `ack`), so an event fires once instead of on every poll.
@@ -656,6 +796,19 @@ def build_parser():
     # Restrict pruning to a given owner's direct reports ("" = top level).
     a.add_argument("--owner", default=None)
     a.set_defaults(fn=cmd_prune)
+
+    # The watcher's silent-stall backstop: supplies the two signals Python cannot
+    # observe cheaply (the pane-idle age and the pane root pid); all policy,
+    # timestamp math, and process-tree probing stay here.
+    a = sub.add_parser("stall-check")
+    a.add_argument("--id", required=True)
+    a.add_argument("--pane-idle", type=int, required=True, dest="pane_idle")
+    a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
+    a.add_argument("--threshold", type=int, default=180)
+    a.add_argument("--root-grace", type=int, default=30, dest="root_grace")
+    a.add_argument("--probe-gap", type=int, default=10, dest="probe_gap")
+    a.add_argument("--cpu-eps", type=float, default=0.5, dest="cpu_eps")
+    a.set_defaults(fn=cmd_stall_check)
 
     a = sub.add_parser("needs-attention")
     # Emit only this owner's direct reports ("" = top level). Omit for every layer.

@@ -41,6 +41,13 @@ Only pass the flags that changed.
   This is your signal to wingman that you are ready to be stood down, and **wingman reaps you as soon as it sees it**.
   A deliverable that is merely ready is `review`, never `done`; reach `done` only at the true end (the PR merged/closed, the plan approved and handed off) or an explicit stand-down.
 
+## A state you never set yourself: `stalled`
+
+The supervisor watching you may externally flip your line to `stalled` when you show no sign of life on any channel - no pane output, no status update, no running child process, no CPU activity - for an extended period (default 180s) while your status claims `working`.
+That combination means your agent has likely errored or gone idle without reporting; the flip preserves your last summary inside the stall reason, and the remedy it surfaces to your owner is a takeover or stand-down.
+Parking on an armed harness-tracked watcher is recognized (the armed watcher is a live descendant process in your pane) and is never flagged, so the wake-loop pattern below needs no defensive status refreshes.
+Refresh your `summary` on meaningful progress regardless (see "When to update") - on a harness that neither repaints its pane nor runs child processes during quiet work, that refresh is the remaining escape hatch.
+
 ## Mapping your work to these states
 
 You do not need per-playbook state instructions - apply this one rule to whatever your playbook has you do:
@@ -86,8 +93,17 @@ Substantial output (an analysis, a design, a plan) goes in a **file** (under the
 Do not paste large content back; wingman never ingests it.
 
 Write these artifacts formally, for a reader outside wingman.
-Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*.
-"Pilot" is wingman's own private term for the human it flies for; it must not appear in the plans, reports, PRs, commit messages, or code comments you produce.
+Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*: "pilot" is wingman's own private term for the human it flies for.
+The full rule, including where the internal terms remain legitimate, is the communication register below.
+
+## Communication register
+
+The session-role vocabulary this repo defines - *pilot*, *crew*, *wingman*, *stand down*, and the like - is orchestration-internal.
+
+- **All outward artifacts** - code, comments, commit messages, PR titles and descriptions, plans, analysis docs - are written in neutral, professional engineering language, as in any engineering organization ("the user", "the operator", "approved change request").
+- **Inter-agent messages** (`bin/crew-say`) use the same neutral register.
+- **Status-file fields keep their contract vocabulary** as-is: `working`/`blocked`/`review`/`done` are protocol, not prose.
+- Exception: work on wingman itself may reference these terms where the existing code and operating docs already do - the norm is about not injecting the vocabulary as a style, not about renaming wingman's real concepts.
 
 ## You may be watched or taken over
 

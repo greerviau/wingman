@@ -20,7 +20,23 @@ test_new_home() {
   WINGMAN_HOME="$(mktemp -d)/wm"
   export WINGMAN_HOME
   export WM_TMUX_SESSION="wm-test-$$-$RANDOM"
+  # The tests model wingman's own top-level scope (owner ""). When the suite runs
+  # inside a crew session, the inherited crew id would silently re-scope
+  # watch-fleet and the Stop hook to that crew's (empty) reports.
+  unset WINGMAN_CREW_ID
   wm_state init >/dev/null
+}
+
+# Rewrite a member's live-status `updated` stamp to N minutes ago (default 10) so
+# staleness-gated paths (wm-state stall-check) trip without waiting.
+wm_age_status() {
+  uv run --no-project --quiet python - "$WINGMAN_HOME/crew/$1.json" "${2:-10}" <<'EOF'
+import json, sys, datetime
+d = json.load(open(sys.argv[1]))
+d["updated"] = (datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(minutes=int(sys.argv[2]))).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+json.dump(d, open(sys.argv[1], "w"))
+EOF
 }
 
 wm_state() { uv run --no-project --quiet "$TEST_REPO/bin/lib/wm-state.py" "$@"; }

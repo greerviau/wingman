@@ -53,6 +53,18 @@ assert_false "repo-scoped launch does not add the unrelated repoB" "grep -q 'rep
 if "$SPAWN" --type analyst --repo "$WS" --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "repo scope on a non-git path fails" "[ $rc -ne 0 ]"
 
+# --- model default: --model > $WM_MODEL > agent CLI default -------------------
+unset WM_MODEL
+nid="$("$SPAWN" --type analyst --repo repoA --objective "no model set" 2>/dev/null | tail -1)"
+assert_false "no --model and no WM_MODEL leaves the agent default" \
+  "grep -q -- '--model' '$WINGMAN_HOME/crew/$nid.launch.sh'"
+mid="$(WM_MODEL=opus "$SPAWN" --type analyst --repo repoA --objective "env model" 2>/dev/null | tail -1)"
+assert_contains "WM_MODEL is the default when --model is not passed" \
+  "$(grep -- '--model' "$WINGMAN_HOME/crew/$mid.launch.sh")" "--model 'opus'"
+xid="$(WM_MODEL=opus "$SPAWN" --type analyst --repo repoA --objective "explicit model" --model sonnet 2>/dev/null | tail -1)"
+assert_contains "an explicit --model wins over WM_MODEL" \
+  "$(grep -- '--model' "$WINGMAN_HOME/crew/$xid.launch.sh")" "--model 'sonnet'"
+
 # --- argument guards ---------------------------------------------------------
 if "$SPAWN" --type analyst --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "invalid --scope is rejected" "[ $rc -ne 0 ]"

@@ -3,12 +3,22 @@
 # task (never a detached daemon). One "cycle" is a single run of this script:
 # wingman starts it in the background, it BLOCKS - watching crew status files and
 # tmux window liveness, absorbing benign "still working" updates - and only EXITS
-# (with one reason line on stdout) the moment a crew member flips to
-# blocked/done/died or freezes on a prompt. Because it is a task the agent harness
-# tracks, that exit is the wake: the harness re-invokes wingman, which handles the
-# event and arms exactly one fresh cycle. A file on disk cannot rouse an idle
-# session, so the exit-of-a-tracked-task is the only reliable wake channel; this
-# script therefore never tries to inject keystrokes into wingman's terminal.
+# the moment a crew member flips to an attention state (blocked/review/done/died/
+# stalled) or freezes on a prompt. Because it is a task the agent harness tracks,
+# that exit is the wake: the harness re-invokes wingman, which handles the event
+# and arms exactly one fresh cycle. A file on disk cannot rouse an idle session,
+# so the exit-of-a-tracked-task is the only reliable wake channel; this script
+# therefore never tries to inject keystrokes into wingman's terminal.
+#
+# The pane backstop covers the two failure shapes the status files cannot see:
+# a member frozen on an interactive permission/trust prompt (flipped to blocked),
+# and a member silently stalled - no pane output, no status update, and an
+# execution probe finding nothing running in its pane's process tree (flipped to
+# stalled via wm-state stall-check).
+#
+# On fire, stdout carries the reason lines plus a directive to report the full
+# roster; the wake file carries the new events plus the owner-scoped roster
+# snapshot to report from.
 #
 # Benign wakes are absorbed for free: a crew member merely refreshing its
 # "working" summary never appears in `needs-attention`, so the loop keeps blocking
@@ -23,7 +33,8 @@
 # Singleton: a live cycle (pid alive + fresh beacon) makes a second arm print
 # `watcher: healthy` and exit without starting a rival loop, so wingman can re-arm
 # defensively without spawning duplicates. Read the printed status line - `armed`,
-# `healthy`, or a `blocked:/done:/died:` reason - as the source of truth.
+# `healthy`, or a `blocked:/review:/done:/died:/stalled:` reason - as the source
+# of truth.
 #
 # Owner scope: each cycle watches exactly one owner's direct reports. Wingman arms
 # its own cycle (--owner "" - it has no $WINGMAN_CREW_ID) and never sees a lead's
@@ -58,7 +69,7 @@ while [ $# -gt 0 ]; do
     --owner) OWNER="${2:-}"; shift 2 ;;
     --status|--stop|--start|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -81,6 +92,14 @@ INTERVAL="${WM_WATCH_INTERVAL:-5}"
 # this grace window. Touched every loop iteration, so a genuinely blocking watcher
 # always looks live and a crashed/killed one goes stale within the grace.
 GRACE="${WM_WATCH_GRACE:-30}"
+# Silent-stall detection. STALL_IDLE seconds of BOTH pane-output silence AND
+# status-file staleness nominates a 'working' member; it is flagged stalled only if
+# the execution probe (see wm-state stall-check) then finds no late-started
+# descendant process and no CPU activity in its pane's process tree.
+STALL_IDLE="${WM_STALL_IDLE:-180}"
+STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
+STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
+STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
 
 beat_age() {
   [ -f "$BEATFILE" ] || { echo 999999; return; }
@@ -129,14 +148,85 @@ trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
 # Signature of an interactive prompt that has frozen a crew member. Covers the
-# three gates a crew can hit: a per-tool permission prompt ("Do you want to
-# proceed?"), the one-time workspace-trust dialog, and the one-time Bypass
-# Permissions mode acceptance. Overridable (e.g. for another harness).
-WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# gates a crew can hit: every per-tool permission phrasing ("Do you want to
+# proceed?", "Do you want to make this edit…?", "Do you want to create…?" - the
+# case-sensitive prefix catches them all), the one-time workspace-trust dialog
+# (matched by its "Yes, I trust this folder" option row - the question text
+# varies across CLI versions and sits outside the adjacency window; verified
+# against a live capture, Claude Code v2.1.206), and the one-time Bypass
+# Permissions mode acceptance (likewise matched by its acceptance rows).
+# Precision against pane content that merely *mentions* a prompt (a diff, a
+# plan, a test fixture) is carried by the UI-shape adjacency and stability
+# conditions below, not by the phrase list. Overridable (e.g. for another
+# harness).
+WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Yes, I trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# A real dialog pairs the question with a numbered options list rendered with it.
+WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
+# A real dialog renders at the bottom of the screen; only this many trailing
+# lines of the capture are searched, so transcript content mid-screen never
+# matches.
+WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
+# ...and renders its options directly under the question: an options line must
+# appear within this many lines after the phrase line. A quoted phrase in prose
+# with an unrelated numbered list elsewhere in the tail stops matching.
+WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
+# ...and renders the question as its own line: only non-alphanumeric characters
+# (whitespace, border glyphs) and optionally an option-row prefix ("❯ 1. ", so
+# the Bypass acceptance rows still match) may precede the phrase. Transcript
+# quotes and diff hunks carry prose before it and stop matching; a verbatim
+# full-dialog quote at column zero is the accepted residual.
+WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
 
-# Emit the wake payload (human-readable, for wingman to read on wake) and the
-# machine reason lines (one per member, "<status>: <id> <note>") to stdout, then
-# exit so the tracked task completes and the harness re-invokes wingman.
+# True if the given text contains the question phrase - rendered as its own
+# line per WM_PERM_LEAD_RE - with a numbered-options line within the next
+# WM_PERM_ADJ lines: the one-block shape a real dialog renders, which
+# transcript prose about prompts almost never reproduces.
+prompt_shape_in() {
+  _ps_text="$1"
+  _ps_hits="$(printf '%s\n' "$_ps_text" \
+    | grep -nE "${WM_PERM_LEAD_RE}(${WM_PERM_PROMPT_RE})" | cut -d: -f1)"
+  [ -n "$_ps_hits" ] || return 1
+  for _ps_n in $_ps_hits; do
+    if printf '%s\n' "$_ps_text" | sed -n "$((_ps_n+1)),$((_ps_n+WM_PERM_ADJ))p" \
+        | grep -qE "$WM_PERM_OPTION_RE"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# True iff a member's pane is frozen on an interactive prompt. Cumulative
+# conditions, each of which alone stops the transcript-content false positive
+# (a session that reads, writes, tests, or investigates this detector shows the
+# signature strings in its own pane while healthily working):
+#   1. the prompt UI shape - question phrase with an options line adjacent -
+#      appears within the last WM_PERM_TAIL lines, where a dialog renders;
+#   2. the full pane text is byte-identical to the previous poll's capture - a
+#      frozen dialog is static (costs one extra INTERVAL of latency on a real
+#      freeze). Note a *parked* healthy pane is also static (the §3.2 shape),
+#      which is why the adjacency in condition 1 must carry precision there.
+# Also sets PFC_SHAPE=1 when condition 1 held regardless of stability, so the
+# caller can hold the stall check off a prompt-shaped pane that is one INTERVAL
+# away from a definitive diagnosis. The per-member capture hash lives in
+# $WM_HOME/pane-<id>.hash (the pidfile pattern); a stale file is harmless.
+prompt_freeze_check() {
+  PFC_SHAPE=0
+  _pfc_id="$1"; _pfc_win="$2"
+  _pfc_text="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_pfc_win")"
+  _pfc_hashfile="$WM_HOME/pane-$(printf '%s' "$_pfc_id" | tr -c 'A-Za-z0-9._-' '_').hash"
+  _pfc_hash="$(printf '%s' "$_pfc_text" | cksum)"
+  _pfc_prev="$(cat "$_pfc_hashfile" 2>/dev/null)"
+  printf '%s\n' "$_pfc_hash" > "$_pfc_hashfile"
+  prompt_shape_in "$(printf '%s\n' "$_pfc_text" | tail -n "$WM_PERM_TAIL")" || return 1
+  PFC_SHAPE=1
+  [ -n "$_pfc_prev" ] && [ "$_pfc_hash" = "$_pfc_prev" ]
+}
+
+# Fire the wake: the two channels carry distinct roles. Stdout is the terse
+# trigger - the machine reason lines (one per member, "<status>: <id> <note>")
+# plus an explicit directive to report the full roster. The wake file is the
+# payload to report from - the new events plus the full roster snapshot for this
+# cycle's owner scope, written at fire time so it is current.
 #
 # needs-attention emits tab-separated "id status updated note"; the `updated`
 # column is the per-event version stamp we ack below.
@@ -145,13 +235,24 @@ fire() {
   {
     echo "# Crew need your attention"
     echo
+    echo "## New events"
+    echo
     printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
       [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
     done
+    echo
+    echo "## Full roster (this owner's scope)"
+    echo
+    wm_state crew-list --owner "$OWNER" 2>/dev/null
   } > "$WAKEFILE"
   printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && printf '%s: %s %s\n' "$st" "$id" "$note"
   done
+  printf -- '--\n'
+  printf 'The lines above are state-change deltas, not the full picture.\n'
+  printf 'Read %s for the full roster (or run bin/crew-list), then report a compact\n' "$WAKEFILE"
+  printf 'roster status to the pilot: who is on what, what is blocked, what is stalled,\n'
+  printf 'what is ready for review. Then arm one fresh watch-fleet cycle before you stop.\n'
   # Firing IS the delivery, so ack each surfaced (id, updated). That suppresses
   # this exact event on subsequent arms while preserving gap-safety: a different
   # crew - or this crew with a new status (new updated) - is not acked and still
@@ -171,11 +272,13 @@ while :; do
   if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
     wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null 2>&1
 
-    # Backstop: a crew parked on an interactive permission/trust prompt is frozen,
-    # but that terminal-UI state never reaches its status file (it stays "working").
-    # Detect it from the pane and flip the crew to blocked so it flows through the
-    # normal needs-attention/fire path below. Independent of the crew's permission
-    # mode, so it still catches stalls when bypass is disabled.
+    # Pane backstop over every working member: two failure shapes never reach the
+    # status files (they stay "working"). A member frozen on an interactive
+    # permission/trust prompt is flipped to blocked (independent of the crew's
+    # permission mode, so it still catches freezes when bypass is disabled); a
+    # member gone silently idle - agent errored, nothing executing - is flipped to
+    # stalled by wm-state stall-check. Both then flow through the normal
+    # needs-attention/fire path below.
     for _id in $(wm_state crew-list --status working --owner "$OWNER" --json 2>/dev/null | wm_py -c '
 import sys, json
 try:
@@ -187,11 +290,28 @@ for r in data:
 ' 2>/dev/null); do
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
-      if wm_tmux_pane_text "$WM_TMUX_SESSION:$_win" | grep -qiE "$WM_PERM_PROMPT_RE"; then
+      if prompt_freeze_check "$_id" "$_win"; then
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
           >/dev/null 2>&1
+        continue   # the permission freeze is the more specific diagnosis
       fi
+      # A prompt-shaped pane whose stability is not yet confirmed (first sighting,
+      # no prior hash) is one INTERVAL from a definitive diagnosis; hold the stall
+      # check off it, or a dialog frozen longer than STALL_IDLE before our first
+      # look would be flipped stalled on poll one and - having left the working
+      # scan - never get its confirming second sighting as blocked.
+      [ "$PFC_SHAPE" = 1 ] && continue
+
+      # Silent-stall backstop: no pane repaint AND no status update for STALL_IDLE
+      # seconds nominates the member; stall-check probes its process tree and flags
+      # it stalled only if nothing there is executing or armed to wake it.
+      _idle="$(wm_tmux_window_activity_age "$_win")"
+      _pid="$(wm_tmux_pane_pid "$_win")"
+      [ -n "$_pid" ] && wm_state stall-check --id "$_id" \
+        --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
+        --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
+        --cpu-eps "$STALL_CPU_EPS" >/dev/null 2>&1
     done
   fi
 
