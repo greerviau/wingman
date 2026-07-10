@@ -12,6 +12,9 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   projects.json     the discovered-projects cache: {"name": "path"}
   acked.json        the last (id -> updated) event surfaced to wingman, so a
                     terminal state does not re-surface on every needs-attention poll
+  crew-archive.jsonl  append-only history of records removed by `prune`, one JSON
+                    object per line, so pruning keeps crew.json lean without losing
+                    the record of who ran
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
@@ -70,6 +73,10 @@ def projects_path():
 
 def acked_path():
     return os.path.join(home(), "acked.json")
+
+
+def archive_path():
+    return os.path.join(home(), "crew-archive.jsonl")
 
 
 def now():
@@ -207,9 +214,15 @@ def cmd_crew_get(args):
 def cmd_crew_list(args):
     rows = [merged(r) for r in load_roster()]
     if args.status:
+        # An explicit status filter is honored verbatim, so `--status stood-down`
+        # is the deliberate way to inspect closed history.
         rows = [r for r in rows if r.get("status") == args.status]
-    if args.active:
+    elif args.active:
         rows = [r for r in rows if r.get("status") in LIVE_STATES]
+    elif not args.all:
+        # Default view: current crew only. `stood-down` is fully-closed history and
+        # is noise on the live roster; pass --all (or --status stood-down) for it.
+        rows = [r for r in rows if r.get("status") != "stood-down"]
     if args.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
     else:
@@ -257,6 +270,91 @@ def cmd_standdown(args):
     write_json(status_path(args.id), live)
     render_board()
     print(args.id)
+
+
+def _parse_updated(stamp):
+    """Parse an `updated` timestamp (ISO-8601, trailing Z) into an aware datetime,
+    or None if it is missing/unparseable. Tolerates stamps with or without
+    fractional seconds."""
+    if not stamp:
+        return None
+    s = stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def cmd_prune(args):
+    """Remove terminal crew records from the roster, archiving them first.
+
+    Default target is `stood-down` (fully-closed); `--all-terminal` also sweeps
+    `died`. `--older-than-days N` restricts removal to records last updated more
+    than N days ago. `--dry-run` reports what would go without touching anything.
+
+    For each removed record: append the merged view to crew-archive.jsonl, delete
+    its crew/<id>.json status file, and drop its acked.json entry. `done` is never
+    a prune target - wingman reaps it to `stood-down` the moment it appears, so a
+    live `done` on the roster is a fresh event, not history."""
+    ensure_home()
+    targets = {"stood-down", "died"} if args.all_terminal else {"stood-down"}
+    cutoff = None
+    if args.older_than_days is not None:
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.older_than_days)
+
+    roster = load_roster()
+    remove, keep = [], []
+    for r in roster:
+        m = merged(r)
+        if m.get("status") not in targets:
+            keep.append(r)
+            continue
+        if cutoff is not None:
+            ts = _parse_updated(m.get("updated"))
+            if ts is None or ts >= cutoff:
+                keep.append(r)  # too recent (or undatable) to prune
+                continue
+        remove.append(m)
+
+    if args.dry_run:
+        if not remove:
+            print("prune (dry-run): nothing to remove")
+        else:
+            print("prune (dry-run): would remove %d record(s):" % len(remove))
+            for m in remove:
+                print("  %s\t%s\t%s" % (m.get("id", "?"), m.get("status", "?"), m.get("updated", "")))
+        return
+
+    if not remove:
+        print("0")
+        return
+
+    # Archive first, so a crash mid-prune never loses a record.
+    with open(archive_path(), "a") as fh:
+        for m in remove:
+            fh.write(json.dumps(m, sort_keys=True) + "\n")
+
+    removed_ids = set()
+    for m in remove:
+        cid = m.get("id")
+        removed_ids.add(cid)
+        try:
+            os.remove(status_path(cid))
+        except FileNotFoundError:
+            pass
+
+    write_json(crew_json_path(), keep)
+
+    acked = read_json(acked_path(), {})
+    if isinstance(acked, dict):
+        for cid in removed_ids:
+            acked.pop(cid, None)
+        write_json(acked_path(), acked)
+
+    render_board()
+    print(len(remove))
 
 
 def cmd_needs_attention(_args):
@@ -427,6 +525,8 @@ def build_parser():
     a.add_argument("--json", action="store_true")
     a.add_argument("--status")
     a.add_argument("--active", action="store_true")
+    # Include fully-closed `stood-down` records (hidden by default).
+    a.add_argument("--all", action="store_true")
     a.set_defaults(fn=cmd_crew_list)
 
     sub.add_parser("render-board").set_defaults(fn=cmd_render_board)
@@ -438,6 +538,12 @@ def build_parser():
     a = sub.add_parser("standdown")
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_standdown)
+
+    a = sub.add_parser("prune")
+    a.add_argument("--all-terminal", action="store_true", dest="all_terminal")
+    a.add_argument("--older-than-days", type=int, dest="older_than_days")
+    a.add_argument("--dry-run", action="store_true", dest="dry_run")
+    a.set_defaults(fn=cmd_prune)
 
     sub.add_parser("needs-attention").set_defaults(fn=cmd_needs_attention)
 

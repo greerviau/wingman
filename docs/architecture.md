@@ -34,18 +34,21 @@ The watcher also detects a crew frozen on a permission or trust prompt - a termi
 ## The deliverable lifecycle and `review`
 
 A crew member is not spun down the moment its deliverable appears; one session sees a piece of work through from creation to final disposition.
-The status state machine (`bin/lib/wm-state.py`) encodes this:
+The **state model is defined once** in the shared status contract (`playbook/_status-contract.md`), which is appended to every crew brief; playbooks describe only the work, not how to move between states.
+The status state machine (`bin/lib/wm-state.py`) encodes the same states:
 
 - `LIVE_STATES = (working, blocked, review)` - a member in any of these is still in flight and stays on the board's Active list.
-- `review` is the "a deliverable is ready and in review" state: a plan written, a PR opened.
-  It is both **live** and **surfaced** - `needs-attention` (`ATTENTION_STATES`) announces it to the pilot once, exactly as `blocked` is announced, but the member keeps running.
-  A member enters `review` once, at delivery, and does its follow-up work under `working`, so summary refreshes never re-announce (the ack store dedups per `(id, updated)`; `working` is never surfaced).
-- `done` means the engagement is complete and the member is safe to reap: a plan approved/handed off, or a PR merged/closed.
+- `working` is active work in flight - producing, revising, or seeing through work (e.g. CI) that must conclude before the deliverable is ready.
+  It is never surfaced, so summary refreshes here don't wake the pilot.
+- `review` is the parked-and-waiting state: the deliverable is produced and surfaced, and the member is now watching an external condition it does not control (a PR merge, a plan approval).
+  It is both **live** and **surfaced** - `needs-attention` (`ATTENTION_STATES`) announces it to the pilot once per entry, exactly as `blocked` is announced, but the member keeps running.
+  A member moves back to `working` to act on an event (a review comment, a CI failure) and returns to `review` when it settles; each entry into `review` is a fresh `(id, updated)` and re-announces once, while idle time in `review` writes nothing, so a parked member never spams (the ack store dedups per `(id, updated)`).
+- `done` means the terminal condition is met and the member is ready to be reaped: a plan approved/handed off, or a PR merged/closed.
   A ready deliverable is `review`, never `done`.
 
-The lifecycle is uniform across types - deliver → `review` → revise in the same session on feedback → `done` - and each playbook defines what "seeing it through" means for its type.
+The lifecycle is uniform across types - deliver → `review` → drop to `working` to act on feedback and back → `done` - and each playbook names its own deliverable, dependency-to-watch, and terminal condition; the contract supplies the state mechanics.
 
-Wingman deliberately holds **no** waiting logic itself: it recognizes crew status updates and surfaces the meaningful ones, and it spins a member down in exactly two cases - the member reports `done` (the watcher detects it, wingman reaps it with `crew-standdown`), or the pilot stands it down explicitly.
+Wingman holds **no** waiting logic itself: it recognizes crew status updates and surfaces the meaningful ones, and it spins a member down in exactly two cases - the member reports `done` (the watcher detects it; wingman relays the outcome and reaps it with `crew-standdown` **in the same turn**, so `done` is transient on the roster and finished members never pile up), or the pilot stands it down explicitly.
 Nothing else reaps a member.
 *How long* and *why* a member stays alive after delivering is entirely the playbook's concern; wingman only avoids cutting it short.
 
@@ -53,7 +56,8 @@ Nothing else reaps a member.
 
 A build member's "seeing it through" is watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
 A crew Claude session cannot rouse itself once its turn ends, so after opening a PR the member arms `bin/pr-watch` as a **harness-tracked background task** (never detached).
-It blocks, polling the PR through the forge CLI, and exits with one reason line (`ci-failed` / `changes-requested` / `comment` / `merged` / `closed`) the instant an actionable event occurs; that exit re-invokes the crew member, which acts and arms exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
+It blocks, polling the PR through the forge CLI, and exits with one reason line (`merged` / `closed` / `changes-requested` / `ci-failed` / `comment` / `checks-passed`) the instant an actionable event occurs; that exit re-invokes the crew member, which acts and arms exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
+`checks-passed` fires once when the PR settles with nothing failing and nothing pending (all-green, or a repo with no CI), which is what lets a member stay `working` through CI and be woken to move into `review` only when it is genuinely on the humans; it re-arms once checks go pending/failing and settle again.
 
 A cursor at `$WINGMAN_HOME/pr/<crew-id>.json` records what has already been surfaced, so a persistently-red build or an already-handled comment does not re-fire, and the crew's own replies (filtered by the authenticated forge login) never wake it.
 Firing advances only the fired dimension, so a co-occurring lower-priority event still surfaces on the next cycle.
@@ -123,8 +127,10 @@ Machine-local runtime state, created on first run, never committed:
 - `wake` - the current attention list the watcher writes when it fires.
 - `acked.json` - the last `updated` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
   A new `updated` (a genuine state change) re-surfaces.
-- `pr/<id>.json` - a build member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark), so a red build or a handled comment does not re-fire.
+- `pr/<id>.json` - a build member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
 - `projects.json` - the discovered-projects cache.
+- `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
+  Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.
 
 All *user-editable* customization lives in the repo as gitignored `*.local.md` / `config.local.*`, not here.
 `~/.wingman/` is pure runtime state you never hand-edit.
@@ -143,6 +149,8 @@ They cover:
 
 - the wake loop (`watch-fleet` blocks, fires on an actionable event, singleton guard),
 - terminal-event de-duplication (an event surfaces once, re-surfaces only on a state change),
-- repo-vs-global spawn scope.
+- repo-vs-global spawn scope,
+- roster views and cleanup (`crew-list` hides `stood-down` by default, `--all` reveals it; `crew-prune` archives + removes terminal records),
+- PR-event evaluation including `checks-passed` (fires once on green / no-CI, re-arms after a new failing/pending rollup).
 
 Requires `bash`, `git`, `tmux`, and `uv`.

@@ -28,16 +28,18 @@ Talk to it in plain language, or use the slash commands:
 | "Implement feature X in `<repo>`" | spawns a **spec** crew → plan → (your review) → **build** crew → PR → the build crew watches its PR through to merge/close |
 | "Investigate issue Y in `<repo>`" | spawns a **spec** crew in report mode (reproduces bugs end-to-end first) |
 | `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added; pass `global` instead of a repo for cross-repo work |
-| `/status` | compact roster: who's on what, what's blocked, what's ready |
+| `/status` | compact roster: who's on what (with each member's status), what's blocked, what's ready. Closed history is hidden by default |
 | `/blocked` | each blocked member + the decision it needs |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
+| `/prune` | clean the roster: drop fully-closed records (archived first) |
 
 **One session sees its work through.** A crew member is not spun down the moment its deliverable appears.
-When a build crew opens a PR it reports it "ready for review" and then keeps running: it watches CI and fixes it if it breaks, watches for review feedback and addresses it, replies on the threads, and finishes only when the PR is merged or closed.
+When a build crew opens a PR it parks in a `review` state and keeps running: it watches CI and fixes it if it breaks, watches for review feedback and addresses it (dropping back to `working` while it does), replies on the threads, and reports `done` only when the PR is merged or closed.
+`done` is the member's own "stand me down" signal, so wingman reaps it right then - finished members don't linger.
 Feedback you give wingman is routed back to that same session (not a fresh one), so it keeps the full context.
 It stops early only if you `/standdown` it.
-The same lifecycle applies to spec and other crew types.
+The same lifecycle applies to spec and other crew types; how each state is entered lives in one shared status contract (`playbook/_status-contract.md`), so a playbook only describes the work.
 
 **Take the wheel any time.** "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
 Detach (`Ctrl-b d`) to hand back.

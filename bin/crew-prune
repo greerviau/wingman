@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# crew-prune - clean the roster by removing terminal crew records, archiving each
+# to ~/.wingman/crew-archive.jsonl first so nothing is lost.
+#
+# By default removes only fully-closed (stood-down) records. Live crew, and the
+# `died` records you may still want to recover, are left in place.
+#
+# Usage:
+#   crew-prune                     remove stood-down records
+#   crew-prune --all-terminal      also remove died records
+#   crew-prune --older-than-days N restrict to records last updated > N days ago
+#   crew-prune --dry-run           show what would be removed, change nothing
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+out="$(wm_state prune "$@")" || exit 1
+case " $* " in
+  *" --dry-run "*) printf '%s\n' "$out" ;;
+  *) wm_ok "pruned ${out} record(s) (archived to $WM_HOME/crew-archive.jsonl)" ;;
+esac
