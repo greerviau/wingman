@@ -33,7 +33,8 @@
 # Singleton: a live cycle (pid alive + fresh beacon) makes a second arm print
 # `watcher: healthy` and exit without starting a rival loop, so wingman can re-arm
 # defensively without spawning duplicates. Read the printed status line - `armed`,
-# `healthy`, or a `blocked:/done:/died:` reason - as the source of truth.
+# `healthy`, or a `blocked:/review:/done:/died:/stalled:` reason - as the source
+# of truth.
 #
 # Owner scope: each cycle watches exactly one owner's direct reports. Wingman arms
 # its own cycle (--owner "" - it has no $WINGMAN_CREW_ID) and never sees a lead's
@@ -68,7 +69,7 @@ while [ $# -gt 0 ]; do
     --owner) OWNER="${2:-}"; shift 2 ;;
     --status|--stop|--start|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -147,10 +148,43 @@ trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
 # Signature of an interactive prompt that has frozen a crew member. Covers the
-# three gates a crew can hit: a per-tool permission prompt ("Do you want to
-# proceed?"), the one-time workspace-trust dialog, and the one-time Bypass
-# Permissions mode acceptance. Overridable (e.g. for another harness).
-WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# three gates a crew can hit: a per-tool permission prompt, the one-time
+# workspace-trust dialog, and the one-time Bypass Permissions mode acceptance.
+# Full fixed phrasings, matched case-sensitively: pane content that merely
+# *mentions* a prompt (a diff, a plan, a test fixture) must not trip the
+# detector. Overridable (e.g. for another harness).
+WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to proceed\?|Do you trust the files in this folder\?|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# A real dialog pairs the question with a numbered options list rendered with it.
+WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
+# A real dialog renders at the bottom of the screen; only this many trailing
+# lines of the capture are searched, so transcript content mid-screen never
+# matches.
+WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
+
+# True iff a member's pane is frozen on an interactive prompt. Three cumulative
+# conditions, each of which alone stops the transcript-content false positive
+# (a session that reads, writes, tests, or investigates this detector shows the
+# signature strings in its own pane while healthily working):
+#   1. the question phrase AND a numbered-options line both appear within the
+#      last WM_PERM_TAIL lines - the prompt UI shape, where a dialog renders;
+#   2. the full pane text is byte-identical to the previous poll's capture - a
+#      frozen dialog is static, while a working session's status line ticks
+#      every second (costs one extra INTERVAL of latency on a real freeze);
+#   3. the phrases themselves are full and case-sensitive (WM_PERM_PROMPT_RE).
+# The per-member capture hash lives in $WM_HOME/pane-<id>.hash (the pidfile
+# pattern); a stale file is harmless.
+prompt_freeze_check() {
+  _pfc_id="$1"; _pfc_win="$2"
+  _pfc_text="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_pfc_win")"
+  _pfc_hashfile="$WM_HOME/pane-$(printf '%s' "$_pfc_id" | tr -c 'A-Za-z0-9._-' '_').hash"
+  _pfc_hash="$(printf '%s' "$_pfc_text" | cksum)"
+  _pfc_prev="$(cat "$_pfc_hashfile" 2>/dev/null)"
+  printf '%s\n' "$_pfc_hash" > "$_pfc_hashfile"
+  _pfc_tail="$(printf '%s\n' "$_pfc_text" | tail -n "$WM_PERM_TAIL")"
+  printf '%s\n' "$_pfc_tail" | grep -qE "$WM_PERM_PROMPT_RE" || return 1
+  printf '%s\n' "$_pfc_tail" | grep -qE "$WM_PERM_OPTION_RE" || return 1
+  [ -n "$_pfc_prev" ] && [ "$_pfc_hash" = "$_pfc_prev" ]
+}
 
 # Fire the wake: the two channels carry distinct roles. Stdout is the terse
 # trigger - the machine reason lines (one per member, "<status>: <id> <note>")
@@ -220,7 +254,7 @@ for r in data:
 ' 2>/dev/null); do
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
-      if wm_tmux_pane_text "$WM_TMUX_SESSION:$_win" | grep -qiE "$WM_PERM_PROMPT_RE"; then
+      if prompt_freeze_check "$_id" "$_win"; then
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
           >/dev/null 2>&1

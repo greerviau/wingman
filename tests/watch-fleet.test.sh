@@ -130,14 +130,48 @@ kill "$ppid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- permission freeze stays the more specific diagnosis ----------------------
+# A real frozen dialog: question phrase + numbered options at the bottom of a
+# static pane. Detection needs two identical polls, so the flip lands on the
+# second cycle.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z4 --type developer --objective h --repo /tmp --window wm-z4 --session-id s11 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z4 'echo "Do you want to proceed?"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z4 'printf "Do you want to proceed?\n> 1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
 wm_age_status z4
 out6="$(WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
 assert_contains "permission prompt fires as blocked, not stalled" "$out6" "blocked: z4"
 assert_contains "frozen member reads blocked" "$(wm_state crew-get --id z4)" '"status": "blocked"'
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- no false positive on transcript content that mentions a prompt -----------
+# The incident shape: a static pane whose transcript quotes the full question
+# phrase (a diff/plan/test fixture) but shows no options list - the UI-shape
+# anchor must refuse it even though the pane is stable.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z5 --type developer --objective i --repo /tmp --window wm-z5 --session-id s12 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z5 'echo "the test fixture echoes: Do you want to proceed?"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+qpid=$!
+sleep 6
+assert_true "watcher keeps blocking on quoted prompt text" "kill -0 $qpid"
+assert_contains "quoting member is never flagged" "$(wm_state crew-get --id z5)" '"status": "working"'
+kill "$qpid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- no false positive on a live pane even with full prompt shape -------------
+# Phrase and options both visible, but the pane keeps changing (a working
+# session's status line ticks) - the stability condition must refuse it.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z6 --type developer --objective j --repo /tmp --window wm-z6 --session-id s13 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z6 'printf "Do you want to proceed?\n  1. Yes\n"; while :; do echo tick; sleep 1; done'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+lpid=$!
+sleep 6
+assert_true "watcher keeps blocking on a live prompt-shaped pane" "kill -0 $lpid"
+assert_contains "live member is never flagged" "$(wm_state crew-get --id z6)" '"status": "working"'
+kill "$lpid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 test_summary
