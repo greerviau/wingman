@@ -120,11 +120,13 @@ Use it for cross-repo work or when the repo is genuinely unclear.
 
 Machine-local runtime state, created on first run, never committed:
 
-- `crew.json` - the live roster (id, type, session id, tmux window, repo, status).
+- `crew.json` - the live roster (id, type, session id, tmux window, repo, status, `parent`).
+  `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
 - `crew/<id>.json` - each crew member's distilled status record.
-- `board.md` - the human-readable render of the roster.
-- `watch.pid` / `watch.beat` - the live watcher cycle's pid and liveness beacon.
-- `wake` - the current attention list the watcher writes when it fires.
+- `board.md` - the human-readable render of the roster, its Active section indented as a tree so a reader sees the org.
+- `watch.pid` / `watch.beat` - wingman's (owner `""`) watcher cycle's pid and liveness beacon.
+  A lead's watcher keys its own files by owner (`watch-<owner>.pid` / `watch-<owner>.beat`), so per-owner watchers coexist.
+- `wake` - the attention list wingman's watcher writes when it fires; a lead's watcher writes `wake-<owner>`.
 - `acked.json` - the last `updated` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
   A new `updated` (a genuine state change) re-surfaces.
 - `pr/<id>.json` - a build member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.

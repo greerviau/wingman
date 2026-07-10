@@ -128,6 +128,54 @@ def merged(record):
     return out
 
 
+def parent_of(record):
+    """The owner id of a record ("" for a top-level, wingman-spawned member).
+    Tolerates records written before `parent` existed (treated as top level)."""
+    return record.get("parent") or ""
+
+
+def descendants_inclusive(roster, root_id):
+    """The set of ids for `root_id` and every member transitively owned by it.
+    Following the `parent` chain, so standing down a lead reaps its whole
+    sub-crew. `root_id` is always included even if it has no children."""
+    result = set([root_id])
+    changed = True
+    while changed:
+        changed = False
+        for r in roster:
+            rid = r.get("id")
+            if rid is not None and rid not in result and parent_of(r) in result:
+                result.add(rid)
+                changed = True
+    return result
+
+
+def order_tree(rows):
+    """Return (record, depth) pairs in depth-first order - each parent
+    immediately before its children - so a flat render still reads as the org.
+    Records whose parent is absent from `rows` are treated as roots, so an
+    owner-filtered slice still renders."""
+    by_id = dict((r.get("id"), r) for r in rows)
+    children = {}
+    roots = []
+    for r in rows:
+        p = parent_of(r)
+        if p and p in by_id:
+            children.setdefault(p, []).append(r)
+        else:
+            roots.append(r)
+    ordered = []
+
+    def visit(rec, depth):
+        ordered.append((rec, depth))
+        for child in sorted(children.get(rec.get("id"), []), key=lambda x: x.get("id") or ""):
+            visit(child, depth + 1)
+
+    for root in sorted(roots, key=lambda x: x.get("id") or ""):
+        visit(root, 0)
+    return ordered
+
+
 # ---------------------------------------------------------------- commands
 
 
@@ -146,6 +194,10 @@ def cmd_crew_add(args):
         "objective": args.objective,
         "repo": args.repo,
         "scope": getattr(args, "scope", "repo") or "repo",
+        # Owner: the crew id that spawned this member ("" = top level, spawned by
+        # wingman itself). spawn-crew stamps it from $WINGMAN_CREW_ID, so ownership
+        # falls out of who is spawning - a lead's spawns carry the lead's id.
+        "parent": getattr(args, "parent", "") or "",
         "window": args.window,
         "session_id": args.session_id,
         "status": "working",
@@ -213,6 +265,12 @@ def cmd_crew_get(args):
 
 def cmd_crew_list(args):
     rows = [merged(r) for r in load_roster()]
+    # Owner scope: with --owner, show only that manager's direct reports ("" = top
+    # level). --tree ignores it and renders the whole hierarchy. Without --owner,
+    # no owner filter (a flat view of every layer).
+    owner = getattr(args, "owner", None)
+    if owner is not None and not args.tree:
+        rows = [r for r in rows if parent_of(r) == owner]
     if args.status:
         # An explicit status filter is honored verbatim, so `--status stood-down`
         # is the deliberate way to inspect closed history.
@@ -223,7 +281,9 @@ def cmd_crew_list(args):
         # Default view: current crew only. `stood-down` is fully-closed history and
         # is noise on the live roster; pass --all (or --status stood-down) for it.
         rows = [r for r in rows if r.get("status") != "stood-down"]
-    if args.json:
+    if args.tree:
+        print(render_tree_text(rows))
+    elif args.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
     else:
         print(render_roster_text(rows))
@@ -257,19 +317,28 @@ def cmd_reconcile(args):
 
 
 def cmd_standdown(args):
+    """Mark a member stood-down, cascading to every member it owns so a lead's
+    whole sub-crew is reaped with it (never orphaned). Prints each affected id
+    (one per line) so the caller can close the corresponding tmux windows."""
     ensure_home()
     roster = load_roster()
+    targets = descendants_inclusive(roster, args.id)
+    affected = []
+    stamp = now()
     for r in roster:
-        if r.get("id") == args.id:
+        if r.get("id") in targets:
             r["status"] = "stood-down"
-            r["updated"] = now()
+            r["updated"] = stamp
+            affected.append(r["id"])
+            live = read_json(status_path(r["id"]), {"id": r["id"]})
+            live["status"] = "stood-down"
+            live["updated"] = stamp
+            write_json(status_path(r["id"]), live)
     write_json(crew_json_path(), roster)
-    live = read_json(status_path(args.id), {"id": args.id})
-    live["status"] = "stood-down"
-    live["updated"] = now()
-    write_json(status_path(args.id), live)
     render_board()
-    print(args.id)
+    # Deterministic order (target first, then its reports) for a readable report.
+    for cid in sorted(affected, key=lambda c: (c != args.id, c)):
+        print(cid)
 
 
 def _parse_updated(stamp):
@@ -304,10 +373,14 @@ def cmd_prune(args):
     if args.older_than_days is not None:
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.older_than_days)
 
+    owner = getattr(args, "owner", None)
     roster = load_roster()
     remove, keep = [], []
     for r in roster:
         m = merged(r)
+        if owner is not None and parent_of(r) != owner:
+            keep.append(r)  # outside the requested owner scope
+            continue
         if m.get("status") not in targets:
             keep.append(r)
             continue
@@ -357,11 +430,16 @@ def cmd_prune(args):
     print(len(remove))
 
 
-def cmd_needs_attention(_args):
-    """Print crew that need wingman: blocked, review, done, or died, excluding any
-    whose current (id, updated) event has already been acked. Used by the watcher
-    and the Stop hook to decide whether to wake wingman; each deliverer acks what it
+def cmd_needs_attention(args):
+    """Print crew that need their owner: blocked, review, done, or died, excluding
+    any whose current (id, updated) event has already been acked. Used by the watcher
+    and the Stop hook to decide whether to wake the owner; each deliverer acks what it
     surfaces (via `ack`), so an event fires once instead of on every poll.
+
+    With --owner, emit only that owner's direct reports ("" = top level, the members
+    wingman spawned). This is what scopes each layer to its own crew: wingman's
+    watcher runs --owner "" and never sees a lead's workers, while a lead's watcher
+    runs --owner <lead-id> and sees only its own. Without --owner, every layer.
 
     `review` (a deliverable ready for the pilot) surfaces the same way: a member
     enters it once at delivery, so the pilot is pinged once; the member then does
@@ -371,10 +449,13 @@ def cmd_needs_attention(_args):
 
     Output is tab-separated: id, status, updated, note. The `updated` column lets a
     deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects)."""
+    owner = getattr(args, "owner", None)
     acked = read_json(acked_path(), {})
     if not isinstance(acked, dict):
         acked = {}
     for r in (merged(x) for x in load_roster()):
+        if owner is not None and parent_of(r) != owner:
+            continue
         if r.get("status") in ATTENTION_STATES:
             if acked.get(r["id"]) == r.get("updated"):
                 continue  # already surfaced this exact event
@@ -443,6 +524,26 @@ def render_roster_text(rows):
     return "\n".join(lines)
 
 
+def render_tree_text(rows):
+    """Indented depth-first render of the org, each report nested under its owner."""
+    ordered = order_tree(rows)
+    if not ordered:
+        return "(no crew)"
+    lines = []
+    for r, depth in ordered:
+        indent = "  " * depth
+        line = "%s[%s] %s %s %s" % (
+            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?"),
+            (r.get("summary") or "").split("\n")[0][:50],
+        )
+        lines.append(line.rstrip())
+        if r.get("status") == "blocked" and r.get("blocker"):
+            lines.append("%s    blocker: %s" % (indent, r["blocker"]))
+        if r.get("delivery"):
+            lines.append("%s    delivery: %s" % (indent, r["delivery"]))
+    return "\n".join(lines)
+
+
 def render_board():
     rows = [merged(r) for r in load_roster()]
     active = [r for r in rows if r.get("status") in LIVE_STATES]
@@ -453,9 +554,12 @@ def render_board():
     if active:
         out.append("| type | id | status | window | repo | summary | blocker | delivery |")
         out.append("|---|---|---|---|---|---|---|---|")
-        for r in active:
-            out.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
-                r.get("type", ""), r.get("id", ""), r.get("status", ""),
+        # Depth-first so each report sits under its owner, its id indented by depth,
+        # letting a human read the org rather than a flat list.
+        for r, depth in order_tree(active):
+            marker = ("&nbsp;&nbsp;" * depth) + ("↳ " if depth else "")
+            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s |" % (
+                r.get("type", ""), marker, r.get("id", ""), r.get("status", ""),
                 r.get("window", ""),
                 os.path.basename(r.get("repo", "") or "") + (" (global)" if r.get("scope") == "global" else ""),
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
@@ -506,6 +610,8 @@ def build_parser():
     # workspace root with every discovered repo added, so the member works across
     # repos and picks its target(s) itself.
     a.add_argument("--scope", default="repo")
+    # The spawning crew's id ("" = wingman, the top orchestrator). Stamps ownership.
+    a.add_argument("--parent", default="")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
@@ -527,6 +633,10 @@ def build_parser():
     a.add_argument("--active", action="store_true")
     # Include fully-closed `stood-down` records (hidden by default).
     a.add_argument("--all", action="store_true")
+    # Owner scope: show only this manager's direct reports ("" = top level).
+    a.add_argument("--owner", default=None)
+    # Render the whole hierarchy as an indented tree (ignores --owner).
+    a.add_argument("--tree", action="store_true")
     a.set_defaults(fn=cmd_crew_list)
 
     sub.add_parser("render-board").set_defaults(fn=cmd_render_board)
@@ -543,9 +653,14 @@ def build_parser():
     a.add_argument("--all-terminal", action="store_true", dest="all_terminal")
     a.add_argument("--older-than-days", type=int, dest="older_than_days")
     a.add_argument("--dry-run", action="store_true", dest="dry_run")
+    # Restrict pruning to a given owner's direct reports ("" = top level).
+    a.add_argument("--owner", default=None)
     a.set_defaults(fn=cmd_prune)
 
-    sub.add_parser("needs-attention").set_defaults(fn=cmd_needs_attention)
+    a = sub.add_parser("needs-attention")
+    # Emit only this owner's direct reports ("" = top level). Omit for every layer.
+    a.add_argument("--owner", default=None)
+    a.set_defaults(fn=cmd_needs_attention)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)

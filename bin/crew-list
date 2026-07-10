@@ -2,11 +2,19 @@
 # crew-list - print the roster (merged roster + live status), reconciled against
 # the live tmux windows first so a crew member whose window died shows as 'died'.
 #
+# By default it scopes to the caller's own direct reports, so each layer sees only
+# its crew: wingman ($WINGMAN_CREW_ID unset -> "") sees the top level, a lead sees
+# its workers. Drill down with an explicit --owner, render the whole org with
+# --tree, or flatten every layer with --all-owners.
+#
 # Usage:
-#   crew-list                 the compact human roster
+#   crew-list                 the caller's direct reports (compact human roster)
 #   crew-list --json          machine-readable merged roster
-#   crew-list --active        only working/blocked
+#   crew-list --active        only working/blocked/review
 #   crew-list --status <s>    filter by a status
+#   crew-list --owner <id>    a specific manager's team ("" = top level)
+#   crew-list --tree          the whole hierarchy, indented
+#   crew-list --all-owners    every layer, flat (no owner scoping)
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -14,6 +22,33 @@ set -u
 # Reconcile liveness before rendering (cheap, zero-token).
 if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
   wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null
+fi
+
+# Default the owner scope to the caller (wingman = "", a lead = its own id) so a
+# bare crew-list shows only direct reports. An explicit --owner/--tree overrides;
+# --all-owners is a bin-only escape hatch that drops the scope for a flat view.
+inject=1
+pass=()
+for a in "$@"; do
+  case "$a" in
+    --owner|--tree) inject=0; pass+=("$a") ;;
+    --all-owners)   inject=0 ;;   # bin-only: show every layer, unscoped
+    *)              pass+=("$a") ;;
+  esac
+done
+
+# Build the final arg vector. Guard every array expansion with a length check:
+# bash 3.2 errors on "${arr[@]}" for an empty array under `set -u`.
+if [ "$inject" = 1 ]; then
+  if [ "${#pass[@]}" -gt 0 ]; then
+    set -- --owner "${WINGMAN_CREW_ID:-}" "${pass[@]}"
+  else
+    set -- --owner "${WINGMAN_CREW_ID:-}"
+  fi
+elif [ "${#pass[@]}" -gt 0 ]; then
+  set -- "${pass[@]}"
+else
+  set --
 fi
 
 wm_state crew-list "$@"

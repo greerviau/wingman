@@ -30,8 +30,12 @@ fi
 [ -f "$STATE_PY" ] || exit 0
 [ -d "$WM_HOME" ] || exit 0
 
-attention="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention 2>/dev/null)"
-active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --json 2>/dev/null | $WM_UV python -c 'import sys,json;
+# This hook guards wingman itself, so it scopes to wingman's own layer (owner "" -
+# wingman has no $WINGMAN_CREW_ID): a lead's worker is that lead's concern, watched
+# by the lead's own watcher, and must not block wingman's stop.
+OWNER="${WINGMAN_CREW_ID:-}"
+attention="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention --owner "$OWNER" 2>/dev/null)"
+active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --owner "$OWNER" --json 2>/dev/null | $WM_UV python -c 'import sys,json;
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')"
 

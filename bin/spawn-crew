@@ -178,8 +178,12 @@ wm_tmux_ensure_session
 wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$WINDOW" "bash $(quote "$LAUNCH")"
 
 # --- record in the roster ----------------------------------------------------
+# --parent stamps ownership from the spawning crew's id: empty for wingman (the
+# top orchestrator has no $WINGMAN_CREW_ID), the lead's own id when a lead spawns.
+# Owner-scoping (surfacing, the watcher, crew-list) all fall out of this field.
 wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
-  --repo "$REPO" --scope "$SCOPE" --window "$WINDOW" --session-id "$SID" >/dev/null
+  --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
+  --window "$WINDOW" --session-id "$SID" >/dev/null
 
 # --- deliver the opening objective as the first user message -----------------
 # Give the interactive session a moment to reach its input prompt, then type.
