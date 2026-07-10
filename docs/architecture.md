@@ -54,7 +54,7 @@ Nothing else reaps a member.
 
 ## The crew-level wake loop (PR review)
 
-A build member's "seeing it through" is watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
+A developer member's "seeing it through" is watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
 A crew Claude session cannot rouse itself once its turn ends, so after opening a PR the member arms `bin/pr-watch` as a **harness-tracked background task** (never detached).
 It blocks, polling the PR through the forge CLI, and exits with one reason line (`merged` / `closed` / `changes-requested` / `ci-failed` / `comment` / `checks-passed`) the instant an actionable event occurs; that exit re-invokes the crew member, which acts and arms exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
 `checks-passed` fires once when the PR settles with nothing failing and nothing pending (all-green, or a repo with no CI), which is what lets a member stay `working` through CI and be woken to move into `review` only when it is genuinely on the humans; it re-arms once checks go pending/failing and settle again.
@@ -65,7 +65,7 @@ The event-decision logic lives in `bin/lib/pr-eval.py` (pure, unit-testable with
 
 This keeps the two watch loops cleanly separated at different levels: `watch-fleet` is wingman's channel to its crew (forge-agnostic), `pr-watch` is a crew member's channel to the forge.
 The forge-specific part is isolated in `pr-watch`'s `gh` calls, overridable via `WM_GH` (point it at another binary or wrapper), exactly as the agent launch line is isolated in `spawn-crew` behind `WM_AGENT`; a non-GitHub forge swaps this one script.
-Spec (and other non-PR) members have no external signal to poll, so they arm no watcher - they idle in `review` until the pilot's feedback arrives via `crew-say`.
+Analyst (and other non-PR) members have no external signal to poll, so they arm no watcher - they idle in `review` until the pilot's feedback arrives via `crew-say`.
 
 ## Autonomous mode and interactive gates
 
@@ -84,18 +84,20 @@ After that, crew in that repo run fully unattended.
 
 A crew type is defined entirely by a playbook - plain prose in `playbook/`:
 
-- `playbook/spec.md` - turn a problem into a plan (or a report).
-- `playbook/build.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
-- `playbook/lead.md` - decompose a large effort and spawn/integrate its own crew.
+- `playbook/analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
+- `playbook/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
+- `playbook/developer.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
+- `playbook/reviewer.md` - review a plan or a PR and report findings.
+- `playbook/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up.
 - `playbook/research.md` - example non-dev type: gather evidence, write a cited report.
-  Shows the shape a `researcher`/`scientist`/`analyst` role takes.
+  Shows the shape a `scientist`/`pm` role takes.
 
 There is no hardcoded list of types; a type exists iff its playbook does.
 `bin/spawn-crew --list-types` enumerates them.
 
 `playbook/<type>.local.md` overrides the tracked `<type>.md` when present.
 `*.local.md` is gitignored, following the same pattern as Claude Code's `settings.json` / `settings.local.json`: customizations and private crew types can't be accidentally committed and survive `git pull` of new defaults.
-Example: to make the spec crew follow your own planning skill or checklist, write `playbook/spec.local.md` saying so.
+Example: to make the analyst crew follow your own planning skill or checklist, write `playbook/analyst.local.md` saying so.
 
 Project-discovery hints follow the same story: an optional gitignored `config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list (`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`).
 It is absent by default; the defaults cover the common case.
@@ -129,7 +131,7 @@ Machine-local runtime state, created on first run, never committed:
 - `wake` - the attention list wingman's watcher writes when it fires; a lead's watcher writes `wake-<owner>`.
 - `acked.json` - the last `updated` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
   A new `updated` (a genuine state change) re-surfaces.
-- `pr/<id>.json` - a build member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
+- `pr/<id>.json` - a developer member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
 - `projects.json` - the discovered-projects cache.
 - `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
   Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.

@@ -29,5 +29,5 @@ brief. The one thing worth naming for your kind of work: a report has no externa
 dependency to wait on - once it is written your engagement is over, so **that is
 your terminal condition**. Wingman surfaces the report (relaying its path) as it
 reaps you, so the findings still reach the requester. If the question needs a
-decision or a follow-up build, wingman routes that separately - your job ends at
+decision or a follow-up implementation, wingman routes that separately - your job ends at
 findings.

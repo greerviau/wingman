@@ -12,7 +12,7 @@ export WM_WATCH_INTERVAL=1
 
 # --- fires immediately when an event is already pending on arm ---------------
 test_new_home
-wm_state crew-add --id a1 --type spec --objective x --repo /tmp --window wm-a1 --session-id s1 >/dev/null
+wm_state crew-add --id a1 --type analyst --objective x --repo /tmp --window wm-a1 --session-id s1 >/dev/null
 wm_state crew-set --id a1 --status done --summary "finished x" >/dev/null
 out="$("$WF" 2>/dev/null)"; rc=$?
 assert_eq "arm fires and exits 0 when a member is already done" "$rc" "0"
@@ -21,7 +21,7 @@ assert_contains "wake file names the member" "$(cat "$WINGMAN_HOME/wake")" "a1"
 
 # --- blocks while the fleet is only working, then fires on the flip ----------
 test_new_home
-wm_state crew-add --id b1 --type spec --objective y --repo /tmp --window wm-b1 --session-id s2 >/dev/null
+wm_state crew-add --id b1 --type analyst --objective y --repo /tmp --window wm-b1 --session-id s2 >/dev/null
 wm_state crew-set --id b1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/out.log" 2>&1 &
 wpid=$!
@@ -42,7 +42,7 @@ kill "$wpid" 2>/dev/null
 
 # --- a blocked member is actionable too --------------------------------------
 test_new_home
-wm_state crew-add --id c1 --type build --objective z --repo /tmp --window wm-c1 --session-id s3 >/dev/null
+wm_state crew-add --id c1 --type developer --objective z --repo /tmp --window wm-c1 --session-id s3 >/dev/null
 wm_state crew-set --id c1 --status blocked --blocker "need a decision" >/dev/null
 out3="$("$WF" 2>/dev/null)"
 assert_contains "blocked member fires with its reason" "$out3" "blocked: c1"

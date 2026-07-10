@@ -8,7 +8,7 @@ Launch a crew member for this directive: `$ARGUMENTS`.
 
 Parse the first token as the crew **type**, the second as the target **repo**
 (resolved via `bin/discover-projects` if it's a name), and the rest as the
-**objective**. If a plan/spec file path is given, pass it as `--input`. Then run:
+**objective**. If a plan/report file path is given, pass it as `--input`. Then run:
 
 `bin/spawn-crew --type <type> --repo <repo> --objective "<objective>" [--input <path>]`
 

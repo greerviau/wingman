@@ -29,7 +29,7 @@ cleanup() { rm -f "$CFG"; tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null; }
 trap cleanup EXIT
 
 # --- global scope ------------------------------------------------------------
-id="$("$SPAWN" --type spec --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"
+id="$("$SPAWN" --type analyst --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"
 assert_true "global spawn succeeds" "[ -n '$id' ]"
 
 scope="$(wm_state crew-get --id "$id" | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("scope"))')"
@@ -41,7 +41,7 @@ assert_true "launch adds repoA" "grep -q 'repoA' '$launch'"
 assert_true "launch adds repoB" "grep -q 'repoB' '$launch'"
 
 # --- repo scope: a discovered git repo grounds there, scope=repo -------------
-rid="$("$SPAWN" --type spec --repo repoA --objective "just repoA" 2>/dev/null | tail -1)"
+rid="$("$SPAWN" --type analyst --repo repoA --objective "just repoA" 2>/dev/null | tail -1)"
 assert_true "repo-scoped spawn succeeds" "[ -n '$rid' ]"
 rscope="$(wm_state crew-get --id "$rid" | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("scope"))')"
 assert_eq "repo-scoped record has scope=repo" "$rscope" "repo"
@@ -50,13 +50,13 @@ assert_contains "repo-scoped launch cds into repoA" "$(grep '^cd ' "$rlaunch")" 
 assert_false "repo-scoped launch does not add the unrelated repoB" "grep -q 'repoB' '$rlaunch'"
 
 # --- repo scope still enforces a git checkout --------------------------------
-if "$SPAWN" --type spec --repo "$WS" --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
+if "$SPAWN" --type analyst --repo "$WS" --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "repo scope on a non-git path fails" "[ $rc -ne 0 ]"
 
 # --- argument guards ---------------------------------------------------------
-if "$SPAWN" --type spec --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
+if "$SPAWN" --type analyst --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "invalid --scope is rejected" "[ $rc -ne 0 ]"
-if "$SPAWN" --type spec --scope global --repo repoA --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
+if "$SPAWN" --type analyst --scope global --repo repoA --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "--scope global with --repo is rejected" "[ $rc -ne 0 ]"
 
 test_summary

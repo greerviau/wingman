@@ -3,7 +3,7 @@
 # interactive claude session in its own tmux window, in the target repo.
 #
 # Usage:
-#   spawn-crew --type <spec|build|lead> (--repo <path-or-name> | --scope global) \
+#   spawn-crew --type <analyst|architect|developer|reviewer|lead> (--repo <path-or-name> | --scope global) \
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]

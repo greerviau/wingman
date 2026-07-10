@@ -61,7 +61,7 @@ Once your turn ends you are idle and **cannot rouse yourself** - so if you are i
   It **blocks**, absorbing benign no-change polls for free, and **exits with one reason line** the instant something actionable happens - that exit re-invokes you.
 - **On each wake:** read the reason, act on it (which may move you to `working` and back), then **arm exactly one fresh cycle** before you end your turn.
   The chain persists only if you re-arm after every fire.
-- Your playbook names the concrete watcher for your kind of work (a `build` member watches its PR; a type with no external signal - like a plan awaiting approval - simply idles in `review` with no watcher, since the pilot's feedback arrives as a message).
+- Your playbook names the concrete watcher for your kind of work (a `developer` member watches its PR; a type with no external signal - like a plan awaiting approval - simply idles in `review` with no watcher, since feedback arrives as a message).
 
 ## When to update
 
@@ -70,7 +70,7 @@ Update your status at these moments, without being asked:
 1. **On start** - `--status working --summary "<what I'm about to do>"`.
 2. **On meaningful progress** - refresh `--summary`.
 3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`, then wait.
-4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for build work, `--delivery <PR>`; then park and watch per the wake loop.
+4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for a PR, `--delivery <PR>`; then park and watch per the wake loop.
 5. **When the terminal condition is met** - `--status done --summary "<one-line outcome>"`.
 
 ## Keep detail out of chat, on disk

@@ -15,8 +15,8 @@ export WM_WATCH_INTERVAL=1
 # --- owner-scoped surfacing (escalation bubble-up) ---------------------------
 test_new_home
 wm_state crew-add --id lead1 --type lead  --objective big --repo /tmp --window wm-lead1 --session-id s1 >/dev/null
-wm_state crew-add --id wkr1  --type build --objective a   --repo /tmp --window wm-wkr1  --session-id s2 --parent lead1 >/dev/null
-wm_state crew-add --id top1  --type build --objective d   --repo /tmp --window wm-top1  --session-id s3 >/dev/null
+wm_state crew-add --id wkr1  --type developer --objective a   --repo /tmp --window wm-wkr1  --session-id s2 --parent lead1 >/dev/null
+wm_state crew-add --id top1  --type developer --objective d   --repo /tmp --window wm-top1  --session-id s3 >/dev/null
 
 # A worker blocks: it must surface to its lead's owner scope, not to the top level.
 wm_state crew-set --id wkr1 --status blocked --blocker "which API?" >/dev/null
@@ -42,7 +42,7 @@ case "$lead_list" in *top1*) fail "lead-scope list hides a top-level member" ;; 
 # --- tree render --------------------------------------------------------------
 tree="$(wm_state crew-list --tree)"
 assert_contains "tree shows the lead" "$tree" "lead1"
-assert_contains "tree indents the worker under its lead" "$tree" "  [build] wkr1"
+assert_contains "tree indents the worker under its lead" "$tree" "  [developer] wkr1"
 
 # --- cascade standdown --------------------------------------------------------
 wm_state standdown --id lead1 >/dev/null
@@ -53,7 +53,7 @@ assert_contains "a top-level sibling is untouched by the cascade" "$(wm_state cr
 # --- per-owner watchers coexist ----------------------------------------------
 test_new_home
 wm_state crew-add --id lead1 --type lead  --objective big --repo /tmp --window wm-lead1 --session-id s1 >/dev/null
-wm_state crew-add --id wkr1  --type build --objective a   --repo /tmp --window wm-wkr1  --session-id s2 --parent lead1 >/dev/null
+wm_state crew-add --id wkr1  --type developer --objective a   --repo /tmp --window wm-wkr1  --session-id s2 --parent lead1 >/dev/null
 wm_state crew-set --id lead1 --status working --summary "managing" >/dev/null
 wm_state crew-set --id wkr1  --status working --summary "coding" >/dev/null
 

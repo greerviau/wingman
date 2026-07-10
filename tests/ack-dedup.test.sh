@@ -13,7 +13,7 @@ export WM_WATCH_INTERVAL=1
 
 # --- needs-attention emits once, then is quiet after an explicit ack ----------
 test_new_home
-wm_state crew-add --id d1 --type spec --objective x --repo /tmp --window wm-d1 --session-id s1 >/dev/null
+wm_state crew-add --id d1 --type analyst --objective x --repo /tmp --window wm-d1 --session-id s1 >/dev/null
 wm_state crew-set --id d1 --status done --summary "finished x" >/dev/null
 
 na="$(wm_state needs-attention)"
@@ -35,7 +35,7 @@ assert_false "the new updated differs from the acked one" "[ \"$upd3\" = \"$upd\
 
 # --- the watcher acks what it fires: a re-arm stays quiet ----------------------
 test_new_home
-wm_state crew-add --id e1 --type spec --objective y --repo /tmp --window wm-e1 --session-id s2 >/dev/null
+wm_state crew-add --id e1 --type analyst --objective y --repo /tmp --window wm-e1 --session-id s2 >/dev/null
 wm_state crew-set --id e1 --status done --summary "done y" >/dev/null
 
 out="$("$WF" 2>/dev/null)"; rc=$?
@@ -52,7 +52,7 @@ assert_true "re-arm keeps blocking on the already-acked done event" "kill -0 $wp
 assert_false "re-arm did not re-fire the acked event" "grep -q 'done: e1' \"$WINGMAN_HOME/rearm.log\""
 
 # A different crew finishing in the meantime is unacked and still surfaces.
-wm_state crew-add --id e2 --type build --objective y2 --repo /tmp --window wm-e2 --session-id s3 >/dev/null
+wm_state crew-add --id e2 --type developer --objective y2 --repo /tmp --window wm-e2 --session-id s3 >/dev/null
 wm_state crew-set --id e2 --status done --summary "done y2" >/dev/null
 sleep 3
 assert_false "watcher exits after a NEW member becomes actionable" "kill -0 $wpid"
@@ -62,7 +62,7 @@ kill "$wpid" 2>/dev/null
 
 # --- the Stop hook acks what it blocks on -------------------------------------
 test_new_home
-wm_state crew-add --id f1 --type spec --objective z --repo /tmp --window wm-f1 --session-id s4 >/dev/null
+wm_state crew-add --id f1 --type analyst --objective z --repo /tmp --window wm-f1 --session-id s4 >/dev/null
 wm_state crew-set --id f1 --status done --summary "done z" >/dev/null
 
 # First stop attempt (stop_hook_active false): the hook blocks and acks.
