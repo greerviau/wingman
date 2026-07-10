@@ -96,6 +96,15 @@ Write these artifacts formally, for a reader outside wingman.
 Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*.
 "Pilot" is wingman's own private term for the human it flies for; it must not appear in the plans, reports, PRs, commit messages, or code comments you produce.
 
+## Communication register
+
+The session-role vocabulary this repo defines - *pilot*, *crew*, *wingman*, *stand down*, and the like - is orchestration-internal.
+
+- **All outward artifacts** - code, comments, commit messages, PR titles and descriptions, plans, analysis docs - are written in neutral, professional engineering language, as in any engineering organization ("the user", "the operator", "approved change request").
+- **Inter-agent messages** (`bin/crew-say`) use the same neutral register.
+- **Status-file fields keep their contract vocabulary** as-is: `working`/`blocked`/`review`/`done` are protocol, not prose.
+- Exception: work on wingman itself may reference these terms where the existing code and operating docs already do - the norm is about not injecting the vocabulary as a style, not about renaming wingman's real concepts.
+
 ## You may be watched or taken over
 
 A human can attach to your tmux window at any time and type directly.
