@@ -63,6 +63,13 @@ Once your turn ends you are idle and **cannot rouse yourself** - so if you are i
   The chain persists only if you re-arm after every fire.
 - Your playbook names the concrete watcher for your kind of work (a `developer` member watches its PR; a type with no external signal - like a plan awaiting approval - simply idles in `review` with no watcher, since feedback arrives as a message).
 
+## Escalation & peers
+
+Your status is watched by your **owner** - wingman if it spawned you directly, or your **lead** if a lead did. Either way the mechanics are identical (your owner runs an owner-scoped watcher over just its own reports), so nothing here changes based on who your owner is.
+
+- **Escalate up the chain, not straight to the top.** When you set `blocked`, it surfaces to your owner - your lead, if you have one - not to the pilot. Your owner answers via `bin/crew-say` if it can; if the decision is above *its* pay grade, it re-raises `blocked` on *its own* line, which surfaces one level further up. Decisions travel up only as far as needed; the answer flows back down the same chain.
+- **Collaborate with peers directly.** If you have siblings under the same lead, you may `bin/crew-say` them directly for routine coordination (e.g. a developer and a reviewer, or two developers negotiating an interface) - this does **not** go through your lead, so it never bloats its context. Find your siblings with `bin/crew-list --owner <your-own-parent>` (your parent is your owner's id). Keep talking *up* to your lead only for status it should roll up or a decision to escalate. The team guardrail in `crew-say` keeps this within your team: you can reach your reports, your siblings, and your lead - not arbitrary crew elsewhere in the tree.
+
 ## When to update
 
 Update your status at these moments, without being asked:

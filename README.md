@@ -58,6 +58,17 @@ The built-ins read as an org: `analyst` (requirements / plan or report), `archit
 
 `*.local.md` is gitignored, so your customizations can't be accidentally committed and survive `git pull` of new defaults.
 
+## Run an effort as an org (leads)
+
+Your crew is a **tree** with you at the top. Small directives take the lean direct paths (an analyst for a plan, a developer with a plan in hand). A large, end-to-end effort - multi-phase, multi-repo, or requirements-through-ship - gets a **lead**: say *"take the lead on X"* (or let wingman suggest one) and it hires and runs its own crew, one layer down.
+
+- The lead **decomposes** the effort, **sequences** the phases (analyst → architect → developer(s) → reviewer), **iterates** each deliverable with its owner, **integrates** the results, and rolls a **single status line** up to you.
+- **Each layer sees only its direct reports.** A worker's blocker surfaces to its lead, not to you; only a decision the lead can't make escalates up the chain, and your answer flows back down. You see effort-level progress ("planning → building (2/3 PRs open)"), not worker chatter.
+- **Peers collaborate directly.** Two developers negotiating an interface, or a developer and a reviewer, talk to each other without going through the lead.
+- **Drill down any time:** `/status --tree` for the whole org, `/status --owner <lead-id>` for one lead's team; `~/.wingman/board.md` renders the tree.
+
+The tree is domain-neutral - only the playbooks carry domain, so the same machinery runs a science lab (PI → experimental design → analysis → peer review) or a business team by swapping playbooks. Management depth is capped at two crew layers (a lead does not spawn leads).
+
 ## Autonomous by default
 
 Crew launch with `--permission-mode bypassPermissions` so gated tool calls auto-approve instead of hanging forever with no human at the terminal.

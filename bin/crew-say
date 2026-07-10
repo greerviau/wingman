@@ -1,16 +1,58 @@
 #!/usr/bin/env bash
 # crew-say - send a follow-up message (an answer to a blocker, a course
-# correction) into a crew member's live claude session via tmux. The session
-# resumes with full context.
+# correction, a peer hand-off) into a crew member's live claude session via tmux.
+# The session resumes with full context.
 #
-# Usage: crew-say <id> "<message>"
+# Team guardrail: collaboration stays within a team. The caller (identified by its
+# own $WINGMAN_CREW_ID; empty for wingman) may message only:
+#   - its own direct reports        (wingman -> its top level; a lead -> its workers)
+#   - a sibling under the same lead  (worker <-> worker peer collaboration)
+#   - its own lead                   (a worker talking up its chain)
+# Anything else is refused so a worker cannot reach arbitrary crew elsewhere in the
+# tree. Discover legitimate siblings with `crew-list --owner <your-own-parent>`.
+# Pass --force (or set WM_CREW_SAY_FORCE=1) to override, e.g. for a human operator.
+#
+# Usage: crew-say [--force] <id> "<message>"
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
+FORCE=0
+if [ "${1:-}" = "--force" ]; then FORCE=1; shift; fi
+
 ID="${1:-}"; MSG="${2:-}"
-[ -n "$ID" ] || wm_die "usage: crew-say <id> \"<message>\""
-[ -n "$MSG" ] || wm_die "usage: crew-say <id> \"<message>\""
+[ -n "$ID" ] || wm_die "usage: crew-say [--force] <id> \"<message>\""
+[ -n "$MSG" ] || wm_die "usage: crew-say [--force] <id> \"<message>\""
+
+# --- team guardrail ---------------------------------------------------------
+if [ "$FORCE" != 1 ] && [ -z "${WM_CREW_SAY_FORCE:-}" ]; then
+  CALLER="${WINGMAN_CREW_ID:-}"
+  verdict="$(wm_state crew-list --all --json 2>/dev/null | wm_py -c '
+import sys, json
+caller, target = sys.argv[1], sys.argv[2]
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+by_id = dict((r.get("id"), r) for r in roster)
+def parent(cid):
+    r = by_id.get(cid)
+    return (r.get("parent") or "") if r is not None else None
+tgt = by_id.get(target)
+if tgt is None:
+    print("no-target"); sys.exit(0)
+tp = tgt.get("parent") or ""
+cp = parent(caller)  # None when the caller has no record (wingman itself)
+ok = (tp == caller)                       # target is a direct report of the caller
+ok = ok or (cp is not None and tp == cp)  # target is a sibling under the same lead
+ok = ok or (cp is not None and target == cp)  # target is the caller own lead
+print("ok" if ok else "deny")
+' "$CALLER" "$ID" 2>/dev/null)"
+  if [ "$verdict" = deny ]; then
+    who="${CALLER:-wingman}"
+    wm_die "team guardrail: '$who' may only message its own reports, a sibling under the same lead, or its lead (refused '$ID'). Find siblings with crew-list --owner <your-parent>; pass --force to override."
+  fi
+fi
 
 WINDOW="wm-$ID"
 wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
