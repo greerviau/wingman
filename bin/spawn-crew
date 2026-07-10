@@ -136,6 +136,9 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # The full state-engine invocation, run through uv (--no-project so it ignores
   # the target repo's own pyproject). Crew run it unquoted so it word-splits.
   echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
+  # The wingman bin/ dir, so a crew grounded in another repo can still invoke the
+  # crew-level tools it needs by absolute path (e.g. $WINGMAN_BIN/pr-watch).
+  echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
   # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
   # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
   # it to substitute a stub).
