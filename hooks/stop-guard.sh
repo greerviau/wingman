@@ -69,7 +69,9 @@ if [ -n "$attention" ]; then
   done)"
   reason="Crew need your attention before you go idle:
 $list
-Surface each blocker/PR to the pilot (or answer via bin/crew-say), then you may stop."
+Read $WM_HOME/wake and run bin/crew-list, surface each blocker/PR to the pilot (or
+answer via bin/crew-say), and give the pilot a compact roster status (who is on what,
+what is blocked, what is stalled, what is ready), then you may stop."
 elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
   reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
 fi

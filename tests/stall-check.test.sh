@@ -11,19 +11,6 @@ set -u
 # Fast probe knobs for every stall-check call in this file.
 CHECK="--threshold 5 --root-grace 2 --probe-gap 2 --cpu-eps 0.5"
 
-# Rewrite a member's live-status `updated` to 10 minutes ago so the status-idle
-# gate trips without waiting.
-age_status() {
-  wm_py - "$WINGMAN_HOME/crew/$1.json" <<'EOF'
-import json, sys, datetime
-p = sys.argv[1]
-d = json.load(open(p))
-d["updated"] = (datetime.datetime.now(datetime.timezone.utc)
-                - datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-json.dump(d, open(p, "w"))
-EOF
-}
-
 wm_py() { uv run --no-project --quiet python "$@"; }
 
 status_of() {
@@ -56,7 +43,7 @@ assert_eq "fresh pane is never nominated" "$out" ""
 assert_eq "status untouched by a failed gate" "$(status_of g1)" "working"
 
 # Stale status but fresh pane (AND fails).
-age_status g1
+wm_age_status g1
 out="$(wm_state stall-check --id g1 --pane-idle 2 --pane-pid 1 $CHECK)"
 assert_eq "stale status + fresh pane is not nominated" "$out" ""
 
@@ -70,7 +57,7 @@ assert_eq "member is still working after all gate checks" "$(status_of g1)" "wor
 test_new_home
 wm_state crew-add --id r1 --type analyst --objective y --repo /tmp --window wm-r1 --session-id s2 >/dev/null
 wm_state crew-set --id r1 --status review --artifact /tmp/plan.md >/dev/null
-age_status r1
+wm_age_status r1
 out="$(wm_state stall-check --id r1 --pane-idle 999 --pane-pid 1 $CHECK)"
 assert_eq "a review member is a no-op regardless of ages" "$out" ""
 assert_eq "review member keeps its status" "$(status_of r1)" "review"
@@ -84,7 +71,7 @@ assert_contains "review still renders under Active" "$(sed -n '/## Active/,/## C
 test_new_home
 wm_state crew-add --id p1 --type developer --objective z --repo /tmp --window wm-p1 --session-id s3 >/dev/null
 wm_state crew-set --id p1 --status working --summary "compiling the widget" >/dev/null
-age_status p1
+wm_age_status p1
 spawn_bg sleep 600
 idle_pid=$!
 out="$(wm_state stall-check --id p1 --pane-idle 999 --pane-pid "$idle_pid" $CHECK)"
@@ -110,7 +97,7 @@ assert_contains "a later status change re-surfaces" "$(wm_state needs-attention)
 # --- probe: late-started descendant (armed watcher analog) -> not flagged -----
 test_new_home
 wm_state crew-add --id p2 --type lead --objective w --repo /tmp --window wm-p2 --session-id s4 >/dev/null
-age_status p2
+wm_age_status p2
 spawn_bg sh -c 'sleep 4; sleep 600'
 parked_pid=$!
 sleep 5   # let the late child exist and lag the root well past --root-grace 2
@@ -121,7 +108,7 @@ assert_eq "parked member stays working" "$(status_of p2)" "working"
 # --- probe: launch-time child only (MCP-server baseline) -> still flagged -----
 test_new_home
 wm_state crew-add --id p3 --type developer --objective v --repo /tmp --window wm-p3 --session-id s5 >/dev/null
-age_status p3
+wm_age_status p3
 spawn_bg sh -c 'sleep 600 & wait'
 launch_pid=$!
 sleep 3   # root and child age together; the lag stays inside the grace
@@ -131,7 +118,7 @@ assert_eq "launch-time child is not evidence of execution" "$out" "stalled"
 # --- probe: CPU activity -> not flagged ---------------------------------------
 test_new_home
 wm_state crew-add --id p4 --type developer --objective u --repo /tmp --window wm-p4 --session-id s6 >/dev/null
-age_status p4
+wm_age_status p4
 spawn_bg sh -c 'while :; do :; done'
 busy_pid=$!
 out="$(wm_state stall-check --id p4 --pane-idle 999 --pane-pid "$busy_pid" $CHECK)"
@@ -143,7 +130,7 @@ wait "$busy_pid" 2>/dev/null
 # --- probe: vanished root -> staleness verdict stands -------------------------
 test_new_home
 wm_state crew-add --id p5 --type developer --objective t --repo /tmp --window wm-p5 --session-id s7 >/dev/null
-age_status p5
+wm_age_status p5
 sh -c 'exit 0' & gone_pid=$!
 wait "$gone_pid" 2>/dev/null
 out="$(wm_state stall-check --id p5 --pane-idle 999 --pane-pid "$gone_pid" $CHECK)"
