@@ -13,3 +13,7 @@ config.local.*
 
 # Editor / OS noise
 .DS_Store
+
+# Python bytecode from the uv-run state engine / helpers
+__pycache__/
+*.pyc

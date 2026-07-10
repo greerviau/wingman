@@ -28,8 +28,20 @@ import os
 import sys
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "updated")
-LIVE_STATES = ("working", "blocked")
+# Live = the member is still in flight and stays on the board's Active list.
+# `review` means "a deliverable is ready and in review" - it is announced to
+# wingman once (like `blocked`) but the member keeps running, shepherding that
+# deliverable to its final disposition (a build member watching its PR to
+# merge/close; a spec member awaiting the pilot's review of its plan).
+LIVE_STATES = ("working", "blocked", "review")
+# Terminal = the engagement is complete and the member is safe to reap. A ready
+# deliverable is `review`, never `done`; `done` is reached only at the natural end
+# (PR merged/closed) or the pilot's explicit disposition.
 TERMINAL_STATES = ("done", "died", "stood-down")
+# States that wake wingman (surfaced by needs-attention, deduped per (id,updated)
+# via the ack store). `review` and `blocked` are both live AND surfaced: the pilot
+# is pinged once, but the member stays in flight.
+ATTENTION_STATES = ("blocked", "review", "done", "died")
 
 
 def home():
@@ -248,10 +260,16 @@ def cmd_standdown(args):
 
 
 def cmd_needs_attention(_args):
-    """Print crew that need wingman: blocked, done, or died, excluding any whose
-    current (id, updated) event has already been acked. Used by the watcher and the
-    Stop hook to decide whether to wake wingman; each deliverer acks what it
-    surfaces (via `ack`), so a terminal state fires once instead of on every poll.
+    """Print crew that need wingman: blocked, review, done, or died, excluding any
+    whose current (id, updated) event has already been acked. Used by the watcher
+    and the Stop hook to decide whether to wake wingman; each deliverer acks what it
+    surfaces (via `ack`), so an event fires once instead of on every poll.
+
+    `review` (a deliverable ready for the pilot) surfaces the same way: a member
+    enters it once at delivery, so the pilot is pinged once; the member then does
+    its steady watch/revision work under `working` (not surfaced), so refreshes
+    never re-announce. A genuine new event (a later `blocked`, or terminal `done`)
+    carries a new `updated` and surfaces again.
 
     Output is tab-separated: id, status, updated, note. The `updated` column lets a
     deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects)."""
@@ -259,12 +277,16 @@ def cmd_needs_attention(_args):
     if not isinstance(acked, dict):
         acked = {}
     for r in (merged(x) for x in load_roster()):
-        if r.get("status") in ("blocked", "done", "died"):
+        if r.get("status") in ATTENTION_STATES:
             if acked.get(r["id"]) == r.get("updated"):
                 continue  # already surfaced this exact event
+            # The note is a short hint for wingman to relay; prefer the pointer the
+            # pilot needs (the blocker to answer, the PR/branch delivered, or the
+            # artifact produced) over the free-text summary.
+            note = (r.get("blocker") or r.get("delivery")
+                    or r.get("artifact") or r.get("summary") or "")
             print("%s\t%s\t%s\t%s" % (
-                r["id"], r["status"], r.get("updated") or "",
-                r.get("blocker") or r.get("summary") or ""))
+                r["id"], r["status"], r.get("updated") or "", note))
 
 
 def cmd_ack(args):

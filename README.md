@@ -1,14 +1,10 @@
 ![Wingman Logo](assets/wingman-logo.png)
 
 Wingman is a long-lived Claude Code session that runs a **crew** of agents for you.
-You (the pilot) give it high-level directives - *"implement this feature"*,
-*"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real
-work to a crew, tracks their status, raises only real decisions to you, and keeps
-its own context clean. It orchestrates; it does not do the heavy lifting.
+You (the pilot) give it high-level directives - *"implement this feature"*, *"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real work to a crew, tracks their status, raises only real decisions to you, and keeps its own context clean.
+It orchestrates; it does not do the heavy lifting.
 
-Each crew member is an **independent `claude` session in its own tmux window**,
-launched in your target repo - so you can watch it, type into it, or take it over
-live, and it survives even if wingman itself is killed.
+Each crew member is an **independent `claude` session in its own tmux window**, launched in your target repo - so you can watch it, type into it, or take it over live, and it survives even if wingman itself is killed.
 
 ## Quick start
 
@@ -18,12 +14,10 @@ cd wingman
 claude          # or: bin/wingman   (adds your project roots via --add-dir)
 ```
 
-On first launch wingman runs `bin/doctor` (installs any missing dependencies with
-your consent), discovers your sibling repos with zero config, and starts the
-supervisor. Then give it a directive.
+On first launch wingman runs `bin/doctor` (installs any missing dependencies with your consent), discovers your sibling repos with zero config, and starts the supervisor.
+Then give it a directive.
 
-The only things you must have before the first run are **`claude`** and **`git`**;
-`doctor` handles the rest.
+The only things you must have before the first run are **`claude`** and **`git`**; `doctor` handles the rest.
 
 ## Driving wingman
 
@@ -31,7 +25,7 @@ Talk to it in plain language, or use the slash commands:
 
 | You say | Wingman does |
 |---|---|
-| "Implement feature X in `<repo>`" | spawns a **spec** crew → plan → (your review) → **build** crew → PR |
+| "Implement feature X in `<repo>`" | spawns a **spec** crew → plan → (your review) → **build** crew → PR → the build crew watches its PR through to merge/close |
 | "Investigate issue Y in `<repo>`" | spawns a **spec** crew in report mode (reproduces bugs end-to-end first) |
 | `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `spec`, `build`, `research`, or one you added; pass `global` instead of a repo for cross-repo work |
 | `/status` | compact roster: who's on what, what's blocked, what's ready |
@@ -39,34 +33,33 @@ Talk to it in plain language, or use the slash commands:
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 
-**Take the wheel any time.** "Let me takeover X" prints the exact command to
-attach to a crew member's tmux window - select, type, take over. Detach
-(`Ctrl-b d`) to hand back. Killing wingman leaves the crew running; relaunching it
-rebuilds the roster.
+**One session sees its work through.** A crew member is not spun down the moment its deliverable appears.
+When a build crew opens a PR it reports it "ready for review" and then keeps running: it watches CI and fixes it if it breaks, watches for review feedback and addresses it, replies on the threads, and finishes only when the PR is merged or closed.
+Feedback you give wingman is routed back to that same session (not a fresh one), so it keeps the full context.
+It stops early only if you `/standdown` it.
+The same lifecycle applies to spec and other crew types.
+
+**Take the wheel any time.** "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
+Detach (`Ctrl-b d`) to hand back.
+Killing wingman leaves the crew running; relaunching it rebuilds the roster.
 
 ## Customizing crew behavior (playbooks)
 
-A crew type is just a playbook - plain prose in `playbook/`. The built-ins are
-`spec` (plan or report), `build` (worktree → implement → commit → push → PR),
-`lead` (decompose and spawn its own crew), and `research` (an example non-dev type).
+A crew type is just a playbook - plain prose in `playbook/`.
+The built-ins are `spec` (plan or report), `build` (worktree → implement → commit → push → PR), `lead` (decompose and spawn its own crew), and `research` (an example non-dev type).
 
-- **Customize a type:** drop a `playbook/<type>.local.md` beside the default; if
-  present it wins.
-- **Add a type:** create `playbook/<type>.md` (tracked) or `.local.md` (yours only),
-  then spawn it with `--type <name>`. There's no hardcoded list - a type exists iff
-  its playbook does. `bin/spawn-crew --list-types` shows what's available.
+- **Customize a type:** drop a `playbook/<type>.local.md` beside the default; if present it wins.
+- **Add a type:** create `playbook/<type>.md` (tracked) or `.local.md` (yours only), then spawn it with `--type <name>`.
+  There's no hardcoded list - a type exists iff its playbook does.
+  `bin/spawn-crew --list-types` shows what's available.
 
-`*.local.md` is gitignored, so your customizations can't be accidentally committed
-and survive `git pull` of new defaults.
+`*.local.md` is gitignored, so your customizations can't be accidentally committed and survive `git pull` of new defaults.
 
 ## Autonomous by default
 
-Crew launch with `--permission-mode bypassPermissions` so gated tool calls
-auto-approve instead of hanging forever with no human at the terminal. Two one-time
-interactive gates remain (Claude Code's Bypass-Permissions acceptance, and each
-repo's first-time workspace-trust dialog); wingman detects a crew frozen on either
-and wakes you to approve once via `bin/crew-takeover`. After that, crew in that repo
-run unattended.
+Crew launch with `--permission-mode bypassPermissions` so gated tool calls auto-approve instead of hanging forever with no human at the terminal.
+Two one-time interactive gates remain (Claude Code's Bypass-Permissions acceptance, and each repo's first-time workspace-trust dialog); wingman detects a crew frozen on either and wakes you to approve once via `bin/crew-takeover`.
+After that, crew in that repo run unattended.
 
 ## Tests
 
@@ -75,6 +68,4 @@ Requires `bash`, `git`, `tmux`, and `uv`.
 
 ## Under the hood
 
-The crew coordination layer, the wake loop, machine-local state in `~/.wingman/`,
-and the harness-agnostic design are documented in
-[`docs/architecture.md`](docs/architecture.md).
+The crew coordination layer, the wake loop, machine-local state in `~/.wingman/`, and the harness-agnostic design are documented in [`docs/architecture.md`](docs/architecture.md).
