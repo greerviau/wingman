@@ -54,7 +54,10 @@ cat > "$FAKE_PR" <<'JSON'
  "comments":[{"author":{"login":"reviewer1"},"body":"nit","createdAt":"2026-07-10T10:00:00Z"}]}
 JSON
 assert_contains "a new reviewer comment fires comment" "$(run)" "comment: #42"
-assert_eq "the same comment does not re-fire" "$(run)" ""
+# with the comment handled and the checks green, the PR has settled -> checks-passed
+# (once), then it goes quiet: neither the handled comment nor the green rollup re-fire.
+assert_contains "a settled-green PR then fires checks-passed" "$(run)" "checks-passed: #42"
+assert_eq "a green PR with no new events stays quiet" "$(run)" ""
 
 # 4. a review requesting changes beats a plain comment
 cat > "$FAKE_PR" <<'JSON'
@@ -80,14 +83,17 @@ cat > "$FAKE_PR" <<'JSON'
 JSON
 assert_contains "a merged PR fires merged" "$(run)" "merged: #42"
 
-# 7. a pre-existing comment at first arm is treated as seen (no spurious wake) ...
+# 7. first arm on a no-CI PR settles straight to review; a pre-existing comment is
+#    treated as seen (it must not fire as a comment) ...
 test_new_home
 export WINGMAN_CREW_ID=pw2
 cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],
  "comments":[{"author":{"login":"reviewer1"},"body":"old","createdAt":"2026-07-10T13:00:00Z"}]}
 JSON
-assert_eq "a comment already present at first arm is seen, not fired" "$(run)" ""
+r7="$(run)"
+assert_contains "first arm on a no-CI PR fires checks-passed" "$r7" "checks-passed: #42"
+case "$r7" in *comment*) fail "a comment already present at first arm must not fire as a comment" ;; *) ok "a comment already present at first arm is seen, not fired" ;; esac
 
 # ... and a later inline review-thread comment (REST shape) then fires
 export FAKE_RC="$D/rc.json"

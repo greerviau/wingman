@@ -16,6 +16,7 @@
 #   changes-requested: <pr>       a review requested changes
 #   ci-failed: <pr> <checks>      a required check concluded failure
 #   comment: <pr> <n> new         new review/issue comment(s) since last handled
+#   checks-passed: <pr>           PR settled green (or no CI) -> crew moves to review
 #
 # A cursor at $WINGMAN_HOME/pr/<crew-id>.json records what has already been
 # surfaced, so a persistently-red build or an already-seen comment does not re-fire,

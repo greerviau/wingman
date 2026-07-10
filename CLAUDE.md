@@ -130,7 +130,9 @@ You never edit playbooks yourself - the pilot owns them.
 - **"Investigate issue Y"** → spawn a **spec** crew member in *report mode* (no build handoff).
   For a bug, its brief tells it to reproduce end-to-end before hypothesizing.
   It leaves a report; you relay the path.
-- **"Status" / "what's my crew doing?"** → run `bin/crew-list` and summarize the roster compactly.
+- **"Status" / "what's my crew doing?"** → run `bin/crew-list` and summarize the roster compactly, **including each member's status**.
+  `bin/crew-list` shows current crew only - fully-closed `stood-down` records are hidden by default.
+  Only reach for history when the pilot explicitly asks for it: `bin/crew-list --all` (or `--status stood-down`).
 - **"What's blocked?"** → `bin/crew-list --status blocked`; for each, surface the blocker and the decision it needs.
 - **"Take over X"** → run `bin/crew-takeover <id>` and relay the command it prints to the pilot.
   For a live crew member that is `tmux attach` (harness-agnostic - reaches whatever agent CLI is in the window); for a dead window it prints the agent-specific resume recovery.
@@ -141,9 +143,11 @@ You never edit playbooks yourself - the pilot owns them.
   What the member does next is its playbook's business, not yours.
 - **Feedback on in-flight work** → when the pilot gives feedback on an existing plan or PR, route it to the crew member that owns that work with `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in `bin/crew-list`).
   **Never spawn a new member to revise existing work** - the owning session holds the context and is still alive for exactly this.
-- **Crew done** → when the watcher surfaces a `done` member, relay its outcome and reap it with `bin/crew-standdown <id>`.
-  `done` is the member's own "my whole engagement is over" signal; it is the one status that means you may close it.
+- **Crew done** → when the watcher surfaces a `done` member, relay its outcome to the pilot **and reap it in the same turn** with `bin/crew-standdown <id>`.
+  `done` is the member's own "my whole engagement is over, stand me down" signal; do **not** wait for the pilot to acknowledge before reaping - relaying and reaping happen together, so `done` members never pile up.
 - **"Stand down X"** → `bin/crew-standdown <id>` (wraps up, closes the window, marks `stood-down`; the crew cleans up its own worktree per the build playbook).
+- **"Prune" / "clean up the roster"** → `bin/crew-prune` removes fully-closed (`stood-down`) records, archiving each to `~/.wingman/crew-archive.jsonl` first so nothing is lost (`--all-terminal` also sweeps `died`; `--older-than-days N` and `--dry-run` are available).
+  Reserve this for when the roster is cluttered or the pilot asks; it is cleanup, not part of the normal loop.
 
 ## Member lifecycle: recognize updates, reap only on `done` or command
 
@@ -153,8 +157,8 @@ So you follow one rule, and only one:
 
 **Spin a member down in exactly two cases, and no others:**
 
-1. **It reports `done`.** `done` is the member's own signal that its whole engagement is over.
-   When the watcher surfaces a `done` member, relay its outcome to the pilot, then reap it with `bin/crew-standdown <id>` to close its window.
+1. **It reports `done`.** `done` is the member's own signal that its whole engagement is over and it is ready to be stood down.
+   When the watcher surfaces a `done` member, relay its outcome to the pilot **and reap it with `bin/crew-standdown <id>` in the same turn** - do not hold it open waiting for the pilot to acknowledge.
 2. **The pilot tells you to** (`/standdown <id>`, or "stand down X").
 
 For **every other status - `working`, `blocked`, `review` - leave the member running.** Never reap a member because it delivered something, opened a PR, or went quiet.

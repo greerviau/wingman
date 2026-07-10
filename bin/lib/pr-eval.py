@@ -20,12 +20,18 @@ canned JSON. It reads:
 It prints ONE reason line and advances the cursor for exactly that dimension, or
 prints nothing when there is no new event. Priority (highest first):
 
-  merged > closed > changes-requested > ci-failed > comment
+  merged > closed > changes-requested > ci-failed > comment > checks-passed
 
 Only the fired dimension's cursor advances, so a co-occurring event of lower
 priority still surfaces on the next poll instead of being skipped. A CI rollup
 that has gone green resets the ci cursor (a later failure re-fires); a pending or
 unchanged-failing rollup is not an event.
+
+`checks-passed` fires once when the PR has nothing failing and nothing pending -
+covering both an all-green rollup and a repo with no CI at all - so a member that
+stays `working` through CI is woken to move into `review` the moment it settles.
+It sits below `comment` so unaddressed feedback is handled before the member parks,
+and it re-arms (fires again) once checks return to pending/failing and settle anew.
 """
 import argparse
 import json
@@ -73,6 +79,21 @@ def failing_checks(pr):
         elif str(c.get("state") or "").upper() in FAIL_STATES:  # StatusContext
             names.append(c.get("context") or c.get("name") or "check")
     return sorted(set(names))
+
+
+def checks_pending(pr):
+    """True if any check has not yet concluded (still queued/in-progress/expected).
+    A CheckRun is pending until its status is COMPLETED; a StatusContext is pending
+    in PENDING/EXPECTED."""
+    for c in pr.get("statusCheckRollup") or []:
+        if not isinstance(c, dict):
+            continue
+        if "conclusion" in c or "status" in c:  # CheckRun
+            if str(c.get("status") or "").upper() != "COMPLETED":
+                return True
+        elif str(c.get("state") or "").upper() in ("PENDING", "EXPECTED"):  # StatusContext
+            return True
+    return False
 
 
 def _login(item):
@@ -140,6 +161,16 @@ def evaluate(pr, review_comments, cursor, me):
     if fresh:
         cur["conv_hwm"] = convo_max
         return ("comment: %s %d new" % (_pr_ref(pr), len(fresh)), cur)
+
+    # checks-passed: the PR has settled with nothing failing and nothing pending
+    # (all-green, or no CI at all). Fire once per settle so the member moves into
+    # `review`; a later pending/failing rollup re-arms it for the next recovery.
+    ready = (not fail) and (not checks_pending(pr))
+    if not ready:
+        cur["ready_fired"] = False
+    elif not cur.get("ready_fired"):
+        cur["ready_fired"] = True
+        return ("checks-passed: %s" % _pr_ref(pr), cur)
 
     return (None, cur)
 

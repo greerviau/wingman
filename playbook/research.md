@@ -21,13 +21,13 @@ Your deliverable is a cited report file, and your handoff is that file's path.
 
 ## Handoff contract
 
-- Write the report to a file and set it as your `artifact` in your status.
-- Your `summary` names the one-line takeaway and the file path.
-- Set `--status done` when the report is written. If the question needs a decision
-  or a follow-up build, wingman routes that separately - your job ends at findings.
+Write the report to a file and carry only its path as your `artifact`; your
+`summary` is the one-line takeaway plus the path.
 
-## Status updates
-
-Follow the crew status contract (appended to this brief): `working` on start with
-a one-line summary, `blocked` with a precise `blocker` if you need a decision or
-access, and `done` with the `artifact` path when the report is written.
+How you report state is governed by the crew status contract appended to this
+brief. The one thing worth naming for your kind of work: a report has no external
+dependency to wait on - once it is written your engagement is over, so **that is
+your terminal condition**. Wingman surfaces the report (relaying its path) as it
+reaps you, so the findings still reach the requester. If the question needs a
+decision or a follow-up build, wingman routes that separately - your job ends at
+findings.
