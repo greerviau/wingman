@@ -37,12 +37,31 @@ If the directive is "investigate" rather than "plan a change," you stop at a
 
 - Write the plan/report to a file and set it as your `artifact` in your status.
 - Your `summary` names the one-line outcome and the file path.
-- Set `--status done` when the file is written. A downstream `build` member will
-  be spawned with `--input <your-artifact-path>`; write the plan so that a fresh
-  session can implement it from the file alone.
+- When the file is written, set `--artifact <path>` and `--status review` (not
+  `done`). `review` tells wingman "plan ready for your review" **once** while
+  keeping you alive - you stay on the hook until the plan is disposed of. Write
+  the plan so a fresh `build` session could implement it from the file alone.
+
+## Stay alive through review
+
+You do **not** finish when the file lands. A plan gets reviewed, and review means
+revision:
+
+- **Feedback arrives as a message in this session** (wingman routes the pilot's
+  feedback here with `bin/crew-say` rather than spawning a new spec member).
+  Revise the plan **in the same file**, keep `--status review` (drop to `working`
+  with a short summary while you rewrite), and refresh your `summary`. The
+  reviewer is iterating the plan with *you* - hold the context.
+- **On approval**, your job is done: the requester (via wingman) will hand the
+  plan to a `build` member. Set `--status done` with a one-line outcome. Unless
+  told otherwise, treat approval-and-handoff as your disposition.
+
+Unlike a `build` member you have no external signal to poll (no PR), so you do not
+arm a watcher - you simply idle in `review` until feedback or approval arrives.
 
 ## Status updates
 
 Follow the crew status contract (appended to this brief). At minimum: `working` on
 start with a one-line summary, `blocked` with a precise `blocker` if you need a
-decision you can't make yourself, and `done` with the `artifact` path when the file is written.
+decision you can't make yourself, `--artifact` + `--status review` when the file
+is written, and `--status done` only once the plan is approved/disposed.

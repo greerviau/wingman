@@ -168,9 +168,11 @@ playbook wires a handoff. You never edit playbooks yourself - the pilot owns the
 ## Command vocabulary (pilot → you)
 
 - **"Implement feature X"** → spawn a **spec** crew member to produce a plan. When
-  it reports `done` with an `artifact` (the plan path), optionally relay it for the
-  pilot's review, then spawn a **build** crew member with `--input <plan-path>` to
-  implement and ship it. Record both; tell the pilot it's underway; return control.
+  it reports `review` with an `artifact` (the plan path), relay it for the pilot's
+  review. On the pilot's approval, spawn a **build** crew member with
+  `--input <plan-path>` and then stand down the spec member (approval is its
+  disposition). If the pilot has feedback on the plan instead, route it to the same
+  spec member with `bin/crew-say` - do not spawn a new one.
 - **"Investigate issue Y"** → spawn a **spec** crew member in *report mode* (no
   build handoff). For a bug, its brief tells it to reproduce end-to-end before
   hypothesizing. It leaves a report; you relay the path.
@@ -185,19 +187,51 @@ playbook wires a handoff. You never edit playbooks yourself - the pilot owns the
   only relay the command. Note: you cannot "resume" a *live* crew member from
   another terminal - a running session refuses a second attach/resume - so taking
   over a live one always means attaching to its window.
-- **PR ready** → when a build member sets a `delivery` reference, tell the pilot
-  "PR ready for review" with the link. Their feedback flows back via
-  `bin/crew-say <id> "<feedback>"` for revision and re-push.
+- **PR ready** → when a build member enters `review` with a `delivery` reference,
+  tell the pilot "PR ready for review" with the link - then **leave it running**.
+  It is watching its own PR (CI + review feedback) and will see it through to
+  merge/close on its own; do **not** stand it down just because the PR is out.
+- **Feedback on in-flight work** → when the pilot gives feedback on an existing
+  plan or PR, route it to the crew member that owns that work with
+  `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in
+  `bin/crew-list`). **Never spawn a new member to revise existing work** - the
+  owning session holds the context and is still alive for exactly this.
 - **"Stand down X"** → `bin/crew-standdown <id>` (wraps up, closes the window,
   marks `stood-down`; the crew cleans up its own worktree per the build playbook).
+
+## The deliverable lifecycle (all crew types)
+
+A crew member is **not finished when its deliverable first appears** - it sees the
+work all the way through. Read its status accordingly:
+
+- **`review`** is a *live* state, not a terminal one: "a deliverable is ready and
+  in review" (a plan written, a PR opened). Announce it to the pilot **once** ("plan
+  ready" / "PR ready for review" with the pointer), then leave the member running.
+  It stays on the board's Active list and keeps working - a build member watches its
+  PR to merge/close and handles CI + review feedback itself; a spec member awaits
+  the pilot's review of its plan. **Never reap a `review` member.**
+- **`working`** is its steady state while shepherding a delivered artifact; those
+  refreshes are silent by design and do not wake you.
+- **`blocked`** is a genuine decision it needs; relay it and answer with
+  `bin/crew-say`.
+- **`done`** now means the engagement is truly over (plan approved/handed off, or
+  PR merged/closed) and the member is safe to reap. Only `done`/`died`/`stood-down`
+  remove a member; a member you reap is one you (or the pilot) explicitly stand
+  down, or one that reached `done` on its own.
+
+The pilot's feedback on any in-flight deliverable goes to the **owning member** via
+`bin/crew-say`, never to a freshly spawned one - one session carries a piece of
+work from start to disposition.
 
 ## The spec → build handoff
 
 The playbooks define the contract: a **spec** member writes its plan to a file and
-reports the path as its `artifact`; a **build** member is spawned with
-`--input <that-path>` and its playbook tells it to read and implement it. You move
-the *pointer*, never the plan's contents. Pause for the pilot's review of the plan
-between the two steps whenever the feature is non-trivial or they asked to review.
+reports the path as its `artifact` with `--status review`; a **build** member is
+spawned with `--input <that-path>` and its playbook tells it to read and implement
+it. You move the *pointer*, never the plan's contents. Relay the plan for the
+pilot's review; iterate it in the **same** spec session via `bin/crew-say` if they
+have feedback. On the pilot's approval, spawn the build member and stand down the
+spec member.
 
 ## Nested delegation (leads)
 

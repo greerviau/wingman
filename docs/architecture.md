@@ -48,6 +48,57 @@ watcher, `bin/watch-fleet`, is built for exactly this:
 The watcher also detects a crew frozen on a permission or trust prompt - a
 terminal-UI stall the status files can't see - and flips it to `blocked`.
 
+## The deliverable lifecycle and `review`
+
+A crew member is not spun down the moment its deliverable appears; one session sees
+a piece of work through from creation to final disposition. The status state
+machine (`bin/lib/wm-state.py`) encodes this:
+
+- `LIVE_STATES = (working, blocked, review)` - a member in any of these is still in
+  flight and stays on the board's Active list.
+- `review` is the "a deliverable is ready and in review" state: a plan written, a
+  PR opened. It is both **live** and **surfaced** - `needs-attention`
+  (`ATTENTION_STATES`) announces it to the pilot once, exactly as `blocked` is
+  announced, but the member keeps running. A member enters `review` once, at
+  delivery, and does its follow-up work under `working`, so summary refreshes never
+  re-announce (the ack store dedups per `(id, updated)`; `working` is never
+  surfaced).
+- `done` means the engagement is complete and the member is safe to reap: a plan
+  approved/handed off, or a PR merged/closed. A ready deliverable is `review`,
+  never `done`.
+
+The lifecycle is uniform across types - deliver → `review` → revise in the same
+session on feedback → `done` - and each playbook defines what "seeing it through"
+means for its type.
+
+## The crew-level wake loop (PR review)
+
+A build member's "seeing it through" is watching its own PR, and it uses the same
+wake primitive wingman uses on itself, one level down. A crew Claude session cannot
+rouse itself once its turn ends, so after opening a PR the member arms
+`bin/pr-watch` as a **harness-tracked background task** (never detached). It blocks,
+polling the PR through the forge CLI, and exits with one reason line
+(`ci-failed` / `changes-requested` / `comment` / `merged` / `closed`) the instant an
+actionable event occurs; that exit re-invokes the crew member, which acts and arms
+exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
+
+A cursor at `$WINGMAN_HOME/pr/<crew-id>.json` records what has already been
+surfaced, so a persistently-red build or an already-handled comment does not
+re-fire, and the crew's own replies (filtered by the authenticated forge login)
+never wake it. Firing advances only the fired dimension, so a co-occurring
+lower-priority event still surfaces on the next cycle. The event-decision logic
+lives in `bin/lib/pr-eval.py` (pure, unit-testable with canned JSON); `bin/pr-watch`
+is the thin poll loop around it.
+
+This keeps the two watch loops cleanly separated at different levels: `watch-fleet`
+is wingman's channel to its crew (forge-agnostic), `pr-watch` is a crew member's
+channel to the forge. The forge-specific part is isolated in `pr-watch`'s `gh`
+calls, overridable via `WM_GH` (point it at another binary or wrapper), exactly as
+the agent launch line is isolated in `spawn-crew` behind `WM_AGENT`; a non-GitHub
+forge swaps this one script. Spec (and other non-PR) members have no external
+signal to poll, so they arm no watcher - they idle in `review` until the pilot's
+feedback arrives via `crew-say`.
+
 ## Autonomous mode and interactive gates
 
 Because no human sits at a crew member's terminal, `bin/spawn-crew` launches each
@@ -69,7 +120,8 @@ After that, crew in that repo run fully unattended.
 A crew type is defined entirely by a playbook - plain prose in `playbook/`:
 
 - `playbook/spec.md` - turn a problem into a plan (or a report).
-- `playbook/build.md` - the dev cycle: worktree → implement → commit → push → PR.
+- `playbook/build.md` - the dev cycle: worktree → implement → commit → push → PR,
+  then watch the PR (CI + review feedback) through to merge/close.
 - `playbook/lead.md` - decompose a large effort and spawn/integrate its own crew.
 - `playbook/research.md` - example non-dev type: gather evidence, write a cited
   report. Shows the shape a `researcher`/`scientist`/`analyst` role takes.
@@ -118,9 +170,12 @@ Machine-local runtime state, created on first run, never committed:
 - `board.md` - the human-readable render of the roster.
 - `watch.pid` / `watch.beat` - the live watcher cycle's pid and liveness beacon.
 - `wake` - the current attention list the watcher writes when it fires.
-- `acked.json` - the last `updated` stamp surfaced per crew id, so a terminal event
-  (done/died/blocked) is delivered once instead of on every watcher arm and
+- `acked.json` - the last `updated` stamp surfaced per crew id, so a surfaced event
+  (blocked/review/done/died) is delivered once instead of on every watcher arm and
   Stop-hook check. A new `updated` (a genuine state change) re-surfaces.
+- `pr/<id>.json` - a build member's `pr-watch` cursor: what PR events it has already
+  surfaced (CI signature, conversation high-water mark), so a red build or a handled
+  comment does not re-fire.
 - `projects.json` - the discovered-projects cache.
 
 All *user-editable* customization lives in the repo as gitignored `*.local.md` /

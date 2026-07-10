@@ -11,12 +11,35 @@ Keep it current by running this command (never hand-edit the JSON):
 
 ```
 $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
-  --status <working|blocked|done> \
+  --status <working|blocked|review|done> \
   --summary "<=10 lines, plain text, what you're doing / did" \
   [--blocker "the specific decision or input you need to proceed"] \
   [--artifact "path to the file you produced (plan, report, analysis)"] \
   [--delivery "branch or PR URL when ready for review"]
 ```
+
+The status values:
+
+- **`working`** - in flight, doing the work. Refreshing your summary here never
+  wakes the pilot, so this is also your steady state while watching over a
+  delivered artifact (fixing CI, addressing review feedback).
+- **`blocked`** - you need a decision you cannot make yourself. Wingman relays the
+  `blocker` and sends the answer back into this session. Then you continue.
+- **`review`** - a **deliverable is ready and in review** (a plan written, a PR
+  opened). This announces "ready for review" to the pilot **once**, but you stay
+  alive and keep shepherding that deliverable. Enter it **once**, at delivery;
+  do the follow-up work (revisions, CI fixes) under `working` so you don't
+  re-announce on every refresh.
+- **`done`** - the **whole engagement is complete** and you are safe to reap: the
+  plan was approved/handed off, or the PR was merged or closed. A ready deliverable
+  is `review`, never `done`.
+
+**The lifecycle is the same for every crew type:** deliver → `review` (still
+alive) → revise in this same session when feedback arrives → `done` only at the
+natural end or an explicit stand-down. You see your work all the way through; you
+are not spun down when the deliverable first appears. Your type's playbook says
+what "seeing it through" means for you (a `build` member watches its PR to
+merge/close; a `spec` member awaits the pilot's review of its plan).
 
 `$WINGMAN_STATE` (the full `uv run ... wm-state.py` invocation), `$WINGMAN_CREW_ID`,
 and `$WINGMAN_HOME` are exported into your environment. Run `$WINGMAN_STATE`
@@ -29,9 +52,11 @@ Update your status at these moments, without being asked:
    only thing wingman sees, so make it count).
 3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`.
    Then stop and wait; wingman will relay the answer back into this session.
-4. **When you produce a deliverable** - set `--artifact <path>` (a plan/report)
-   and, for build work, `--delivery <branch-or-PR>`.
-5. **When finished** - `--status done --summary "<one-line outcome>"`.
+4. **When your deliverable is ready** - `--status review` with `--artifact <path>`
+   (a plan/report) and, for build work, `--delivery <PR>`. Do this once; then keep
+   shepherding it under `working`.
+5. **When the engagement is truly over** (plan approved/handed off, or PR
+   merged/closed) - `--status done --summary "<one-line outcome>"`.
 
 ## Keep detail out of chat, on disk
 

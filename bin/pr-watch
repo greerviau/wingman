@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# pr-watch - the crew-level wake loop: the build crew's analog of watch-fleet.
+#
+# A crew Claude session, once its turn ends, is idle and cannot rouse itself - the
+# same constraint wingman solves for itself with watch-fleet. So a build member,
+# after opening its PR, arms THIS script as a harness-tracked background task (e.g.
+# Bash run_in_background, never detached). It BLOCKS - polling the PR via the forge
+# CLI, absorbing benign no-change polls for free - and EXITS with one reason line
+# the instant an actionable PR event occurs. Because the harness tracks it, that
+# exit re-invokes the crew session, which acts on the reason (fix CI, address +
+# reply to review, or clean up on merge/close) and arms exactly one fresh cycle.
+#
+# Events (one per exit, highest priority first):
+#   merged: <pr>                  PR merged            -> crew cleans up, sets done
+#   closed: <pr>                  PR closed unmerged   -> crew cleans up, sets done
+#   changes-requested: <pr>       a review requested changes
+#   ci-failed: <pr> <checks>      a required check concluded failure
+#   comment: <pr> <n> new         new review/issue comment(s) since last handled
+#
+# A cursor at $WINGMAN_HOME/pr/<crew-id>.json records what has already been
+# surfaced, so a persistently-red build or an already-seen comment does not re-fire,
+# and the crew's OWN replies never wake it. Firing advances only the fired
+# dimension, so a co-occurring lower-priority event still surfaces next cycle.
+#
+# Forge boundary: everything forge-specific is the `gh` calls below, isolated here
+# exactly as the agent launch line is isolated in spawn-crew. Point WM_GH at another
+# binary (or a wrapper) to retarget; swap this whole script for a non-GitHub forge.
+# bash-3.2-safe.
+#
+# Usage:
+#   pr-watch --pr <url-or-number>   arm one cycle: block until an actionable PR
+#                                   event, then print the reason and exit. Run as a
+#                                   harness-tracked background task.
+#   pr-watch --pr <n> --once        poll exactly once (for testing); print an event
+#                                   if one is pending, else nothing, and exit.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+GH="${WM_GH:-gh}"
+PR=""; ONCE=0
+INTERVAL="${WM_PR_WATCH_INTERVAL:-30}"   # CI/reviews move in minutes, not seconds
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pr)    PR="$2"; shift 2 ;;
+    --once)  ONCE=1; shift ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    *)       wm_die "unknown arg: $1" ;;
+  esac
+done
+[ -n "$PR" ] || wm_die "usage: pr-watch --pr <url-or-number>"
+[ -n "${WINGMAN_CREW_ID:-}" ] || wm_die "WINGMAN_CREW_ID must be set (pr-watch runs inside a crew session)"
+wm_have "$GH" || wm_die "'$GH' not found (set WM_GH to your forge CLI)"
+
+wm_state init >/dev/null
+CURDIR="$WM_HOME/pr"
+mkdir -p "$CURDIR"
+CURSOR="$CURDIR/$WINGMAN_CREW_ID.json"
+PR_EVAL="$WM_LIB/pr-eval.py"
+
+# The authenticated login, so the crew's own comments/reviews never wake it. Best
+# effort: an empty login just means no self-filtering.
+ME="$($GH api user --jq .login 2>/dev/null || true)"
+
+# One poll: fetch PR state + inline review comments, ask pr-eval for an event.
+# Prints the reason line (and returns 0) iff there is a fresh actionable event.
+poll_once() {
+  _pr_json="$($GH pr view "$PR" \
+    --json state,mergedAt,statusCheckRollup,reviews,comments,number,url \
+    2>/dev/null)" || return 1
+  [ -n "$_pr_json" ] || return 1
+
+  # Inline (code-thread) review comments live in the REST API, not `gh pr view`.
+  # Resolve owner/repo from the checkout and the PR number, then fetch them; a
+  # failure here degrades gracefully to issue-comments + reviews only.
+  _rc_file=""
+  _nwo="$($GH repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+  _num="$(printf '%s' "$_pr_json" | wm_py -c 'import sys,json; print(json.load(sys.stdin).get("number") or "")' 2>/dev/null)"
+  if [ -n "$_nwo" ] && [ -n "$_num" ]; then
+    _rc="$($GH api "repos/$_nwo/pulls/$_num/comments" --paginate 2>/dev/null || true)"
+    if [ -n "$_rc" ]; then
+      _rc_file="$CURDIR/$WINGMAN_CREW_ID.rc.json"
+      printf '%s' "$_rc" > "$_rc_file"
+    fi
+  fi
+
+  _pr_file="$CURDIR/$WINGMAN_CREW_ID.pr.json"
+  printf '%s' "$_pr_json" > "$_pr_file"
+  _reason="$(wm_py "$PR_EVAL" --pr-json "$_pr_file" \
+    ${_rc_file:+--review-comments "$_rc_file"} \
+    --cursor "$CURSOR" --me "$ME" 2>/dev/null)"
+  [ -n "$_reason" ] || return 1
+  printf '%s\n' "$_reason"
+  return 0
+}
+
+if [ "$ONCE" = 1 ]; then
+  poll_once || true
+  exit 0
+fi
+
+# --- the blocking loop ------------------------------------------------------
+# Top-of-loop check: an event already pending the instant a fresh cycle is armed
+# fires immediately (at-least-once across the crew's re-arms), mirroring watch-fleet.
+while :; do
+  if reason="$(poll_once)"; then
+    printf '%s\n' "$reason"
+    exit 0
+  fi
+  sleep "$INTERVAL"
+done
