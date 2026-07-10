@@ -93,8 +93,8 @@ Substantial output (an analysis, a design, a plan) goes in a **file** (under the
 Do not paste large content back; wingman never ingests it.
 
 Write these artifacts formally, for a reader outside wingman.
-Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*.
-"Pilot" is wingman's own private term for the human it flies for; it must not appear in the plans, reports, PRs, commit messages, or code comments you produce.
+Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*: "pilot" is wingman's own private term for the human it flies for.
+The full rule, including where the internal terms remain legitimate, is the communication register below.
 
 ## Communication register
 

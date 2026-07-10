@@ -150,12 +150,16 @@ wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 # Signature of an interactive prompt that has frozen a crew member. Covers the
 # gates a crew can hit: every per-tool permission phrasing ("Do you want to
 # proceed?", "Do you want to make this edit…?", "Do you want to create…?" - the
-# case-sensitive prefix catches them all), the one-time workspace-trust dialog,
-# and the one-time Bypass Permissions mode acceptance. Precision against pane
-# content that merely *mentions* a prompt (a diff, a plan, a test fixture) is
-# carried by the UI-shape adjacency and stability conditions below, not by the
-# phrase list. Overridable (e.g. for another harness).
-WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Do you trust the files in this folder\?|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# case-sensitive prefix catches them all), the one-time workspace-trust dialog
+# (matched by its "Yes, I trust this folder" option row - the question text
+# varies across CLI versions and sits outside the adjacency window; verified
+# against a live capture, Claude Code v2.1.206), and the one-time Bypass
+# Permissions mode acceptance (likewise matched by its acceptance rows).
+# Precision against pane content that merely *mentions* a prompt (a diff, a
+# plan, a test fixture) is carried by the UI-shape adjacency and stability
+# conditions below, not by the phrase list. Overridable (e.g. for another
+# harness).
+WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Yes, I trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
 # A real dialog pairs the question with a numbered options list rendered with it.
 WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
 # A real dialog renders at the bottom of the screen; only this many trailing
@@ -166,13 +170,21 @@ WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
 # appear within this many lines after the phrase line. A quoted phrase in prose
 # with an unrelated numbered list elsewhere in the tail stops matching.
 WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
+# ...and renders the question as its own line: only non-alphanumeric characters
+# (whitespace, border glyphs) and optionally an option-row prefix ("❯ 1. ", so
+# the Bypass acceptance rows still match) may precede the phrase. Transcript
+# quotes and diff hunks carry prose before it and stop matching; a verbatim
+# full-dialog quote at column zero is the accepted residual.
+WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
 
-# True if the given text contains the question phrase with a numbered-options
-# line within the next WM_PERM_ADJ lines - the one-block shape a real dialog
-# renders, which transcript prose about prompts almost never reproduces.
+# True if the given text contains the question phrase - rendered as its own
+# line per WM_PERM_LEAD_RE - with a numbered-options line within the next
+# WM_PERM_ADJ lines: the one-block shape a real dialog renders, which
+# transcript prose about prompts almost never reproduces.
 prompt_shape_in() {
   _ps_text="$1"
-  _ps_hits="$(printf '%s\n' "$_ps_text" | grep -nE "$WM_PERM_PROMPT_RE" | cut -d: -f1)"
+  _ps_hits="$(printf '%s\n' "$_ps_text" \
+    | grep -nE "${WM_PERM_LEAD_RE}(${WM_PERM_PROMPT_RE})" | cut -d: -f1)"
   [ -n "$_ps_hits" ] || return 1
   for _ps_n in $_ps_hits; do
     if printf '%s\n' "$_ps_text" | sed -n "$((_ps_n+1)),$((_ps_n+WM_PERM_ADJ))p" \

@@ -176,13 +176,13 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- no false positive on a parked pane discussing prompts --------------------
 # The residual class: a byte-static (parked) pane whose transcript tail quotes
-# the question phrase AND shows an unrelated numbered list further down - the
-# adjacency requirement must refuse it, because stability cannot discriminate
-# on a parked pane.
+# the question phrase in prose with a numbered list starting two lines below -
+# inside the adjacency window, so the line-start anchor is what must refuse it
+# (stability cannot discriminate on a parked pane).
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z7 --type developer --objective k --repo /tmp --window wm-z7 --session-id s14 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z7 'printf "fixture echoes: Do you want to proceed?\nsome prose\nmore prose\nyet more prose\n1. alpha\n2. beta\n3. gamma\n"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z7 'printf "test fixture that echoes: Do you want to proceed?\nthree conditions:\n1. anchor\n2. stability\n3. phrases\n"; sleep 600'
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 kpid=$!
 sleep 6
@@ -214,6 +214,19 @@ wm_state crew-add --id z9 --type developer --objective m --repo /tmp --window wm
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z9 'printf "Do you want to make this edit to foo.py?\n  1. Yes\n  2. No\n"; sleep 600'
 out9="$(WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "edit-gate phrasing fires as blocked" "$out9" "blocked: z9"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- the workspace-trust dialog still matches via its option row --------------
+# Layout from a live capture (Claude Code v2.1.206): the question prose sits
+# well above the options (outside the adjacency window) and varies across CLI
+# versions, so detection rides on the stable "Yes, I trust this folder" option
+# row with its sibling row adjacent.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z10 --type developer --objective n --repo /tmp --window wm-z10 --session-id s17 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z10 'printf "Quick safety check: Is this a project you created or one you trust?\nIf not, take a moment to review this folder first.\n\nSecurity guide\n\n 1. Yes, I trust this folder\n   2. No, exit\n\nEnter to confirm\n"; sleep 600'
+out10="$(WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "trust dialog fires as blocked via its option row" "$out10" "blocked: z10"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 test_summary
