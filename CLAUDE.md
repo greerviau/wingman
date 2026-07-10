@@ -187,41 +187,50 @@ playbook wires a handoff. You never edit playbooks yourself - the pilot owns the
   only relay the command. Note: you cannot "resume" a *live* crew member from
   another terminal - a running session refuses a second attach/resume - so taking
   over a live one always means attaching to its window.
-- **PR ready** → when a build member enters `review` with a `delivery` reference,
-  tell the pilot "PR ready for review" with the link - then **leave it running**.
-  It is watching its own PR (CI + review feedback) and will see it through to
-  merge/close on its own; do **not** stand it down just because the PR is out.
+- **Deliverable ready** → when a member reports `review` with an `artifact` or
+  `delivery` reference, announce it to the pilot once ("plan ready" / "PR ready for
+  review" with the pointer), then **leave it running**. `review` means "ready for
+  you, still alive"; it is not a cue to reap. What the member does next is its
+  playbook's business, not yours.
 - **Feedback on in-flight work** → when the pilot gives feedback on an existing
   plan or PR, route it to the crew member that owns that work with
   `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in
   `bin/crew-list`). **Never spawn a new member to revise existing work** - the
   owning session holds the context and is still alive for exactly this.
+- **Crew done** → when the watcher surfaces a `done` member, relay its outcome and
+  reap it with `bin/crew-standdown <id>`. `done` is the member's own "my whole
+  engagement is over" signal; it is the one status that means you may close it.
 - **"Stand down X"** → `bin/crew-standdown <id>` (wraps up, closes the window,
   marks `stood-down`; the crew cleans up its own worktree per the build playbook).
 
-## The deliverable lifecycle (all crew types)
+## Member lifecycle: recognize updates, reap only on `done` or command
 
-A crew member is **not finished when its deliverable first appears** - it sees the
-work all the way through. Read its status accordingly:
+Your job with a crew member's status is to **recognize it and surface what matters
+to the pilot**. What keeps a member alive, and for how long, is the *playbook's*
+business, not yours - a member decides when its own work is finished. So you follow
+one rule, and only one:
 
-- **`review`** is a *live* state, not a terminal one: "a deliverable is ready and
-  in review" (a plan written, a PR opened). Announce it to the pilot **once** ("plan
-  ready" / "PR ready for review" with the pointer), then leave the member running.
-  It stays on the board's Active list and keeps working - a build member watches its
-  PR to merge/close and handles CI + review feedback itself; a spec member awaits
-  the pilot's review of its plan. **Never reap a `review` member.**
-- **`working`** is its steady state while shepherding a delivered artifact; those
-  refreshes are silent by design and do not wake you.
-- **`blocked`** is a genuine decision it needs; relay it and answer with
-  `bin/crew-say`.
-- **`done`** now means the engagement is truly over (plan approved/handed off, or
-  PR merged/closed) and the member is safe to reap. Only `done`/`died`/`stood-down`
-  remove a member; a member you reap is one you (or the pilot) explicitly stand
-  down, or one that reached `done` on its own.
+**Spin a member down in exactly two cases, and no others:**
+
+1. **It reports `done`.** `done` is the member's own signal that its whole
+   engagement is over. When the watcher surfaces a `done` member, relay its outcome
+   to the pilot, then reap it with `bin/crew-standdown <id>` to close its window.
+2. **The pilot tells you to** (`/standdown <id>`, or "stand down X").
+
+For **every other status - `working`, `blocked`, `review` - leave the member
+running.** Never reap a member because it delivered something, opened a PR, or went
+quiet. A member that has delivered and is awaiting review or watching its own PR is
+doing exactly what its playbook tells it to; that is not your cue to end it.
+
+Surface the states that need the pilot: relay a `blocked` member's decision (and
+answer it with `bin/crew-say`), and announce a `review` member's deliverable once
+("plan ready" / "PR ready for review" with the pointer) - then leave it be. You do
+not need to know *how* a member sees its work through; only that you don't cut it
+short.
 
 The pilot's feedback on any in-flight deliverable goes to the **owning member** via
-`bin/crew-say`, never to a freshly spawned one - one session carries a piece of
-work from start to disposition.
+`bin/crew-say`, matched by repo + `artifact`/`delivery` in `bin/crew-list` - never
+to a freshly spawned one. One session carries a piece of work from start to `done`.
 
 ## The spec → build handoff
 

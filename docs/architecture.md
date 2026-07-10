@@ -71,6 +71,13 @@ The lifecycle is uniform across types - deliver → `review` → revise in the s
 session on feedback → `done` - and each playbook defines what "seeing it through"
 means for its type.
 
+Wingman deliberately holds **no** waiting logic itself: it recognizes crew status
+updates and surfaces the meaningful ones, and it spins a member down in exactly two
+cases - the member reports `done` (the watcher detects it, wingman reaps it with
+`crew-standdown`), or the pilot stands it down explicitly. Nothing else reaps a
+member. *How long* and *why* a member stays alive after delivering is entirely the
+playbook's concern; wingman only avoids cutting it short.
+
 ## The crew-level wake loop (PR review)
 
 A build member's "seeing it through" is watching its own PR, and it uses the same
