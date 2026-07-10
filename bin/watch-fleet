@@ -148,41 +148,65 @@ trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
 # Signature of an interactive prompt that has frozen a crew member. Covers the
-# three gates a crew can hit: a per-tool permission prompt, the one-time
-# workspace-trust dialog, and the one-time Bypass Permissions mode acceptance.
-# Full fixed phrasings, matched case-sensitively: pane content that merely
-# *mentions* a prompt (a diff, a plan, a test fixture) must not trip the
-# detector. Overridable (e.g. for another harness).
-WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to proceed\?|Do you trust the files in this folder\?|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# gates a crew can hit: every per-tool permission phrasing ("Do you want to
+# proceed?", "Do you want to make this edit…?", "Do you want to create…?" - the
+# case-sensitive prefix catches them all), the one-time workspace-trust dialog,
+# and the one-time Bypass Permissions mode acceptance. Precision against pane
+# content that merely *mentions* a prompt (a diff, a plan, a test fixture) is
+# carried by the UI-shape adjacency and stability conditions below, not by the
+# phrase list. Overridable (e.g. for another harness).
+WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Do you trust the files in this folder\?|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
 # A real dialog pairs the question with a numbered options list rendered with it.
 WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
 # A real dialog renders at the bottom of the screen; only this many trailing
 # lines of the capture are searched, so transcript content mid-screen never
 # matches.
 WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
+# ...and renders its options directly under the question: an options line must
+# appear within this many lines after the phrase line. A quoted phrase in prose
+# with an unrelated numbered list elsewhere in the tail stops matching.
+WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
 
-# True iff a member's pane is frozen on an interactive prompt. Three cumulative
+# True if the given text contains the question phrase with a numbered-options
+# line within the next WM_PERM_ADJ lines - the one-block shape a real dialog
+# renders, which transcript prose about prompts almost never reproduces.
+prompt_shape_in() {
+  _ps_text="$1"
+  _ps_hits="$(printf '%s\n' "$_ps_text" | grep -nE "$WM_PERM_PROMPT_RE" | cut -d: -f1)"
+  [ -n "$_ps_hits" ] || return 1
+  for _ps_n in $_ps_hits; do
+    if printf '%s\n' "$_ps_text" | sed -n "$((_ps_n+1)),$((_ps_n+WM_PERM_ADJ))p" \
+        | grep -qE "$WM_PERM_OPTION_RE"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# True iff a member's pane is frozen on an interactive prompt. Cumulative
 # conditions, each of which alone stops the transcript-content false positive
 # (a session that reads, writes, tests, or investigates this detector shows the
 # signature strings in its own pane while healthily working):
-#   1. the question phrase AND a numbered-options line both appear within the
-#      last WM_PERM_TAIL lines - the prompt UI shape, where a dialog renders;
+#   1. the prompt UI shape - question phrase with an options line adjacent -
+#      appears within the last WM_PERM_TAIL lines, where a dialog renders;
 #   2. the full pane text is byte-identical to the previous poll's capture - a
-#      frozen dialog is static, while a working session's status line ticks
-#      every second (costs one extra INTERVAL of latency on a real freeze);
-#   3. the phrases themselves are full and case-sensitive (WM_PERM_PROMPT_RE).
-# The per-member capture hash lives in $WM_HOME/pane-<id>.hash (the pidfile
-# pattern); a stale file is harmless.
+#      frozen dialog is static (costs one extra INTERVAL of latency on a real
+#      freeze). Note a *parked* healthy pane is also static (the §3.2 shape),
+#      which is why the adjacency in condition 1 must carry precision there.
+# Also sets PFC_SHAPE=1 when condition 1 held regardless of stability, so the
+# caller can hold the stall check off a prompt-shaped pane that is one INTERVAL
+# away from a definitive diagnosis. The per-member capture hash lives in
+# $WM_HOME/pane-<id>.hash (the pidfile pattern); a stale file is harmless.
 prompt_freeze_check() {
+  PFC_SHAPE=0
   _pfc_id="$1"; _pfc_win="$2"
   _pfc_text="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_pfc_win")"
   _pfc_hashfile="$WM_HOME/pane-$(printf '%s' "$_pfc_id" | tr -c 'A-Za-z0-9._-' '_').hash"
   _pfc_hash="$(printf '%s' "$_pfc_text" | cksum)"
   _pfc_prev="$(cat "$_pfc_hashfile" 2>/dev/null)"
   printf '%s\n' "$_pfc_hash" > "$_pfc_hashfile"
-  _pfc_tail="$(printf '%s\n' "$_pfc_text" | tail -n "$WM_PERM_TAIL")"
-  printf '%s\n' "$_pfc_tail" | grep -qE "$WM_PERM_PROMPT_RE" || return 1
-  printf '%s\n' "$_pfc_tail" | grep -qE "$WM_PERM_OPTION_RE" || return 1
+  prompt_shape_in "$(printf '%s\n' "$_pfc_text" | tail -n "$WM_PERM_TAIL")" || return 1
+  PFC_SHAPE=1
   [ -n "$_pfc_prev" ] && [ "$_pfc_hash" = "$_pfc_prev" ]
 }
 
@@ -260,6 +284,12 @@ for r in data:
           >/dev/null 2>&1
         continue   # the permission freeze is the more specific diagnosis
       fi
+      # A prompt-shaped pane whose stability is not yet confirmed (first sighting,
+      # no prior hash) is one INTERVAL from a definitive diagnosis; hold the stall
+      # check off it, or a dialog frozen longer than STALL_IDLE before our first
+      # look would be flipped stalled on poll one and - having left the working
+      # scan - never get its confirming second sighting as blocked.
+      [ "$PFC_SHAPE" = 1 ] && continue
 
       # Silent-stall backstop: no pane repaint AND no status update for STALL_IDLE
       # seconds nominates the member; stall-check probes its process tree and flags

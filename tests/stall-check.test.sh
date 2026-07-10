@@ -136,4 +136,20 @@ wait "$gone_pid" 2>/dev/null
 out="$(wm_state stall-check --id p5 --pane-idle 999 --pane-pid "$gone_pid" $CHECK)"
 assert_eq "vanished root falls back to the staleness verdict" "$out" "stalled"
 
+# --- a self-report during the probe gap wins over the pre-gap snapshot --------
+test_new_home
+wm_state crew-add --id p6 --type developer --objective s --repo /tmp --window wm-p6 --session-id s8 >/dev/null
+wm_state crew-set --id p6 --status working --summary "finishing the report" >/dev/null
+wm_age_status p6
+spawn_bg sleep 600
+idle2_pid=$!
+wm_state stall-check --id p6 --pane-idle 999 --pane-pid "$idle2_pid" \
+  --threshold 5 --root-grace 2 --probe-gap 5 --cpu-eps 0.5 > "$WINGMAN_HOME/sc.out" &
+scpid=$!
+sleep 2
+wm_state crew-set --id p6 --status review --artifact /tmp/p6-report.md >/dev/null
+wait "$scpid"
+assert_eq "mid-gap self-report is not clobbered" "$(status_of p6)" "review"
+assert_eq "no stall is reported for the self-reporting member" "$(cat "$WINGMAN_HOME/sc.out")" ""
+
 test_summary

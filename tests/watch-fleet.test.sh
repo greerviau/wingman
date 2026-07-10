@@ -174,4 +174,46 @@ assert_contains "live member is never flagged" "$(wm_state crew-get --id z6)" '"
 kill "$lpid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- no false positive on a parked pane discussing prompts --------------------
+# The residual class: a byte-static (parked) pane whose transcript tail quotes
+# the question phrase AND shows an unrelated numbered list further down - the
+# adjacency requirement must refuse it, because stability cannot discriminate
+# on a parked pane.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z7 --type developer --objective k --repo /tmp --window wm-z7 --session-id s14 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z7 'printf "fixture echoes: Do you want to proceed?\nsome prose\nmore prose\nyet more prose\n1. alpha\n2. beta\n3. gamma\n"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+kpid=$!
+sleep 6
+assert_true "watcher keeps blocking on a parked prompt-discussing pane" "kill -0 $kpid"
+assert_contains "parked discussing member is never flagged" "$(wm_state crew-get --id z7)" '"status": "working"'
+kill "$kpid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a freeze older than WM_STALL_IDLE at first sighting is still blocked -----
+# The dialog has been frozen past the stall threshold before the watcher's
+# first-ever look (no prior pane hash); the prompt shape must hold the stall
+# check off until stability confirms, so the diagnosis lands as blocked.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z8 --type developer --objective l --repo /tmp --window wm-z8 --session-id s15 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z8 'printf "Do you want to proceed?\n  1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
+wm_age_status z8
+sleep 5   # let the frozen pane out-age WM_STALL_IDLE before the watcher ever looks
+out8="$(WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "pre-aged freeze still fires as blocked" "$out8" "blocked: z8"
+assert_false "pre-aged freeze is never misdiagnosed stalled" "printf '%s' \"\$out8\" | grep -q 'stalled: z8'"
+assert_contains "pre-aged frozen member reads blocked" "$(wm_state crew-get --id z8)" '"status": "blocked"'
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- per-tool phrasing variants still match (edit/create gates) ---------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z9 --type developer --objective m --repo /tmp --window wm-z9 --session-id s16 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z9 'printf "Do you want to make this edit to foo.py?\n  1. Yes\n  2. No\n"; sleep 600'
+out9="$(WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "edit-gate phrasing fires as blocked" "$out9" "blocked: z9"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary

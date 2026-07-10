@@ -536,6 +536,14 @@ def cmd_stall_check(args):
         return
     if _probe_execution(args.pane_pid, args.root_grace, args.probe_gap, args.cpu_eps):
         return
+    # The probe slept for the sampling gap; a member that self-reported during it
+    # (a flip to review with an artifact, a real blocker) must win over the
+    # pre-gap snapshot. Re-read and bail unless nothing changed.
+    current = read_json(status_path(args.id), None)
+    if (not isinstance(current, dict) or current.get("status") != "working"
+            or current.get("updated") != live.get("updated")):
+        return
+    live = current
 
     prior = (live.get("summary") or "").split("\n")[0][:80]
     reason = ("no pane output, status update, running child process, or CPU activity "
