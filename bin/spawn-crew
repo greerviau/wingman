@@ -13,6 +13,9 @@
 # across repos and pick its target(s) itself (for cross-repo work or an unclear
 # repo). Prints the crew id on success. All tmux calls are confined to this file and
 # lib/common.sh so a future session backend is a localized change.
+#
+# Model selection: an explicit --model always wins; otherwise $WM_MODEL (if set)
+# is the default for every spawn; with neither, the agent CLI's own default stands.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -29,7 +32,7 @@ while [ $# -gt 0 ]; do
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
     --list-types) wm_crew_types; exit 0 ;;
-    -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,19p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
@@ -84,6 +87,11 @@ PLAYBOOK="$WM_REPO/playbook/$TYPE.md"
 # permission decision up to the pilot as a real blocker via a permission-prompt
 # hook / MCP tool, so the pilot approves specific actions instead of all-or-nothing.
 PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
+
+# Model for the crew session, alongside the other harness-specific knobs
+# (WM_AGENT, WM_PERMISSION_MODE). An explicit --model wins; else $WM_MODEL if
+# set; else no --model flag is passed and the agent CLI's own default applies.
+[ -n "$MODEL" ] || MODEL="${WM_MODEL:-}"
 
 # --- derive an id / slug -----------------------------------------------------
 slugify() {
