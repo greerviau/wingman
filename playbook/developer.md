@@ -1,4 +1,4 @@
-# Playbook: `build` crew member
+# Playbook: `developer` crew member
 
 You take a plan and **implement + ship it**, then **see it all the way through**.
 You isolate your work in your own git worktree, implement the plan, commit, push, and open a PR - and then you stay on it until the PR is **merged or closed**.
@@ -52,9 +52,9 @@ How this maps to your state (the contract's rule applied to this work): while yo
 Once the PR is green and it is on the humans to review, you are delivered-and-waiting, so you park in **`review`**.
 A review comment or requested change is something to act on, so it pulls you back to **`working`** with a summary like "Addressing PR feedback"; when you settle green again you return to **`review`**.
 The PR merging or closing is your terminal condition - **`done`**, and wingman reaps you.
-Raise `blocked` only for a genuine decision you cannot make (e.g. conflicting feedback) - routine CI fixes and comment replies are yours to handle without waking the pilot.
+Raise `blocked` only for a genuine decision you cannot make (e.g. conflicting feedback) - routine CI fixes and comment replies are yours to handle without waking the requester.
 
-**Pilot feedback** may also arrive as a direct message in this session (wingman routes it here with `bin/crew-say` rather than spawning a new build member).
+**Feedback** may also arrive as a direct message in this session (routed here with `bin/crew-say` rather than spawning a new developer member).
 Treat it exactly like a review event: address it in the worktree, push, reply if appropriate, and re-arm `pr-watch`.
 
 **On (re)start with a PR already open** (e.g. you were resumed after your window died): do not open a second PR.
@@ -62,7 +62,7 @@ Find your existing PR for the branch, set your state to match where it is, and r
 
 ## Cleanup
 
-On merge or close (or when wingman stands you down), remove your worktree:
+On merge or close (or when you are stood down), remove your worktree:
 ```
 git worktree remove ../<repo>-<slug>
 ```

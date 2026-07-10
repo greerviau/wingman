@@ -25,11 +25,20 @@
 # defensively without spawning duplicates. Read the printed status line - `armed`,
 # `healthy`, or a `blocked:/done:/died:` reason - as the source of truth.
 #
+# Owner scope: each cycle watches exactly one owner's direct reports. Wingman arms
+# its own cycle (--owner "" - it has no $WINGMAN_CREW_ID) and never sees a lead's
+# workers; a lead arms its own (--owner <lead-id>, the default from its
+# $WINGMAN_CREW_ID) and sees only its crew. The pidfile/beacon/wake are keyed by
+# owner so wingman's watcher and each lead's watcher coexist without contending.
+#
 # Usage:
-#   watch-fleet            arm one cycle: block until an actionable event, then
-#                          exit with the reason. Run as a harness-tracked
-#                          background task (e.g. Bash run_in_background), never
-#                          bundled onto the tail of another command.
+#   watch-fleet            arm one cycle for the caller's own crew: block until an
+#                          actionable event, then exit with the reason. Run as a
+#                          harness-tracked background task (e.g. Bash
+#                          run_in_background), never bundled onto another command.
+#   watch-fleet --owner <id>  watch a specific owner's crew ("" = top level).
+#                          Defaults to $WINGMAN_CREW_ID, so wingman and a lead each
+#                          arm a bare `watch-fleet` and it self-scopes.
 #   watch-fleet --status   report whether a live cycle exists (pid + beacon).
 #   watch-fleet --stop      stop the current cycle (manual/testing).
 #   watch-fleet --start    deprecated alias for arming; warns, then blocks.
@@ -38,9 +47,35 @@ set -u
 . "$(dirname "$0")/lib/common.sh"
 
 wm_state init >/dev/null
-PIDFILE="$WM_HOME/watch.pid"
-WAKEFILE="$WM_HOME/wake"
-BEATFILE="$WM_HOME/watch.beat"
+
+# --- parse owner scope + mode -----------------------------------------------
+# The owner this cycle watches defaults to the caller's own crew id ("" = wingman,
+# the top orchestrator). --owner overrides it.
+OWNER="${WINGMAN_CREW_ID:-}"
+MODE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --owner) OWNER="${2:-}"; shift 2 ;;
+    --status|--stop|--start|arm|__loop) MODE="$1"; shift ;;
+    "") shift ;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    *) wm_die "unknown arg: $1" ;;
+  esac
+done
+
+# Key the singleton files by owner so per-owner watchers never contend. Owner ""
+# (wingman) keeps the legacy filenames so its references and the Stop hook are
+# unchanged; a non-empty owner is sanitized into a filesystem-safe suffix.
+if [ -n "$OWNER" ]; then
+  _key="$(printf '%s' "$OWNER" | tr -c 'A-Za-z0-9._-' '_')"
+  PIDFILE="$WM_HOME/watch-$_key.pid"
+  WAKEFILE="$WM_HOME/wake-$_key"
+  BEATFILE="$WM_HOME/watch-$_key.beat"
+else
+  PIDFILE="$WM_HOME/watch.pid"
+  WAKEFILE="$WM_HOME/wake"
+  BEATFILE="$WM_HOME/watch.beat"
+fi
 INTERVAL="${WM_WATCH_INTERVAL:-5}"
 # A cycle is "live" iff its recorded pid is alive AND its beacon is fresher than
 # this grace window. Touched every loop iteration, so a genuinely blocking watcher
@@ -61,7 +96,7 @@ cycle_live() {
   [ "$(beat_age)" -lt "$GRACE" ]
 }
 
-case "${1:-}" in
+case "$MODE" in
   --status)
     if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"
     else wm_info "no live watch-fleet cycle"; fi
@@ -77,9 +112,7 @@ case "${1:-}" in
   --start)
     wm_warn "watch-fleet --start is deprecated: arm 'bin/watch-fleet' as a harness-tracked background task instead. Blocking now."
     ;;
-  arm|__loop|"") : ;;   # fall through to arm
-  -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
-  *) wm_die "unknown arg: $1" ;;
+  *) : ;;   # arm/__loop/"" fall through to arm
 esac
 
 # --- singleton guard --------------------------------------------------------
@@ -143,7 +176,7 @@ while :; do
     # Detect it from the pane and flip the crew to blocked so it flows through the
     # normal needs-attention/fire path below. Independent of the crew's permission
     # mode, so it still catches stalls when bypass is disabled.
-    for _id in $(wm_state crew-list --status working --json 2>/dev/null | wm_py -c '
+    for _id in $(wm_state crew-list --status working --owner "$OWNER" --json 2>/dev/null | wm_py -c '
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -162,9 +195,10 @@ for r in data:
     done
   fi
 
-  # Who needs the pilot right now? Checked at the top of the loop so an event that
-  # is already pending on arm fires immediately (at-least-once across re-arms).
-  attention="$(wm_state needs-attention 2>/dev/null)"
+  # Who needs this owner right now? Scoped to the owner's own direct reports, so a
+  # lead's worker never wakes wingman and vice versa. Checked at the top of the loop
+  # so an event already pending on arm fires immediately (at-least-once re-arms).
+  attention="$(wm_state needs-attention --owner "$OWNER" 2>/dev/null)"
   [ -n "$attention" ] && fire "$attention"
 
   sleep "$INTERVAL"

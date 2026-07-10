@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # crew-standdown - wrap up a crew member: mark it stood-down and close its tmux
-# window. Any git worktree the crew created is cleaned up by the crew per the
-# build playbook; this script does not touch worktrees.
+# window. Standing down a manager cascades to its whole sub-crew, so a lead's
+# workers are never orphaned; every affected window is closed. Any git worktree a
+# crew created is cleaned up by the crew per the build playbook; this does not
+# touch worktrees.
 #
 # Usage: crew-standdown <id>
 # bash-3.2-safe.
@@ -12,9 +14,21 @@ ID="${1:-}"
 [ -n "$ID" ] || wm_die "usage: crew-standdown <id>"
 wm_state crew-get --id "$ID" >/dev/null 2>&1 || wm_die "no crew member '$ID'"
 
-WINDOW="wm-$ID"
-if wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
-  wm_tmux kill-window -t "$WM_TMUX_SESSION:$WINDOW" 2>/dev/null || true
+# standdown cascades to descendants and prints every affected id (target first).
+AFFECTED="$(wm_state standdown --id "$ID")"
+
+closed=0
+for cid in $AFFECTED; do
+  WINDOW="wm-$cid"
+  if wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
+    wm_tmux kill-window -t "$WM_TMUX_SESSION:$WINDOW" 2>/dev/null || true
+    closed=$((closed+1))
+  fi
+done
+
+set -- $AFFECTED
+if [ "$#" -gt 1 ]; then
+  wm_ok "stood down $ID and $(($# - 1)) descendant(s) ($closed window(s) closed)"
+else
+  wm_ok "stood down $ID (window closed)"
 fi
-wm_state standdown --id "$ID" >/dev/null
-wm_ok "stood down $ID (window closed)"

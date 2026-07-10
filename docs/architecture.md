@@ -54,7 +54,7 @@ Nothing else reaps a member.
 
 ## The crew-level wake loop (PR review)
 
-A build member's "seeing it through" is watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
+A developer member's "seeing it through" is watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
 A crew Claude session cannot rouse itself once its turn ends, so after opening a PR the member arms `bin/pr-watch` as a **harness-tracked background task** (never detached).
 It blocks, polling the PR through the forge CLI, and exits with one reason line (`merged` / `closed` / `changes-requested` / `ci-failed` / `comment` / `checks-passed`) the instant an actionable event occurs; that exit re-invokes the crew member, which acts and arms exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
 `checks-passed` fires once when the PR settles with nothing failing and nothing pending (all-green, or a repo with no CI), which is what lets a member stay `working` through CI and be woken to move into `review` only when it is genuinely on the humans; it re-arms once checks go pending/failing and settle again.
@@ -65,7 +65,23 @@ The event-decision logic lives in `bin/lib/pr-eval.py` (pure, unit-testable with
 
 This keeps the two watch loops cleanly separated at different levels: `watch-fleet` is wingman's channel to its crew (forge-agnostic), `pr-watch` is a crew member's channel to the forge.
 The forge-specific part is isolated in `pr-watch`'s `gh` calls, overridable via `WM_GH` (point it at another binary or wrapper), exactly as the agent launch line is isolated in `spawn-crew` behind `WM_AGENT`; a non-GitHub forge swaps this one script.
-Spec (and other non-PR) members have no external signal to poll, so they arm no watcher - they idle in `review` until the pilot's feedback arrives via `crew-say`.
+Analyst (and other non-PR) members have no external signal to poll, so they arm no watcher - they idle in `review` until the pilot's feedback arrives via `crew-say`.
+
+## The crew hierarchy (leads)
+
+Wingman's crew is a **tree**, with the pilot at the top. A large effort is owned by a **lead** - a crew member whose playbook is "be a manager for one effort." A lead runs the *same* intake → scope → spawn → supervise → report → escalate loop wingman runs, one layer down, over its own crew (an analyst, an architect, one or more developers, a reviewer). This is recursion over the existing primitives, not a parallel subsystem: the lead uses the same `bin/` scripts and the same watcher.
+
+**Ownership falls out of who spawns.** Every crew record carries a `parent` field, stamped by `bin/spawn-crew` from the spawner's `$WINGMAN_CREW_ID`. Wingman has none (it is the top orchestrator), so its spawns get `parent=""` (top level); a lead has its own id, so its spawns get `parent=<lead-id>`. No new flags - the tree is implicit in who ran the spawn.
+
+**Each layer sees only its direct reports.** Surfacing (`needs-attention --owner`), the watcher, and the default `crew-list` are all scoped to an owner (`""` = top level). Wingman's watcher runs `--owner ""` and sees only the top level (including a lead's rolled-up line); a lead's watcher runs `--owner <lead-id>` (the default from its own `$WINGMAN_CREW_ID`) and sees only its own workers. The pidfile/beacon/wake are keyed by owner (`watch-<owner>.*`, `wake-<owner>`; wingman keeps the legacy unsuffixed names), so wingman's watcher and each lead's watcher coexist without contending. Drill-down is always available: `crew-list --owner <id>`, `crew-list --tree`, and the tree-rendered `board.md`.
+
+**Escalation is recursive human-in-the-loop.** A worker that sets `blocked` surfaces to its owner (its lead), not to the pilot. The lead answers via `crew-say` if it can; if the decision is above its pay grade, it re-raises `blocked` on its *own* line, which surfaces one level up. Decisions travel up only as far as needed; the answer flows back down the same chain. Cascade stand-down mirrors this: standing down (or reaping) a member recurses to its descendants, so finishing a lead never orphans its sub-crew.
+
+**Peers collaborate directly.** Siblings under the same lead `crew-say` each other for routine coordination (a developer↔reviewer exchange, a developer↔developer interface negotiation) without routing through the lead - which would pour their detail into the lead's context, the exact bloat the hierarchy prevents. The lead sees only the rolled-up outcome unless a genuine decision escalates. A guardrail in `crew-say` keeps collaboration within a team: a caller may message its own reports, a sibling under the same lead, or its own lead - not arbitrary crew elsewhere in the tree (override with `--force`).
+
+**Depth cap: two crew layers.** The full chain is pilot → wingman → lead → worker; wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers. A lead does not spawn further leads; deeper nesting is a future opt-in gated behind cost guardrails.
+
+**Domain generality.** The tree, escalation, rollup, and owner-scoping know nothing about software; only the playbooks carry domain. A science lab (PI → experimental-design → analysis → peer-review) or a business team (manager → research → production → review) runs the same machinery by swapping playbooks - reuse the default role names with domain-appropriate `*.local.md` prose, or add named roles (`playbook/pi.md`, …) and a `lead.local.md` that sequences them. The lead playbook is written in role-and-handoff terms ("gather requirements → design → execute → review → integrate") with software as the concrete default, so a domain swap is a playbook swap, not a code change.
 
 ## Autonomous mode and interactive gates
 
@@ -84,18 +100,20 @@ After that, crew in that repo run fully unattended.
 
 A crew type is defined entirely by a playbook - plain prose in `playbook/`:
 
-- `playbook/spec.md` - turn a problem into a plan (or a report).
-- `playbook/build.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
-- `playbook/lead.md` - decompose a large effort and spawn/integrate its own crew.
+- `playbook/analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
+- `playbook/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
+- `playbook/developer.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
+- `playbook/reviewer.md` - review a plan or a PR and report findings.
+- `playbook/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up.
 - `playbook/research.md` - example non-dev type: gather evidence, write a cited report.
-  Shows the shape a `researcher`/`scientist`/`analyst` role takes.
+  Shows the shape a `scientist`/`pm` role takes.
 
 There is no hardcoded list of types; a type exists iff its playbook does.
 `bin/spawn-crew --list-types` enumerates them.
 
 `playbook/<type>.local.md` overrides the tracked `<type>.md` when present.
 `*.local.md` is gitignored, following the same pattern as Claude Code's `settings.json` / `settings.local.json`: customizations and private crew types can't be accidentally committed and survive `git pull` of new defaults.
-Example: to make the spec crew follow your own planning skill or checklist, write `playbook/spec.local.md` saying so.
+Example: to make the analyst crew follow your own planning skill or checklist, write `playbook/analyst.local.md` saying so.
 
 Project-discovery hints follow the same story: an optional gitignored `config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list (`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`).
 It is absent by default; the defaults cover the common case.
@@ -120,14 +138,16 @@ Use it for cross-repo work or when the repo is genuinely unclear.
 
 Machine-local runtime state, created on first run, never committed:
 
-- `crew.json` - the live roster (id, type, session id, tmux window, repo, status).
+- `crew.json` - the live roster (id, type, session id, tmux window, repo, status, `parent`).
+  `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
 - `crew/<id>.json` - each crew member's distilled status record.
-- `board.md` - the human-readable render of the roster.
-- `watch.pid` / `watch.beat` - the live watcher cycle's pid and liveness beacon.
-- `wake` - the current attention list the watcher writes when it fires.
+- `board.md` - the human-readable render of the roster, its Active section indented as a tree so a reader sees the org.
+- `watch.pid` / `watch.beat` - wingman's (owner `""`) watcher cycle's pid and liveness beacon.
+  A lead's watcher keys its own files by owner (`watch-<owner>.pid` / `watch-<owner>.beat`), so per-owner watchers coexist.
+- `wake` - the attention list wingman's watcher writes when it fires; a lead's watcher writes `wake-<owner>`.
 - `acked.json` - the last `updated` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
   A new `updated` (a genuine state change) re-surfaces.
-- `pr/<id>.json` - a build member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
+- `pr/<id>.json` - a developer member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
 - `projects.json` - the discovered-projects cache.
 - `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
   Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.

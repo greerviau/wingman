@@ -8,9 +8,9 @@ set -u
 
 # --- crew-list default hides stood-down --------------------------------------
 test_new_home
-wm_state crew-add --id a1 --type build --objective x --repo /tmp --window wm-a1 --session-id s1 >/dev/null
-wm_state crew-add --id a2 --type spec  --objective y --repo /tmp --window wm-a2 --session-id s2 >/dev/null
-wm_state crew-add --id a3 --type build --objective z --repo /tmp --window wm-a3 --session-id s3 >/dev/null
+wm_state crew-add --id a1 --type developer --objective x --repo /tmp --window wm-a1 --session-id s1 >/dev/null
+wm_state crew-add --id a2 --type analyst  --objective y --repo /tmp --window wm-a2 --session-id s2 >/dev/null
+wm_state crew-add --id a3 --type developer --objective z --repo /tmp --window wm-a3 --session-id s3 >/dev/null
 wm_state standdown --id a1 >/dev/null
 wm_state crew-set --id a3 --status died >/dev/null
 

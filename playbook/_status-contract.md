@@ -61,7 +61,14 @@ Once your turn ends you are idle and **cannot rouse yourself** - so if you are i
   It **blocks**, absorbing benign no-change polls for free, and **exits with one reason line** the instant something actionable happens - that exit re-invokes you.
 - **On each wake:** read the reason, act on it (which may move you to `working` and back), then **arm exactly one fresh cycle** before you end your turn.
   The chain persists only if you re-arm after every fire.
-- Your playbook names the concrete watcher for your kind of work (a `build` member watches its PR; a type with no external signal - like a plan awaiting approval - simply idles in `review` with no watcher, since the pilot's feedback arrives as a message).
+- Your playbook names the concrete watcher for your kind of work (a `developer` member watches its PR; a type with no external signal - like a plan awaiting approval - simply idles in `review` with no watcher, since feedback arrives as a message).
+
+## Escalation & peers
+
+Your status is watched by your **owner** - wingman if it spawned you directly, or your **lead** if a lead did. Either way the mechanics are identical (your owner runs an owner-scoped watcher over just its own reports), so nothing here changes based on who your owner is.
+
+- **Escalate up the chain, not straight to the top.** When you set `blocked`, it surfaces to your owner - your lead, if you have one - not to the pilot. Your owner answers via `bin/crew-say` if it can; if the decision is above *its* pay grade, it re-raises `blocked` on *its own* line, which surfaces one level further up. Decisions travel up only as far as needed; the answer flows back down the same chain.
+- **Collaborate with peers directly.** If you have siblings under the same lead, you may `bin/crew-say` them directly for routine coordination (e.g. a developer and a reviewer, or two developers negotiating an interface) - this does **not** go through your lead, so it never bloats its context. Find your siblings with `bin/crew-list --owner <your-own-parent>` (your parent is your owner's id). Keep talking *up* to your lead only for status it should roll up or a decision to escalate. The team guardrail in `crew-say` keeps this within your team: you can reach your reports, your siblings, and your lead - not arbitrary crew elsewhere in the tree.
 
 ## When to update
 
@@ -70,7 +77,7 @@ Update your status at these moments, without being asked:
 1. **On start** - `--status working --summary "<what I'm about to do>"`.
 2. **On meaningful progress** - refresh `--summary`.
 3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`, then wait.
-4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for build work, `--delivery <PR>`; then park and watch per the wake loop.
+4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for a PR, `--delivery <PR>`; then park and watch per the wake loop.
 5. **When the terminal condition is met** - `--status done --summary "<one-line outcome>"`.
 
 ## Keep detail out of chat, on disk

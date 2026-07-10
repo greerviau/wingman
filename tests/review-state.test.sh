@@ -3,14 +3,14 @@
 # to wingman once, like blocked, so the pilot is told "ready for review"; (2) keep
 # the member LIVE (Active list, counts as active, reconciles to died if its window
 # dies) rather than reaping it; (3) stay quiet on the follow-up work the member does
-# under `working`, so a build member fixing CI / addressing comments never
+# under `working`, so a developer member fixing CI / addressing comments never
 # re-announces "ready". No real crew/tmux/claude needed.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 # --- review surfaces once, then is quiet once acked ---------------------------
 test_new_home
-wm_state crew-add --id r1 --type build --objective x --repo /tmp --window wm-r1 --session-id s1 >/dev/null
+wm_state crew-add --id r1 --type developer --objective x --repo /tmp --window wm-r1 --session-id s1 >/dev/null
 wm_state crew-set --id r1 --status review --delivery "https://gh/pr/1" --summary "PR open" >/dev/null
 
 na="$(wm_state needs-attention)"
@@ -41,7 +41,7 @@ assert_contains "done after review surfaces the terminal outcome" "$(wm_state ne
 
 # --- a windowless review member reconciles to died ---------------------------
 test_new_home
-wm_state crew-add --id r2 --type build --objective y --repo /tmp --window wm-r2 --session-id s2 >/dev/null
+wm_state crew-add --id r2 --type developer --objective y --repo /tmp --window wm-r2 --session-id s2 >/dev/null
 wm_state crew-set --id r2 --status review --delivery "https://gh/pr/2" >/dev/null
 wm_state reconcile --windows "" >/dev/null   # no live windows
 assert_contains "a review member whose window is gone reconciles to died" \
