@@ -29,7 +29,7 @@ Talk to it in plain language, or use the slash commands:
 | "Investigate issue Y in `<repo>`" | spawns an **analyst** crew in report mode (reproduces bugs end-to-end first) |
 | "Take the lead on X" (big, end-to-end) | spawns a **lead** that hires and runs its own crew (analyst → architect → developers → reviewer) and rolls one status line up to you |
 | `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `analyst`, `architect`, `developer`, `reviewer`, `lead`, `research`, or one you added; pass `global` instead of a repo for cross-repo work |
-| `/status` | compact roster: who's on what (with each member's status), what's blocked, what's ready. Closed history is hidden by default |
+| `/status` | compact roster: who's on what (with each member's status), what's blocked, what's stalled, what's ready. Closed history is hidden by default |
 | `/blocked` | each blocked member + the decision it needs |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |

@@ -41,6 +41,13 @@ Only pass the flags that changed.
   This is your signal to wingman that you are ready to be stood down, and **wingman reaps you as soon as it sees it**.
   A deliverable that is merely ready is `review`, never `done`; reach `done` only at the true end (the PR merged/closed, the plan approved and handed off) or an explicit stand-down.
 
+## A state you never set yourself: `stalled`
+
+The supervisor watching you may externally flip your line to `stalled` when you show no sign of life on any channel - no pane output, no status update, no running child process, no CPU activity - for an extended period (default 180s) while your status claims `working`.
+That combination means your agent has likely errored or gone idle without reporting; the flip preserves your last summary inside the stall reason, and the remedy it surfaces to your owner is a takeover or stand-down.
+Parking on an armed harness-tracked watcher is recognized (the armed watcher is a live descendant process in your pane) and is never flagged, so the wake-loop pattern below needs no defensive status refreshes.
+Refresh your `summary` on meaningful progress regardless (see "When to update") - on a harness that neither repaints its pane nor runs child processes during quiet work, that refresh is the remaining escape hatch.
+
 ## Mapping your work to these states
 
 You do not need per-playbook state instructions - apply this one rule to whatever your playbook has you do:
