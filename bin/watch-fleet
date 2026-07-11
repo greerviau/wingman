@@ -129,9 +129,12 @@ cycle_live() {
 
 case "$MODE" in
   --status)
-    if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"
-    else wm_info "no live watch-fleet cycle"; fi
-    exit 0 ;;
+    # The documented, scriptable liveness check: exit 0 iff a cycle is live, 1
+    # otherwise, so a caller can test `bin/watch-fleet --status >/dev/null 2>&1`
+    # without parsing text.
+    if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"; exit 0
+    else wm_info "no live watch-fleet cycle"; exit 1; fi
+    ;;
   --stop)
     if [ -f "$PIDFILE" ]; then
       pid="$(cat "$PIDFILE" 2>/dev/null)"
@@ -146,16 +149,44 @@ case "$MODE" in
   *) : ;;   # arm/__loop/"" fall through to arm
 esac
 
+# --- atomic check-then-claim -------------------------------------------------
+# mkdir is atomic on every POSIX filesystem (no flock(1) dependency, which macOS
+# does not ship), so the check-then-claim below is wrapped in a short-lived lock
+# directory: two `watch-fleet` invocations racing in the same instant would
+# otherwise both observe no live cycle and both write $PIDFILE, the second
+# silently clobbering the first and producing two competing blocking loops. The
+# lock is held only across the check+claim (microseconds), never across the
+# blocking loop itself, so it adds no contention for the common case (one arm at
+# a time). A stuck concurrent arm is bounded at 5s rather than hanging forever;
+# a stale lock directory left by a killed process is cleared by the next arm
+# once its 50 tries are exhausted, surfacing loudly via wm_die instead of
+# wedging silently.
+CLAIMLOCK="$PIDFILE.lock"
+_claim_tries=0
+while ! mkdir "$CLAIMLOCK" 2>/dev/null; do
+  _claim_tries=$((_claim_tries+1))
+  [ "$_claim_tries" -ge 50 ] && wm_die "watcher: could not acquire the claim lock after 5s (a concurrent arm may be stuck) - see $CLAIMLOCK"
+  sleep 0.1
+done
+trap 'rmdir "$CLAIMLOCK" 2>/dev/null' EXIT
+
 # --- singleton guard --------------------------------------------------------
 # If a genuinely live cycle already holds the lock, do not start a rival loop.
+# The reworded line leads with "already armed" (mirroring what the caller just
+# attempted) and states explicitly that the pid is never a kill target - a fresh
+# arm reporting a bare "healthy pid=N" is what got misread as something to stop
+# in the incident this closes. The `watcher: healthy` token prefix is unchanged
+# so CLAUDE.md's documented arm-status parsing contract still holds.
 if cycle_live; then
-  wm_ok "watcher: healthy pid=$(cat "$PIDFILE") (beacon $(beat_age)s)"
+  wm_ok "watcher: already armed and healthy - one cycle is live (pid $(cat "$PIDFILE"), beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
+  rmdir "$CLAIMLOCK" 2>/dev/null
   exit 0
 fi
 
 # --- claim the cycle --------------------------------------------------------
 echo $$ > "$PIDFILE"
 : > "$BEATFILE" || true
+rmdir "$CLAIMLOCK" 2>/dev/null
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 

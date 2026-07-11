@@ -335,4 +335,43 @@ assert_false "watcher still fires on the real event after SIGURG" "kill -0 $upid
 assert_contains "post-SIGURG fire carries the reason" "$(cat "$WINGMAN_HOME/urg.log")" "done: u1"
 kill "$upid" 2>/dev/null
 
+# --- concurrent arms race safely (closes the TOCTOU gap, #12) ----------------
+# Two near-simultaneous arms, backgrounded and raced with &: the mkdir claim
+# lock must let exactly one win the claim, leaving exactly one live process and
+# a pidfile that names it.
+test_new_home
+wm_state crew-add --id race1 --type developer --objective race --repo /tmp --window wm-race1 --session-id sr1 >/dev/null
+wm_state crew-set --id race1 --status working --summary "in progress" >/dev/null
+"$WF" >"$WINGMAN_HOME/race-a.log" 2>&1 &
+race_a=$!
+wm_track "$race_a"
+"$WF" >"$WINGMAN_HOME/race-b.log" 2>&1 &
+race_b=$!
+wm_track "$race_b"
+sleep 3
+alive_count=0
+kill -0 "$race_a" 2>/dev/null && alive_count=$((alive_count+1))
+kill -0 "$race_b" 2>/dev/null && alive_count=$((alive_count+1))
+assert_eq "the race leaves exactly one live watcher process" "$alive_count" "1"
+pidfile_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+assert_true "the pidfile names a live process" "kill -0 $pidfile_pid"
+if kill -0 "$race_a" 2>/dev/null; then
+  assert_eq "the pidfile matches the surviving racer" "$pidfile_pid" "$race_a"
+else
+  assert_eq "the pidfile matches the surviving racer" "$pidfile_pid" "$race_b"
+fi
+kill "$race_a" "$race_b" 2>/dev/null
+
+# --- --status is the scriptable liveness check (#12) --------------------------
+test_new_home
+assert_false "no live cycle: --status exits nonzero" "\"$WF\" --status >/dev/null 2>&1"
+wm_state crew-add --id st1 --type developer --objective s --repo /tmp --window wm-st1 --session-id ss1 >/dev/null
+wm_state crew-set --id st1 --status working --summary "in progress" >/dev/null
+"$WF" >"$WINGMAN_HOME/status.log" 2>&1 &
+stpid=$!
+wm_track "$stpid"
+sleep 2
+assert_true "a live cycle: --status exits zero" "\"$WF\" --status >/dev/null 2>&1"
+kill "$stpid" 2>/dev/null
+
 test_summary

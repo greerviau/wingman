@@ -97,6 +97,8 @@ The watcher is built for exactly this:
   Do not churn extra arms while one is `healthy`.
 - The watcher checks for pending events the moment it arms, so a crew member that finishes in the gap between one fire and the next arm is surfaced by that arm, not lost.
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
+- **Never `kill` a watch-fleet process for any reason during normal operation** - the pid shown in a `healthy`/`armed` line is informational, never an instruction.
+  The only legitimate way to stop a cycle is `bin/watch-fleet --stop`, and that is a manual/testing action, not part of the normal arm-supervise-fire loop.
 
 ## Spawning crew (the recipe)
 
