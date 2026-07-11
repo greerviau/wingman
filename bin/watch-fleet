@@ -325,19 +325,15 @@ print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()))
 #      which is why the adjacency in condition 1 must carry precision there.
 # Also sets PFC_SHAPE=1 when condition 1 held regardless of stability, so the
 # caller can hold the stall check off a prompt-shaped pane that is one INTERVAL
-# away from a definitive diagnosis. The per-member capture hash lives in
-# $WM_HOME/pane-<id>.hash (the pidfile pattern); a stale file is harmless.
+# away from a definitive diagnosis. Reads $PANE_TEXT/$PANE_STABLE, which the
+# caller must set for this poll via wm_pane_snapshot before calling this (shared
+# with the API-error check, so the pane is captured and hashed once per member
+# per poll, not twice).
 prompt_freeze_check() {
   PFC_SHAPE=0
-  _pfc_id="$1"; _pfc_win="$2"
-  _pfc_text="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_pfc_win")"
-  _pfc_hashfile="$WM_HOME/pane-$(printf '%s' "$_pfc_id" | tr -c 'A-Za-z0-9._-' '_').hash"
-  _pfc_hash="$(printf '%s' "$_pfc_text" | cksum)"
-  _pfc_prev="$(cat "$_pfc_hashfile" 2>/dev/null)"
-  printf '%s\n' "$_pfc_hash" > "$_pfc_hashfile"
-  prompt_shape_in "$(printf '%s\n' "$_pfc_text" | tail -n "$WM_PERM_TAIL")" || return 1
+  prompt_shape_in "$(printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL")" || return 1
   PFC_SHAPE=1
-  [ -n "$_pfc_prev" ] && [ "$_pfc_hash" = "$_pfc_prev" ]
+  [ "$PANE_STABLE" = 1 ]
 }
 
 # Fire the wake: the two channels carry distinct roles. Stdout is the terse
@@ -410,7 +406,8 @@ for r in data:
 ' 2>/dev/null); do
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
-      if prompt_freeze_check "$_id" "$_win" && ! liveness_veto "$_id"; then
+      wm_pane_snapshot "$_id" "$_win"
+      if prompt_freeze_check && ! liveness_veto "$_id"; then
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
           >/dev/null 2>&1

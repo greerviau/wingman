@@ -215,6 +215,22 @@ wm_tmux() { tmux "$@"; }
 # reaches the status files).
 wm_tmux_pane_text() { wm_tmux capture-pane -p -t "$1" 2>/dev/null; }
 
+# Capture a window's pane text once per poll and compare it to the previous
+# poll's capture, so every per-poll caller (the permission-freeze check, the
+# API-error check) shares one capture+hash instead of each doing its own.
+# Sets PANE_TEXT (the current capture) and PANE_STABLE (1 iff byte-identical to
+# the previous poll's capture for this id, else 0). The per-id hash lives in
+# $WM_HOME/pane-<id>.hash (the pidfile-naming pattern); a stale file is harmless.
+wm_pane_snapshot() {
+  _id="$1"; _win="$2"
+  PANE_TEXT="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_win")"
+  _hashfile="$WM_HOME/pane-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').hash"
+  _hash="$(printf '%s' "$PANE_TEXT" | cksum)"
+  _prev="$(cat "$_hashfile" 2>/dev/null)"
+  printf '%s\n' "$_hash" > "$_hashfile"
+  if [ -n "$_prev" ] && [ "$_hash" = "$_prev" ]; then PANE_STABLE=1; else PANE_STABLE=0; fi
+}
+
 # Pid of the root process of a window's first pane (the agent CLI itself - spawn-crew
 # execs it as the pane command). Empty if the window is unknown.
 wm_tmux_pane_pid() {
