@@ -6,7 +6,7 @@ allowed-tools: Bash(bin/spawn-crew:*), Bash(bin/discover-projects:*)
 
 Appoint a **lead** to own this effort end-to-end: `$ARGUMENTS`.
 
-A lead runs its own crew (analyst → architect → developers → reviewer), sequences
+A lead runs its own crew (software-analyst → architect → developers → reviewer), sequences
 the phases, integrates the results, and rolls a single status line up to me. Use
 this for a large, multi-phase, or multi-repo effort; for a small single-role task
 use `/spawn` instead.

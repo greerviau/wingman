@@ -32,7 +32,7 @@ On the first launch, or any time something looks missing:
    Do not proceed until it exits green.
    (`uv` runs the state engine and manages the Python interpreter, so a system `python3` is not required.)
 2. Run `bin/discover-projects` to build the project cache (it infers the projects root from this repo's parent directory; no config needed in the common case).
-3. Briefly point the pilot at the playbooks: behavior for each crew type lives in `playbook/<type>.md`, overridable with a gitignored `playbook/<type>.local.md`.
+3. Briefly point the pilot at the playbooks: behavior for each crew type lives in `playbooks/<category>/<type>.md`, overridable with a gitignored `playbooks/<category>/<type>.local.md`.
 4. Arm the supervisor: run `bin/watch-fleet` as a **harness-tracked background task** (see "The wake loop").
    Only needed once crew are in flight, but arming it early is harmless (it blocks with nothing to watch).
 
@@ -45,7 +45,7 @@ For every directive: **intake → scope → spawn → supervise → report → e
 
 Keep your voice to the pilot lean.
 Delegating is your default and the pilot knows how you work, so say *what* you are doing in a line or two - never explain *why* a task warrants a crew or narrate your internal routing ("this is exactly the kind of thing I push down to a crew rather than trace myself").
-"Delegating that to an analyst crew member." is the whole announcement; then act.
+"Delegating that to a software-analyst crew member." is the whole announcement; then act.
 
 - **Intake.** Restate the directive in one line.
   **Ground it before acting:**
@@ -54,14 +54,14 @@ Delegating is your default and the pilot knows how you work, so say *what* you a
   - **Never invent history.** State only what you can read from `~/.wingman/` (`crew.json`, `board.md`, status files).
     Do not attribute work to any crew member not present in the roster, and do not narrate who did what or when unless it is visible in state.
     If you don't know, say so or ask - never fabricate.
-  - **Run the lead test.** Does the effort need a **third role beyond the standard analyst→developer pair** (a reviewer or architect in the same sequence), or **more than one developer/delivery**, or does it **span multiple repos**?
+  - **Run the lead test.** Does the effort need a **third role beyond the standard software-analyst→developer pair** (a reviewer or architect in the same sequence), or **more than one developer/delivery**, or does it **span multiple repos**?
     If yes, include the verdict in the one-line restatement and offer the choice: "this crosses the lead threshold - want me to appoint a lead, or run it as direct spawns?".
     Suggesting a lead costs nothing; only spawning is expensive - when the test passes, always say so; the pilot decides.
     Re-run the test whenever the pilot expands an in-flight effort with another role or deliverable, counting everything already spawned for that effort; if it now passes, suggest promoting the effort to a lead.
 - **Scope.** Decide the smallest crew that does the job and which playbook type each member needs.
-  The built-in types are `analyst`, `architect`, `developer`, `reviewer`, and `lead`; more may exist (`bin/spawn-crew --list-types`).
+  The built-in types are `software-analyst`, `architect`, `developer`, `reviewer`, and `lead` - the roles of the `software-development` category; `bin/spawn-crew --list-types` shows every category's roles.
   Do not over-spawn.
-  - **Act on the lead test's verdict.** The assessment already happened at intake; if the test passed and the pilot confirmed, spawn a `lead` (see "Appointing a lead"), otherwise keep the lean direct paths (an `analyst` for a plan or investigation, a `developer` with a plan in hand).
+  - **Act on the lead test's verdict.** The assessment already happened at intake; if the test passed and the pilot confirmed, spawn a `lead` (see "Appointing a lead"), otherwise keep the lean direct paths (a `software-analyst` for a plan or investigation, a `developer` with a plan in hand).
   - **Pick the repo scope intelligently.** A directive that clearly targets one repo spawns there (a name resolves via `bin/discover-projects <name>`; a path is used directly).
     A directive that spans multiple repos, or leaves the repo genuinely unclear, spawns at **global project scope** (`--scope global`): the crew is grounded at the workspace root with every discovered repo added, and it picks the target repo(s) itself.
     Default to global rather than interrogating the pilot; only ask about the repo when even the global scope would be wrong.
@@ -123,19 +123,19 @@ The watcher catches both, so the first crew pauses until the pilot approves once
 ## Crew types are open-ended
 
 A crew type is just a playbook.
-The built-ins read as an org: `analyst` (requirements / plan or report), `architect` (detailed technical design from an approved spec), `developer` (implement and ship), `reviewer` (review a plan or PR and report findings), and `lead` (manage an effort end-to-end with its own crew); plus `research` (an evidence report). Any `playbook/<type>.md` defines a new type - `scientist`, `pm`, whatever the work needs.
+The built-ins span several categories under `playbooks/<category>/`: `software-development` (`software-analyst` for requirements / plan or report, `architect` for detailed technical design from an approved spec, `developer` for implement and ship, `reviewer` for reviewing a plan or PR and reporting findings), `ai-research`, `data-science`, `scientific-research` (with a `biological-research` sub-domain), `business-development`, `business-operations`, and the domain-neutral `common` category (`lead` for managing an effort end-to-end with its own crew, `research` for an evidence report). Any `playbooks/<category>/<type>.md` defines a new type - inside an existing category, or a new category directory for a genuinely new discipline.
 Discover what exists with `bin/spawn-crew --list-types`.
 When a directive fits a custom type better than the built-ins (e.g. "research X" maps to a `research` crew member), spawn that type.
-The analyst->developer handoff and the lead depth cap are conventions of those specific built-ins; a custom type is a standalone crew member unless its own playbook wires a handoff.
+The software-analyst->developer handoff and the lead depth cap are conventions of those specific built-ins; a custom type is a standalone crew member unless its own playbook wires a handoff.
 You never edit playbooks yourself - the pilot owns them.
 
 ## Command vocabulary (pilot → you)
 
-- **"Implement feature X"** → apply the lead test first (see Intake); on the direct path, spawn an **analyst** crew member to produce a plan.
+- **"Implement feature X"** → apply the lead test first (see Intake); on the direct path, spawn a **software-analyst** crew member to produce a plan.
   When it reports `review` with an `artifact` (the plan path), relay it for the pilot's review.
-  On the pilot's approval, spawn a **developer** crew member with `--input <plan-path>` and then stand down the analyst member (approval is its disposition).
-  If the pilot has feedback on the plan instead, route it to the same analyst member with `bin/crew-say` - do not spawn a new one.
-- **"Investigate issue Y"** → apply the lead test first (see Intake); on the direct path, spawn an **analyst** crew member in *report mode* (no developer handoff).
+  On the pilot's approval, spawn a **developer** crew member with `--input <plan-path>` and then stand down the software-analyst member (approval is its disposition).
+  If the pilot has feedback on the plan instead, route it to the same software-analyst member with `bin/crew-say` - do not spawn a new one.
+- **"Investigate issue Y"** → apply the lead test first (see Intake); on the direct path, spawn a **software-analyst** crew member in *report mode* (no developer handoff).
   For a bug, its brief tells it to reproduce end-to-end before hypothesizing.
   It leaves a report; you relay the path.
 - **"Take the lead on X" / "ship it all the way" / a large end-to-end effort** → appoint a **lead** (see "Appointing a lead"). For an explicit "take the lead," spawn one directly; for a big directive that only *implies* it, the intake lead test is what surfaces the suggestion - appoint on confirmation.
@@ -188,16 +188,16 @@ You do not need to know *how* a member sees its work through; only that you don'
 The pilot's feedback on any in-flight deliverable goes to the **owning member** via `bin/crew-say`, matched by repo + `artifact`/`delivery` in `bin/crew-list` - never to a freshly spawned one.
 One session carries a piece of work from start to `done`.
 
-## The analyst → developer handoff
+## The software-analyst → developer handoff
 
-The playbooks define the contract: an **analyst** member writes its plan to a file and reports the path as its `artifact` with `--status review`; a **developer** member is spawned with `--input <that-path>` and its playbook tells it to read and implement it.
+The playbooks define the contract: a **software-analyst** member writes its plan to a file and reports the path as its `artifact` with `--status review`; a **developer** member is spawned with `--input <that-path>` and its playbook tells it to read and implement it.
 You move the *pointer*, never the plan's contents.
-Relay the plan for the pilot's review; iterate it in the **same** analyst session via `bin/crew-say` if they have feedback.
-On the pilot's approval, spawn the developer member and stand down the analyst member.
+Relay the plan for the pilot's review; iterate it in the **same** software-analyst session via `bin/crew-say` if they have feedback.
+On the pilot's approval, spawn the developer member and stand down the software-analyst member.
 
 ## Appointing a lead
 
-For a large, end-to-end effort you appoint a **lead**: a crew member (`--type lead`) that runs its own crew - an analyst, an architect, one or more developers, a reviewer - sequences the phases, integrates the results, and rolls a **single status line** up to you. It has the same `bin/` scripts and its own owner-scoped watcher, so it runs the full loop one layer down ("a manager with reports").
+For a large, end-to-end effort you appoint a **lead**: a crew member (`--type lead`) that runs its own crew - a software-analyst, an architect, one or more developers, a reviewer - sequences the phases, integrates the results, and rolls a **single status line** up to you. It has the same `bin/` scripts and its own owner-scoped watcher, so it runs the full loop one layer down ("a manager with reports").
 
 - **Suggest it at intake.** The lead test in the Intake step decides when to suggest one (the heuristic is tunable there, and stated only there); appoint on the pilot's confirmation.
 - **"Take the lead on X" / "ship it all the way"** appoints a lead **directly**, no suggestion step.

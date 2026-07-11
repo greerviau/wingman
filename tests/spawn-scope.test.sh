@@ -29,7 +29,7 @@ cleanup() { rm -f "$CFG"; tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null; }
 trap cleanup EXIT
 
 # --- global scope ------------------------------------------------------------
-id="$("$SPAWN" --type analyst --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"
+id="$("$SPAWN" --type software-analyst --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"
 assert_true "global spawn succeeds" "[ -n '$id' ]"
 
 scope="$(wm_state crew-get --id "$id" | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("scope"))')"
@@ -41,7 +41,7 @@ assert_true "launch adds repoA" "grep -q 'repoA' '$launch'"
 assert_true "launch adds repoB" "grep -q 'repoB' '$launch'"
 
 # --- repo scope: a discovered git repo grounds there, scope=repo -------------
-rid="$("$SPAWN" --type analyst --repo repoA --objective "just repoA" 2>/dev/null | tail -1)"
+rid="$("$SPAWN" --type software-analyst --repo repoA --objective "just repoA" 2>/dev/null | tail -1)"
 assert_true "repo-scoped spawn succeeds" "[ -n '$rid' ]"
 rscope="$(wm_state crew-get --id "$rid" | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("scope"))')"
 assert_eq "repo-scoped record has scope=repo" "$rscope" "repo"
@@ -61,25 +61,25 @@ gwt="$(wm_state crew-get --id "$id" | uv run --no-project --quiet python -c 'imp
 assert_eq "global-scope record has an empty worktree" "$gwt" ""
 
 # --- repo scope still enforces a git checkout --------------------------------
-if "$SPAWN" --type analyst --repo "$WS" --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
+if "$SPAWN" --type software-analyst --repo "$WS" --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "repo scope on a non-git path fails" "[ $rc -ne 0 ]"
 
 # --- model default: --model > $WM_MODEL > agent CLI default -------------------
 unset WM_MODEL
-nid="$("$SPAWN" --type analyst --repo repoA --objective "no model set" 2>/dev/null | tail -1)"
+nid="$("$SPAWN" --type software-analyst --repo repoA --objective "no model set" 2>/dev/null | tail -1)"
 assert_false "no --model and no WM_MODEL leaves the agent default" \
   "grep -q -- '--model' '$WINGMAN_HOME/crew/$nid.launch.sh'"
-mid="$(WM_MODEL=opus "$SPAWN" --type analyst --repo repoA --objective "env model" 2>/dev/null | tail -1)"
+mid="$(WM_MODEL=opus "$SPAWN" --type software-analyst --repo repoA --objective "env model" 2>/dev/null | tail -1)"
 assert_contains "WM_MODEL is the default when --model is not passed" \
   "$(grep -- '--model' "$WINGMAN_HOME/crew/$mid.launch.sh")" "--model 'opus'"
-xid="$(WM_MODEL=opus "$SPAWN" --type analyst --repo repoA --objective "explicit model" --model sonnet 2>/dev/null | tail -1)"
+xid="$(WM_MODEL=opus "$SPAWN" --type software-analyst --repo repoA --objective "explicit model" --model sonnet 2>/dev/null | tail -1)"
 assert_contains "an explicit --model wins over WM_MODEL" \
   "$(grep -- '--model' "$WINGMAN_HOME/crew/$xid.launch.sh")" "--model 'sonnet'"
 
 # --- argument guards ---------------------------------------------------------
-if "$SPAWN" --type analyst --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
+if "$SPAWN" --type software-analyst --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "invalid --scope is rejected" "[ $rc -ne 0 ]"
-if "$SPAWN" --type analyst --scope global --repo repoA --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
+if "$SPAWN" --type software-analyst --scope global --repo repoA --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "--scope global with --repo is rejected" "[ $rc -ne 0 ]"
 
 test_summary

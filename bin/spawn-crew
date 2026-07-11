@@ -3,7 +3,7 @@
 # interactive claude session in its own tmux window, in the target repo.
 #
 # Usage:
-#   spawn-crew --type <analyst|architect|developer|reviewer|lead> (--repo <path-or-name> | --scope global) \
+#   spawn-crew --type <software-analyst|architect|developer|reviewer|lead> (--repo <path-or-name> | --scope global) \
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
@@ -74,12 +74,14 @@ else
 fi
 
 # --- resolve the playbook (local override wins) ------------------------------
-# A crew type is valid iff a playbook exists for it. Add playbook/<type>.md
-# (tracked) or playbook/<type>.local.md (gitignored, survives pulls) to define
-# a new type - researcher, scientist, reviewer, anything.
-PLAYBOOK="$WM_REPO/playbook/$TYPE.md"
-[ -f "$WM_REPO/playbook/$TYPE.local.md" ] && PLAYBOOK="$WM_REPO/playbook/$TYPE.local.md"
-[ -f "$PLAYBOOK" ] || wm_die "no playbook for crew type '$TYPE'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create playbook/$TYPE.md (or $TYPE.local.md)"
+# A crew type is valid iff a playbook exists for it under $WM_PLAYBOOKS. A bare
+# name (e.g. "developer") is searched across every category - role names are
+# kept unique across categories, so every existing and shipped type resolves
+# unambiguously. A category-qualified name ("software-development/developer")
+# is accepted to break a genuine collision. Add
+# $WM_PLAYBOOKS/<category>/<type>.md (tracked) or .local.md (gitignored,
+# survives pulls) to define a new type.
+wm_resolve_playbook "$TYPE"
 
 # Permission posture for the (unattended) crew session. Default bypassPermissions;
 # explicit empty (WM_PERMISSION_MODE=) disables it and falls back to prompting.
@@ -99,7 +101,10 @@ slugify() {
     | tr -c 'a-z0-9' '-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-32
 }
 if [ -z "$ID" ]; then
-  ID="$(slugify "$OBJECTIVE")-$TYPE"
+  # slugify $TYPE too: a category-qualified type ("common/lead") contains a
+  # slash, which is otherwise invalid in a tmux window name and unsafe in a
+  # generated file/worktree path.
+  ID="$(slugify "$OBJECTIVE")-$(slugify "$TYPE")"
 fi
 # Ensure uniqueness against the current roster.
 base="$ID"; n=2
@@ -139,7 +144,7 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
   printf -- '---\n\n'
   cat "$PLAYBOOK"
   printf '\n\n---\n\n'
-  cat "$WM_REPO/playbook/_status-contract.md"
+  cat "$WM_PLAYBOOKS/_status-contract.md"
 } > "$SYSPROMPT"
 
 # --- write the launch script (avoids all in-tmux quoting) --------------------

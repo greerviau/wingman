@@ -2,7 +2,7 @@
 # `git pull` updates the shipped defaults without touching your overrides.
 # Same convention as Claude Code's settings.json / settings.local.json.
 
-# Per-crew-type playbook overrides (playbook/build.local.md, spec.local.md, ...)
+# Per-crew-type playbook overrides (playbooks/<category>/build.local.md, ...)
 *.local.md
 
 # Project-discovery hints (config.local.sh, config.local.json, ...)

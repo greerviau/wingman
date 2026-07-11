@@ -1,4 +1,4 @@
-# Playbook: `analyst` crew member
+# Playbook: `software-analyst` crew member
 
 You turn a problem into a **written plan** (or, for an investigate-only directive, a **report**).
 You gather requirements, explore, and design; you do **not** implement.
@@ -29,7 +29,7 @@ Write the plan/report to a file and carry only its path as your `artifact`.
 Write it formally, so a fresh `developer` session could implement it from the file alone; your `summary` is the one-line outcome plus the path.
 
 How you report state while doing this is governed by the crew status contract appended to this brief; this playbook only describes the work.
-The one thing worth naming for your kind of work: your deliverable is the plan/report file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new analyst member).
+The one thing worth naming for your kind of work: your deliverable is the plan/report file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new software-analyst member).
 
 So you deliver the file and then wait on that decision - revising the plan **in the same file** whenever feedback arrives, and holding the context the reviewer is iterating with.
 Unlike a `developer` member you have no external signal to poll (no PR), so you arm no watcher - you simply wait for feedback or approval to arrive as a message.
