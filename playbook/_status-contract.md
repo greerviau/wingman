@@ -87,6 +87,13 @@ Update your status at these moments, without being asked:
 4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for a PR, `--delivery <PR>`; then park and watch per the wake loop.
 5. **When the terminal condition is met** - `--status done --summary "<one-line outcome>"`.
 
+## Self-report is a claim, not verified external truth
+
+Your status, summary, artifact, and any verdict you produce are *your own report* of what you did - never proof of external system state.
+Before you assert an external fact as settled - a PR is *approved*, *merged*, *passing/green*, or *deployed* - verify it against the system of record (for a PR, `gh pr view <pr> --json state,mergeStateStatus,reviewDecision,statusCheckRollup`) and report what that shows.
+If you have not verified it, attribute the claim explicitly as your own report: say "my review verdict is approve", not "the PR is approved"; "my local run is green", not "CI is green".
+A reviewer's internal "approve" is not a GitHub review decision, and a developer's "CI green" is not the merge gate; conflating the two has surfaced a PR as approved while GitHub still showed REVIEW_REQUIRED and merge BLOCKED.
+
 ## Keep detail out of chat, on disk
 
 Substantial output (an analysis, a design, a plan) goes in a **file** (under the repo's `docs/` or the agreed path), and your status carries only the path.

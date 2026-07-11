@@ -41,6 +41,46 @@ EOF
 
 wm_state() { uv run --no-project --quiet "$TEST_REPO/bin/lib/wm-state.py" "$@"; }
 
+# Run a command under a hard wall-clock timeout. macOS ships no coreutils
+# `timeout`, and every watch-fleet invocation in the suite must be bounded: the
+# watcher BLOCKS until an event, so a foreground `$(watch-fleet)` that never fires
+# would wedge the test - and, through tests/run.sh, the whole suite - forever.
+# Returns the command's own exit status when it finishes in time; on timeout the
+# command is killed (TERM, then KILL) and a diagnostic goes to stderr so the
+# awaiting assertion fails loudly instead of hanging. Usable inside command
+# substitution: only the command writes to stdout; the watchdog's stdout is
+# detached so it never holds the substitution pipe open. bash-3.2-safe.
+wm_timeout() {
+  _wt_secs="$1"; shift
+  "$@" &
+  _wt_pid=$!
+  ( sleep "$_wt_secs"
+    printf 'wm_timeout: command exceeded %ss (pid %s); killing\n' "$_wt_secs" "$_wt_pid" >&2
+    kill -TERM "$_wt_pid" 2>/dev/null
+    sleep 2
+    kill -KILL "$_wt_pid" 2>/dev/null ) >/dev/null &
+  _wt_wd=$!
+  wait "$_wt_pid" 2>/dev/null; _wt_rc=$?
+  kill "$_wt_wd" 2>/dev/null
+  wait "$_wt_wd" 2>/dev/null
+  return "$_wt_rc"
+}
+
+# Track background watch-fleet (or other) pids a test launches, so an EXIT trap can
+# reap them. A test's happy path still kills its own watchers explicitly; this is
+# the safety net that stops a blocking watcher outliving the test - and leaking
+# into later suites - if an assertion path returns early. Install with:
+#   trap wm_kill_tracked EXIT
+# and call `wm_track "$pid"` after each background launch.
+WM_TRACKED_PIDS=""
+wm_track() { WM_TRACKED_PIDS="$WM_TRACKED_PIDS $1"; }
+wm_kill_tracked() {
+  _rc=$?
+  [ -n "$WM_TRACKED_PIDS" ] && kill $WM_TRACKED_PIDS 2>/dev/null
+  WM_TRACKED_PIDS=""
+  return "$_rc"
+}
+
 ok()   { _TESTS_RUN=$((_TESTS_RUN+1)); printf '  ok   - %s\n' "$1"; }
 fail() { _TESTS_RUN=$((_TESTS_RUN+1)); _TESTS_FAIL=$((_TESTS_FAIL+1)); printf '  FAIL - %s\n' "$1"; }
 

@@ -10,6 +10,9 @@ set -u
 WF="$TEST_REPO/bin/watch-fleet"
 STOP_GUARD="$TEST_REPO/hooks/stop-guard.sh"
 export WM_WATCH_INTERVAL=1
+# Never let a blocking watcher wedge the suite: every foreground watch-fleet run is
+# bounded by wm_timeout, and any backgrounded one is reaped on exit.
+trap wm_kill_tracked EXIT
 
 # --- needs-attention emits once, then is quiet after an explicit ack ----------
 test_new_home
@@ -38,7 +41,7 @@ test_new_home
 wm_state crew-add --id e1 --type analyst --objective y --repo /tmp --window wm-e1 --session-id s2 >/dev/null
 wm_state crew-set --id e1 --status done --summary "done y" >/dev/null
 
-out="$("$WF" 2>/dev/null)"; rc=$?
+out="$(wm_timeout 30 "$WF" 2>/dev/null)"; rc=$?
 assert_eq "first arm fires and exits 0" "$rc" "0"
 assert_contains "first arm surfaces the done member" "$out" "done: e1"
 assert_true "watcher recorded an ack store" "[ -f \"$WINGMAN_HOME/acked.json\" ]"
@@ -47,6 +50,7 @@ assert_true "watcher recorded an ack store" "[ -f \"$WINGMAN_HOME/acked.json\" ]
 # immediately - it blocks. (Before the fix it re-fired on every arm, forever.)
 "$WF" >"$WINGMAN_HOME/rearm.log" 2>&1 &
 wpid=$!
+wm_track "$wpid"
 sleep 3
 assert_true "re-arm keeps blocking on the already-acked done event" "kill -0 $wpid"
 assert_false "re-arm did not re-fire the acked event" "grep -q 'done: e1' \"$WINGMAN_HOME/rearm.log\""

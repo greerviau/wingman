@@ -57,6 +57,18 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
+# Immunize the wake loop against SIGURG (signal 16). This script is armed as a
+# harness-tracked background task, and its exit is the only channel that wakes an
+# idle managing session; a stray SIGURG that reaches it terminates the process
+# (exit 144 = 128+16) and silently ends that session's turn. SIGURG's default
+# disposition is "ignore", but the background-launch environment can hand the
+# process a non-default disposition, and the per-poll subprocess churn (pane
+# capture, `ps` scan, the stall probe's blocking child) widens the window for one
+# to land fatally. Setting it to SIG_IGN here is unconditional and inherited by
+# every child spawned below, so neither the loop nor its probes can be killed by a
+# signal that carries no meaning for this tool.
+trap '' URG
+
 wm_state init >/dev/null
 
 # --- parse owner scope + mode -----------------------------------------------

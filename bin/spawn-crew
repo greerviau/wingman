@@ -194,7 +194,9 @@ wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --window "$WINDOW" --session-id "$SID" >/dev/null
 
 # --- deliver the opening objective as the first user message -----------------
-# Give the interactive session a moment to reach its input prompt, then type.
+# A small head start off the window launch; wm_tmux_send_message then waits for the
+# TUI to actually be ready before typing and confirms the submit registered, so a
+# variable startup no longer leaves the objective unsent in the input box.
 sleep "${WM_SPAWN_DELAY:-2}"
 OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"

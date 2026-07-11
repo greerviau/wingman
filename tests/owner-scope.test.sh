@@ -11,6 +11,9 @@ set -u
 
 WF="$TEST_REPO/bin/watch-fleet"
 export WM_WATCH_INTERVAL=1
+# Reap any backgrounded watcher on exit so a blocking one can never outlive the
+# test and leak into later suites.
+trap wm_kill_tracked EXIT
 
 # --- owner-scoped surfacing (escalation bubble-up) ---------------------------
 test_new_home
@@ -60,8 +63,10 @@ wm_state crew-set --id wkr1  --status working --summary "coding" >/dev/null
 # Arm wingman's watcher (top) and the lead's watcher; both must block, not contend.
 "$WF" --owner ""     >"$WINGMAN_HOME/top.log"  2>&1 &
 tpid=$!
+wm_track "$tpid"
 "$WF" --owner lead1  >"$WINGMAN_HOME/lead.log" 2>&1 &
 lpid=$!
+wm_track "$lpid"
 sleep 2
 assert_true "top watcher is blocking"  "kill -0 $tpid"
 assert_true "lead watcher is blocking" "kill -0 $lpid"

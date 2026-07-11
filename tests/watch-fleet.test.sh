@@ -10,12 +10,16 @@ set -u
 
 WF="$TEST_REPO/bin/watch-fleet"
 export WM_WATCH_INTERVAL=1
+# The watcher blocks until an event fires, so bound every foreground run with
+# wm_timeout and reap any backgrounded one on exit; a watcher that never fires can
+# then never wedge this file or, through run.sh, the whole suite.
+trap wm_kill_tracked EXIT
 
 # --- fires immediately when an event is already pending on arm ---------------
 test_new_home
 wm_state crew-add --id a1 --type analyst --objective x --repo /tmp --window wm-a1 --session-id s1 >/dev/null
 wm_state crew-set --id a1 --status done --summary "finished x" >/dev/null
-out="$("$WF" 2>/dev/null)"; rc=$?
+out="$(wm_timeout 45 "$WF" 2>/dev/null)"; rc=$?
 assert_eq "arm fires and exits 0 when a member is already done" "$rc" "0"
 assert_contains "fire prints the done reason line" "$out" "done: a1 finished x"
 assert_contains "wake file names the member" "$(cat "$WINGMAN_HOME/wake")" "a1"
@@ -26,11 +30,12 @@ wm_state crew-add --id b1 --type analyst --objective y --repo /tmp --window wm-b
 wm_state crew-set --id b1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/out.log" 2>&1 &
 wpid=$!
+wm_track "$wpid"
 sleep 3
 assert_true "watcher keeps blocking while member is working" "kill -0 $wpid"
 
 # singleton: a second arm sees the live cycle and stands down as 'healthy'
-out2="$("$WF" 2>&1)"; rc2=$?
+out2="$(wm_timeout 45 "$WF" 2>&1)"; rc2=$?
 assert_eq "second arm exits 0" "$rc2" "0"
 assert_contains "second arm reports healthy, does not start a rival" "$out2" "healthy"
 
@@ -45,7 +50,7 @@ kill "$wpid" 2>/dev/null
 test_new_home
 wm_state crew-add --id c1 --type developer --objective z --repo /tmp --window wm-c1 --session-id s3 >/dev/null
 wm_state crew-set --id c1 --status blocked --blocker "need a decision" >/dev/null
-out3="$("$WF" 2>/dev/null)"
+out3="$(wm_timeout 45 "$WF" 2>/dev/null)"
 assert_contains "blocked member fires with its reason" "$out3" "blocked: c1"
 
 # --- fire carries the full picture: deltas + directive + roster ---------------
@@ -54,7 +59,7 @@ wm_state crew-add --id d1 --type analyst --objective a --repo /tmp --window wm-d
 wm_state crew-add --id d2 --type developer --objective b --repo /tmp --window wm-d2 --session-id s5 >/dev/null
 wm_state crew-set --id d2 --status working --summary "still building" >/dev/null
 wm_state crew-set --id d1 --status review --artifact /tmp/plan.md >/dev/null
-out4="$("$WF" 2>/dev/null)"
+out4="$(wm_timeout 45 "$WF" 2>/dev/null)"
 assert_contains "fire prints the review reason line" "$out4" "review: d1 /tmp/plan.md"
 assert_contains "stdout directs beyond the deltas" "$out4" "not the full picture"
 assert_contains "directive names the wake file path" "$out4" "$WINGMAN_HOME/wake"
@@ -70,7 +75,7 @@ test_new_home
 wm_state crew-add --id t1 --type analyst --objective c --repo /tmp --window wm-t1 --session-id s6 >/dev/null
 wm_state crew-add --id w1 --type developer --objective d --repo /tmp --window wm-w1 --session-id s7 --parent lead-x >/dev/null
 wm_state crew-set --id w1 --status done --summary "shipped" >/dev/null
-out5="$("$WF" --owner lead-x 2>/dev/null)"
+out5="$(wm_timeout 45 "$WF" --owner lead-x 2>/dev/null)"
 assert_contains "lead-scoped fire reports its own member" "$out5" "done: w1"
 assert_contains "directive names the lead-keyed wake file" "$out5" "wake-lead-x"
 wake5="$(cat "$WINGMAN_HOME/wake-lead-x")"
@@ -88,6 +93,7 @@ wm_age_status z1
 WM_STALL_IDLE=6 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
   "$WF" >"$WINGMAN_HOME/stall.log" 2>&1 &
 spid=$!
+wm_track "$spid"
 i=0; while kill -0 "$spid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
 assert_false "watcher exited on the stall" "kill -0 $spid"
 assert_contains "cycle exits with the stalled reason" "$(cat "$WINGMAN_HOME/stall.log")" "stalled: z1"
@@ -104,6 +110,7 @@ wm_age_status z2
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
   "$WF" >/dev/null 2>&1 &
 bpid=$!
+wm_track "$bpid"
 sleep 8
 assert_true "watcher keeps blocking on a busy pane" "kill -0 $bpid"
 assert_contains "busy member is never flagged" "$(wm_state crew-get --id z2)" '"status": "working"'
@@ -123,6 +130,7 @@ wm_age_status z3
 WM_STALL_IDLE=6 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
   "$WF" >/dev/null 2>&1 &
 ppid=$!
+wm_track "$ppid"
 sleep 14
 assert_true "watcher keeps blocking on a parked member" "kill -0 $ppid"
 assert_contains "parked member is never flagged" "$(wm_state crew-get --id z3)" '"status": "working"'
@@ -138,7 +146,7 @@ tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z4 --type developer --objective h --repo /tmp --window wm-z4 --session-id s11 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z4 'printf "Do you want to proceed?\n> 1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
 wm_age_status z4
-out6="$(WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
+out6="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
 assert_contains "permission prompt fires as blocked, not stalled" "$out6" "blocked: z4"
 assert_contains "frozen member reads blocked" "$(wm_state crew-get --id z4)" '"status": "blocked"'
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
@@ -153,6 +161,7 @@ wm_state crew-add --id z5 --type developer --objective i --repo /tmp --window wm
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z5 'echo "the test fixture echoes: Do you want to proceed?"; sleep 600'
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 qpid=$!
+wm_track "$qpid"
 sleep 6
 assert_true "watcher keeps blocking on quoted prompt text" "kill -0 $qpid"
 assert_contains "quoting member is never flagged" "$(wm_state crew-get --id z5)" '"status": "working"'
@@ -168,6 +177,7 @@ wm_state crew-add --id z6 --type developer --objective j --repo /tmp --window wm
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z6 'printf "Do you want to proceed?\n  1. Yes\n"; while :; do echo tick; sleep 1; done'
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 lpid=$!
+wm_track "$lpid"
 sleep 6
 assert_true "watcher keeps blocking on a live prompt-shaped pane" "kill -0 $lpid"
 assert_contains "live member is never flagged" "$(wm_state crew-get --id z6)" '"status": "working"'
@@ -185,6 +195,7 @@ wm_state crew-add --id z7 --type developer --objective k --repo /tmp --window wm
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z7 'printf "test fixture that echoes: Do you want to proceed?\nthree conditions:\n1. anchor\n2. stability\n3. phrases\n"; sleep 600'
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 kpid=$!
+wm_track "$kpid"
 sleep 6
 assert_true "watcher keeps blocking on a parked prompt-discussing pane" "kill -0 $kpid"
 assert_contains "parked discussing member is never flagged" "$(wm_state crew-get --id z7)" '"status": "working"'
@@ -201,7 +212,7 @@ wm_state crew-add --id z8 --type developer --objective l --repo /tmp --window wm
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z8 'printf "Do you want to proceed?\n  1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
 wm_age_status z8
 sleep 5   # let the frozen pane out-age WM_STALL_IDLE before the watcher ever looks
-out8="$(WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+out8="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "pre-aged freeze still fires as blocked" "$out8" "blocked: z8"
 assert_false "pre-aged freeze is never misdiagnosed stalled" "printf '%s' \"\$out8\" | grep -q 'stalled: z8'"
 assert_contains "pre-aged frozen member reads blocked" "$(wm_state crew-get --id z8)" '"status": "blocked"'
@@ -212,7 +223,7 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z9 --type developer --objective m --repo /tmp --window wm-z9 --session-id s16 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z9 'printf "Do you want to make this edit to foo.py?\n  1. Yes\n  2. No\n"; sleep 600'
-out9="$(WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+out9="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "edit-gate phrasing fires as blocked" "$out9" "blocked: z9"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
@@ -225,8 +236,36 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z10 --type developer --objective n --repo /tmp --window wm-z10 --session-id s17 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z10 'printf "Quick safety check: Is this a project you created or one you trust?\nIf not, take a moment to review this folder first.\n\nSecurity guide\n\n 1. Yes, I trust this folder\n   2. No, exit\n\nEnter to confirm\n"; sleep 600'
-out10="$(WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+out10="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "trust dialog fires as blocked via its option row" "$out10" "blocked: z10"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- the wake loop is immune to SIGURG (regression: spurious exit 144) --------
+# The watcher is armed as a background task whose exit is the only channel that
+# wakes an idle managing session. A stray SIGURG (signal 16) reaching it would
+# terminate it (exit 144 = 128+16) and silently end that turn, so the loop
+# explicitly ignores SIGURG. Lock the directive in place and prove a SIGURG burst
+# neither kills the blocking loop nor stops it firing on the genuine event.
+assert_true "watch-fleet ignores SIGURG explicitly" "grep -qE \"trap '' (URG|SIGURG)\" '$WF'"
+
+test_new_home
+wm_state crew-add --id u1 --type developer --objective u --repo /tmp --window wm-u1 --session-id s18 >/dev/null
+wm_state crew-set --id u1 --status working --summary "in progress" >/dev/null
+"$WF" >"$WINGMAN_HOME/urg.log" 2>&1 &
+upid=$!
+wm_track "$upid"
+sleep 2
+j=0; while [ "$j" -lt 40 ]; do
+  kill -URG "$upid" 2>/dev/null
+  for _c in $(pgrep -P "$upid" 2>/dev/null); do kill -URG "$_c" 2>/dev/null; done
+  j=$((j+1))
+done
+sleep 1
+assert_true "watcher survives a SIGURG burst and keeps blocking" "kill -0 $upid"
+wm_state crew-set --id u1 --status done --summary "done u" >/dev/null
+i=0; while kill -0 "$upid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
+assert_false "watcher still fires on the real event after SIGURG" "kill -0 $upid"
+assert_contains "post-SIGURG fire carries the reason" "$(cat "$WINGMAN_HOME/urg.log")" "done: u1"
+kill "$upid" 2>/dev/null
 
 test_summary
