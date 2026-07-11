@@ -115,19 +115,68 @@ wm_tmux_window_activity_age() {
   echo $(( $(date +%s) - _act ))
 }
 
-# Deliver a message into a live interactive session: type the (possibly large)
-# text, then submit with Enter. The two keystrokes are split by a short settle
-# delay on purpose. An interactive TUI (e.g. Claude Code) ingests a rapid bulk
-# burst as a bracketed paste - the "[Pasted text #N]" placeholder - and an Enter
-# fired in the same burst is absorbed as a newline inside that paste instead of
-# submitting it, leaving the message sitting unexecuted in the input box. The
-# delay lets the paste finalize so the following Enter is seen as a submit.
-# Override the settle time (seconds) with WM_SUBMIT_DELAY.
+# Wait until a target pane's interactive TUI has finished starting and is ready to
+# accept input, rather than guessing with a fixed delay. A freshly launched agent
+# paints a splash/prompt and connects MCP servers before it will honour keystrokes;
+# keys sent into that window land but a submit can be swallowed by the startup
+# transition. Readiness is inferred harness-neutrally: the pane is non-empty and
+# byte-stable across two consecutive reads (startup paints, then settles at an idle
+# prompt). An already-idle session (the crew-say path) satisfies this on the first
+# check. Best-effort and bounded (WM_READY_TRIES polls of WM_READY_POLL seconds), so
+# a pane that never settles still proceeds rather than hanging.
+wm_tmux_pane_ready() {
+  _pr_target="$1"
+  _pr_prev=""; _pr_i=0
+  _pr_max="${WM_READY_TRIES:-40}"
+  while [ "$_pr_i" -lt "$_pr_max" ]; do
+    _pr_text="$(wm_tmux_pane_text "$_pr_target")"
+    _pr_cur="$(printf '%s' "$_pr_text" | cksum)"
+    if [ -n "$_pr_text" ] && [ "$_pr_cur" = "$_pr_prev" ]; then
+      return 0
+    fi
+    _pr_prev="$_pr_cur"
+    sleep "${WM_READY_POLL:-0.5}"
+    _pr_i=$((_pr_i+1))
+  done
+  return 0
+}
+
+# Deliver a message into a live interactive session: wait for the TUI to be ready,
+# type the (possibly large) text, submit with Enter, then confirm the submit
+# actually registered and re-press Enter if it did not.
+#
+# Two failure modes motivate this. First, an interactive TUI (e.g. Claude Code)
+# ingests a rapid bulk burst as a bracketed paste - the "[Pasted text #N]"
+# placeholder - and an Enter fired in the same burst is absorbed as a newline
+# inside that paste instead of submitting; the WM_SUBMIT_DELAY settle between the
+# text and the Enter lets the paste finalize first. Second, during a freshly
+# spawned session's startup the Enter can be swallowed by the startup transition
+# even after the text lands, leaving the message unexecuted in the input box (a
+# fixed delay cannot cover a variable startup). Submitting always consumes the
+# input box and advances the pane, so the confirm loop compares the pane against
+# its just-composed state and re-presses Enter until it advances (bounded by
+# WM_SUBMIT_TRIES). Extra Enters against an already-submitted, empty prompt are
+# inert, so the retry is safe for the already-reliable crew-say path too.
 wm_tmux_send_message() {
   _target="$1"; _text="$2"
+  wm_tmux_pane_ready "$_target"
   wm_tmux send-keys -t "$_target" -l "$_text"
   sleep "${WM_SUBMIT_DELAY:-1}"
+  # Snapshot the pane with the text composed in the input box, then submit.
+  _sm_composed="$(wm_tmux_pane_text "$_target" | cksum)"
   wm_tmux send-keys -t "$_target" Enter
+  _sm_i=0
+  _sm_max="${WM_SUBMIT_TRIES:-6}"
+  while [ "$_sm_i" -lt "$_sm_max" ]; do
+    sleep "${WM_SUBMIT_POLL:-0.8}"
+    _sm_now="$(wm_tmux_pane_text "$_target" | cksum)"
+    # A registered submit clears the composed input and echoes/streams below it, so
+    # any change from the composed snapshot means the Enter took.
+    [ "$_sm_now" != "$_sm_composed" ] && return 0
+    wm_tmux send-keys -t "$_target" Enter
+    _sm_i=$((_sm_i+1))
+  done
+  return 0
 }
 
 # Ensure the shared tmux server + wingman session exist (detached).

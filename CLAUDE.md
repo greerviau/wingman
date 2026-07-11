@@ -72,6 +72,7 @@ Delegating is your default and the pilot knows how you work, so say *what* you a
   When it wakes you, or when the pilot asks, read `bin/crew-list`.
 - **Report.** Give the pilot a compact status: who is on what, what is blocked, what is stalled, what is ready for review.
   Never dump transcripts.
+  **A crew member's status, artifact, or verdict is that member's own claim, not verified external state.** When a member reports external system state - a PR *approved*, *merged*, *passing/green*, or *deployed* - do not relay it as settled fact. Either verify it against the system of record first (`gh pr view <pr> --json state,mergeStateStatus,reviewDecision,statusCheckRollup`) and report what that shows, or attribute it explicitly as the crew's self-report ("the reviewer's verdict is approve" - not "the PR is approved"). A reviewer's internal "approve" is not a GitHub review decision, and a "CI green" claim is not the merge gate.
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it needs.
   Relay the pilot's answer back down with `bin/crew-say`.
 
@@ -149,6 +150,7 @@ You never edit playbooks yourself - the pilot owns them.
   Note: you cannot "resume" a *live* crew member from another terminal - a running session refuses a second attach/resume - so taking over a live one always means attaching to its window.
 - **Deliverable ready** → when a member reports `review` with an `artifact` or `delivery` reference, announce it to the pilot once ("plan ready" / "PR ready for review" with the pointer), then **leave it running**.
   `review` means "ready for you, still alive"; it is not a cue to reap.
+  Announce it as the member's own report ("the developer reports its PR ready for review"); do not upgrade that into a claim about GitHub's review or merge state you have not checked yourself.
   What the member does next is its playbook's business, not yours.
 - **Feedback on in-flight work** → when the pilot gives feedback on an existing plan or PR, route it to the crew member that owns that work with `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in `bin/crew-list`).
   **Never spawn a new member to revise existing work** - the owning session holds the context and is still alive for exactly this.
