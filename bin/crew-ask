@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# crew-ask - the synchronous counterpart to crew-say: pose a direct question to
+# one of your delegates and capture that delegate's own distilled answer back into
+# your context, without ever scraping its pane.
+#
+# Where crew-say is a one-way, fire-and-forget inject (it delivers a message and
+# captures nothing), crew-ask is a request/response path on a dedicated channel:
+# each ask is one record under ~/.wingman/ask/<req>.json, the delegate authors a
+# bounded answer into it, and the caller is woken to read it - all off the status/
+# needs-attention channel, so an answer to a side question never perturbs the
+# delegate's own lifecycle (it stays `working`; it merely replies on the side).
+#
+# Three subcommands, three actors:
+#
+#   crew-ask [--force] <id> "<question>"        (caller -> delegate)  SEND
+#     Runs the team guardrail (same policy as crew-say), mints a request id,
+#     records the pending request, and delivers a FRAMED question into the
+#     delegate's live session over the same tmux primitive crew-say uses. Prints
+#     the request id and the exact `await` command to arm. Foreground; happens once.
+#
+#   crew-ask reply --id <req> --answer "<distilled>" [--answer-file <path>]
+#                                               (delegate -> caller)  REPLY
+#     The delegate, on seeing the framed message, writes a bounded answer. An
+#     enforced cap keeps it distilled; --answer-file points at fuller detail
+#     without inlining it. Answering does NOT change the delegate's own status.
+#
+#   crew-ask await --id <req> [--timeout <sec>] (caller waits)        AWAIT
+#     A blocking, single-shot wake-loop watcher, armed by the caller as a
+#     harness-tracked background task exactly like pr-watch/watch-fleet. It polls
+#     the response record and EXITS with one reason line the instant the answer
+#     lands, the delegate dies, or the timeout elapses - that exit re-invokes the
+#     idle caller, which reads ~/.wingman/ask/<req>.json and continues.
+#
+# Events await fires (one per exit):
+#   answered: <req> <inline answer>      the delegate replied
+#   undeliverable: <req> <why>           the delegate died/vanished before replying
+#   unanswered: <req> <why>              no reply within the timeout
+#
+# The ask channel deliberately never writes the wake file, never calls `ack`, and
+# never appears in needs-attention, so it composes cleanly with watch-fleet: a
+# caller can have both armed at once (they use distinct pidfiles/beacons and never
+# contend), and a landed answer never masquerades as a roster event.
+#
+# Harness boundary: message delivery goes through wm_tmux_send_message (the one
+# isolated tmux boundary, shared with crew-say/spawn-crew); the wake is the
+# harness's tracked-background-task exit, exactly as for watch-fleet/pr-watch.
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+usage() {
+  sed -n '2,60p' "$0"
+  exit "${1:-0}"
+}
+
+# ---------------------------------------------------------------- reply
+cmd_reply() {
+  _req=""; _answer=""; _answer_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --id)          _req="$2"; shift 2 ;;
+      --answer)      _answer="$2"; shift 2 ;;
+      --answer-file) _answer_file="$2"; shift 2 ;;
+      -h|--help)     usage 0 ;;
+      *)             wm_die "unknown arg: $1" ;;
+    esac
+  done
+  [ -n "$_req" ] || wm_die "usage: crew-ask reply --id <req> --answer \"<answer>\" [--answer-file <path>]"
+  [ -n "$_answer" ] || wm_die "usage: crew-ask reply --id <req> --answer \"<answer>\" [--answer-file <path>]"
+  _me="${WINGMAN_CREW_ID:-}"
+  [ -n "$_me" ] || wm_die "WINGMAN_CREW_ID must be set (a reply comes from the delegate that was asked)"
+  # wm-state enforces the cap, the anti-spoof check (responder must equal the
+  # addressed delegate), and refuses a closed request. Surface its error verbatim.
+  if [ -n "$_answer_file" ]; then
+    wm_state ask-reply --id "$_req" --responder "$_me" --answer "$_answer" --answer-file "$_answer_file" >/dev/null \
+      || exit 1
+  else
+    wm_state ask-reply --id "$_req" --responder "$_me" --answer "$_answer" >/dev/null \
+      || exit 1
+  fi
+  wm_ok "replied to request $_req"
+}
+
+# ---------------------------------------------------------------- await
+# Read one field from the ask record (JSON) via wm-state ask-get.
+ask_field() {
+  wm_state ask-get --id "$1" 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(r.get(sys.argv[1]) if r.get(sys.argv[1]) is not None else "")
+' "$2" 2>/dev/null
+}
+
+cmd_await() {
+  _req=""; _once=0; _timeout=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --id)      _req="$2"; shift 2 ;;
+      --timeout) _timeout="$2"; shift 2 ;;
+      --once)    _once=1; shift ;;
+      -h|--help) usage 0 ;;
+      *)         wm_die "unknown arg: $1" ;;
+    esac
+  done
+  [ -n "$_req" ] || wm_die "usage: crew-ask await --id <req> [--timeout <sec>]"
+  [ -z "$_timeout" ] && _timeout="${WM_ASK_TIMEOUT:-300}"
+  _interval="${WM_ASK_WATCH_INTERVAL:-3}"
+  _grace="${WM_ASK_WATCH_GRACE:-30}"
+
+  wm_state init >/dev/null
+  _pidfile="$WM_HOME/ask/$_req.pid"
+  _beatfile="$WM_HOME/ask/$_req.beat"
+
+  # The delegate this request is addressed to (for the delegate-gone check).
+  _to="$(ask_field "$_req" to)"
+
+  # Fire: print the single reason line (that stdout IS the wake), plus a directive
+  # that borrows the wake-handling lesson - the surfaced line is an instruction,
+  # not bare data - and explicitly marks this as a captured reply, NOT a roster
+  # event, so the caller does not conflate it with a watch-fleet delta wake.
+  fire() {
+    _reason="$1"
+    printf '%s\n' "$_reason"
+    printf -- '--\n'
+    printf 'Read %s/ask/%s.json for the full answer, then continue the work that was\n' "$WM_HOME" "$_req"
+    printf 'waiting on it. This is a captured reply, not a crew status event - do not\n'
+    printf 'report it as roster status.\n'
+    rm -f "$_pidfile"
+    exit 0
+  }
+
+  # One evaluation of the request state, in priority order. Prints a reason and
+  # returns 0 iff there is an actionable event; returns 1 to keep waiting.
+  eval_once() {
+    _status="$(ask_field "$_req" status)"
+    if [ "$_status" = answered ]; then
+      _ans="$(ask_field "$_req" answer | tr '\n' ' ')"
+      _af="$(ask_field "$_req" answer_file)"
+      if [ -n "$_af" ]; then
+        printf 'answered: %s %s (detail: %s)\n' "$_req" "$_ans" "$_af"
+      else
+        printf 'answered: %s %s\n' "$_req" "$_ans"
+      fi
+      return 0
+    fi
+    if [ "$_status" != pending ]; then
+      # Already resolved to timeout/undeliverable by a prior cycle (or externally).
+      printf 'unanswered: %s request is %s\n' "$_req" "$_status"
+      return 0
+    fi
+    if delegate_gone; then
+      wm_state ask-resolve --id "$_req" --status undeliverable \
+        --note "delegate $_to is gone" >/dev/null 2>&1
+      # Compare-and-set may have lost to an answer that landed in the same tick.
+      if [ "$(ask_field "$_req" status)" = answered ]; then
+        eval_once; return $?
+      fi
+      printf 'undeliverable: %s delegate %s is gone\n' "$_req" "$_to"
+      return 0
+    fi
+    return 1
+  }
+
+  # The delegate is gone iff its roster status is a terminal one, or (when a tmux
+  # session exists to check against) its window is absent. When no session exists
+  # to check, absence is "can't tell" - never fire undeliverable on that alone.
+  delegate_gone() {
+    _dg_st="$(wm_state crew-get --id "$_to" 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    print(json.load(sys.stdin).get("status") or "")
+except Exception:
+    pass
+' 2>/dev/null)"
+    case "$_dg_st" in died|stood-down) return 0 ;; esac
+    if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+      wm_tmux_windows | grep -qx "wm-$_to" || return 0
+    fi
+    return 1
+  }
+
+  if [ "$_once" = 1 ]; then
+    # Single poll (for tests): print an event if one is pending, else nothing.
+    # No timeout dimension - --once has no accumulated elapsed to measure against.
+    if reason="$(eval_once)"; then printf '%s\n' "$reason"; fi
+    exit 0
+  fi
+
+  # --- singleton guard ------------------------------------------------------
+  # A live waiter (pid alive + fresh beacon) already covers this request; a second
+  # arm stands down rather than double-firing, so the caller can re-arm defensively.
+  if [ -f "$_pidfile" ] && [ -f "$_beatfile" ]; then
+    _p="$(cat "$_pidfile" 2>/dev/null)"
+    if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+      _bm="$(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_beatfile" 2>/dev/null)"
+      if [ -n "$_bm" ] && [ $(( $(date +%s) - _bm )) -lt "$_grace" ]; then
+        wm_ok "waiter: healthy pid=$_p (request $_req)"
+        exit 0
+      fi
+    fi
+  fi
+
+  echo $$ > "$_pidfile"
+  : > "$_beatfile" || true
+  trap 'rm -f "$_pidfile"; exit 0' INT TERM
+  wm_ok "waiter: armed pid=$$ (request $_req, timeout ${_timeout}s)"
+
+  _start="$(date +%s)"
+  # Top-of-loop check (at-least-once): an answer already present the instant the
+  # cycle arms fires immediately, mirroring watch-fleet/pr-watch.
+  while :; do
+    : > "$_beatfile" || true   # liveness beacon for the singleton guard + Stop hook
+    if reason="$(eval_once)"; then fire "$reason"; fi
+    if [ $(( $(date +%s) - _start )) -ge "$_timeout" ]; then
+      wm_state ask-resolve --id "$_req" --status timeout \
+        --note "no reply within ${_timeout}s" >/dev/null 2>&1
+      # An answer may have landed in the same tick; the compare-and-set lets it win.
+      if [ "$(ask_field "$_req" status)" = answered ]; then
+        reason="$(eval_once)"; fire "$reason"
+      fi
+      fire "unanswered: $_req no reply within ${_timeout}s"
+    fi
+    sleep "$_interval"
+  done
+}
+
+# ---------------------------------------------------------------- send
+cmd_send() {
+  _force=0
+  if [ "${1:-}" = "--force" ]; then _force=1; shift; fi
+  _id="${1:-}"; _q="${2:-}"
+  [ -n "$_id" ] || wm_die "usage: crew-ask [--force] <id> \"<question>\""
+  [ -n "$_q" ] || wm_die "usage: crew-ask [--force] <id> \"<question>\""
+
+  # Team guardrail: identical policy to crew-say, via the shared helper.
+  if [ "$_force" != 1 ] && [ -z "${WM_TEAM_FORCE:-}" ]; then
+    _caller="${WINGMAN_CREW_ID:-}"
+    _verdict="$(wm_team_guardrail "$_caller" "$_id")"
+    if [ "$_verdict" = deny ]; then
+      _who="${_caller:-wingman}"
+      wm_die "team guardrail: '$_who' may only ask its own reports, a sibling under the same lead, or its lead (refused '$_id'). Find siblings with crew-list --owner <your-parent>; pass --force to override."
+    fi
+  fi
+
+  # Refuse fast for a dead delegate: no point minting a request nobody can answer.
+  _window="wm-$_id"
+  wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
+    | grep -qx "$_window" || wm_die "no live window for '$_id' (see: bin/crew-takeover $_id)"
+
+  # Mint a short, collision-safe request id (uuid path like spawn-crew).
+  _rand="$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-8)"
+  [ -n "$_rand" ] || _rand="$(wm_py -c 'import uuid;print(uuid.uuid4().hex[:8])')"
+  _req="ask-$_rand"
+
+  wm_state ask-new --id "$_req" --from "${WINGMAN_CREW_ID:-}" --to "$_id" --question "$_q" >/dev/null \
+    || wm_die "could not record the request"
+
+  _caller_label="${WINGMAN_CREW_ID:-wingman}"
+  _max="${WM_ASK_MAX_CHARS:-4000}"
+  _bin="${WINGMAN_BIN:-$WM_BIN}"
+  _framed="[crew-ask $_req] $_q
+
+This is a direct question from $_caller_label. Answer it now, before resuming your
+own work, by running:
+  $_bin/crew-ask reply --id $_req --answer \"<your distilled answer, <=$_max chars>\"
+(add --answer-file <path> if you need to point at fuller detail). Keep the answer
+bounded; it is captured verbatim into the asker's context. Answering does not
+change your own status - continue what you were doing afterward."
+
+  wm_tmux_send_message "$WM_TMUX_SESSION:$_window" "$_framed"
+
+  wm_ok "asked $_id (request $_req)"
+  printf 'arm the wait: %s/crew-ask await --id %s --timeout %s\n' \
+    "$_bin" "$_req" "${WM_ASK_TIMEOUT:-300}"
+}
+
+# ---------------------------------------------------------------- dispatch
+case "${1:-}" in
+  reply) shift; cmd_reply "$@" ;;
+  await) shift; cmd_await "$@" ;;
+  -h|--help|"") usage 0 ;;
+  *)     cmd_send "$@" ;;
+esac

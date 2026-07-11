@@ -10,6 +10,11 @@
 #   crew-prune --all-terminal      also remove died records
 #   crew-prune --older-than-days N restrict to records last updated > N days ago
 #   crew-prune --dry-run           show what would be removed, change nothing
+#
+# On a real prune it also opportunistically sweeps closed (answered/timeout/
+# undeliverable) ask records older than WM_ASK_RETENTION_HOURS (default 24) - the
+# ask channel's time-based, never event-based cleanup, which can never race a
+# caller reading a just-landed answer. Pending asks are always kept.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -17,5 +22,9 @@ set -u
 out="$(wm_state prune "$@")" || exit 1
 case " $* " in
   *" --dry-run "*) printf '%s\n' "$out" ;;
-  *) wm_ok "pruned ${out} record(s) (archived to $WM_HOME/crew-archive.jsonl)" ;;
+  *)
+    wm_ok "pruned ${out} record(s) (archived to $WM_HOME/crew-archive.jsonl)"
+    asks="$(wm_state ask-prune --older-than-hours "${WM_ASK_RETENTION_HOURS:-24}" 2>/dev/null || echo 0)"
+    [ "${asks:-0}" -gt 0 ] 2>/dev/null && wm_ok "swept ${asks} closed ask record(s)"
+    ;;
 esac

@@ -29,4 +29,28 @@ assert_contains "second pass falls to the watcher-arm nudge" "$out2" "watch-flee
 out3="$(printf '{"stop_hook_active": true}' | bash "$HOOK")"
 assert_eq "stop_hook_active allows the stop" "$out3" ""
 
+# --- pending ask with no live waiter blocks the stop --------------------------
+# A caller asked a delegate but did not arm the wait; it would sleep forever with
+# the answer never waking it. The hook must catch this like the no-watcher case.
+test_new_home
+wm_state ask-new --id ask-abc --from "" --to somew --question "did it change?" >/dev/null
+outa="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "a pending ask with no waiter blocks the stop" "$outa" '"decision": "block"'
+assert_contains "the reason names the pending request" "$outa" "ask-abc"
+assert_contains "the reason points at crew-ask await" "$outa" "crew-ask await"
+
+# With a live waiter (fresh pid + beacon) the ask is covered and does not block.
+test_new_home
+wm_state ask-new --id ask-live --from "" --to somew --question "covered?" >/dev/null
+# Model a live waiter: a real backgrounded process whose pid we record, plus a
+# fresh beacon file - the exact liveness shape await maintains.
+sleep 30 & lpid=$!
+trap 'kill "$lpid" 2>/dev/null' EXIT
+mkdir -p "$WINGMAN_HOME/ask"
+echo "$lpid" > "$WINGMAN_HOME/ask/ask-live.pid"
+: > "$WINGMAN_HOME/ask/ask-live.beat"
+outc="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+case "$outc" in *ask-live*) fail "a covered ask must not block the stop" ;; *) ok "a pending ask with a live waiter does not block" ;; esac
+kill "$lpid" 2>/dev/null
+
 test_summary

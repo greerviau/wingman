@@ -83,6 +83,42 @@ quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+# --- team guardrail ---------------------------------------------------------
+# Collaboration stays within a team: a caller may reach only its own direct
+# reports, a sibling under the same lead, or its own lead. Print a verdict for
+# whether <caller> may reach <target>:
+#   ok        - target is a direct report of the caller, a sibling under the same
+#               lead, or the caller's own lead
+#   deny      - target exists but is outside the caller's team
+#   no-target - no roster record for target
+# Shared by crew-say (one-way inject) and crew-ask (ask-and-capture) so both
+# honour one policy. The caller id is "" for wingman (the top orchestrator, which
+# has no roster record); a member passes its own $WINGMAN_CREW_ID.
+wm_team_guardrail() {
+  _tg_caller="$1"; _tg_target="$2"
+  wm_state crew-list --all --json 2>/dev/null | wm_py -c '
+import sys, json
+caller, target = sys.argv[1], sys.argv[2]
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+by_id = dict((r.get("id"), r) for r in roster)
+def parent(cid):
+    r = by_id.get(cid)
+    return (r.get("parent") or "") if r is not None else None
+tgt = by_id.get(target)
+if tgt is None:
+    print("no-target"); sys.exit(0)
+tp = tgt.get("parent") or ""
+cp = parent(caller)  # None when the caller has no record (wingman itself)
+ok = (tp == caller)                       # target is a direct report of the caller
+ok = ok or (cp is not None and tp == cp)  # target is a sibling under the same lead
+ok = ok or (cp is not None and target == cp)  # target is the caller own lead
+print("ok" if ok else "deny")
+' "$_tg_caller" "$_tg_target" 2>/dev/null
+}
+
 # --- tmux helpers -----------------------------------------------------------
 # All tmux calls live behind this boundary so a future backend swap is localized.
 WM_TMUX_SESSION="${WM_TMUX_SESSION:-wingman}"
