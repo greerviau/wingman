@@ -158,6 +158,10 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # WM_PERMISSION_MODE= (empty) to disable and fall back to interactive prompting.
   [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
   printf ' --session-id %s' "$(quote "$SID")"
+  # The crew's own human-readable slug as the session name, so it shows up
+  # legibly in the Claude Code session picker / terminal title instead of an
+  # auto-generated one.
+  printf ' --name %s' "$(quote "$ID")"
   [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
   [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
   printf ' --add-dir %s' "$(quote "$WM_HOME")"
