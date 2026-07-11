@@ -16,6 +16,13 @@ export WM_REPO WM_BIN WM_LIB
 WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 export WINGMAN_HOME="$WM_HOME"
 
+# Root of the playbook library: category subdirectories of role files, plus the
+# shared _status-contract.md partial at its own top level. Overridable (like
+# WM_HOME above) so tests can point the resolver at an isolated fixture tree
+# instead of mutating the live repo's playbook/ directory.
+WM_PLAYBOOKS="${WM_PLAYBOOKS:-$WM_REPO/playbook}"
+export WM_PLAYBOOKS
+
 # Python is run through uv, which manages the interpreter and (via --no-project)
 # ignores any pyproject.toml in the current directory - important because crew
 # run inside target repos that have their own projects. wm-state.py declares its
@@ -65,22 +72,100 @@ wm_install_cmd() {
 
 wm_have() { command -v "$1" >/dev/null 2>&1; }
 
-# List available crew types: every playbook basename in playbook/ (tracked
-# <type>.md or gitignored <type>.local.md), excluding _-prefixed shared partials.
-# Crew types are open-ended - add a playbook and the type exists.
+# List available crew types: every playbook role file under $WM_PLAYBOOKS (at
+# any category depth, including nested sub-domains like
+# scientific-research/biological-research/), tracked <role>.md or gitignored
+# <role>.local.md, excluding _-prefixed shared partials. Printed as
+# category-qualified "category/role" lines; sorting also groups each
+# category's roles together, which is the "grouped by category" contract.
+# bash-3.2-safe: find + a while-read loop via process substitution (no
+# globstar, no arrays, no mapfile). Crew types are open-ended - add a
+# playbook and the type exists.
 wm_crew_types() {
-  for f in "$WM_REPO"/playbook/*.md "$WM_REPO"/playbook/*.local.md; do
-    [ -f "$f" ] || continue
-    b="$(basename "$f")"; b="${b%.local.md}"; b="${b%.md}"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    b="$(basename "$f")"
     case "$b" in _*) continue ;; esac
-    echo "$b"
-  done | sort -u
+    b="${b%.local.md}"; b="${b%.md}"
+    d="$(dirname "$f")"
+    cat="${d#"$WM_PLAYBOOKS"/}"
+    [ "$cat" = "$d" ] && continue  # file sits directly at $WM_PLAYBOOKS root (e.g. the partial, already filtered above)
+    echo "$cat/$b"
+  done < <(find "$WM_PLAYBOOKS" -type f \( -name '*.md' -o -name '*.local.md' \) 2>/dev/null) | sort -u
 }
 
 # Single-quote-escape an argument so it can be embedded safely in generated
 # shell source. Portable to bash 3.2 (no ${var@Q}).
 quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Escape find(1) -name glob metacharacters (\, *, ?, [, ]) so a crew type
+# containing one of these is matched as a literal filename, not a pattern -
+# find -name treats its argument as a shell glob, and an unescaped --type
+# value could otherwise match far more files than the exact-name lookup the
+# resolver's collision detection depends on.
+wm_glob_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/\*/\\*/g' -e 's/?/\\?/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
+}
+
+# Resolve a crew --type to a playbook file under $WM_PLAYBOOKS, local override
+# (<type>.local.md) winning over the tracked <type>.md, and set PLAYBOOK to the
+# result (or wm_die with a precise message). A bare name (e.g. "developer") is
+# searched across every category directory - role names are kept unique across
+# categories, so every shipped type resolves unambiguously; a
+# category-qualified name ("software-development/developer") is accepted to
+# break a genuine collision. Wrapped in its own function so its use of the
+# script's positional parameters ($1, and no `set --` of the caller's argv) is
+# scoped to this call and can never collide with the caller's own arguments.
+wm_resolve_playbook() {
+  _rp_type="$1"
+  case "$_rp_type" in
+    */*)
+      # Category-qualified form: resolve directly, local override wins.
+      PLAYBOOK="$WM_PLAYBOOKS/$_rp_type.md"
+      [ -f "$WM_PLAYBOOKS/$_rp_type.local.md" ] && PLAYBOOK="$WM_PLAYBOOKS/$_rp_type.local.md"
+      [ -f "$PLAYBOOK" ] || wm_die "no playbook for crew type '$_rp_type'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create $WM_PLAYBOOKS/$_rp_type.md (or $_rp_type.local.md)"
+      ;;
+    *)
+      # Bare form: search every category directory for a role file named
+      # $_rp_type. Collapse a .local.md onto its sibling .md in the same
+      # directory (still one candidate directory - local override still wins
+      # there); more than one distinct directory is a collision the caller
+      # must disambiguate. Directories are collected newline-delimited (not
+      # space-joined + `set --`) so a path containing a space is never
+      # mis-split.
+      _rp_esc="$(wm_glob_escape "$_rp_type")"
+      _rp_dirs=$'\n'
+      _rp_count=0
+      while IFS= read -r _rp_f; do
+        [ -n "$_rp_f" ] || continue
+        _rp_d="$(dirname "$_rp_f")"
+        case "$_rp_dirs" in
+          *$'\n'"$_rp_d"$'\n'*) ;;
+          *) _rp_dirs="$_rp_dirs$_rp_d"$'\n'; _rp_count=$((_rp_count+1)); _rp_only="$_rp_d" ;;
+        esac
+      done < <(find "$WM_PLAYBOOKS" -type f \( -name "$_rp_esc.md" -o -name "$_rp_esc.local.md" \) 2>/dev/null)
+      case "$_rp_count" in
+        0)
+          wm_die "no playbook for crew type '$_rp_type'. Available: $(wm_crew_types | tr '\n' ' ')- to add it, create $WM_PLAYBOOKS/<category>/$_rp_type.md (or $_rp_type.local.md)"
+          ;;
+        1)
+          _rp_d="$_rp_only"
+          ;;
+        *)
+          _rp_qualified=""
+          while IFS= read -r _rp_d2; do
+            [ -n "$_rp_d2" ] || continue
+            _rp_qualified="$_rp_qualified ${_rp_d2#"$WM_PLAYBOOKS"/}/$_rp_type"
+          done <<<"$_rp_dirs"
+          wm_die "crew type '$_rp_type' is ambiguous across categories: pick one of$_rp_qualified"
+          ;;
+      esac
+      PLAYBOOK="$_rp_d/$_rp_type.md"
+      [ -f "$_rp_d/$_rp_type.local.md" ] && PLAYBOOK="$_rp_d/$_rp_type.local.md"
+      ;;
+  esac
 }
 
 # --- team guardrail ---------------------------------------------------------
