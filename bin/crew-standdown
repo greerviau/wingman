@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # crew-standdown - wrap up a crew member: mark it stood-down and close its tmux
-# window. Standing down a manager cascades to its whole sub-crew, so a lead's
-# workers are never orphaned; every affected window is closed. Any git worktree a
-# crew created is cleaned up by the crew per the build playbook; this does not
-# touch worktrees.
+# window. Standing down a manager cascades to its whole sub-crew (following both the
+# `parent` chain and `orphaned_from`, so a dead lead's re-adopted workers are reaped
+# with it), and every affected window is closed.
+#
+# Worktree teardown fallback: the graceful path is the member removing its own
+# worktree on merge/close (per the build playbook). This is the backstop for a
+# NON-graceful exit (dead/orphaned/force-reaped member) that left its worktree
+# behind: if the roster record carries a `worktree` path that still exists, it is
+# force-removed. NOTE: `git worktree remove --force` discards any uncommitted work in
+# that tree - intended, since the member is being torn down, and a gracefully-exiting
+# member already removed its own tree, so this only ever hits a leftover.
 #
 # Usage: crew-standdown <id>
 # bash-3.2-safe.
@@ -18,17 +25,46 @@ wm_state crew-get --id "$ID" >/dev/null 2>&1 || wm_die "no crew member '$ID'"
 AFFECTED="$(wm_state standdown --id "$ID")"
 
 closed=0
+removed=0
 for cid in $AFFECTED; do
   WINDOW="wm-$cid"
   if wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
     wm_tmux kill-window -t "$WM_TMUX_SESSION:$WINDOW" 2>/dev/null || true
     closed=$((closed+1))
   fi
+
+  # Worktree-removal fallback (only fires when a non-graceful exit left the tree
+  # behind; the recorded path is empty for a member with no worktree, e.g. an
+  # analyst, so the guard below skips it).
+  { read -r WT; read -r RP; } <<EOF
+$(wm_state crew-get --id "$cid" 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print(d.get("worktree") or "")
+print(d.get("repo") or "")')
+EOF
+  if [ -n "$WT" ] && [ -d "$WT" ]; then
+    # The repo for `git -C`: the roster repo (repo scope) or the worktree's own git
+    # dir (global scope, or a moved repo). --force cleans git's worktree metadata
+    # too; prune covers a tree whose directory was already deleted by hand.
+    gitdir="$RP"
+    { [ -n "$gitdir" ] && git -C "$gitdir" rev-parse --git-dir >/dev/null 2>&1; } || gitdir="$WT"
+    if git -C "$gitdir" worktree remove --force "$WT" >/dev/null 2>&1; then
+      removed=$((removed+1))
+    else
+      git -C "$gitdir" worktree prune >/dev/null 2>&1 || true
+    fi
+  fi
 done
 
+_wt_note=""
+[ "$removed" -gt 0 ] && _wt_note=", $removed worktree(s) removed"
 set -- $AFFECTED
 if [ "$#" -gt 1 ]; then
-  wm_ok "stood down $ID and $(($# - 1)) descendant(s) ($closed window(s) closed)"
+  wm_ok "stood down $ID and $(($# - 1)) descendant(s) ($closed window(s) closed$_wt_note)"
 else
-  wm_ok "stood down $ID (window closed)"
+  wm_ok "stood down $ID (window closed$_wt_note)"
 fi

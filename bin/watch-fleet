@@ -388,7 +388,9 @@ while :; do
 
   # Reconcile liveness so a dead window becomes 'died'.
   if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
-    wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null 2>&1
+    # Pass this cycle's owner so the dead-owner re-adopt pass runs only under
+    # wingman's watcher (--owner ""); a lead's cycle does the death-flip only (N4).
+    wm_state reconcile --windows "$(wm_tmux_windows_csv)" --owner "$OWNER" >/dev/null 2>&1
 
     # Pane backstop over every working member: two failure shapes never reach the
     # status files (they stay "working"). A member frozen on an interactive
