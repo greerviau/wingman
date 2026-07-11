@@ -1,5 +1,7 @@
 ![Wingman Logo](assets/wingman-logo.png)
 
+[![CI](https://github.com/greerviau/wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/greerviau/wingman/actions/workflows/ci.yml)
+
 Wingman is a long-lived Claude Code session that runs a **crew** of agents for you.
 You (the pilot) give it high-level directives - *"implement this feature"*, *"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real work to a crew, tracks their status, raises only real decisions to you, and keeps its own context clean.
 It orchestrates; it does not do the heavy lifting.
@@ -79,6 +81,8 @@ After that, crew in that repo run unattended.
 
 `bash tests/run.sh` runs the bash E2E suites (no real `claude`/tmux fleet needed).
 Requires `bash`, `git`, `tmux`, and `uv`.
+
+GitHub Actions runs the same suite on every push and pull request to `main` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)), wrapped in a bounded timeout so a stuck watcher can never hang the job.
 
 ## Under the hood
 

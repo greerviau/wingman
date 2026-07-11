@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# One in-flight run per ref; a new push supersedes the previous run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint bash scripts (errors only)
+        run: |
+          # Discover every bash script by shebang: bin/ and hooks/ hold
+          # extensionless executables, tests/ holds *.test.sh. Python helpers
+          # under bin/lib are skipped by the bash-shebang filter.
+          mapfile -t files < <(grep -rlE '^#!.*\bbash\b' bin hooks tests | sort -u)
+          printf 'Linting %d file(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          # -S error: only genuine errors fail CI; style/info/warning findings do
+          # not, keeping this a low-friction gate over pre-existing scripts.
+          # -e SC1091: do not fail on unfollowable `source` of sibling libs.
+          shellcheck -S error -e SC1091 "${files[@]}"
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    # Outer backstop: even if the bounded suite timeout below is bypassed, the
+    # job can never run away.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Show toolchain
+        run: |
+          bash --version | head -1
+          git --version
+          tmux -V
+          uv --version
+
+      - name: Run test suite (bounded)
+        run: |
+          # The suite drives bin/watch-fleet and real tmux windows. A watcher
+          # that fails to exit would otherwise block the job indefinitely, so
+          # wrap the whole suite in a hard timeout (SIGTERM at 900s, SIGKILL
+          # 30s later). A genuine hang is unbounded, so any finite cap catches
+          # it; 900s sits well above the suite's real runtime (watch-fleet and
+          # stall-check alone spend minutes in deliberate sleeps) so a slow but
+          # healthy run is never cut off. run.sh exits non-zero on any failing
+          # suite; timeout exits 124/137 if it has to intervene. Either fails
+          # the job.
+          timeout --kill-after=30s 900s bash tests/run.sh
+
+  # Single aggregate gate: green only when both jobs pass. Mark this check
+  # ("ci") as required in the branch-protection rules for main so a PR cannot
+  # merge unless the suite and the linter both pass.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    needs: [shellcheck, test]
+    if: always()
+    steps:
+      - name: Verify required jobs succeeded
+        run: |
+          echo "shellcheck: ${{ needs.shellcheck.result }}"
+          echo "test:       ${{ needs.test.result }}"
+          if [ "${{ needs.shellcheck.result }}" != "success" ] || \
+             [ "${{ needs.test.result }}" != "success" ]; then
+            echo "::error::A required CI job did not succeed."
+            exit 1
+          fi
+          echo "All required CI jobs succeeded."
