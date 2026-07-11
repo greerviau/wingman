@@ -200,14 +200,23 @@ def parent_of(record):
 def descendants_inclusive(roster, root_id):
     """The set of ids for `root_id` and every member transitively owned by it.
     Following the `parent` chain, so standing down a lead reaps its whole
-    sub-crew. `root_id` is always included even if it has no children."""
+    sub-crew. `root_id` is always included even if it has no children.
+
+    A member is also treated as a descendant of X if its `orphaned_from` names X:
+    when a dead owner's workers are re-adopted (reconcile moves their live `parent`
+    to the grandparent so they stay watched), `orphaned_from` preserves the original
+    ownership, so `crew-standdown <dead-owner>` still cascades to them instead of
+    leaving them - and their worktrees - behind."""
     result = set([root_id])
     changed = True
     while changed:
         changed = False
         for r in roster:
             rid = r.get("id")
-            if rid is not None and rid not in result and parent_of(r) in result:
+            if rid is None or rid in result:
+                continue
+            orphaned_from = r.get("orphaned_from") or ""
+            if parent_of(r) in result or (orphaned_from and orphaned_from in result):
                 result.add(rid)
                 changed = True
     return result
@@ -276,6 +285,16 @@ def cmd_crew_add(args):
         "blocker": None,
         "artifact": None,
         "delivery": None,
+        # The git worktree this member works in, recorded at spawn (repo scope) so a
+        # non-graceful exit (dead/orphaned member) can still be torn down by
+        # crew-standdown. Empty when unknown at spawn (global scope self-registers it
+        # later via crew-set --worktree).
+        "worktree": getattr(args, "worktree", "") or "",
+        # The prior parent of a re-adopted orphan (set by reconcile's dead-owner
+        # pass): standing down the dead owner still reaps a member whose
+        # orphaned_from names it, even though its live parent was moved to the
+        # grandparent. None until the member is orphaned.
+        "orphaned_from": None,
         # Immutable spawn stamp; never rewritten by crew-set (see the stamp comment
         # above). Consumed by the prompt-freeze liveness veto.
         "spawned_at": stamp,
@@ -322,6 +341,11 @@ def cmd_crew_set(args):
             for field in ("status", "artifact", "delivery"):
                 if getattr(args, field, None) is not None:
                     r[field] = live.get(field)
+            # worktree is a roster-only field (not a live-status field): a member
+            # that creates its worktree after spawn (global scope) self-registers
+            # the path here so a later teardown can find it.
+            if getattr(args, "worktree", None) is not None:
+                r["worktree"] = args.worktree
             r["updated"] = live["updated"]
     write_json(crew_json_path(), roster)
     render_board()
@@ -369,8 +393,19 @@ def cmd_render_board(_args):
 
 def cmd_reconcile(args):
     """Mark live-but-windowless crew as 'died'. Given the current tmux windows,
-    any crew member still in a live state whose window is gone is flagged."""
+    any crew member still in a live state whose window is gone is flagged.
+
+    Dead-owner re-adopt (Fix B / #11), run ONLY under wingman's watcher
+    (--owner ""): after the death flip, any still-live worker whose window is alive
+    but whose owner is now terminal (died/stood-down) is re-parented to the dead
+    owner's own parent (the grandparent, always "" = wingman under the depth-2 cap),
+    with the prior parent recorded in `orphaned_from`. Re-parenting immediately
+    restores a live watcher (wingman now sees the worker as a direct report), and
+    the dead owner's `died` event is enriched to enumerate the re-adopted workers and
+    the dispositions. The orphan mutation is scoped to owner "" so the enlarged
+    read-modify-write of crew.json stays single-writer (N4)."""
     ensure_home()
+    owner = getattr(args, "owner", None)
     live_windows = set(w for w in (args.windows or "").split(",") if w)
     roster = load_roster()
     changed = []
@@ -385,6 +420,48 @@ def cmd_reconcile(args):
             live["updated"] = r["updated"]
             write_json(status_path(r["id"]), live)
             changed.append(r["id"])
+
+    # Dead-owner re-adopt, wingman's watcher only (owner == "").
+    if owner == "":
+        by_id = dict((r.get("id"), r) for r in roster)
+        orphans_by_owner = {}
+        for r in roster:
+            if merged(r).get("status") not in LIVE_STATES:
+                continue
+            if r.get("window") not in live_windows:
+                continue  # its own window is gone; the death flip already handled it
+            p = parent_of(r)
+            if not p:
+                continue  # top-level: owned by wingman, which never dies
+            owner_rec = by_id.get(p)
+            if owner_rec is None:
+                continue
+            if merged(owner_rec).get("status") in ("died", "stood-down"):
+                r["orphaned_from"] = p
+                r["parent"] = parent_of(owner_rec)  # grandparent ("" = wingman)
+                orphans_by_owner.setdefault(p, []).append(r.get("id"))
+        # Enrich each dead owner's `died` event to carry the orphan surface. Bump its
+        # `updated` so the event re-fires (unacked) even if the death itself was
+        # already surfaced on an earlier cycle; it fires once, because after
+        # re-parenting the workers are no longer detected as this owner's orphans.
+        for dead_id, workers in orphans_by_owner.items():
+            owner_rec = by_id.get(dead_id)
+            if owner_rec is None:
+                continue
+            names = ", ".join("`%s`" % w for w in workers)
+            msg = ("lead `%s` died; its %d live worker(s) (%s) were re-adopted to you "
+                   "and are now visible. Choose: keep supervising them; "
+                   "`bin/crew-standdown %s` to cascade-stand-down the whole sub-crew; "
+                   "or `bin/crew-takeover <worker>` to hand one off."
+                   % (dead_id, len(workers), names, dead_id))
+            stamp = now()
+            owner_rec["summary"] = msg
+            owner_rec["updated"] = stamp
+            live = read_json(status_path(dead_id), {"id": dead_id})
+            live["summary"] = msg
+            live["updated"] = stamp
+            write_json(status_path(dead_id), live)
+
     write_json(crew_json_path(), roster)
     render_board()
     print(" ".join(changed))
@@ -1025,6 +1102,9 @@ def build_parser():
     a.add_argument("--scope", default="repo")
     # The spawning crew's id ("" = wingman, the top orchestrator). Stamps ownership.
     a.add_argument("--parent", default="")
+    # The git worktree the member works in, recorded at spawn (repo scope) for
+    # teardown; empty when unknown at spawn (global scope self-registers via crew-set).
+    a.add_argument("--worktree", default="")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
@@ -1034,6 +1114,9 @@ def build_parser():
     a.add_argument("--blocker")
     a.add_argument("--artifact")
     a.add_argument("--delivery")
+    # Self-register the worktree path after spawn (global scope, whose repo/path is
+    # not knowable at spawn time). Roster-only field, not a live-status field.
+    a.add_argument("--worktree", default=None)
     a.set_defaults(fn=cmd_crew_set)
 
     a = sub.add_parser("crew-get")
@@ -1056,6 +1139,9 @@ def build_parser():
 
     a = sub.add_parser("reconcile")
     a.add_argument("--windows", default="")
+    # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
+    # omit or pass a lead id to keep reconcile to the global death-flip only.
+    a.add_argument("--owner", default=None)
     a.set_defaults(fn=cmd_reconcile)
 
     a = sub.add_parser("standdown")

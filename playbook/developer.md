@@ -9,12 +9,18 @@ This playbook only describes the work and the one signal you watch.
 
 ## The dev cycle
 
-1. **Isolate.** From the target repo, create your own worktree and branch:
+1. **Isolate.** Create your own worktree at the path wingman recorded for you
+   (`$WINGMAN_WORKTREE`, exported into your session) and a branch:
    ```
-   git worktree add ../<repo>-<slug> -b <feat|fix>/<short-description>
+   git worktree add "$WINGMAN_WORKTREE" -b <feat|fix>/<short-description>
    ```
    Work inside that worktree so parallel crew never collide.
-   (Wingman does not manage worktrees; you own this step.)
+   The branch name is yours to choose; only the *path* is fixed - wingman knows it,
+   so if you exit non-gracefully it can still tear the worktree down. If
+   `$WINGMAN_WORKTREE` is unset (a global-scope member, whose path is not known at
+   spawn), pick a path yourself and register it with
+   `$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --worktree <path>` so teardown can
+   still find it.
 2. **Read the plan.** Read the plan at the `--input` path you were given and follow it.
    If the plan is missing or ambiguous, block with a precise question rather than guessing at scope.
 3. **Implement.** Make the change.
@@ -64,6 +70,9 @@ Find your existing PR for the branch, set your state to match where it is, and r
 
 On merge or close (or when you are stood down), remove your worktree:
 ```
-git worktree remove ../<repo>-<slug>
+git worktree remove "$WINGMAN_WORKTREE"
 ```
 (Keep the branch/PR; only the local worktree is cleaned up.)
+This graceful removal is your responsibility; if you exit non-gracefully and leave
+the worktree behind, `crew-standdown` force-removes it from the recorded path as a
+backstop.

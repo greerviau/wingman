@@ -108,6 +108,14 @@ while wm_state crew-get --id "$ID" >/dev/null 2>&1; do
 done
 WINDOW="wm-$ID"
 
+# --- deterministic worktree path (repo scope) --------------------------------
+# Recorded at spawn and exported to the member so a non-graceful exit (a
+# dead/orphaned member) can still be torn down by crew-standdown. Repo scope only:
+# global scope cannot predetermine the repo at spawn, so a global-scope member
+# self-registers its worktree via `wm-state crew-set --worktree` when it creates one.
+WORKTREE=""
+[ "$SCOPE" = repo ] && WORKTREE="$(dirname "$REPO")/$(basename "$REPO")-$ID"
+
 # --- generate the forced session id ------------------------------------------
 if wm_have uuidgen; then SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"; else
   SID="$(wm_py -c 'import uuid;print(uuid.uuid4())')"
@@ -147,6 +155,10 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # The wingman bin/ dir, so a crew grounded in another repo can still invoke the
   # crew-level tools it needs by absolute path (e.g. $WINGMAN_BIN/pr-watch).
   echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
+  # The deterministic worktree path (repo scope): the developer playbook creates the
+  # worktree at exactly this path, so teardown needs only the path. Absent for global
+  # scope, whose member self-registers the path after it creates the worktree.
+  [ -n "$WORKTREE" ] && echo "export WINGMAN_WORKTREE=$(quote "$WORKTREE")"
   # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
   # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
   # it to substitute a stub).
@@ -195,7 +207,7 @@ wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$WINDOW" "bash $(quote "$LAUNCH
 # Owner-scoping (surfacing, the watcher, crew-list) all fall out of this field.
 wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
-  --window "$WINDOW" --session-id "$SID" >/dev/null
+  --window "$WINDOW" --session-id "$SID" --worktree "$WORKTREE" >/dev/null
 
 # --- deliver the opening objective as the first user message -----------------
 # A small head start off the window launch; wm_tmux_send_message then waits for the

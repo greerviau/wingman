@@ -49,6 +49,17 @@ rlaunch="$WINGMAN_HOME/crew/$rid.launch.sh"
 assert_contains "repo-scoped launch cds into repoA" "$(grep '^cd ' "$rlaunch")" "repoA"
 assert_false "repo-scoped launch does not add the unrelated repoB" "grep -q 'repoB' '$rlaunch'"
 
+# --- repo scope records + exports the worktree path (Fix B / #11) -------------
+# The deterministic path is <dirname repo>/<basename repo>-<id>, recorded at spawn
+# and exported so a non-graceful exit can still be torn down.
+assert_contains "repo-scoped launch exports WINGMAN_WORKTREE" "$(grep 'WINGMAN_WORKTREE' "$rlaunch")" "repoA-$rid"
+rwt="$(wm_state crew-get --id "$rid" | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("worktree"))')"
+assert_contains "repo-scoped record persists the worktree path" "$rwt" "repoA-$rid"
+# Global scope cannot predetermine a worktree, so none is exported or recorded.
+assert_false "global-scope launch exports no WINGMAN_WORKTREE" "grep -q 'WINGMAN_WORKTREE' '$launch'"
+gwt="$(wm_state crew-get --id "$id" | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("worktree") or "")')"
+assert_eq "global-scope record has an empty worktree" "$gwt" ""
+
 # --- repo scope still enforces a git checkout --------------------------------
 if "$SPAWN" --type analyst --repo "$WS" --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "repo scope on a non-git path fails" "[ $rc -ne 0 ]"
