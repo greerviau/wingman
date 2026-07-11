@@ -77,6 +77,22 @@ Your status is watched by your **owner** - wingman if it spawned you directly, o
 - **Escalate up the chain, not straight to the top.** When you set `blocked`, it surfaces to your owner - your lead, if you have one - not to the pilot. Your owner answers via `bin/crew-say` if it can; if the decision is above *its* pay grade, it re-raises `blocked` on *its own* line, which surfaces one level further up. Decisions travel up only as far as needed; the answer flows back down the same chain.
 - **Collaborate with peers directly.** If you have siblings under the same lead, you may `bin/crew-say` them directly for routine coordination (e.g. a developer and a reviewer, or two developers negotiating an interface) - this does **not** go through your lead, so it never bloats its context. Find your siblings with `bin/crew-list --owner <your-own-parent>` (your parent is your owner's id). Keep talking *up* to your lead only for status it should roll up or a decision to escalate. The team guardrail in `crew-say` keeps this within your team: you can reach your reports, your siblings, and your lead - not arbitrary crew elsewhere in the tree.
 
+## Answering a direct question (`crew-ask`)
+
+Occasionally a message arrives framed as `[crew-ask <req-id>] <question>`.
+This is a direct question from your owner, your lead, or a sibling, and it expects a captured answer, not a status update.
+Answer it promptly, before resuming your own work, by running:
+
+```
+$WINGMAN_BIN/crew-ask reply --id <req-id> --answer "<distilled answer>"
+```
+
+Add `--answer-file <path>` to point at fuller detail without inlining it.
+Keep the answer bounded and distilled - it is captured verbatim into the asker's context, so it must be an answer, not a transcript.
+An answer over the cap is rejected; summarize it or move the detail into `--answer-file`.
+
+**Answering does not change your own status.** It is orthogonal to your lifecycle: stay in whatever state you were in (`working`, `blocked`, ...) and continue your own work after replying.
+
 ## When to update
 
 Update your status at these moments, without being asked:

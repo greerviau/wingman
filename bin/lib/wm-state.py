@@ -86,6 +86,14 @@ def archive_path():
     return os.path.join(home(), "crew-archive.jsonl")
 
 
+def ask_dir():
+    return os.path.join(home(), "ask")
+
+
+def ask_path(req):
+    return os.path.join(ask_dir(), req + ".json")
+
+
 def now():
     # UTC, microsecond precision, ISO-8601 with a trailing Z. Microsecond
     # precision makes `updated` a reliable per-event version stamp for the ack
@@ -96,6 +104,7 @@ def now():
 
 def ensure_home():
     os.makedirs(crew_dir(), exist_ok=True)
+    os.makedirs(ask_dir(), exist_ok=True)
     if not os.path.exists(crew_json_path()):
         write_json(crew_json_path(), [])
     if not os.path.exists(projects_path()):
@@ -644,6 +653,163 @@ def cmd_projects_lookup(args):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- ask channel
+# A dedicated request/response channel, parallel to (not overloading) the status
+# channel: a caller poses a direct question to one of its delegates and captures
+# a bounded, distilled answer back into its own context, without scraping panes.
+# Each ask is one file under ~/.wingman/ask/<req>.json. It never touches a
+# delegate's crew/<id>.json status, needs-attention, acked.json, or board.md - an
+# answer to a side question is orthogonal to the delegate's own lifecycle (it stays
+# `working`; it merely replies on the side). See bin/crew-ask for the send/reply/
+# await flow and the ask docs/plan for the rationale.
+
+ASK_STATES = ("pending", "answered", "timeout", "undeliverable")
+
+
+def cmd_ask_new(args):
+    """Mint a pending ask record. Refuses to overwrite an existing one, so a
+    double-send (or a restarted sender) never clobbers an in-flight request."""
+    ensure_home()
+    path = ask_path(args.id)
+    if os.path.exists(path):
+        sys.exit("wm-state: ask '%s' already exists" % args.id)
+    record = {
+        "id": args.id,
+        "from": args.sender or "",
+        "to": args.to,
+        "question": args.question,
+        "status": "pending",
+        "answer": None,
+        "answer_file": None,
+        "responder": None,
+        "created": now(),
+        "answered": None,
+    }
+    write_json(path, record)
+    print(args.id)
+
+
+def cmd_ask_reply(args):
+    """Record a delegate's bounded answer. Refuses a missing/closed request, a
+    responder that is not the addressed delegate (anti-spoof), and an answer over
+    the cap (reject, never silently truncate - forces a real distillation). An
+    --answer-file is stored as an absolute-path pointer; its bytes never enter
+    state."""
+    ensure_home()
+    record = read_json(ask_path(args.id), None)
+    if not isinstance(record, dict):
+        sys.exit("wm-state: no ask '%s'" % args.id)
+    if record.get("status") != "pending":
+        sys.exit("wm-state: ask '%s' is already %s, not open for a reply"
+                 % (args.id, record.get("status")))
+    if args.responder != record.get("to"):
+        sys.exit("wm-state: responder '%s' is not the addressed delegate '%s' "
+                 "for ask '%s' (a reply must come from the delegate that was asked)"
+                 % (args.responder, record.get("to"), args.id))
+    max_chars = args.max_chars
+    if max_chars is None:
+        try:
+            max_chars = int(os.environ.get("WM_ASK_MAX_CHARS", "4000"))
+        except ValueError:
+            max_chars = 4000
+    if len(args.answer) > max_chars:
+        sys.exit("wm-state: answer is %d chars, over the %d-char cap. Summarize it, "
+                 "or move the detail into a file and pass --answer-file <path> while "
+                 "keeping --answer short." % (len(args.answer), max_chars))
+    answer_file = None
+    if args.answer_file:
+        if not os.path.exists(args.answer_file):
+            sys.exit("wm-state: --answer-file '%s' does not exist" % args.answer_file)
+        answer_file = os.path.abspath(args.answer_file)
+    record["status"] = "answered"
+    record["answer"] = args.answer
+    record["answer_file"] = answer_file
+    record["responder"] = args.responder
+    record["answered"] = now()
+    write_json(ask_path(args.id), record)
+    print(args.id)
+
+
+def cmd_ask_get(args):
+    record = read_json(ask_path(args.id), None)
+    if not isinstance(record, dict):
+        sys.exit("wm-state: no ask '%s'" % args.id)
+    print(json.dumps(record, indent=2, sort_keys=True))
+
+
+def cmd_ask_resolve(args):
+    """Terminal non-answer transition set by the await watcher (timeout or
+    undeliverable). Compare-and-set on `pending`: an answer that landed in the
+    same tick wins, so a resolve never clobbers a real reply. Prints the resulting
+    status (the request's current status if it was already closed)."""
+    ensure_home()
+    record = read_json(ask_path(args.id), None)
+    if not isinstance(record, dict):
+        sys.exit("wm-state: no ask '%s'" % args.id)
+    if record.get("status") == "pending":
+        record["status"] = args.status
+        record["answered"] = now()
+        if args.note:
+            record["note"] = args.note
+        write_json(ask_path(args.id), record)
+    print(record.get("status"))
+
+
+def cmd_ask_list(args):
+    """Print matching ask records, tab-separated `id status from to created`. Used
+    by the Stop-hook guard (pending asks needing a live waiter) and by cleanup."""
+    ensure_home()
+    rows = []
+    for name in sorted(os.listdir(ask_dir())):
+        if not name.endswith(".json"):
+            continue
+        record = read_json(os.path.join(ask_dir(), name), None)
+        if not isinstance(record, dict):
+            continue
+        if args.sender is not None and (record.get("from") or "") != args.sender:
+            continue
+        if args.status is not None and record.get("status") != args.status:
+            continue
+        rows.append(record)
+    rows.sort(key=lambda r: r.get("created") or "")
+    for r in rows:
+        print("%s\t%s\t%s\t%s\t%s" % (
+            r.get("id", ""), r.get("status", ""), r.get("from") or "",
+            r.get("to") or "", r.get("created") or ""))
+
+
+def cmd_ask_prune(args):
+    """Best-effort, time-based cleanup of closed ask records (answered/timeout/
+    undeliverable) older than --older-than-hours. Deletion is time-based, never
+    event-based, so it can never race a caller reading a just-landed answer.
+    Pending asks are always kept. Prints the number removed."""
+    ensure_home()
+    cutoff = None
+    if args.older_than_hours is not None:
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(hours=args.older_than_hours))
+    removed = 0
+    for name in os.listdir(ask_dir()):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(ask_dir(), name)
+        record = read_json(path, None)
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") == "pending":
+            continue
+        if cutoff is not None:
+            ts = _parse_updated(record.get("answered") or record.get("created"))
+            if ts is None or ts >= cutoff:
+                continue
+        try:
+            os.remove(path)
+            removed += 1
+        except FileNotFoundError:
+            pass
+    print(removed)
+
+
 # ---------------------------------------------------------------- rendering
 
 
@@ -830,6 +996,42 @@ def build_parser():
     a = sub.add_parser("projects-lookup")
     a.add_argument("--name", required=True)
     a.set_defaults(fn=cmd_projects_lookup)
+
+    # --- ask channel: request/response between a caller and its delegate -------
+    a = sub.add_parser("ask-new")
+    a.add_argument("--id", required=True)
+    # `--from` is a Python keyword, so it lands in args.sender.
+    a.add_argument("--from", default="", dest="sender")
+    a.add_argument("--to", required=True)
+    a.add_argument("--question", required=True)
+    a.set_defaults(fn=cmd_ask_new)
+
+    a = sub.add_parser("ask-reply")
+    a.add_argument("--id", required=True)
+    a.add_argument("--responder", required=True)
+    a.add_argument("--answer", required=True)
+    a.add_argument("--answer-file", default=None, dest="answer_file")
+    a.add_argument("--max-chars", type=int, default=None, dest="max_chars")
+    a.set_defaults(fn=cmd_ask_reply)
+
+    a = sub.add_parser("ask-get")
+    a.add_argument("--id", required=True)
+    a.set_defaults(fn=cmd_ask_get)
+
+    a = sub.add_parser("ask-resolve")
+    a.add_argument("--id", required=True)
+    a.add_argument("--status", required=True, choices=("timeout", "undeliverable"))
+    a.add_argument("--note", default=None)
+    a.set_defaults(fn=cmd_ask_resolve)
+
+    a = sub.add_parser("ask-list")
+    a.add_argument("--from", default=None, dest="sender")
+    a.add_argument("--status", default=None)
+    a.set_defaults(fn=cmd_ask_list)
+
+    a = sub.add_parser("ask-prune")
+    a.add_argument("--older-than-hours", type=int, default=None, dest="older_than_hours")
+    a.set_defaults(fn=cmd_ask_prune)
 
     return p
 

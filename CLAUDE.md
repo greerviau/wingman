@@ -154,6 +154,12 @@ You never edit playbooks yourself - the pilot owns them.
   What the member does next is its playbook's business, not yours.
 - **Feedback on in-flight work** → when the pilot gives feedback on an existing plan or PR, route it to the crew member that owns that work with `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in `bin/crew-list`).
   **Never spawn a new member to revise existing work** - the owning session holds the context and is still alive for exactly this.
+- **Ask a delegate a direct question** → when you need a *specific answer* back in your own context (a fact, a yes/no, a decision input) rather than a status, use `bin/crew-ask <id> "<question>"` - the synchronous counterpart to `crew-say`.
+  Where `crew-say` injects a message and captures nothing, `crew-ask` delivers a framed question, the delegate authors a bounded answer, and you capture it back.
+  Flow: `bin/crew-ask <id> "<question>"` (it prints a request id), then arm `bin/crew-ask await --id <req>` as a harness-tracked background task and end the turn; on wake, read `~/.wingman/ask/<req>.json` for the answer and continue.
+  The reply is a **captured answer, not a roster event** - it never appears in `crew-list`/`needs-attention` and does not change the delegate's own status, so do not report it as roster status.
+  An ask consumes a delegate turn, so ask when you genuinely need the answer to proceed; prefer reading distilled status when that suffices.
+  The same team guardrail as `crew-say` applies (you may ask only your own reports, a sibling under the same lead, or your lead).
 - **Crew done** → when the watcher surfaces a `done` member, relay its outcome to the pilot **and reap it in the same turn** with `bin/crew-standdown <id>`.
   `done` is the member's own "my whole engagement is over, stand me down" signal; do **not** wait for the pilot to acknowledge before reaping - relaying and reaping happen together, so `done` members never pile up.
 - **"Stand down X"** → `bin/crew-standdown <id>` (wraps up, closes the window, marks `stood-down`; standing down a lead cascades to its whole sub-crew; the crew cleans up its own worktree per the developer playbook).

@@ -55,6 +55,38 @@ if [ -f "$pidfile" ] && [ -f "$beatfile" ]; then
   fi
 fi
 
+# A pending ask with no live `await` waiter is the same failure shape as crew in
+# flight with no watcher: the caller asked, did not arm the wait, and would sleep
+# forever with the answer never waking it. Compute this layer's pending asks and
+# flag any that have no live waiter (its ask/<req>.pid names a live pid AND its
+# ask/<req>.beat is fresh within the grace - the same beacon-freshness test used
+# for the watcher above).
+ask_grace="${WM_ASK_WATCH_GRACE:-30}"
+unwaited=""
+pending_asks="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" ask-list --from "$OWNER" --status pending 2>/dev/null)"
+if [ -n "$pending_asks" ]; then
+  now_s="$(date +%s)"
+  while IFS=$'\t' read -r req st frm to created; do
+    [ -n "$req" ] || continue
+    live=0
+    apid_file="$WM_HOME/ask/$req.pid"
+    abeat_file="$WM_HOME/ask/$req.beat"
+    if [ -f "$apid_file" ] && [ -f "$abeat_file" ]; then
+      apid="$(cat "$apid_file" 2>/dev/null)"
+      if [ -n "$apid" ] && kill -0 "$apid" 2>/dev/null; then
+        abeat_m="$($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$abeat_file" 2>/dev/null)"
+        if [ -n "$abeat_m" ] && [ $(( now_s - abeat_m )) -lt "$ask_grace" ]; then live=1; fi
+      fi
+    fi
+    if [ "$live" = 0 ]; then
+      unwaited="$unwaited
+- ask $req to $to"
+    fi
+  done <<EOF
+$pending_asks
+EOF
+fi
+
 reason=""
 if [ -n "$attention" ]; then
   # Blocking the stop is a delivery to wingman, so ack each surfaced (id, updated).
@@ -72,6 +104,9 @@ $list
 Read $WM_HOME/wake and run bin/crew-list, surface each blocker/PR to the pilot (or
 answer via bin/crew-say), and give the pilot a compact roster status (who is on what,
 what is blocked, what is stalled, what is ready), then you may stop."
+elif [ -n "$unwaited" ]; then
+  reason="You have a pending question with no live waiter:$unwaited
+Arm 'bin/crew-ask await --id <req>' as a harness-tracked background task for each so its exit wakes you when the answer lands, then you may stop."
 elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
   reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
 fi

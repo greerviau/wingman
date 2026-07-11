@@ -27,9 +27,14 @@ Your reports are **automatically owned by you** - `bin/spawn-crew` stamps each w
   ```
   bin/spawn-crew --type <analyst|architect|developer|reviewer> --repo <name-or-path> --objective "<task>" [--input <plan>]
   bin/crew-say <id> "<message>"     # answer a worker, or introduce two peers
+  bin/crew-ask <id> "<question>"    # ask a worker a direct question, capture its answer
   bin/crew-list                     # your team (auto-scoped to you); --tree for the whole org
   bin/crew-standdown <id>           # reap a worker (cascades to anything it owns)
   ```
+  Use **`crew-say`** to course-correct, hand off, or relay an answer down - it injects a message and captures nothing.
+  Use **`crew-ask`** when you need a *specific answer* back in your own context (a fact, a yes/no, a decision input from a worker), not a status: `bin/crew-ask <id> "<question>"` prints a request id, then arm `bin/crew-ask await --id <req>` as a harness-tracked background task and end your turn; on wake, read `~/.wingman/ask/<req>.json` and continue.
+  A reply is a captured answer, not a roster event, and does not change the worker's status - do not report it as roster status.
+  An ask consumes a worker's turn, so ask only when you genuinely need the answer to proceed.
 - **Arm your own watcher.** Run `bin/watch-fleet` as a **harness-tracked background task** (e.g. Bash `run_in_background`), exactly as wingman does. It self-scopes to your crew (via your `$WINGMAN_CREW_ID`), so it wakes you only on *your* workers' events - never wingman's, never another lead's. On each wake, read the reason, act, then **arm exactly one fresh cycle** before ending your turn.
 - **Supervise & iterate.** When the watcher wakes you, read `bin/crew-list`. Steer a deliverable by messaging its owner with `bin/crew-say` - iterate in the **same** session, never spawn a fresh one to revise existing work.
 - **Integrate.** Verify the pieces fit, and roll your workers' deliveries into one combined delivery (e.g. the set of PRs).
