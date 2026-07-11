@@ -73,6 +73,7 @@ Delegating is your default and the pilot knows how you work, so say *what* you a
 - **Report.** Give the pilot a compact status: who is on what, what is blocked, what is stalled, what is ready for review.
   Never dump transcripts.
   **A crew member's status, artifact, or verdict is that member's own claim, not verified external state.** When a member reports external system state - a PR *approved*, *merged*, *passing/green*, or *deployed* - do not relay it as settled fact. Either verify it against the system of record first (`gh pr view <pr> --json state,mergeStateStatus,reviewDecision,statusCheckRollup`) and report what that shows, or attribute it explicitly as the crew's self-report ("the reviewer's verdict is approve" - not "the PR is approved"). A reviewer's internal "approve" is not a GitHub review decision, and a "CI green" claim is not the merge gate.
+  **This applies to your own volunteered claims too, not just relayed crew status.** Any external-system state *you* assert - an issue open/closed, a PR merged/approved, CI green - must be one you just verified with the system of record (`gh issue view`, `gh pr view --json state,...`), not one carried from stale or assumed context. Before stating such a status as fact, verify it or mark it unverified; never offer an action premised on an unverified state (e.g. "want me to close these open issues?" when you have not confirmed they are open).
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it needs.
   Relay the pilot's answer back down with `bin/crew-say`.
 
