@@ -25,12 +25,16 @@ Your reports are **automatically owned by you** - `bin/spawn-crew` stamps each w
 - **Announce before you hire.** State your intended crew (the roles and count) before spawning more than ~2 at once. If the effort needs a large fan-out, surface that upward (set your `summary`/`blocker`) for wingman's awareness before committing - a lead running a whole team is the most expensive thing in the system.
 - **Spawn your own crew.** You have the same scripts:
   ```
-  bin/spawn-crew --type <software-analyst|architect|developer|reviewer> --repo <name-or-path> --objective "<task>" [--input <plan>]
+  bin/spawn-crew --type <software-analyst|architect|developer|reviewer> --repo <name-or-path> --objective "<task>" \
+    [--input <plan>] [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
   bin/crew-say <id> "<message>"     # answer a worker, or introduce two peers
   bin/crew-ask <id> "<question>"    # ask a worker a direct question, capture its answer
   bin/crew-list                     # your team (auto-scoped to you); --tree for the whole org
   bin/crew-standdown <id>           # reap a worker (cascades to anything it owns)
   ```
+  `--model`/`--effort` are per-worker: pass them only on the spawn of the worker they apply to.
+  If the pilot stated a model preference when appointing you (or later via `bin/crew-say`) scoped to one phase ("use Opus for the developer phase"), thread it onto only that phase's `bin/spawn-crew` call - every other worker still falls through to `WM_MODEL`/the agent default, unchanged.
+  A preference stated for the whole effort ("use Opus for everything") is the one case you apply to every worker you spawn.
   Use **`crew-say`** to course-correct, hand off, or relay an answer down - it injects a message and captures nothing.
   Use **`crew-ask`** when you need a *specific answer* back in your own context (a fact, a yes/no, a decision input from a worker), not a status: `bin/crew-ask <id> "<question>"` prints a request id, then arm `bin/crew-ask await --id <req>` as a harness-tracked background task and end your turn; on wake, read `~/.wingman/ask/<req>.json` and continue.
   A reply is a captured answer, not a roster event, and does not change the worker's status - do not report it as roster status.

@@ -120,6 +120,10 @@ Because no human sits at a crew member's terminal, `bin/spawn-crew` launches it 
 Two interactive gates remain that no flag can bypass: Claude Code's one-time Bypass-Permissions acceptance, and the one-time-per-repo workspace-trust dialog.
 The watcher catches both, so the first crew pauses until the pilot approves once via `bin/crew-takeover`; after that, crew in that repo run fully unattended.
 
+`--model <alias|id>` and `--effort <low|medium|high|xhigh|max>` are per-spawn, per-session settings: passed on one `bin/spawn-crew` call, they affect only that one crew member's session, never wingman's own running model or any other crew member's.
+Omit both and the existing default chain stands unchanged (explicit `--model` > `WM_MODEL` env default > the agent CLI's own default).
+See "Command vocabulary" for when to pass them.
+
 ## Crew types are open-ended
 
 A crew type is just a playbook.
@@ -139,12 +143,18 @@ You never edit playbooks yourself - the pilot owns them.
   For a bug, its brief tells it to reproduce end-to-end before hypothesizing.
   It leaves a report; you relay the path.
 - **"Take the lead on X" / "ship it all the way" / a large end-to-end effort** → appoint a **lead** (see "Appointing a lead"). For an explicit "take the lead," spawn one directly; for a big directive that only *implies* it, the intake lead test is what surfaces the suggestion - appoint on confirmation.
+- **A directive names a model or effort for a spawn** (e.g. "spawn a developer for this on Opus", "have the software-analyst use Sonnet", "run this on high effort") → pass `--model <alias|id>` and/or `--effort <low|medium|high|xhigh|max>` on that one `bin/spawn-crew` call, carrying the value through verbatim (an alias like `opus`/`sonnet`/`haiku`/`fable`, or a raw model id - no translation or validation on your end; the agent CLI resolves it).
+  This affects only the one spawn: wingman's own model and every other crew member - already running or spawned afterward without a model request - are untouched.
+  Absent a named model or effort, behavior is unchanged: explicit `--model` beats the `WM_MODEL` env default, which beats the agent CLI's own default, exactly as before this existed.
+  When appointing a **lead**, a model preference stated for a specific phase ("use Opus for the developer phase") is not yours to apply - pass it through as part of the lead's objective so the lead threads it onto that phase's worker spawn only (see `playbooks/common/lead.md`); a preference stated for "everything" is likewise relayed in the objective, not applied by you spawning the lead itself on that model.
 - **"Status" / "what's my crew doing?"** → run `bin/crew-list` and summarize the roster compactly, **including each member's status**.
   `bin/crew-list` shows your **direct reports** (a lead appears as one line); for the whole org use `bin/crew-list --tree`, and to see inside a lead's team use `bin/crew-list --owner <lead-id>`.
   It shows current crew only - fully-closed `stood-down` records are hidden by default.
   Only reach for history when the pilot explicitly asks for it: `bin/crew-list --all` (or `--status stood-down`).
 - **"What's blocked?"** → `bin/crew-list --status blocked`; for each, surface the blocker and the decision it needs.
 - **Crew stalled** → when the watcher surfaces a `stalled` member (no sign of life on any channel while its status claimed `working`), relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or `bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked` and `review`, the pilot decides its disposition.
+  An invalid `--model` value is one cause of this: the agent CLI accepts it at startup, so the tmux window stays alive, but every turn comes back as an in-chat model error instead of doing any work - the member never self-reports, so it surfaces as `stalled`, not `died`.
+  `bin/crew-takeover <id>` attaches to the live window, where the model error is directly visible in the transcript (see `docs/analysis/2026-07-11-invalid-model-failure-path.md`).
 - **"Take over X"** → run `bin/crew-takeover <id>` and relay the command it prints to the pilot.
   For a live crew member that is `tmux attach` (harness-agnostic - reaches whatever agent CLI is in the window); for a dead window it prints the agent-specific resume recovery.
   You cannot hand your own terminal over, so you only relay the command.
