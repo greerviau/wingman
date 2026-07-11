@@ -101,7 +101,10 @@ slugify() {
     | tr -c 'a-z0-9' '-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-32
 }
 if [ -z "$ID" ]; then
-  ID="$(slugify "$OBJECTIVE")-$TYPE"
+  # slugify $TYPE too: a category-qualified type ("common/lead") contains a
+  # slash, which is otherwise invalid in a tmux window name and unsafe in a
+  # generated file/worktree path.
+  ID="$(slugify "$OBJECTIVE")-$(slugify "$TYPE")"
 fi
 # Ensure uniqueness against the current roster.
 base="$ID"; n=2
