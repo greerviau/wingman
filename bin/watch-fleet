@@ -436,7 +436,11 @@ for r in data:
   # Who needs this owner right now? Scoped to the owner's own direct reports, so a
   # lead's worker never wakes wingman and vice versa. Checked at the top of the loop
   # so an event already pending on arm fires immediately (at-least-once re-arms).
-  attention="$(wm_state needs-attention --owner "$OWNER" 2>/dev/null)"
+  # --suppress-on ack (the default, explicit here) is the watcher/fire gate: an
+  # event already acked (surfaced and in flight) or handled does not re-fire, while
+  # a new (id, updated) still surfaces. The Stop hook uses --suppress-on handled so
+  # an acked-but-unhandled event still blocks once (Fix A / #8).
+  attention="$(wm_state needs-attention --owner "$OWNER" --suppress-on ack 2>/dev/null)"
   [ -n "$attention" ] && fire "$attention"
 
   sleep "$INTERVAL"

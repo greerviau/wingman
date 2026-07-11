@@ -18,15 +18,13 @@ WM_UV="${WM_UV:-uv run --no-project --quiet}"
 
 INPUT="$(cat)"
 
-# Avoid infinite loops: if we already blocked once this turn, allow the stop.
+# Have we already blocked once this turn? (stop_hook_active). This drives the
+# two-pass state machine below; it no longer just early-exits.
 active="$(printf '%s' "$INPUT" | $WM_UV python -c 'import sys,json;
 try: print(json.load(sys.stdin).get("stop_hook_active"))
 except Exception: print("None")' 2>/dev/null)"
-if [ "$active" = "True" ]; then
-  exit 0
-fi
 
-# No state yet (pre-onboarding) → nothing to guard.
+# No state yet (pre-onboarding) → nothing to guard (neither pass has work to do).
 [ -f "$STATE_PY" ] || exit 0
 [ -d "$WM_HOME" ] || exit 0
 
@@ -34,7 +32,37 @@ fi
 # wingman has no $WINGMAN_CREW_ID): a lead's worker is that lead's concern, watched
 # by the lead's own watcher, and must not block wingman's stop.
 OWNER="${WINGMAN_CREW_ID:-}"
-attention="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention --owner "$OWNER" 2>/dev/null)"
+
+# Per-turn scratch set (Fix A / #8): the exact (id, updated) events this turn's
+# block enumerated, TSV "id<TAB>updated" per line. Keyed by owner like the
+# wake/pid files so wingman's hook and a lead's hook never collide.
+if [ -n "$OWNER" ]; then
+  _okey="$(printf '%s' "$OWNER" | tr -c 'A-Za-z0-9._-' '_')"
+  SCRATCH="$WM_HOME/stop-blocked-$_okey.json"
+else
+  SCRATCH="$WM_HOME/stop-blocked.json"
+fi
+
+# --- pass 2: we already blocked once this turn. Mark EXACTLY the scratch set as
+# handled - so those events stop suppressing a future block only once fully handled
+# - delete the scratch, and allow the stop. Reading the set from the scratch file,
+# not re-deriving it from the stores at allow-time, is what keeps a mid-turn new
+# transition (or a mid-turn watcher ack) from being marked handled and dropped (#8):
+# such an event was never in the scratch, so it re-blocks on the next turn.
+if [ "$active" = "True" ]; then
+  if [ -f "$SCRATCH" ]; then
+    while IFS=$'\t' read -r _hid _hupd; do
+      [ -n "$_hid" ] && WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" mark-handled --id "$_hid" --updated "$_hupd" >/dev/null 2>&1
+    done < "$SCRATCH"
+    rm -f "$SCRATCH"
+  fi
+  exit 0
+fi
+
+# --- pass 1: first stop attempt this turn. --suppress-on handled keeps an
+# acked-but-unhandled event visible here, so every surfaced event blocks once
+# (guaranteeing the roster report) before the owner may stop.
+attention="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention --owner "$OWNER" --suppress-on handled 2>/dev/null)"
 active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --owner "$OWNER" --json 2>/dev/null | $WM_UV python -c 'import sys,json;
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')"
@@ -89,12 +117,17 @@ fi
 
 reason=""
 if [ -n "$attention" ]; then
-  # Blocking the stop is a delivery to wingman, so ack each surfaced (id, updated).
-  # needs-attention emits tab-separated "id status updated note"; the watcher and
-  # this hook share the one ack store, so an event shown by either channel does not
-  # re-surface until the crew's status changes (a new updated).
+  # Record EXACTLY this turn's enumerated events as the scratch set, and ack each
+  # (idempotent) so a freshly-armed watcher cycle will not also re-fire them. Do NOT
+  # mark handled yet - pass 2 does that, only for this captured set. The watcher and
+  # this hook share the one ack store (its writes are flock-serialized), so an event
+  # shown by either channel does not re-fire until the crew's status changes.
+  # needs-attention emits tab-separated "id status updated note".
+  : > "$SCRATCH"
   printf '%s\n' "$attention" | while IFS=$'\t' read -r id st upd note; do
-    [ -n "$id" ] && WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" ack --id "$id" --updated "$upd" >/dev/null 2>&1
+    [ -n "$id" ] || continue
+    printf '%s\t%s\n' "$id" "$upd" >> "$SCRATCH"
+    WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" ack --id "$id" --updated "$upd" >/dev/null 2>&1
   done
   list="$(printf '%s\n' "$attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && printf -- '- %s [%s] %s\n' "$id" "$st" "$note"
@@ -104,11 +137,16 @@ $list
 Read $WM_HOME/wake and run bin/crew-list, surface each blocker/PR to the pilot (or
 answer via bin/crew-say), and give the pilot a compact roster status (who is on what,
 what is blocked, what is stalled, what is ready), then you may stop."
-elif [ -n "$unwaited" ]; then
-  reason="You have a pending question with no live waiter:$unwaited
+else
+  # Nothing unhandled this turn → discard any stale scratch from a prior turn, then
+  # fall through to the no-waiter / no-watcher guards.
+  rm -f "$SCRATCH"
+  if [ -n "$unwaited" ]; then
+    reason="You have a pending question with no live waiter:$unwaited
 Arm 'bin/crew-ask await --id <req>' as a harness-tracked background task for each so its exit wakes you when the answer lands, then you may stop."
-elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
-  reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
+  elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
+    reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
+  fi
 fi
 
 if [ -n "$reason" ]; then

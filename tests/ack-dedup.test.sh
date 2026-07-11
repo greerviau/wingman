@@ -64,7 +64,9 @@ assert_contains "gap event for the new member is delivered" "$(cat "$WINGMAN_HOM
 assert_false "the already-acked member is not re-surfaced" "grep -q 'done: e1' \"$WINGMAN_HOME/rearm.log\""
 kill "$wpid" 2>/dev/null
 
-# --- the Stop hook acks what it blocks on -------------------------------------
+# --- the Stop hook acks what it blocks on, and only HANDLED events stop blocking -
+# (Fix A / #8): acking alone must NOT permanently suppress the Stop hook; only a
+# completed handling (marked on the stop_hook_active pass) does.
 test_new_home
 wm_state crew-add --id f1 --type analyst --objective z --repo /tmp --window wm-f1 --session-id s4 >/dev/null
 wm_state crew-set --id f1 --status done --summary "done z" >/dev/null
@@ -74,8 +76,18 @@ r1="$(printf '{"stop_hook_active": false}' | WINGMAN_HOME="$WINGMAN_HOME" bash "
 assert_contains "Stop hook blocks the first time on a done member" "$r1" '"decision": "block"'
 assert_contains "Stop hook names the member in its reason" "$r1" "f1"
 
-# Next turn's stop (stop_hook_active false again): the event is acked → allow.
+# A fresh stop attempt (stop_hook_active false) with handling NOT completed: the
+# acked-but-unhandled event RE-BLOCKS - the core #8 fix (a premature ack no longer
+# permanently suppresses it).
 r2="$(printf '{"stop_hook_active": false}' | WINGMAN_HOME="$WINGMAN_HOME" bash "$STOP_GUARD")"
-assert_eq "Stop hook allows the stop once the event is acked" "$r2" ""
+assert_contains "an acked-but-unhandled event re-blocks the stop" "$r2" '"decision": "block"'
+
+# The real second attempt of the turn (stop_hook_active true): mark handled, allow.
+r3="$(printf '{"stop_hook_active": true}' | WINGMAN_HOME="$WINGMAN_HOME" bash "$STOP_GUARD")"
+assert_eq "stop_hook_active marks handled and allows the stop" "$r3" ""
+
+# Now the event is fully handled: a subsequent fresh stop no longer blocks on it.
+r4="$(printf '{"stop_hook_active": false}' | WINGMAN_HOME="$WINGMAN_HOME" bash "$STOP_GUARD")"
+assert_eq "a handled event no longer blocks the stop" "$r4" ""
 
 test_summary

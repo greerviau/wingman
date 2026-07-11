@@ -20,14 +20,22 @@ assert_contains "reason enumerates stalled" "$out" "what is stalled"
 assert_contains "reason points at crew-list" "$out" "bin/crew-list"
 assert_contains "reason points at the wake file" "$out" "/wake"
 
-# Blocking was a delivery: the event is acked, so a second pass has no attention
-# left and falls through to the no-watcher nudge (the member is still in flight).
+# Fix A / #8: acking is not handling. A fresh pass with handling NOT completed
+# (stop_hook_active still false) re-blocks on the same surfaced-but-unhandled event,
+# rather than being permanently suppressed by the pass-1 ack.
 out2="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
-assert_contains "second pass falls to the watcher-arm nudge" "$out2" "watch-fleet"
+assert_contains "an unhandled event re-blocks on the next pass" "$out2" '"decision": "block"'
+assert_contains "the re-block still demands the roster report" "$out2" "compact roster status"
 
-# A turn that was already blocked once is always allowed to stop.
+# The real second attempt of the turn (stop_hook_active true): mark the scratch set
+# handled and allow the stop.
 out3="$(printf '{"stop_hook_active": true}' | bash "$HOOK")"
-assert_eq "stop_hook_active allows the stop" "$out3" ""
+assert_eq "stop_hook_active marks handled and allows the stop" "$out3" ""
+
+# h1 is now handled, so a subsequent fresh pass no longer blocks on it and falls
+# through to the no-watcher nudge (the member is still in flight).
+out4="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "a handled event falls to the watcher-arm nudge" "$out4" "watch-fleet"
 
 # --- pending ask with no live waiter blocks the stop --------------------------
 # A caller asked a delegate but did not arm the wait; it would sleep forever with
