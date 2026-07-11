@@ -10,8 +10,13 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   crew/<id>.json    the distilled status each crew member keeps current itself
   board.md          the human-readable render of the merged roster
   projects.json     the discovered-projects cache: {"name": "path"}
-  acked.json        the last (id -> updated) event surfaced to wingman, so a
-                    terminal state does not re-surface on every needs-attention poll
+  acked.json        the last (id -> updated) event SURFACED to wingman (by a
+                    watcher fire or a Stop-hook block), so it does not re-fire on
+                    every needs-attention poll while it is being handled
+  handled.json      the last (id -> updated) event fully HANDLED (surfaced AND the
+                    roster reported), set only by the Stop hook when it lets a stop
+                    proceed. Distinct from acked so a surfaced-but-unhandled event
+                    can still re-block instead of being permanently suppressed
   crew-archive.jsonl  append-only history of records removed by `prune`, one JSON
                     object per line, so pruning keeps crew.json lean without losing
                     the record of who ran
@@ -25,12 +30,18 @@ All JSON is handled here in Python so the shell scripts stay bash-3.2-safe and t
 tool works whether or not jq is installed.
 """
 import argparse
+import contextlib
 import datetime
 import json
 import os
 import subprocess
 import sys
 import time
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
+    fcntl = None
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "updated")
 # Live = the member is still in flight and stays on the board's Active list.
@@ -80,6 +91,42 @@ def projects_path():
 
 def acked_path():
     return os.path.join(home(), "acked.json")
+
+
+def handled_path():
+    return os.path.join(home(), "handled.json")
+
+
+@contextlib.contextmanager
+def with_locked(path):
+    """Serialize a read-modify-write of a shared store across processes.
+
+    write_json is atomic (os.replace), so no file is ever corrupted, but a
+    whole-dict read-modify-write from two processes is last-writer-wins - a
+    concurrent watcher fire()-and-ack and a Stop-hook ack can each discard the
+    other's key. Holding an exclusive flock on <path>.lock across the entire
+    read->modify->write closes that window. Best-effort: on a platform without
+    fcntl (or if the lock cannot be taken) it proceeds without the lock rather than
+    hard-fail, since the atomic replace still prevents corruption."""
+    lock_path = path + ".lock"
+    fh = None
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        fh = open(lock_path, "w")
+        if fcntl is not None:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except OSError:
+                pass  # best-effort
+        yield
+    finally:
+        if fh is not None:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            fh.close()
 
 
 def archive_path():
@@ -391,7 +438,8 @@ def cmd_prune(args):
     than N days ago. `--dry-run` reports what would go without touching anything.
 
     For each removed record: append the merged view to crew-archive.jsonl, delete
-    its crew/<id>.json status file, and drop its acked.json entry. `done` is never
+    its crew/<id>.json status file, and drop its acked.json and handled.json
+    entries. `done` is never
     a prune target - wingman reaps it to `stood-down` the moment it appears, so a
     live `done` on the roster is a fresh event, not history."""
     ensure_home()
@@ -447,11 +495,13 @@ def cmd_prune(args):
 
     write_json(crew_json_path(), keep)
 
-    acked = read_json(acked_path(), {})
-    if isinstance(acked, dict):
-        for cid in removed_ids:
-            acked.pop(cid, None)
-        write_json(acked_path(), acked)
+    for store_path in (acked_path(), handled_path()):
+        with with_locked(store_path):
+            store = read_json(store_path, {})
+            if isinstance(store, dict):
+                for cid in removed_ids:
+                    store.pop(cid, None)
+                write_json(store_path, store)
 
     render_board()
     print(len(remove))
@@ -608,24 +658,48 @@ def cmd_needs_attention(args):
     carries a new `updated` and surfaces again.
 
     Output is tab-separated: id, status, updated, note. The `updated` column lets a
-    deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects)."""
+    deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects).
+
+    The suppression selector distinguishes the two deliverers (Fix A / #8):
+      --suppress-on ack (default): the watcher / fire() gate. Suppress an event that
+        is either already acked (surfaced and being handled) OR already handled, so
+        a freshly-armed cycle does not re-fire an event currently in flight.
+      --suppress-on handled: the Stop-hook gate. Suppress only a fully-handled
+        event, so an acked-but-unhandled one is still visible and still blocks once
+        (guaranteeing the roster report) before the owner may stop.
+      --only-acked: additionally restrict to events currently in acked.json;
+        `--suppress-on handled --only-acked` therefore enumerates exactly the set
+        acked-minus-handled."""
     owner = getattr(args, "owner", None)
+    suppress_on = getattr(args, "suppress_on", None) or "ack"
+    only_acked = getattr(args, "only_acked", False)
     acked = read_json(acked_path(), {})
     if not isinstance(acked, dict):
         acked = {}
+    handled = read_json(handled_path(), {})
+    if not isinstance(handled, dict):
+        handled = {}
     for r in (merged(x) for x in load_roster()):
         if owner is not None and parent_of(r) != owner:
             continue
         if r.get("status") in ATTENTION_STATES:
-            if acked.get(r["id"]) == r.get("updated"):
-                continue  # already surfaced this exact event
+            rid = r["id"]
+            upd = r.get("updated")
+            if suppress_on == "handled":
+                if handled.get(rid) == upd:
+                    continue  # already fully handled
+            else:  # "ack": suppress an event acked OR handled (watcher/fire gate)
+                if acked.get(rid) == upd or handled.get(rid) == upd:
+                    continue
+            if only_acked and acked.get(rid) != upd:
+                continue  # restrict to currently-acked events
             # The note is a short hint for wingman to relay; prefer the pointer the
             # pilot needs (the blocker to answer, the PR/branch delivered, or the
             # artifact produced) over the free-text summary.
             note = (r.get("blocker") or r.get("delivery")
                     or r.get("artifact") or r.get("summary") or "")
             print("%s\t%s\t%s\t%s" % (
-                r["id"], r["status"], r.get("updated") or "", note))
+                rid, r["status"], upd or "", note))
 
 
 def cmd_ack(args):
@@ -635,13 +709,35 @@ def cmd_ack(args):
     Explicit and idempotent: the deliverer passes the exact tuple it surfaced, so
     the ack never races a state change between the read and the ack - a transition
     in that window produces a new `updated` that this ack does not cover, and it
-    correctly re-surfaces."""
+    correctly re-surfaces. The read-modify-write is serialized (with_locked) so a
+    concurrent watcher-fire ack and Stop-hook ack cannot lose each other's key."""
     ensure_home()
-    acked = read_json(acked_path(), {})
-    if not isinstance(acked, dict):
-        acked = {}
-    acked[args.id] = args.updated
-    write_json(acked_path(), acked)
+    with with_locked(acked_path()):
+        acked = read_json(acked_path(), {})
+        if not isinstance(acked, dict):
+            acked = {}
+        acked[args.id] = args.updated
+        write_json(acked_path(), acked)
+    print(args.id)
+
+
+def cmd_mark_handled(args):
+    """Record that the (id, updated) event has been fully HANDLED by the owner -
+    surfaced AND the roster reported - distinct from `ack` (merely surfaced).
+
+    Only the Stop hook sets this, and only for the exact set of events its block
+    enumerated this turn (its per-turn scratch set), when it lets a stop proceed.
+    Marking handled only that captured set - never a set re-derived from the stores
+    at allow-time - is what prevents a mid-turn new transition (or a mid-turn
+    watcher ack) from being marked handled and silently dropped (#8). The
+    read-modify-write is serialized (with_locked) like `ack`."""
+    ensure_home()
+    with with_locked(handled_path()):
+        handled = read_json(handled_path(), {})
+        if not isinstance(handled, dict):
+            handled = {}
+        handled[args.id] = args.updated
+        write_json(handled_path(), handled)
     print(args.id)
 
 
@@ -990,12 +1086,22 @@ def build_parser():
     a = sub.add_parser("needs-attention")
     # Emit only this owner's direct reports ("" = top level). Omit for every layer.
     a.add_argument("--owner", default=None)
+    # Suppression selector (Fix A / #8): "ack" (default) is the watcher/fire gate
+    # (suppress acked OR handled); "handled" is the Stop-hook gate (suppress only
+    # handled). --only-acked restricts to currently-acked events.
+    a.add_argument("--suppress-on", default="ack", choices=("ack", "handled"), dest="suppress_on")
+    a.add_argument("--only-acked", action="store_true", dest="only_acked")
     a.set_defaults(fn=cmd_needs_attention)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)
     a.add_argument("--updated", required=True)
     a.set_defaults(fn=cmd_ack)
+
+    a = sub.add_parser("mark-handled")
+    a.add_argument("--id", required=True)
+    a.add_argument("--updated", required=True)
+    a.set_defaults(fn=cmd_mark_handled)
 
     a = sub.add_parser("projects-set")
     a.add_argument("--data")

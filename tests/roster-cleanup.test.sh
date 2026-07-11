@@ -30,13 +30,16 @@ assert_contains "dry-run still shows it after (nothing removed)" "$(wm_state cre
 
 # --- prune archives + removes the stood-down record --------------------------
 wm_state ack --id a1 --updated "2026-01-01T00:00:00.000000Z" >/dev/null  # seed an acked entry to prove it is cleaned
+wm_state mark-handled --id a1 --updated "2026-01-01T00:00:00.000000Z" >/dev/null  # and a handled entry (Fix A / #8)
 assert_true "a1 has an acked entry before prune" "grep -q a1 '$WINGMAN_HOME/acked.json'"
+assert_true "a1 has a handled entry before prune" "grep -q a1 '$WINGMAN_HOME/handled.json'"
 n="$(wm_state prune)"
 assert_eq "prune removes exactly the one stood-down record" "$n" "1"
 case "$(wm_state crew-list --all)" in *a1*) fail "pruned member is gone from the roster" ;; *) ok "pruned member is gone from the roster" ;; esac
 assert_true  "the pruned record is archived" "grep -q '\"id\": \"a1\"' '$WINGMAN_HOME/crew-archive.jsonl'"
 assert_false "the pruned member's status file is deleted" "test -f '$WINGMAN_HOME/crew/a1.json'"
 assert_false "the pruned member's acked entry is cleaned" "grep -q a1 '$WINGMAN_HOME/acked.json'"
+assert_false "the pruned member's handled entry is cleaned" "grep -q a1 '$WINGMAN_HOME/handled.json'"
 
 # died survives a default prune, goes on --all-terminal ------------------------
 assert_contains "a died member survives a default prune" "$(wm_state crew-list --all)" "a3"
