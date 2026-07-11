@@ -31,7 +31,7 @@ if [ -n "${WINGMAN_CREW_ID:-}" ] && [ "${WINGMAN_CREW_TYPE:-}" != "lead" ]; then
 fi
 
 printf '%s' "$INPUT" | $WM_UV python -c '
-import json, re, sys
+import json, re, shlex, sys
 
 try:
     data = json.load(sys.stdin)
@@ -69,20 +69,74 @@ if tool == "Bash":
     # Direct test-runner invocations only - generic Bash (gh, git, ls, grep,
     # cat, ...) is exactly how wingman/leads do legitimate orchestration and
     # must stay unblocked (this hook'"'"'s own author depends on it constantly).
-    test_patterns = [
-        r"(^|[\s;&|/])pytest\b",
-        r"\b(npm|yarn|pnpm)\s+(run\s+)?test\b",
-        r"\bgo\s+test\b",
-        r"\bcargo\s+test\b",
-        r"\brspec\b",
-        r"\bjest\b",
-        r"\bmocha\b",
-        r"\bpython3?\s+-m\s+(pytest|unittest)\b",
-        r"\bmake\s+test\b",
-        r"tests?/[^\s]*\.test\.sh\b",
-        r"tests?/run\.sh\b",
-    ]
-    if any(re.search(p, command) for p in test_patterns):
+    # Matched against the command actually being invoked in each ;/&&/||/pipe
+    # segment - not a raw substring search over the whole line - so a runner
+    # word appearing as someone else'"'"'s argument (a grep pattern, a `git log
+    # --grep`, a filename, a package name, free text after echo) does not trip
+    # the same deny path as an actual invocation.
+    RUNNER_BINS = {"pytest", "rspec", "jest", "mocha"}
+
+    def basename(tok):
+        return tok.rsplit("/", 1)[-1]
+
+    def is_test_runner_segment(tokens):
+        i = 0
+        while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
+            i += 1
+        tokens = tokens[i:]
+        if not tokens:
+            return False
+        cmd = tokens[0]
+        b = basename(cmd)
+
+        if re.search(r"tests?/[^/\s]*\.test\.sh$", cmd) or re.search(r"tests?/run\.sh$", cmd):
+            return True
+        if b in ("sudo", "env"):
+            return is_test_runner_segment(tokens[1:])
+        if b in ("bash", "sh", "zsh") and len(tokens) > 1:
+            rest = [t for t in tokens[1:] if not t.startswith("-")]
+            return bool(rest) and is_test_runner_segment(rest)
+        if b == "uv" and len(tokens) > 1 and tokens[1] == "run":
+            return is_test_runner_segment(tokens[2:])
+        if b in ("python", "python3") and "-m" in tokens:
+            idx = tokens.index("-m")
+            return idx + 1 < len(tokens) and tokens[idx + 1] in ("pytest", "unittest")
+        if b in ("npm", "yarn", "pnpm"):
+            rest = [t for t in tokens[1:] if t != "run"]
+            return bool(rest) and rest[0] == "test"
+        if b == "go" and len(tokens) > 1 and tokens[1] == "test":
+            return True
+        if b == "cargo" and len(tokens) > 1 and tokens[1] == "test":
+            return True
+        if b == "make" and "test" in tokens[1:]:
+            return True
+        return b in RUNNER_BINS
+
+    def command_segments(cmd_str):
+        segments = []
+        for line in cmd_str.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                lex = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+                lex.whitespace_split = True
+                tokens = list(lex)
+            except ValueError:
+                continue
+            current = []
+            for tok in tokens:
+                if tok and set(tok) <= set(";&|"):
+                    if current:
+                        segments.append(current)
+                    current = []
+                else:
+                    current.append(tok)
+            if current:
+                segments.append(current)
+        return segments
+
+    if any(is_test_runner_segment(seg) for seg in command_segments(command)):
         deny(
             "Running the test suite directly is not yours to do here - you are "
             "acting as an orchestrator. Hand the change and its verification to "

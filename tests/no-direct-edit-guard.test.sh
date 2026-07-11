@@ -47,11 +47,35 @@ assert_contains "top-level: tests/run.sh is denied" "$out" '"permissionDecision"
 out="$(run_hook Bash "bash tests/stop-guard.test.sh")"
 assert_contains "top-level: a tests/*.test.sh invocation is denied" "$out" '"permissionDecision": "deny"'
 
+out="$(run_hook Bash "npm run test")"
+assert_contains "top-level: npm run test is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "cargo test")"
+assert_contains "top-level: cargo test is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "make test")"
+assert_contains "top-level: make test is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "uv run pytest")"
+assert_contains "top-level: uv run pytest is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "python3 -m pytest")"
+assert_contains "top-level: python3 -m pytest is denied" "$out" '"permissionDecision": "deny"'
+
 # Generic Bash - the orchestration wingman itself depends on - must stay open.
 for cmd in "gh pr view 26" "git status" "ls -la" "grep -rn foo ." "cat README.md" \
            "bin/crew-list" "bin/spawn-crew --list-types"; do
   out="$(run_hook Bash "$cmd")"
   assert_eq "top-level: '$cmd' is allowed (no output)" "$out" ""
+done
+
+# A test-runner word appearing as someone else's argument (not the command
+# actually being invoked) must not trip the guard - #27 review finding.
+for cmd in "cat tests/run.sh" "grep -rn pytest ." "git log --grep=fix go test flake" \
+           "gh pr view 26 | grep -i npm test" "pip install pytest-mock" \
+           "echo run make test later"; do
+  out="$(run_hook Bash "$cmd")"
+  assert_eq "top-level: '$cmd' (runner word as argument, not invocation) is allowed" "$out" ""
 done
 
 # --- a lead is also an orchestrator: guarded the same as top-level -----------
