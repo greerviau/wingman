@@ -174,37 +174,143 @@ wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Yes, I trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
 # A real dialog pairs the question with a numbered options list rendered with it.
 WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
+# The highlighted-option glyph, if the CLI renders one. Used ONLY to reject a
+# block that carries more than one such row (a real dialog highlights at most one
+# option; a loose verbatim quote may duplicate the glyph). It is never required to
+# accept: real captures render none (the live workspace-trust dialog signals the
+# selection by indentation, not a glyph), so requiring a marker would miss the
+# highest-value freeze. See WM_PERM_MIN_OPTS for the actual content discriminator.
+WM_PERM_MARK_RE="${WM_PERM_MARK_RE:-^[[:space:]]*❯[[:space:]]*[0-9]+\.[[:space:]]}"
+# A real gate offers a choice, so its option block holds at least this many rows
+# (counting the anchor row when the anchor is itself an option). This is the
+# content discriminator: it rejects a single stray numbered item whose text merely
+# begins with a question phrase (one row) while every true gate - per-tool,
+# workspace-trust, Bypass - renders two or more.
+WM_PERM_MIN_OPTS="${WM_PERM_MIN_OPTS:-2}"
 # A real dialog renders at the bottom of the screen; only this many trailing
 # lines of the capture are searched, so transcript content mid-screen never
 # matches.
 WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
-# ...and renders its options directly under the question: an options line must
-# appear within this many lines after the phrase line. A quoted phrase in prose
+# ...and renders its options directly under the question: the option block must
+# begin within this many lines after the phrase line. A quoted phrase in prose
 # with an unrelated numbered list elsewhere in the tail stops matching.
 WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
 # ...and renders the question as its own line: only non-alphanumeric characters
 # (whitespace, border glyphs) and optionally an option-row prefix ("❯ 1. ", so
-# the Bypass acceptance rows still match) may precede the phrase. Transcript
-# quotes and diff hunks carry prose before it and stop matching; a verbatim
-# full-dialog quote at column zero is the accepted residual.
+# the trust/Bypass acceptance rows - where the phrase IS an option row - still
+# match) may precede the phrase. Transcript quotes and diff hunks carry prose
+# before it and stop matching. The accepted residual is now strictly narrower: a
+# parked pane whose tail holds a verbatim >=WM_PERM_MIN_OPTS-row option block at
+# column zero that has also not self-reported within the liveness grace.
 WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
+# Negative-liveness grace: a member whose status file self-reported more recently
+# than this is too fresh to be frozen, so the blocked-flip is vetoed. Defaults to
+# two poll intervals. The veto applies ONLY once a member has genuinely
+# self-reported since spawn (status.updated has advanced past the immutable
+# spawned_at stamp), so a member frozen on the one-time startup gate - which never
+# runs crew-set, leaving status.updated at the spawn stamp - is never vetoed.
+WM_PERM_LIVENESS_GRACE="${WM_PERM_LIVENESS_GRACE:-$(( INTERVAL * 2 ))}"
 
-# True if the given text contains the question phrase - rendered as its own
-# line per WM_PERM_LEAD_RE - with a numbered-options line within the next
-# WM_PERM_ADJ lines: the one-block shape a real dialog renders, which
-# transcript prose about prompts almost never reproduces.
+# True if the given text contains the question phrase - rendered as its own line
+# per WM_PERM_LEAD_RE - anchoring a full contiguous option block of at least
+# WM_PERM_MIN_OPTS rows bearing at most one selection marker: the one-block shape a
+# real dialog renders, which transcript prose about prompts almost never
+# reproduces. For each phrase hit the option block is found by scanning both
+# directions from the anchor:
+#   - if the anchor line itself is an option row (the trust/Bypass case, where the
+#     matched phrase IS an option), the block starts at the anchor;
+#   - otherwise (the per-tool case, where the phrase is a header) the block starts
+#     at the first option row within WM_PERM_ADJ lines below the anchor.
+# From there it walks downward through consecutive option rows, tolerating blank
+# lines between them (the live trust capture has a blank line before its footer),
+# stopping at the first non-blank non-option line. The block is then accepted iff
+# it holds >=WM_PERM_MIN_OPTS option rows AND <=1 marker rows. The outward walk is
+# capped at WM_PERM_TAIL lines so a pathological pane cannot make it walk far.
 prompt_shape_in() {
   _ps_text="$1"
   _ps_hits="$(printf '%s\n' "$_ps_text" \
     | grep -nE "${WM_PERM_LEAD_RE}(${WM_PERM_PROMPT_RE})" | cut -d: -f1)"
   [ -n "$_ps_hits" ] || return 1
+  _ps_total="$(printf '%s\n' "$_ps_text" | grep -c '')"
   for _ps_n in $_ps_hits; do
-    if printf '%s\n' "$_ps_text" | sed -n "$((_ps_n+1)),$((_ps_n+WM_PERM_ADJ))p" \
-        | grep -qE "$WM_PERM_OPTION_RE"; then
+    # Locate the first option row of the block (its start line).
+    if printf '%s\n' "$_ps_text" | sed -n "${_ps_n}p" | grep -qE "$WM_PERM_OPTION_RE"; then
+      _ps_start="$_ps_n"                       # anchor is itself an option row
+    else
+      _ps_start=""
+      _ps_j="$((_ps_n+1))"; _ps_jmax="$((_ps_n+WM_PERM_ADJ))"
+      while [ "$_ps_j" -le "$_ps_jmax" ] && [ "$_ps_j" -le "$_ps_total" ]; do
+        if printf '%s\n' "$_ps_text" | sed -n "${_ps_j}p" | grep -qE "$WM_PERM_OPTION_RE"; then
+          _ps_start="$_ps_j"; break
+        fi
+        _ps_j="$((_ps_j+1))"
+      done
+      [ -n "$_ps_start" ] || continue
+    fi
+    # Walk downward to the last contiguous option row (blank lines tolerated),
+    # capped at WM_PERM_TAIL lines from the block start.
+    _ps_end="$_ps_start"
+    _ps_k="$((_ps_start+1))"; _ps_kmax="$((_ps_start+WM_PERM_TAIL))"
+    while [ "$_ps_k" -le "$_ps_kmax" ] && [ "$_ps_k" -le "$_ps_total" ]; do
+      _ps_line="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_k}p")"
+      if printf '%s\n' "$_ps_line" | grep -qE "$WM_PERM_OPTION_RE"; then
+        _ps_end="$_ps_k"
+      elif printf '%s\n' "$_ps_line" | grep -qE '^[[:space:]]*$'; then
+        :                                      # blank line: tolerate, do not extend
+      else
+        break                                  # first non-blank non-option ends it
+      fi
+      _ps_k="$((_ps_k+1))"
+    done
+    _ps_block="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_start},${_ps_end}p")"
+    _ps_opts="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_OPTION_RE")"
+    _ps_marks="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_MARK_RE")"
+    if [ "$_ps_opts" -ge "$WM_PERM_MIN_OPTS" ] && [ "$_ps_marks" -le 1 ]; then
       return 0
     fi
   done
   return 1
+}
+
+# Negative-liveness veto: a genuinely frozen session cannot run crew-set, so its
+# status file goes stale. Returns 0 (VETO the blocked flip) iff the member has
+# genuinely self-reported since spawn (its status.updated has advanced past the
+# immutable spawned_at stamp) AND that self-report is fresher than
+# WM_PERM_LIVENESS_GRACE - too recent to be frozen. A member still frozen on the
+# one-time startup gate never ran crew-set, so status.updated equals spawned_at and
+# the veto does not apply (N2): the startup-gate freeze fires normally. This is a
+# veto, not a detector - a legitimately busy member may not self-report for many
+# minutes, so freshness alone cannot flag, but its recency can safely acquit.
+liveness_veto() {
+  _lv_age="$(wm_py -c '
+import json, os, sys, datetime
+cid = sys.argv[1]
+home = os.path.expanduser(os.environ.get("WINGMAN_HOME", "~/.wingman"))
+def rj(p):
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return None
+live = rj(os.path.join(home, "crew", cid + ".json")) or {}
+roster = rj(os.path.join(home, "crew.json")) or []
+spawned_at = None
+for r in roster:
+    if isinstance(r, dict) and r.get("id") == cid:
+        spawned_at = r.get("spawned_at")
+        break
+upd = live.get("updated")
+# Not yet self-reported since spawn (still the spawn stamp, or unknown): no veto.
+if not upd or spawned_at is None or upd == spawned_at:
+    print(999999); sys.exit(0)
+try:
+    t = datetime.datetime.strptime(upd, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=datetime.timezone.utc)
+except Exception:
+    print(999999); sys.exit(0)
+print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()))
+' "$1" 2>/dev/null)"
+  [ -n "$_lv_age" ] || return 1
+  [ "$_lv_age" -lt "$WM_PERM_LIVENESS_GRACE" ]
 }
 
 # True iff a member's pane is frozen on an interactive prompt. Cumulative
@@ -302,7 +408,7 @@ for r in data:
 ' 2>/dev/null); do
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
-      if prompt_freeze_check "$_id" "$_win"; then
+      if prompt_freeze_check "$_id" "$_win" && ! liveness_veto "$_id"; then
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
           >/dev/null 2>&1

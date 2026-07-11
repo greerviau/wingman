@@ -144,7 +144,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z4 --type developer --objective h --repo /tmp --window wm-z4 --session-id s11 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z4 'printf "Do you want to proceed?\n> 1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z4 'printf "Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
 wm_age_status z4
 out6="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
 assert_contains "permission prompt fires as blocked, not stalled" "$out6" "blocked: z4"
@@ -169,12 +169,12 @@ kill "$qpid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- no false positive on a live pane even with full prompt shape -------------
-# Phrase and options both visible, but the pane keeps changing (a working
-# session's status line ticks) - the stability condition must refuse it.
+# Phrase and a full >=2-row option block both visible, but the pane keeps changing
+# (a working session's status line ticks) - the stability condition must refuse it.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z6 --type developer --objective j --repo /tmp --window wm-z6 --session-id s13 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z6 'printf "Do you want to proceed?\n  1. Yes\n"; while :; do echo tick; sleep 1; done'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z6 'printf "Do you want to proceed?\n  1. Yes\n  2. No\n"; while :; do echo tick; sleep 1; done'
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 lpid=$!
 wm_track "$lpid"
@@ -238,6 +238,73 @@ wm_state crew-add --id z10 --type developer --objective n --repo /tmp --window w
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z10 'printf "Quick safety check: Is this a project you created or one you trust?\nIf not, take a moment to review this folder first.\n\nSecurity guide\n\n 1. Yes, I trust this folder\n   2. No, exit\n\nEnter to confirm\n"; sleep 600'
 out10="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "trust dialog fires as blocked via its option row" "$out10" "blocked: z10"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a single stray numbered item is not a gate (>=2-rows rejects it) ---------
+# The PR-#6 residual variant: a parked, byte-static pane whose tail quotes a
+# single numbered item whose text begins with a question phrase. Its option block
+# is one row, below WM_PERM_MIN_OPTS, so the content discriminator refuses it even
+# though the pane is stable.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z11 --type developer --objective o --repo /tmp --window wm-z11 --session-id s19 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z11 'printf "1. Do you want to proceed?\n"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+z11pid=$!
+wm_track "$z11pid"
+sleep 6
+assert_true "watcher keeps blocking on a single stray numbered item" "kill -0 $z11pid"
+assert_contains "single-option member is never flagged" "$(wm_state crew-get --id z11)" '"status": "working"'
+kill "$z11pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a duplicated selection marker rejects the block (marker <=1) --------------
+# A parked, byte-static pane quoting a full >=2-row dialog block, but with the
+# selection glyph on more than one row - a real dialog highlights at most one, so
+# the marker rule refuses the loose verbatim quote.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z12 --type developer --objective p --repo /tmp --window wm-z12 --session-id s20 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z12 'printf "Do you want to proceed?\n❯ 1. Yes\n❯ 2. No\n"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+z12pid=$!
+wm_track "$z12pid"
+sleep 6
+assert_true "watcher keeps blocking on a duplicated-marker block" "kill -0 $z12pid"
+assert_contains "duplicated-marker member is never flagged" "$(wm_state crew-get --id z12)" '"status": "working"'
+kill "$z12pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- an actively-working member is acquitted by the liveness veto --------------
+# A byte-static pane quoting a full >=2-row dialog block (shape + stability both
+# match), but the member has self-reported since spawn and within the liveness
+# grace, so it is too fresh to be frozen and the blocked-flip is vetoed.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z13 --type developer --objective q --repo /tmp --window wm-z13 --session-id s21 >/dev/null
+wm_state crew-set --id z13 --status working --summary "actively grepping the detector strings" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z13 'printf "Do you want to proceed?\n  1. Yes\n  2. No\n"; sleep 600'
+WM_WATCH_INTERVAL=1 WM_PERM_LIVENESS_GRACE=3600 "$WF" >/dev/null 2>&1 &
+z13pid=$!
+wm_track "$z13pid"
+sleep 6
+assert_true "watcher keeps blocking on a freshly self-reported member" "kill -0 $z13pid"
+assert_contains "actively-working member is vetoed, not flagged" "$(wm_state crew-get --id z13)" '"status": "working"'
+kill "$z13pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- the startup-gate freeze is never vetoed by its spawn stamp (N2) -----------
+# A member frozen on the one-time startup gate never runs crew-set, so its
+# status.updated is still the immutable spawn stamp. Even with a large liveness
+# grace - which would veto on freshness alone - the spawn-stamp gate keeps the veto
+# from applying, so the real freeze still fires as blocked.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z14 --type developer --objective r --repo /tmp --window wm-z14 --session-id s22 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z14 'printf "Do you want to proceed?\n  1. Yes\n  2. No\n"; sleep 600'
+out14="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 WM_PERM_LIVENESS_GRACE=3600 "$WF" 2>/dev/null)"
+assert_contains "startup-gate freeze fires despite a large liveness grace" "$out14" "blocked: z14"
+assert_contains "startup-gate frozen member reads blocked" "$(wm_state crew-get --id z14)" '"status": "blocked"'
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- the wake loop is immune to SIGURG (regression: spurious exit 144) --------

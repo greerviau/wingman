@@ -204,6 +204,14 @@ def cmd_crew_add(args):
     ensure_home()
     roster = load_roster()
     roster = [r for r in roster if r.get("id") != args.id]
+    # One stamp for the spawn: the roster `updated`, the immutable `spawned_at`, and
+    # the seeded status file's `updated` all take this identical value, so at spawn
+    # time status.updated == spawned_at exactly. The prompt-freeze liveness veto
+    # (bin/watch-fleet) relies on that equality to tell a member still frozen on the
+    # one-time startup gate (never ran crew-set, so status.updated is still the spawn
+    # stamp) from one that has genuinely self-reported (status.updated advanced past
+    # spawned_at).
+    stamp = now()
     record = {
         "id": args.id,
         "type": args.type,
@@ -221,7 +229,10 @@ def cmd_crew_add(args):
         "blocker": None,
         "artifact": None,
         "delivery": None,
-        "updated": now(),
+        # Immutable spawn stamp; never rewritten by crew-set (see the stamp comment
+        # above). Consumed by the prompt-freeze liveness veto.
+        "spawned_at": stamp,
+        "updated": stamp,
     }
     roster.append(record)
     write_json(crew_json_path(), roster)
@@ -234,7 +245,7 @@ def cmd_crew_add(args):
             "blocker": None,
             "artifact": None,
             "delivery": None,
-            "updated": now(),
+            "updated": stamp,
         })
     render_board()
     print(args.id)
