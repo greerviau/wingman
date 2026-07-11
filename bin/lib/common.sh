@@ -20,7 +20,7 @@ export WINGMAN_HOME="$WM_HOME"
 # shared _status-contract.md partial at its own top level. Overridable (like
 # WM_HOME above) so tests can point the resolver at an isolated fixture tree
 # instead of mutating the live repo's playbook/ directory.
-WM_PLAYBOOKS="${WM_PLAYBOOKS:-$WM_REPO/playbook}"
+WM_PLAYBOOKS="${WM_PLAYBOOKS:-$WM_REPO/playbooks}"
 export WM_PLAYBOOKS
 
 # Python is run through uv, which manages the interpreter and (via --no-project)
