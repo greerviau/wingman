@@ -34,7 +34,7 @@ The watcher also detects a crew frozen on a permission or trust prompt - a termi
 ## The deliverable lifecycle and `review`
 
 A crew member is not spun down the moment its deliverable appears; one session sees a piece of work through from creation to final disposition.
-The **state model is defined once** in the shared status contract (`playbook/_status-contract.md`), which is appended to every crew brief; playbooks describe only the work, not how to move between states.
+The **state model is defined once** in the shared status contract (`playbooks/_status-contract.md`), which is appended to every crew brief; playbooks describe only the work, not how to move between states.
 The status state machine (`bin/lib/wm-state.py`) encodes the same states:
 
 - `LIVE_STATES = (working, blocked, review)` - a member in any of these is still in flight and stays on the board's Active list.
@@ -69,7 +69,7 @@ Analyst (and other non-PR) members have no external signal to poll, so they arm 
 
 ## The crew hierarchy (leads)
 
-Wingman's crew is a **tree**, with the pilot at the top. A large effort is owned by a **lead** - a crew member whose playbook is "be a manager for one effort." A lead runs the *same* intake → scope → spawn → supervise → report → escalate loop wingman runs, one layer down, over its own crew (an analyst, an architect, one or more developers, a reviewer). This is recursion over the existing primitives, not a parallel subsystem: the lead uses the same `bin/` scripts and the same watcher.
+Wingman's crew is a **tree**, with the pilot at the top. A large effort is owned by a **lead** - a crew member whose playbook is "be a manager for one effort." A lead runs the *same* intake → scope → spawn → supervise → report → escalate loop wingman runs, one layer down, over its own crew (a software-analyst, an architect, one or more developers, a reviewer). This is recursion over the existing primitives, not a parallel subsystem: the lead uses the same `bin/` scripts and the same watcher.
 
 **Ownership falls out of who spawns.** Every crew record carries a `parent` field, stamped by `bin/spawn-crew` from the spawner's `$WINGMAN_CREW_ID`. Wingman has none (it is the top orchestrator), so its spawns get `parent=""` (top level); a lead has its own id, so its spawns get `parent=<lead-id>`. No new flags - the tree is implicit in who ran the spawn.
 
@@ -81,7 +81,7 @@ Wingman's crew is a **tree**, with the pilot at the top. A large effort is owned
 
 **Depth cap: two crew layers.** The full chain is pilot → wingman → lead → worker; wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers. A lead does not spawn further leads; deeper nesting is a future opt-in gated behind cost guardrails.
 
-**Domain generality.** The tree, escalation, rollup, and owner-scoping know nothing about software; only the playbooks carry domain. A science lab (PI → experimental-design → analysis → peer-review) or a business team (manager → research → production → review) runs the same machinery by swapping playbooks - reuse the default role names with domain-appropriate `*.local.md` prose, or add named roles (`playbook/pi.md`, …) and a `lead.local.md` that sequences them. The lead playbook is written in role-and-handoff terms ("gather requirements → design → execute → review → integrate") with software as the concrete default, so a domain swap is a playbook swap, not a code change.
+**Domain generality.** The tree, escalation, rollup, and owner-scoping know nothing about software; only the playbooks carry domain. The playbook library ships this as a first-class taxonomy rather than a hypothetical: category subdirectories under `playbooks/` (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, alongside `software-development`) each carry a domain-appropriate pipeline, so a science lab (experimental-designer → experimentalist → analysis-scientist → peer-reviewer) or a business team (market-analyst → gtm-strategist → partnerships-rep) runs the same machinery out of the box. Adding a further domain is still a playbook swap, not a code change: reuse the default role names with domain-appropriate `*.local.md` prose, or add named roles (`playbooks/<category>/pi.md`, …) and a `lead.local.md` that sequences them. The lead playbook is written in role-and-handoff terms ("gather requirements → design → execute → review → integrate") with software as the concrete default.
 
 ## Autonomous mode and interactive gates
 
@@ -98,22 +98,25 @@ After that, crew in that repo run fully unattended.
 
 ## Playbooks and local overrides
 
-A crew type is defined entirely by a playbook - plain prose in `playbook/`:
+A crew type is defined entirely by a playbook - plain prose in `playbooks/<category>/`:
 
-- `playbook/analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
-- `playbook/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
-- `playbook/developer.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
-- `playbook/reviewer.md` - review a plan or a PR and report findings.
-- `playbook/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up.
-- `playbook/research.md` - example non-dev type: gather evidence, write a cited report.
+- `playbooks/software-development/software-analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
+- `playbooks/software-development/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
+- `playbooks/software-development/developer.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
+- `playbooks/software-development/reviewer.md` - review a plan or a PR and report findings.
+- `playbooks/common/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up. Domain-neutral, so it lives outside any one category.
+- `playbooks/common/research.md` - example non-dev type: gather evidence, write a cited report. Also domain-neutral.
   Shows the shape a `scientist`/`pm` role takes.
 
-There is no hardcoded list of types; a type exists iff its playbook does.
-`bin/spawn-crew --list-types` enumerates them.
+Five further categories ship alongside `software-development`, each a domain-specific pipeline of roles: `ai-research` (research-analyst → experiment-designer → ml-engineer → research-reviewer), `data-science` (data-analyst → data-engineer → data-scientist → analytics-reviewer), `scientific-research` (experimental-designer → experimentalist → analysis-scientist → peer-reviewer, with a nested `biological-research` sub-domain: assay-designer, bioinformatician), `business-development` (market-analyst → gtm-strategist → partnerships-rep), and `business-operations` (ops-analyst → finance-analyst / process-designer).
+A role name is unique across every category, so a bare `--type` (e.g. `developer`) always resolves unambiguously; a category-qualified name (`software-development/developer`) is available to break a future collision.
 
-`playbook/<type>.local.md` overrides the tracked `<type>.md` when present.
+There is no hardcoded list of types; a type exists iff its playbook does.
+`bin/spawn-crew --list-types` enumerates them, grouped by category.
+
+`playbooks/<category>/<type>.local.md` overrides the tracked `<type>.md` when present.
 `*.local.md` is gitignored, following the same pattern as Claude Code's `settings.json` / `settings.local.json`: customizations and private crew types can't be accidentally committed and survive `git pull` of new defaults.
-Example: to make the analyst crew follow your own planning skill or checklist, write `playbook/analyst.local.md` saying so.
+Example: to make the software-analyst crew follow your own planning skill or checklist, write `playbooks/software-development/software-analyst.local.md` saying so.
 
 Project-discovery hints follow the same story: an optional gitignored `config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list (`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`).
 It is absent by default; the defaults cover the common case.
