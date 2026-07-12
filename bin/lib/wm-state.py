@@ -26,6 +26,10 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     crew/<id>.json because the watcher writes it directly (never the
                     member itself), so it must never race a member's own crew-set
                     calls; see wm-state's mergeability-* subcommands
+  pilot-location.json  the cached answer to "is the pilot genuinely remote right
+                    now" ({"remote": bool, "wingman_run_id": str}), asked once via
+                    AskUserQuestion and reused for the rest of one wingman run -
+                    see cmd_pilot_location_get/set
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
@@ -94,6 +98,10 @@ def board_path():
 
 def projects_path():
     return os.path.join(home(), "projects.json")
+
+
+def pilot_location_path():
+    return os.path.join(home(), "pilot-location.json")
 
 
 def acked_path():
@@ -1139,6 +1147,34 @@ def cmd_projects_lookup(args):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- pilot location
+# Condition B's shared cache (design: docs/plans/2026-07-12-remote-control-
+# visibility-and-auto-reconnect-design.md, ask 3): "is the pilot genuinely
+# remote right now" is not detectable, so the answer is asked once via
+# AskUserQuestion and cached here for every crew member and wingman itself to
+# reuse for the rest of one wingman run - never per-deliverable, never
+# per-crew-member (each crew member is an independent process with no shared
+# memory of its own, so without this file every member would ask again).
+#
+# Invalidation is keyed to a wingman run, not a wall-clock TTL: wingman stamps a
+# fresh WINGMAN_RUN_ID at its own startup and exports it to every crew member
+# (alongside WINGMAN_HOME, in bin/spawn-crew's generated launch script). A stored
+# answer is only valid while its own wingman_run_id matches the caller's current
+# one; a mismatch (a fresh sit-down, or wingman restarted) or a missing file
+# means "not yet answered for this run" - the caller must ask again.
+def cmd_pilot_location_get(args):
+    data = read_json(pilot_location_path(), None)
+    if not isinstance(data, dict) or data.get("wingman_run_id") != args.run_id:
+        sys.exit(1)  # not yet answered for this run - unanswered defaults to "local" at the caller
+    print("true" if data.get("remote") else "false")
+
+
+def cmd_pilot_location_set(args):
+    ensure_home()
+    with with_locked(pilot_location_path()):
+        write_json(pilot_location_path(), {"remote": args.remote == "true", "wingman_run_id": args.run_id})
+
+
 # ---------------------------------------------------------------- ask channel
 # A dedicated request/response channel, parallel to (not overloading) the status
 # channel: a caller poses a direct question to one of its delegates and captures
@@ -1550,6 +1586,15 @@ def build_parser():
     a = sub.add_parser("projects-lookup")
     a.add_argument("--name", required=True)
     a.set_defaults(fn=cmd_projects_lookup)
+
+    a = sub.add_parser("pilot-location-get")
+    a.add_argument("--run-id", required=True, dest="run_id")
+    a.set_defaults(fn=cmd_pilot_location_get)
+
+    a = sub.add_parser("pilot-location-set")
+    a.add_argument("--run-id", required=True, dest="run_id")
+    a.add_argument("--remote", required=True, choices=("true", "false"))
+    a.set_defaults(fn=cmd_pilot_location_set)
 
     # --- ask channel: request/response between a caller and its delegate -------
     a = sub.add_parser("ask-new")

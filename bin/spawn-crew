@@ -16,6 +16,10 @@
 #
 # Model selection: an explicit --model always wins; otherwise $WM_MODEL (if set)
 # is the default for every spawn; with neither, the agent CLI's own default stands.
+#
+# Remote Control: every crew member launches Remote-Control-visible by default
+# (reachable from claude.ai/code, not only via tmux attach), as name "wm-<id>".
+# Set WM_REMOTE_CONTROL= (empty) to disable.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -95,6 +99,10 @@ PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
 # set; else no --model flag is passed and the agent CLI's own default applies.
 [ -n "$MODEL" ] || MODEL="${WM_MODEL:-}"
 
+# Remote Control visibility, on by default (empty to disable), mirroring
+# WM_PERMISSION_MODE's convention exactly so there is only one pattern to learn.
+REMOTE_CONTROL="${WM_REMOTE_CONTROL-1}"
+
 # --- derive an id / slug -----------------------------------------------------
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
@@ -153,6 +161,12 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   echo '#!/usr/bin/env bash'
   echo "cd $(quote "$REPO") || exit 1"
   echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
+  # The current wingman run's id (ask 3, condition B), so this member can tell
+  # whether a cached pilot-location.json answer was written during this same run
+  # (still valid) or a stale prior one (must ask again). Empty if wingman wasn't
+  # launched via bin/wingman (no run id stamped) - a member then treats the cache
+  # as never valid, the same conservative default as a missing/unreadable file.
+  echo "export WINGMAN_RUN_ID=$(quote "${WINGMAN_RUN_ID:-}")"
   echo "export WINGMAN_CREW_ID=$(quote "$ID")"
   # The crew type (playbook name), so a hook or the member itself can distinguish
   # an orchestrator role (e.g. lead) from a worker role without re-deriving it.
@@ -184,6 +198,14 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   printf ' --name %s' "$(quote "$ID")"
   [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
   [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
+  # Remote-Control-visible by default (WM_REMOTE_CONTROL, mirroring
+  # WM_PERMISSION_MODE's on-by-default/empty-to-disable convention): the pilot can
+  # reach a crew member from claude.ai/code, not only via tmux attach. The
+  # wm-prefixed name matches the tmux window name ($WINDOW), so the member reads
+  # identically in both places. Fails soft on non-subscription (API-key) auth -
+  # verified empirically: the session starts normally and Remote Control is just
+  # quietly unavailable - so defaulting this on is safe everywhere.
+  [ -n "$REMOTE_CONTROL" ] && printf ' --remote-control %s' "$(quote "wm-$ID")"
   printf ' --add-dir %s' "$(quote "$WM_HOME")"
   printf ' --add-dir %s' "$(quote "$WM_REPO")"
   # Global scope: add every discovered repo so the member can work across all of

@@ -48,6 +48,8 @@ The same lifecycle applies to software-analyst and other crew types; how each st
 **Take the wheel any time.** "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
 Detach (`Ctrl-b d`) to hand back.
 Killing wingman leaves the crew running; relaunching it rebuilds the roster.
+Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app - each launches Remote-Control-visible by default (`WM_REMOTE_CONTROL=1`, on unless set empty) - so `tmux attach` is one option, not the only one.
+If a member's connection drops, wingman's watcher notices the disconnect banner and retypes `/remote-control` for it automatically; no action needed.
 
 ## Customizing crew behavior (playbooks)
 

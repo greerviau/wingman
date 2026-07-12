@@ -159,6 +159,21 @@ MERGE_CHECK_INTERVAL="${WM_MERGE_CHECK_INTERVAL:-120}"
 MERGE_CHECK_ENABLED=0
 wm_have "$GH" && MERGE_CHECK_ENABLED=1
 
+# Remote Control disconnect signature (design: docs/plans/2026-07-12-remote-
+# control-visibility-and-auto-reconnect-design.md, ask 2): the CLI's own
+# disconnect banner, confirmed exact substrings it emits once its bounded
+# reconnect budget is exhausted. Crew-side, a settled sighting gets an automatic
+# `/remote-control` retry (the existing wm_tmux_send_message primitive, aimed at
+# a pane it already has a target for); wingman-side (its own pane, registered at
+# startup in $WM_HOME/self-pane), it is detect-only - never injected into - and
+# instead fires the ordinary wake so wingman's own next turn tells the pilot.
+WM_RC_DROPPED_RE="${WM_RC_DROPPED_RE:-Remote Control disconnected|Transport closed|Transport recovery exhausted}"
+WM_RC_DROPPED_TAIL="${WM_RC_DROPPED_TAIL:-15}"
+# At most one /remote-control retry per this many seconds per crew member, so a
+# connection that will not recover from a slash command alone (e.g. the account
+# itself lost its subscription) is not retried every single cycle.
+RC_DROPPED_COOLDOWN="${WM_RC_DROPPED_COOLDOWN:-180}"
+
 # Deliberately not given prompt_freeze_check's full UI-shape/adjacency precision:
 # there is no equivalent stable "shape" for an error banner the way a numbered-
 # options dialog has one, and this check does not need it. Its match never
@@ -168,6 +183,56 @@ wm_have "$GH" && MERGE_CHECK_ENABLED=1
 # anyway. Reads $PANE_TEXT, set for this poll by wm_pane_snapshot.
 api_error_check() {
   printf '%s\n' "$PANE_TEXT" | tail -n "$WM_APIERR_TAIL" | grep -qE "$WM_APIERR_RE"
+}
+
+# True iff this poll's pane capture (reads $PANE_TEXT, set by wm_pane_snapshot
+# like the checks above) carries the Remote Control disconnect signature in its
+# tail. Callers additionally require $PANE_STABLE (two identical consecutive
+# polls) before acting on a hit - the same "one more poll before acting" rule
+# prompt_freeze_check and the API-error nudge both use - so a banner merely
+# scrolling transiently through a member's own transcript (e.g. while it reads
+# or greps this very detector's strings, which this repo's own source now
+# contains) is never mistaken for a live drop: real disconnect banners persist
+# on screen, static, until something acts on them.
+remote_control_dropped_check() {
+  printf '%s\n' "$PANE_TEXT" | tail -n "$WM_RC_DROPPED_TAIL" | grep -qE "$WM_RC_DROPPED_RE"
+}
+
+# Wingman's own Remote Control disconnect: read-only detection, never injection.
+# `bin/watch-fleet` has always deliberately never sent keystrokes into wingman's
+# own pane (see the file header): the only way to act on the disconnect is to
+# type `/remote-control` into the very pane wingman's own turn is running in,
+# which cannot be done reliably from outside while that turn is mid-render of
+# the tool call doing the sending. So this half of ask 2 detects and wakes only;
+# the pilot supplies the one keystroke.
+#
+# Scoped to the owner "" cycle only (wingman's own watcher; a lead's cycle has no
+# such pane to watch). $WM_HOME/self-pane is written once at wingman startup
+# (bin/wingman, best-effort, only if $TMUX_PANE was set) and names a tmux pane
+# id/target directly, independent of $WM_TMUX_SESSION - wingman's own session
+# need not run inside the crew tmux session at all.
+#
+# Fires (returns 0) at most once per distinct banner: a hash of the last banner
+# text that already fired is kept in $WM_HOME/self-pane.fired, so an unresolved,
+# unchanging banner is surfaced once rather than re-waking wingman every cycle
+# until the pilot acts; a new, different disconnect (different hash) fires again.
+self_pane_check() {
+  [ -z "$OWNER" ] || return 1
+  [ -f "$WM_HOME/self-pane" ] || return 1
+  _sp_target="$(cat "$WM_HOME/self-pane" 2>/dev/null)"
+  [ -n "$_sp_target" ] || return 1
+  _sp_text="$(wm_tmux_pane_text "$_sp_target")"
+  [ -n "$_sp_text" ] || return 1
+  _sp_hash="$(printf '%s' "$_sp_text" | cksum)"
+  _sp_hashfile="$WM_HOME/self-pane.hash"
+  _sp_prev="$(cat "$_sp_hashfile" 2>/dev/null)"
+  printf '%s\n' "$_sp_hash" > "$_sp_hashfile"
+  [ -n "$_sp_prev" ] && [ "$_sp_hash" = "$_sp_prev" ] || return 1   # not yet settled
+  printf '%s\n' "$_sp_text" | tail -n "$WM_RC_DROPPED_TAIL" | grep -qE "$WM_RC_DROPPED_RE" || return 1
+  _sp_firedfile="$WM_HOME/self-pane.fired"
+  [ "$(cat "$_sp_firedfile" 2>/dev/null)" != "$_sp_hash" ] || return 1   # already fired for this exact banner
+  printf '%s\n' "$_sp_hash" > "$_sp_firedfile"
+  return 0
 }
 
 beat_age() {
@@ -504,6 +569,24 @@ fire() {
 while :; do
   : > "$BEATFILE" || true   # liveness beacon for the singleton guard + Stop hook
 
+  # Wingman's own Remote Control disconnect (ask 2, detect-only - see
+  # self_pane_check's own docstring for why this never injects). Checked first,
+  # every cycle, independent of $WM_TMUX_SESSION: wingman's own registered pane
+  # need not be inside the crew tmux session at all. Fires the ordinary wake
+  # contract (wake file + reason line + exit 0) exactly like a crew event below,
+  # so wingman's very next turn reports it to the pilot immediately.
+  if self_pane_check; then
+    {
+      echo "# Wingman's own Remote Control session disconnected"
+      echo
+      echo "This session's own Remote Control connection dropped and its automatic"
+      echo "retry budget is exhausted. Run \`/remote-control\` in this session to restore it."
+    } > "$WAKEFILE"
+    echo "remote-control-dropped: wingman run /remote-control in this session to restore it"
+    rm -f "$PIDFILE"
+    exit 0
+  fi
+
   # Reconcile liveness so a dead window becomes 'died'.
   if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
     # Pass this cycle's owner so the dead-owner re-adopt pass runs only under
@@ -529,6 +612,22 @@ for r in data:
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
       wm_pane_snapshot "$_id" "$_win"
+
+      # Remote Control auto-recovery (ask 2, crew-side): a settled disconnect
+      # banner (stable across two polls, same rule as the checks below) gets one
+      # `/remote-control` retry per cooldown window - the existing
+      # message-delivery primitive, aimed at a pane it already has a target for.
+      # Purely self-healing: it never changes crew status, so it stays quiet the
+      # overwhelming majority of the time.
+      if [ "$PANE_STABLE" = 1 ] && remote_control_dropped_check; then
+        _rcfile="$WM_HOME/rcdrop-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').sent"
+        _rc_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_rcfile" 2>/dev/null || echo 0) ))
+        if [ ! -f "$_rcfile" ] || [ "$_rc_age" -ge "$RC_DROPPED_COOLDOWN" ]; then
+          wm_tmux_send_message "$WM_TMUX_SESSION:$_win" "/remote-control"
+          : > "$_rcfile"
+        fi
+      fi
+
       if prompt_freeze_check && ! liveness_veto "$_id"; then
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
