@@ -6,10 +6,11 @@
 # tmux/host crash takes every session in it down at once, and each one is
 # otherwise only recoverable by hand via bin/crew-takeover.
 #
-# Idempotent: a member that is not currently `died`, or whose window already
-# exists (a concurrent/retried resume beat this one to it), is skipped rather
-# than relaunched - running `--all-died` twice is then naturally a no-op the
-# second time.
+# Idempotent: a member that is not currently `died` is skipped, and two
+# concurrent or retried resumes of the same id never both relaunch it - an
+# mkdir-based atomic claim per id (tmux does not enforce unique window names,
+# so a plain check-then-`new-window` would race) makes the loser skip instead.
+# Running `--all-died` twice is then naturally a no-op the second time.
 #
 # Verified, not optimistic: after relaunching, this waits briefly to confirm the
 # new window is still there. tmux destroys a window when its pane's process
