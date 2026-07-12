@@ -101,11 +101,17 @@ EOF
   # instant mkdir succeeds so this process's own dir is never left behind even
   # if it turns out to have lost that internal race).
   _claim="$WM_HOME/crew/$_rid.resuming"
+  # A single release point, called from every exit path once the claim is
+  # held: --all-died calls resume_one once per id in the same process,
+  # reassigning $_claim each time, so an inline release duplicated at each
+  # return site is exactly the kind of thing that's easy to miss at one of
+  # them (as happened here) - one helper closes the whole class of bug.
+  release_claim() { rm -f "$_claim/owner" 2>/dev/null; rmdir "$_claim" 2>/dev/null; trap - EXIT; }
   _claim_owned=0
   _claim_tries=0
   while :; do
     if mkdir "$_claim" 2>/dev/null; then
-      trap 'rm -f "$_claim/owner" 2>/dev/null; rmdir "$_claim" 2>/dev/null' EXIT
+      trap release_claim EXIT
       echo "$$" > "$_claim/owner" 2>/dev/null
       sleep 0.1
       if [ "$(cat "$_claim/owner" 2>/dev/null)" = "$$" ]; then _claim_owned=1; break; fi
@@ -126,9 +132,7 @@ EOF
   if wm_tmux_windows | grep -qx "$_window"; then
     wm_info "'$_rid': window '$_window' already exists, not relaunching"
     RESUME_RESULT="skip: window already exists"
-    rm -f "$_claim/owner" 2>/dev/null
-    rmdir "$_claim" 2>/dev/null
-    trap - EXIT
+    release_claim
     return
   fi
 
@@ -185,6 +189,7 @@ EOF
     wm_warn "'$_rid': --resume exited immediately (window vanished); status left 'died'. Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
     RESUME_RESULT="skip: resume failed"
   fi
+  release_claim
 }
 
 # --- resolve targets ----------------------------------------------------------

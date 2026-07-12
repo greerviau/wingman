@@ -103,6 +103,31 @@ assert_eq "the lead's status flips to working" "$(field_of lead1 status)" "worki
 assert_eq "the worker's status flips to working" "$(field_of wkr1 status)" "working"
 assert_eq "the lead's parent is unchanged (top-level)" "$(field_of lead1 parent)" ""
 assert_eq "the worker's parent is unchanged (still lead1)" "$(field_of wkr1 parent)" "lead1"
+# A multi-id --all-died batch calls resume_one() once per id in the same
+# process; every id but the last used to leak its claim dir (the EXIT trap
+# only resolved $_claim, reassigned per id, to its final value at script
+# exit) - assert neither claim dir survives, not just the one processed last.
+assert_false "the first id's claim dir does not leak" "[ -d '$WINGMAN_HOME/crew/lead1.resuming' ]"
+assert_false "the second id's claim dir does not leak" "[ -d '$WINGMAN_HOME/crew/wkr1.resuming' ]"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a leaked claim would permanently block a re-died member; prove it can't --
+# The reviewer's exact repro: --all-died over two members, then one of them
+# dies again later - it must still be resumable, not stuck forever behind a
+# claim dir that the first batch's non-last processing left behind.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id lk1 --type developer --objective a --repo /tmp --window wm-lk1 --session-id sess-lk1 >/dev/null
+wm_state crew-add --id lk2 --type developer --objective b --repo /tmp --window wm-lk2 --session-id sess-lk2 >/dev/null
+wm_state crew-set --id lk1 --status died >/dev/null
+wm_state crew-set --id lk2 --status died >/dev/null
+out4b="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+assert_contains "both members resume in the first batch" "$out4b" "2 resumed"
+tmux kill-window -t "$WM_TMUX_SESSION:wm-lk1" 2>/dev/null
+wm_state crew-set --id lk1 --status died >/dev/null
+out4c="$(WM_AGENT="$ALIVE_STUB" "$CR" lk1 2>&1)"
+assert_contains "the re-died member (processed first in the earlier batch) resumes again" "$out4c" "1 resumed"
+assert_eq "its status flips back to working" "$(field_of lk1 status)" "working"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- a --resume that exits immediately falls back to the manual path ----------
