@@ -53,7 +53,7 @@ Killing wingman leaves the crew running; relaunching it rebuilds the roster.
 
 A crew type is just a playbook - plain prose in `playbooks/`, grouped by category (`playbooks/<category>/<role>.md`).
 The `software-development` category's built-ins read as an org: `software-analyst` (requirements / plan or report), `architect` (detailed technical design from an approved spec), `developer` (worktree → implement → commit → push → PR), and `reviewer` (review a plan or PR and report findings); `lead` (manage an effort end-to-end with its own crew) and `research` (an example non-dev type) live in the domain-neutral `common` category, since they apply to any discipline.
-Several other categories ship too (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`) - `bin/spawn-crew --list-types` shows every category's roles.
+Several other categories ship too (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, `infrastructure`) - `bin/spawn-crew --list-types` shows every category's roles.
 
 - **Customize a type:** drop a `playbooks/<category>/<type>.local.md` beside the default; if present it wins.
 - **Add a type:** create `playbooks/<category>/<type>.md` (tracked) or `.local.md` (yours only), inside the category it belongs to (or a new category directory, for a genuinely new discipline), then spawn it with `--type <name>`.
