@@ -11,6 +11,27 @@ set -u
 wm_state init >/dev/null
 "$WM_BIN/discover-projects" --quiet >/dev/null 2>&1 || true
 
+# A fresh id per wingman run, stamped and exported so every crew member spawned
+# during this run (bin/spawn-crew embeds it into the generated launch script,
+# alongside WINGMAN_HOME) can tell whether a cached answer in
+# pilot-location.json (ask 3, condition B) was written during THIS run or a
+# stale prior one. uuidgen if available (matches spawn-crew's own session-id
+# generation), else a python uuid fallback - either way just needs to be unique
+# per run, not cryptographically meaningful.
+if wm_have uuidgen; then WINGMAN_RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"; else
+  WINGMAN_RUN_ID="$(wm_py -c 'import uuid;print(uuid.uuid4())')"
+fi
+export WINGMAN_RUN_ID
+
+# Register this session's own pane (ask 2, wingman-side): if running inside tmux
+# ($TMUX_PANE set - the common case the existing crew tooling already assumes
+# elsewhere), record it so bin/watch-fleet can read-only watch it for a dropped
+# Remote Control connection and wake wingman the moment it happens, without ever
+# injecting keystrokes into this pane (see watch-fleet's self_pane_check). A
+# plain terminal or GUI tab with no tmux underneath simply has no pane to
+# register; best-effort, never fatal.
+[ -n "${TMUX_PANE:-}" ] && printf '%s\n' "$TMUX_PANE" > "$WM_HOME/self-pane" 2>/dev/null
+
 # Collect --add-dir args from the discovered roots.
 adddirs=""
 while IFS= read -r root; do

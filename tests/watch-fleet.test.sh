@@ -458,4 +458,106 @@ assert_true "the nudge marker file was written before escalating" \
 kill "$aepid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- Remote Control auto-recovery, crew-side (ask 2) --------------------------
+# A settled disconnect banner (stable across two polls, same rule as the checks
+# above) gets an automatic `/remote-control` retry typed into the member's own
+# pane - the real disconnect banner text the CLI emits, confirmed in the design
+# investigation. The retry lands as real keystrokes (visible via terminal echo
+# even though the pane's own foreground command never reads them), so the fixed
+# points are checkable directly off the capture.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rc1 --type developer --objective rc --repo /tmp --window wm-rc1 --session-id src1 >/dev/null
+wm_state crew-set --id rc1 --status working --summary "building" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc1 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+rcpid=$!
+wm_track "$rcpid"
+_wait=0
+while ! tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-rc1" 2>/dev/null | grep -q '/remote-control' && [ "$_wait" -lt 20 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_contains "a settled disconnect banner gets a /remote-control retry typed into its pane" \
+  "$(tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-rc1")" "/remote-control"
+# The .sent marker is written only after wm_tmux_send_message's full
+# submit-confirm sequence returns, which can trail the pane text above by a
+# couple of seconds (WM_SUBMIT_DELAY + its confirm-poll retries) - poll rather
+# than assert immediately.
+_wait=0
+while [ ! -f "$WINGMAN_HOME/rcdrop-rc1.sent" ] && [ "$_wait" -lt 20 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_true "the recovery attempt is cooldown-marked" "[ -f '$WINGMAN_HOME/rcdrop-rc1.sent' ]"
+assert_contains "the member stays working - this is a quiet self-heal, not a status flip" \
+  "$(wm_state crew-get --id rc1)" '"status": "working"'
+kill "$rcpid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- no false positive: a clean pane is never sent the retry -------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rc2 --type developer --objective rc --repo /tmp --window wm-rc2 --session-id src2 >/dev/null
+wm_state crew-set --id rc2 --status working --summary "building" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc2 'while :; do echo tick; sleep 1; done'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+rc2pid=$!
+wm_track "$rc2pid"
+sleep 6
+assert_false "a clean pane never gets the /remote-control retry" \
+  "tmux capture-pane -p -t '$WM_TMUX_SESSION:wm-rc2' | grep -q '/remote-control'"
+assert_true "watcher keeps blocking on a clean pane" "kill -0 $rc2pid"
+kill "$rc2pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- cooldown: a still-unresolved banner is not retried every cycle ------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rc3 --type developer --objective rc --repo /tmp --window wm-rc3 --session-id src3 >/dev/null
+wm_state crew-set --id rc3 --status working --summary "building" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc3 'printf "Transport recovery exhausted (code 1006)\n"; sleep 600'
+WM_RC_DROPPED_COOLDOWN=60 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+rc3pid=$!
+wm_track "$rc3pid"
+_nudgefile="$WINGMAN_HOME/rcdrop-rc3.sent"
+_wait=0
+while [ ! -f "$_nudgefile" ] && [ "$_wait" -lt 20 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_true "the first retry is sent and marked" "[ -f '$_nudgefile' ]"
+first_mtime="$(uv run --no-project --quiet python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile")"
+sleep 5
+second_mtime="$(uv run --no-project --quiet python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile")"
+assert_eq "the retry is not re-sent within the cooldown window" "$first_mtime" "$second_mtime"
+count="$(tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-rc3" | grep -c '/remote-control')"
+assert_eq "exactly one retry lands in the pane within the cooldown" "$count" "1"
+kill "$rc3pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- Remote Control disconnect, wingman-side (ask 2): detect-only, never inject --
+# bin/wingman registers $TMUX_PANE into $WM_HOME/self-pane at startup; here the
+# registration is simulated directly (the unit under test is watch-fleet's own
+# read-only check, not bin/wingman's write). Scoped to the owner "" cycle only.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm_self_pane 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+printf '%s:wm_self_pane\n' "$WM_TMUX_SESSION" > "$WINGMAN_HOME/self-pane"
+out_self="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "wingman's own disconnected pane fires the wake" "$out_self" "remote-control-dropped: wingman"
+assert_contains "the wake file explains the reason" "$(cat "$WINGMAN_HOME/wake")" "Remote Control"
+assert_false "wingman's own pane is never typed into (detect-only)" \
+  "tmux capture-pane -p -t '$WM_TMUX_SESSION:wm_self_pane' | grep -q '^/remote-control$'"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- the wingman-side check fires once per distinct banner, not every cycle ----
+# An unresolved, unchanging banner is surfaced once (hash-deduped against
+# $WM_HOME/self-pane.fired) rather than re-waking wingman every cycle until the
+# pilot acts - re-arming after the first fire on the SAME still-broken pane must
+# not immediately refire.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm_self_pane2 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+printf '%s:wm_self_pane2\n' "$WM_TMUX_SESSION" > "$WINGMAN_HOME/self-pane"
+wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1
+"$WF" >"$WINGMAN_HOME/rearm.log" 2>&1 &
+rearm_pid=$!
+wm_track "$rearm_pid"
+sleep 5
+assert_true "a second arm on the same unresolved banner keeps blocking, not re-firing" "kill -0 $rearm_pid"
+kill "$rearm_pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary
