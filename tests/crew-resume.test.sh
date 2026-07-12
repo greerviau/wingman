@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# E2E: bin/crew-resume, the bulk/single relaunch of a `died` crew member via
+# `claude --resume <session-id>` (#22). Uses a stub agent (WM_AGENT) and an
+# isolated tmux session per test.new_home, exactly like spawn-scope.test.sh, so
+# no real claude launches. Proves both idempotency guards, tree preservation
+# across a lead + its sub-crew, and the fallback-to-manual path when the
+# resumed process exits immediately (a stale/invalid session id).
+set -u
+. "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+
+CR="$TEST_REPO/bin/crew-resume"
+export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2
+
+field_of() { wm_state crew-get --id "$1" | uv run --no-project --quiet python -c 'import sys,json
+print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$2"; }
+
+STUB_DIR="$(mktemp -d)"
+ALIVE_STUB="$STUB_DIR/alive.sh"
+DEAD_STUB="$STUB_DIR/dead.sh"
+printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$ALIVE_STUB"; chmod +x "$ALIVE_STUB"
+printf '#!/usr/bin/env bash\nexit 7\n' > "$DEAD_STUB"; chmod +x "$DEAD_STUB"
+
+cleanup() { rm -rf "$STUB_DIR"; }
+trap cleanup EXIT
+
+# --- a died member with a live session resumes --------------------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id r1 --type developer --objective x --repo /tmp --window wm-r1 --session-id sess-r1 >/dev/null
+wm_state crew-set --id r1 --status died >/dev/null
+out="$(WM_AGENT="$ALIVE_STUB" "$CR" r1 2>&1)"
+assert_contains "resume reports one resumed" "$out" "1 resumed"
+assert_true "window wm-r1 exists after resume" \
+  "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-r1"
+assert_eq "status flips to working" "$(field_of r1 status)" "working"
+assert_eq "parent is unchanged (top-level)" "$(field_of r1 parent)" ""
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- idempotency guard 1: --all-died twice resumes zero the second time -------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id r2 --type developer --objective x --repo /tmp --window wm-r2 --session-id sess-r2 >/dev/null
+wm_state crew-set --id r2 --status died >/dev/null
+out2a="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+assert_contains "first --all-died resumes the died member" "$out2a" "1 resumed"
+out2b="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+assert_contains "second --all-died is a no-op" "$out2b" "0 resumed"
+assert_eq "status is still working after the no-op re-run" "$(field_of r2 status)" "working"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- idempotency guard 2: a pre-existing window is left alone -----------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id r3 --type developer --objective x --repo /tmp --window wm-r3 --session-id sess-r3 >/dev/null
+wm_state crew-set --id r3 --status died >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION:" -n wm-r3 'sleep 600'
+before_pid="$(tmux list-panes -t "$WM_TMUX_SESSION:wm-r3" -F '#{pane_pid}' 2>/dev/null)"
+out3="$(WM_AGENT="$ALIVE_STUB" "$CR" r3 2>&1)"
+assert_contains "a pre-existing window is skipped, not duplicated" "$out3" "window already exists"
+after_pid="$(tmux list-panes -t "$WM_TMUX_SESSION:wm-r3" -F '#{pane_pid}' 2>/dev/null)"
+assert_eq "the original window's pane is untouched" "$after_pid" "$before_pid"
+assert_eq "status stays died (guard 2 never resumes)" "$(field_of r3 status)" "died"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a lead + its sub-crew, both died, both resumed: tree preserved -----------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id lead1 --type lead --objective L --repo /tmp --window wm-lead1 --session-id sess-lead1 >/dev/null
+wm_state crew-add --id wkr1 --type developer --objective W --repo /tmp --window wm-wkr1 --session-id sess-wkr1 --parent lead1 >/dev/null
+wm_state crew-set --id lead1 --status died >/dev/null
+wm_state crew-set --id wkr1 --status died >/dev/null
+out4="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+assert_contains "both dead members are resumed" "$out4" "2 resumed"
+assert_eq "the lead's status flips to working" "$(field_of lead1 status)" "working"
+assert_eq "the worker's status flips to working" "$(field_of wkr1 status)" "working"
+assert_eq "the lead's parent is unchanged (top-level)" "$(field_of lead1 parent)" ""
+assert_eq "the worker's parent is unchanged (still lead1)" "$(field_of wkr1 parent)" "lead1"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a --resume that exits immediately falls back to the manual path ----------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id r5 --type developer --objective x --repo /tmp --window wm-r5 --session-id sess-r5 >/dev/null
+wm_state crew-set --id r5 --status died >/dev/null
+out5="$(WM_AGENT="$DEAD_STUB" WM_RESUME_VERIFY_TRIES=5 WM_RESUME_VERIFY_POLL=1 "$CR" r5 2>&1)"
+assert_contains "a failed resume reports the manual fallback" "$out5" "resume failed"
+assert_eq "status is left died after a failed resume" "$(field_of r5 status)" "died"
+assert_false "the vanished window is not left behind" \
+  "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-r5"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+test_summary

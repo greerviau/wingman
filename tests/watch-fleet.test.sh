@@ -338,7 +338,12 @@ kill "$upid" 2>/dev/null
 # --- concurrent arms race safely (closes the TOCTOU gap, #12) ----------------
 # Two near-simultaneous arms, backgrounded and raced with &: the mkdir claim
 # lock must let exactly one win the claim, leaving exactly one live process and
-# a pidfile that names it.
+# a pidfile that names it. Assert on each racer's own printed verdict (its
+# first line of output), not on a `kill -0` process-liveness snapshot after a
+# fixed wait - liveness-by-pid over a polling window is itself timing-sensitive
+# under a shared, noisy host (a scheduling delay can make a losing racer look
+# "still alive" well after it has already decided and is mid-exit), where the
+# verdict each process writes the moment it decides is not.
 test_new_home
 wm_state crew-add --id race1 --type developer --objective race --repo /tmp --window wm-race1 --session-id sr1 >/dev/null
 wm_state crew-set --id race1 --status working --summary "in progress" >/dev/null
@@ -348,18 +353,26 @@ wm_track "$race_a"
 "$WF" >"$WINGMAN_HOME/race-b.log" 2>&1 &
 race_b=$!
 wm_track "$race_b"
-sleep 3
-alive_count=0
-kill -0 "$race_a" 2>/dev/null && alive_count=$((alive_count+1))
-kill -0 "$race_b" 2>/dev/null && alive_count=$((alive_count+1))
-assert_eq "the race leaves exactly one live watcher process" "$alive_count" "1"
+# Wait (bounded) for both racers to have printed their verdict.
+_race_i=0
+while [ "$_race_i" -lt 60 ]; do
+  [ -s "$WINGMAN_HOME/race-a.log" ] && [ -s "$WINGMAN_HOME/race-b.log" ] && break
+  sleep 0.2
+  _race_i=$((_race_i+1))
+done
+race_a_out="$(cat "$WINGMAN_HOME/race-a.log" 2>/dev/null)"
+race_b_out="$(cat "$WINGMAN_HOME/race-b.log" 2>/dev/null)"
+winners=0; winner_pid=""
+case "$race_a_out" in *"watcher: armed pid="*) winners=$((winners+1)); winner_pid="$race_a" ;; esac
+case "$race_b_out" in *"watcher: armed pid="*) winners=$((winners+1)); winner_pid="$race_b" ;; esac
+losers=0
+case "$race_a_out" in *"already armed"*) losers=$((losers+1)) ;; esac
+case "$race_b_out" in *"already armed"*) losers=$((losers+1)) ;; esac
+assert_eq "exactly one racer wins the claim and arms" "$winners" "1"
+assert_eq "exactly one racer loses the claim and reports already-armed" "$losers" "1"
 pidfile_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
 assert_true "the pidfile names a live process" "kill -0 $pidfile_pid"
-if kill -0 "$race_a" 2>/dev/null; then
-  assert_eq "the pidfile matches the surviving racer" "$pidfile_pid" "$race_a"
-else
-  assert_eq "the pidfile matches the surviving racer" "$pidfile_pid" "$race_b"
-fi
+assert_eq "the pidfile matches the winning racer's own pid" "$pidfile_pid" "$winner_pid"
 kill "$race_a" "$race_b" 2>/dev/null
 
 # --- --status is the scriptable liveness check (#12) --------------------------

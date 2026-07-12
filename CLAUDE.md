@@ -157,6 +157,8 @@ You never edit playbooks yourself - the pilot owns them.
 - **Crew stalled** → when the watcher surfaces a `stalled` member (no sign of life on any channel while its status claimed `working`), relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or `bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked` and `review`, the pilot decides its disposition.
   An invalid `--model` value is one cause of this: the agent CLI accepts it at startup, so the tmux window stays alive, but every turn comes back as an in-chat model error instead of doing any work - the member never self-reports, so it surfaces as `stalled`, not `died`.
   `bin/crew-takeover <id>` attaches to the live window, where the model error is directly visible in the transcript (see `docs/analysis/2026-07-11-invalid-model-failure-path.md`).
+- **Mass death or correlated outage detected** (a `fire()` bullet naming several ids at once) → relay the event and the suggested command plainly ("N crew members died/hit API errors together around \<time\>, looks like \<a crash / an outage\>").
+  The default remedy is `bin/crew-resume --all-died` (mass-death) or letting the automatic nudge play out (outage) - confirm with the pilot before running `crew-resume` (spawning/resuming sessions is the same costly act as any other spawn) unless the pilot has pre-authorized auto-recovery for this effort.
 - **"Take over X"** → run `bin/crew-takeover <id>` and relay the command it prints to the pilot.
   For a live crew member that is `tmux attach` (harness-agnostic - reaches whatever agent CLI is in the window); for a dead window it prints the agent-specific resume recovery.
   You cannot hand your own terminal over, so you only relay the command.

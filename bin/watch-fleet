@@ -112,6 +112,12 @@ STALL_IDLE="${WM_STALL_IDLE:-180}"
 STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
 STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
+# Fleet-wide correlated event grouping (wm_state group-attention, #22/#23): a
+# batch collapses into one bullet only at or above this count AND this ratio of
+# the relevant live population - see group-attention's own docstring for the
+# denominator rules. A lone death/stall is always routine, never a "batch".
+MASS_MIN_COUNT="${WM_MASS_MIN_COUNT:-2}"
+MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
 
 beat_age() {
   [ -f "$BEATFILE" ] || { echo 999999; return; }
@@ -150,25 +156,46 @@ case "$MODE" in
 esac
 
 # --- atomic check-then-claim -------------------------------------------------
-# mkdir is atomic on every POSIX filesystem (no flock(1) dependency, which macOS
-# does not ship), so the check-then-claim below is wrapped in a short-lived lock
-# directory: two `watch-fleet` invocations racing in the same instant would
-# otherwise both observe no live cycle and both write $PIDFILE, the second
-# silently clobbering the first and producing two competing blocking loops. The
-# lock is held only across the check+claim (microseconds), never across the
-# blocking loop itself, so it adds no contention for the common case (one arm at
-# a time). A stuck concurrent arm is bounded at 5s rather than hanging forever;
-# a stale lock directory left by a killed process is cleared by the next arm
-# once its 50 tries are exhausted, surfacing loudly via wm_die instead of
-# wedging silently.
+# mkdir is documented atomic on every POSIX filesystem (no flock(1) dependency,
+# which macOS does not ship), so the check-then-claim below is wrapped in a
+# short-lived lock directory: two `watch-fleet` invocations racing in the same
+# instant would otherwise both observe no live cycle and both write $PIDFILE,
+# the second silently clobbering the first and producing two competing
+# blocking loops. The lock is held only across the check+claim (well under a
+# second), never across the blocking loop itself, so it adds no contention for
+# the common case (one arm at a time). A stuck concurrent arm is bounded at 5s
+# rather than hanging forever; a stale lock directory left by a killed process
+# is cleared by the next arm once its 50 tries are exhausted, surfacing loudly
+# via wm_die instead of wedging silently.
+#
+# A `mkdir` "success" is verified, not trusted outright: two near-simultaneous
+# claimants have been observed to both see their own `mkdir` report success for
+# the identical path (surfaced empirically under this project's own test
+# environment - not expected on a well-behaved POSIX filesystem, but cheap to
+# defend against regardless of platform). The verification relies on a strictly
+# weaker guarantee than `mkdir` atomicity: ordinary sequential writes to one
+# small regular file have a well-defined last-writer-wins outcome. Every
+# claimant that gets past `mkdir` stamps its own pid into the lock dir, waits
+# briefly for any true-concurrent claimant to do the same, then re-reads the
+# file - only the single last writer sees its own pid reflected back, so a
+# mismatch is treated exactly like a failed `mkdir` (back off and retry).
 CLAIMLOCK="$PIDFILE.lock"
 _claim_tries=0
-while ! mkdir "$CLAIMLOCK" 2>/dev/null; do
+while :; do
+  if mkdir "$CLAIMLOCK" 2>/dev/null; then
+    echo "$$" > "$CLAIMLOCK/owner" 2>/dev/null
+    sleep 0.1
+    [ "$(cat "$CLAIMLOCK/owner" 2>/dev/null)" = "$$" ] && break
+  fi
   _claim_tries=$((_claim_tries+1))
   [ "$_claim_tries" -ge 50 ] && wm_die "watcher: could not acquire the claim lock after 5s (a concurrent arm may be stuck) - see $CLAIMLOCK"
   sleep 0.1
 done
-trap 'rmdir "$CLAIMLOCK" 2>/dev/null' EXIT
+# The lock dir now holds an `owner` file (the verification stamp above), so
+# releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
+# rmdir would fail (ENOTEMPTY) and leak the lock permanently.
+release_claim() { rm -f "$CLAIMLOCK/owner" 2>/dev/null; rmdir "$CLAIMLOCK" 2>/dev/null; }
+trap release_claim EXIT
 
 # --- singleton guard --------------------------------------------------------
 # If a genuinely live cycle already holds the lock, do not start a rival loop.
@@ -179,14 +206,14 @@ trap 'rmdir "$CLAIMLOCK" 2>/dev/null' EXIT
 # so CLAUDE.md's documented arm-status parsing contract still holds.
 if cycle_live; then
   wm_ok "watcher: already armed and healthy - one cycle is live (pid $(cat "$PIDFILE"), beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
-  rmdir "$CLAIMLOCK" 2>/dev/null
+  release_claim
   exit 0
 fi
 
 # --- claim the cycle --------------------------------------------------------
 echo $$ > "$PIDFILE"
 : > "$BEATFILE" || true
-rmdir "$CLAIMLOCK" 2>/dev/null
+release_claim
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
@@ -377,12 +404,19 @@ prompt_freeze_check() {
 # column is the per-event version stamp we ack below.
 fire() {
   _attention="$1"
+  # Collapse a fleet-wide correlated batch (mass death, correlated API outage)
+  # into one synthetic row for the two DISPLAY loops only (#22/#23, §3.3). This
+  # is a pure, stateless filter - it never mutates any status file - so the ack
+  # loop below deliberately keeps iterating $_attention (the real ids and their
+  # real `updated` stamps), never $_grouped (whose synthetic ids ack nothing).
+  _grouped="$(printf '%s\n' "$_attention" | wm_state group-attention \
+    --owner "$OWNER" --mass-min-count "$MASS_MIN_COUNT" --mass-min-ratio "$MASS_MIN_RATIO" 2>/dev/null)"
   {
     echo "# Crew need your attention"
     echo
     echo "## New events"
     echo
-    printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
+    printf '%s\n' "$_grouped" | while IFS=$'\t' read -r id st upd note; do
       [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
     done
     echo
@@ -390,7 +424,7 @@ fire() {
     echo
     wm_state crew-list --owner "$OWNER" 2>/dev/null
   } > "$WAKEFILE"
-  printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
+  printf '%s\n' "$_grouped" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && printf '%s: %s %s\n' "$st" "$id" "$note"
   done
   printf -- '--\n'
@@ -401,7 +435,8 @@ fire() {
   # Firing IS the delivery, so ack each surfaced (id, updated). That suppresses
   # this exact event on subsequent arms while preserving gap-safety: a different
   # crew - or this crew with a new status (new updated) - is not acked and still
-  # surfaces on the next arm's top-of-loop check.
+  # surfaces on the next arm's top-of-loop check. Acks the REAL ids from
+  # $_attention, never the synthetic $_grouped rows (see the comment above).
   printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && wm_state ack --id "$id" --updated "$upd" >/dev/null 2>&1
   done
