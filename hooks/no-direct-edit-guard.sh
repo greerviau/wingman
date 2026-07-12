@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # no-direct-edit-guard.sh - a Claude Code PreToolUse hook. Mechanically
 # enforces CLAUDE.md's prime directive ("never do heavy work yourself") by
-# blocking direct Edit/Write/NotebookEdit calls and direct test-runner Bash
-# invocations at the orchestrator layer, redirecting to bin/spawn-crew instead
-# of letting the call through. See issue #17: the prompt-level instruction
-# alone did not stop wingman from editing code directly once "it's a small
-# change" felt like an implicit exception.
+# blocking direct Edit/Write/NotebookEdit calls against files inside a git
+# repo, and direct test-runner Bash invocations, at the orchestrator layer -
+# redirecting to bin/spawn-crew instead of letting the call through. See issue
+# #17: the prompt-level instruction alone did not stop wingman from editing
+# code directly once "it's a small change" felt like an implicit exception.
 #
 # Registered in user-level ~/.claude/settings.json (by bin/doctor), not this
 # repo's project-level settings, so it loads for every Claude Code session on
@@ -30,6 +30,13 @@
 # Every worker crew type (developer, architect, reviewer, software-analyst,
 # research, ...) is a worker for whom editing files and running tests is
 # literally the job, so the guard stays inactive there.
+#
+# Once active, the Edit/Write/NotebookEdit block only fires for a target path
+# that resolves inside a tracked git repo - a write outside any repo (e.g.
+# wingman's own auto-memory files under ~/.claude/projects/**/memory/*.md,
+# which the memory system's own instructions require writing directly, with
+# no delegation path) passes through untouched. The intent is to stop direct
+# edits to code, not to block every Write/Edit call regardless of target.
 #
 # bash-3.2-safe.
 set -u
@@ -59,7 +66,7 @@ else
 fi
 
 printf '%s' "$INPUT" | $WM_UV python -c '
-import json, re, shlex, sys
+import json, os, re, shlex, subprocess, sys
 
 try:
     data = json.load(sys.stdin)
@@ -81,16 +88,32 @@ def deny(reason):
     sys.exit(0)
 
 
+def is_inside_git_repo(path):
+    d = os.path.dirname(os.path.abspath(path)) or "/"
+    while d != "/" and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    try:
+        r = subprocess.run(
+            ["git", "-C", d, "rev-parse", "--is-inside-work-tree"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        return r.returncode == 0 and r.stdout.strip() == b"true"
+    except Exception:
+        return False
+
+
 if tool in ("Edit", "Write", "NotebookEdit"):
-    deny(
-        "Direct %s calls are not yours to make here - you are acting as an "
-        "orchestrator (wingman'"'"'s top-level layer, or a lead), and CLAUDE.md'"'"'s "
-        "prime directive is \"never do heavy work yourself,\" no size exception. "
-        "Spawn a developer crew member to make this change instead: "
-        "bin/spawn-crew --type developer --repo <name> --objective \"<the "
-        "change>\" (or --input <plan-path> if an analyst already produced a "
-        "plan). See issue #17." % tool
-    )
+    path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+    if not path or is_inside_git_repo(path):
+        deny(
+            "Direct %s calls are not yours to make here - you are acting as an "
+            "orchestrator (wingman'"'"'s top-level layer, or a lead), and CLAUDE.md'"'"'s "
+            "prime directive is \"never do heavy work yourself,\" no size exception. "
+            "Spawn a developer crew member to make this change instead: "
+            "bin/spawn-crew --type developer --repo <name> --objective \"<the "
+            "change>\" (or --input <plan-path> if an analyst already produced a "
+            "plan). See issue #17." % tool
+        )
 
 if tool == "Bash":
     command = tool_input.get("command", "") or ""

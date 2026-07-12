@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# E2E: the PreToolUse guard (#17). Denies direct Edit/Write/NotebookEdit and
-# direct test-runner Bash calls at the orchestrator layer (wingman's own
-# top-level session, or a lead) - and stays inactive for every worker crew
-# type, and for any unrelated Claude Code session elsewhere on the machine.
+# E2E: the PreToolUse guard (#17). Denies direct Edit/Write/NotebookEdit
+# against files inside a git repo, and direct test-runner Bash calls, at the
+# orchestrator layer (wingman's own top-level session, or a lead) - and stays
+# inactive for every worker crew type, for any unrelated Claude Code session
+# elsewhere on the machine, and for Edit/Write targets outside any git repo
+# (e.g. the auto-memory files under ~/.claude/projects/**/memory/).
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 HOOK="$TEST_REPO/hooks/no-direct-edit-guard.sh"
 
 run_hook() {
-  # run_hook <tool_name> <command-or-empty>
+  # run_hook <tool_name> <command-or-empty> [file_path]
   if [ -n "${2:-}" ]; then
     printf '{"tool_name":"%s","tool_input":{"command":"%s"}}' "$1" "$2" | bash "$HOOK"
   else
-    printf '{"tool_name":"%s","tool_input":{"file_path":"x.py"}}' "$1" | bash "$HOOK"
+    fp="${3:-$TEST_REPO/x.py}"
+    printf '{"tool_name":"%s","tool_input":{"file_path":"%s"}}' "$1" "$fp" | bash "$HOOK"
   fi
 }
 
 OUTSIDE_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUTSIDE_DIR"' EXIT
+if git -C "$OUTSIDE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  fail "test setup: OUTSIDE_DIR ($OUTSIDE_DIR) is unexpectedly inside a git repo"
+fi
 
 # --- top-level wingman (no WINGMAN_CREW_ID at all), launched from this repo --
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
@@ -83,6 +89,15 @@ for cmd in "cat tests/run.sh" "grep -rn pytest ." "git log --grep=fix go test fl
   assert_eq "top-level: '$cmd' (runner word as argument, not invocation) is allowed" "$out" ""
 done
 
+# Edit/Write outside any git repo passes through untouched even while active -
+# the guard's intent is to stop direct edits to code, not every Write/Edit
+# regardless of target (e.g. wingman's own auto-memory files).
+out="$(run_hook Edit "" "$OUTSIDE_DIR/note.md")"
+assert_eq "top-level: Edit outside any git repo is allowed (no output)" "$out" ""
+
+out="$(run_hook Write "" "$OUTSIDE_DIR/note.md")"
+assert_eq "top-level: Write outside any git repo is allowed (no output)" "$out" ""
+
 # --- cwd scoping: an unset WINGMAN_CREW_ID means "wingman's own top-level
 # session" only when this session's project root actually is this checkout.
 # Every unrelated Claude Code session elsewhere on the machine also has no
@@ -118,6 +133,9 @@ assert_eq "lead: generic Bash is allowed (no output)" "$out" ""
 export CLAUDE_PROJECT_DIR="$OUTSIDE_DIR"
 out="$(run_hook Edit)"
 assert_contains "lead: Edit is denied from outside this repo" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Edit "" "$OUTSIDE_DIR/note.md")"
+assert_eq "lead: Edit outside any git repo is allowed (no output)" "$out" ""
 
 unset CLAUDE_PROJECT_DIR
 
