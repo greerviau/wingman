@@ -204,22 +204,27 @@ esac
 # file - only the single last writer sees its own pid reflected back, so a
 # mismatch is treated exactly like a failed `mkdir` (back off and retry).
 CLAIMLOCK="$PIDFILE.lock"
+# The lock dir will hold an `owner` file (the verification stamp below), so
+# releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
+# rmdir would fail (ENOTEMPTY) and leak the lock permanently.
+release_claim() { rm -f "$CLAIMLOCK/owner" 2>/dev/null; rmdir "$CLAIMLOCK" 2>/dev/null; }
 _claim_tries=0
 while :; do
   if mkdir "$CLAIMLOCK" 2>/dev/null; then
+    # Registered the instant mkdir succeeds, before the verification below can
+    # fail - so this process's own dir is always reclaimed on exit, even if it
+    # turns out to have lost the internal write race (never a permanent wedge
+    # with no one left to clean it up).
+    trap release_claim EXIT
     echo "$$" > "$CLAIMLOCK/owner" 2>/dev/null
     sleep 0.1
     [ "$(cat "$CLAIMLOCK/owner" 2>/dev/null)" = "$$" ] && break
+    trap - EXIT   # lost the internal race; the presumed winner's own trap cleans up
   fi
   _claim_tries=$((_claim_tries+1))
   [ "$_claim_tries" -ge 50 ] && wm_die "watcher: could not acquire the claim lock after 5s (a concurrent arm may be stuck) - see $CLAIMLOCK"
   sleep 0.1
 done
-# The lock dir now holds an `owner` file (the verification stamp above), so
-# releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
-# rmdir would fail (ENOTEMPTY) and leak the lock permanently.
-release_claim() { rm -f "$CLAIMLOCK/owner" 2>/dev/null; rmdir "$CLAIMLOCK" 2>/dev/null; }
-trap release_claim EXIT
 
 # --- singleton guard --------------------------------------------------------
 # If a genuinely live cycle already holds the lock, do not start a rival loop.

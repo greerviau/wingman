@@ -89,11 +89,45 @@ EOF
     RESUME_RESULT="skip: not died"
     return
   fi
-  # Idempotency guard 2: a window already at this name means a concurrent or
-  # retried resume beat this one to it - never double-launch.
+  # Idempotency guard 2: an atomic per-id claim, not a check-then-act. tmux
+  # does not enforce unique window names - `new-window -n X` happily creates a
+  # second X rather than failing or deduping against an existing one - so a
+  # `grep` of the window list before `new-window` leaves a TOCTOU gap two
+  # concurrent/retried callers can both pass, each then launching its own
+  # `claude --resume` against the identical session id. mkdir is the atomic
+  # claim primitive instead (same pattern as the watcher's own singleton arm:
+  # a write-then-read-back verification, with the cleanup trap registered the
+  # instant mkdir succeeds so this process's own dir is never left behind even
+  # if it turns out to have lost that internal race).
+  _claim="$WM_HOME/crew/$_rid.resuming"
+  _claim_owned=0
+  _claim_tries=0
+  while :; do
+    if mkdir "$_claim" 2>/dev/null; then
+      trap 'rm -f "$_claim/owner" 2>/dev/null; rmdir "$_claim" 2>/dev/null' EXIT
+      echo "$$" > "$_claim/owner" 2>/dev/null
+      sleep 0.1
+      if [ "$(cat "$_claim/owner" 2>/dev/null)" = "$$" ]; then _claim_owned=1; break; fi
+      trap - EXIT   # lost the internal race; the presumed winner's own trap cleans up
+    fi
+    _claim_tries=$((_claim_tries+1))
+    [ "$_claim_tries" -ge 20 ] && break
+    sleep 0.1
+  done
+  if [ "$_claim_owned" != 1 ]; then
+    wm_warn "'$_rid': could not claim the resume lock - another crew-resume may be relaunching it right now, or a stale claim was left by a crashed run (remove $_claim by hand if none is running). Not relaunching."
+    RESUME_RESULT="skip: could not claim resume lock"
+    return
+  fi
+  # Now that concurrent creators are excluded, a window already at this name
+  # means a previous resume already relaunched it (or left a stray window) -
+  # still worth skipping, but no longer the thing that closes the race.
   if wm_tmux_windows | grep -qx "$_window"; then
     wm_info "'$_rid': window '$_window' already exists, not relaunching"
     RESUME_RESULT="skip: window already exists"
+    rm -f "$_claim/owner" 2>/dev/null
+    rmdir "$_claim" 2>/dev/null
+    trap - EXIT
     return
   fi
 

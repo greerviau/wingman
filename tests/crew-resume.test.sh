@@ -62,6 +62,34 @@ assert_eq "the original window's pane is untouched" "$after_pid" "$before_pid"
 assert_eq "status stays died (guard 2 never resumes)" "$(field_of r3 status)" "died"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- two concurrent invocations racing the same died member never double-launch
+# (the must-fix from the PR #29 review: `wm_tmux_windows | grep -qx` before
+# `new-window` is a TOCTOU gap, since tmux happily creates two windows with the
+# identical name rather than failing or deduping - an atomic mkdir claim closes
+# it instead, same pattern as #12's watcher arm lock).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id crx1 --type developer --objective x --repo /tmp --window wm-crx1 --session-id sess-crx1 >/dev/null
+wm_state crew-set --id crx1 --status died >/dev/null
+WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_TRIES=3 WM_RESUME_VERIFY_POLL=1 \
+  "$CR" crx1 >"$WINGMAN_HOME/race-a.log" 2>&1 &
+race_a=$!
+WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_TRIES=3 WM_RESUME_VERIFY_POLL=1 \
+  "$CR" crx1 >"$WINGMAN_HOME/race-b.log" 2>&1 &
+race_b=$!
+wait "$race_a" 2>/dev/null
+wait "$race_b" 2>/dev/null
+win_count="$(tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -c '^wm-crx1$')"
+assert_eq "exactly one wm-crx1 window exists after a concurrent race" "$win_count" "1"
+assert_eq "status flips to working exactly once" "$(field_of crx1 status)" "working"
+race_a_out="$(cat "$WINGMAN_HOME/race-a.log" 2>/dev/null)"
+race_b_out="$(cat "$WINGMAN_HOME/race-b.log" 2>/dev/null)"
+winners=0
+case "$race_a_out" in *"1 resumed"*) winners=$((winners+1)) ;; esac
+case "$race_b_out" in *"1 resumed"*) winners=$((winners+1)) ;; esac
+assert_eq "exactly one racer reports having resumed it" "$winners" "1"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- a lead + its sub-crew, both died, both resumed: tree preserved -----------
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
