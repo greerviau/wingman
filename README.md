@@ -33,6 +33,7 @@ Talk to it in plain language, or use the slash commands:
 | `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `software-analyst`, `architect`, `developer`, `reviewer`, `lead`, `research`, or one you added; `bin/spawn-crew --list-types` shows every category's roles, and a bare name still works when it's unique across categories; pass `global` instead of a repo for cross-repo work |
 | `/status` | compact roster: who's on what (with each member's status), what's blocked, what's stalled, what's ready. Closed history is hidden by default |
 | `/blocked` | each blocked member + the decision it needs |
+| (a batch of crew died together, or hit a correlated API outage) | wingman relays the one collapsed event plus the fix - `bin/crew-resume --all-died` for a mass death, or nothing (an auto-nudge already tried) for an outage |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 | `/prune` | clean the roster: drop fully-closed records (archived first) |

@@ -10,11 +10,14 @@
 # so the exit-of-a-tracked-task is the only reliable wake channel; this script
 # therefore never tries to inject keystrokes into wingman's terminal.
 #
-# The pane backstop covers the two failure shapes the status files cannot see:
-# a member frozen on an interactive permission/trust prompt (flipped to blocked),
-# and a member silently stalled - no pane output, no status update, and an
-# execution probe finding nothing running in its pane's process tree (flipped to
-# stalled via wm-state stall-check).
+# The pane backstop covers the failure shapes the status files cannot see: a
+# member frozen on an interactive permission/trust prompt (flipped to blocked); a
+# member silently stalled - no pane output, no status update, and an execution
+# probe finding nothing running in its pane's process tree (flipped to stalled via
+# wm-state stall-check); and a member whose pane shows an API/connectivity-error
+# signature (rate limit, 5xx, network error) followed by the same silence - nudged
+# once per cooldown window, then flagged stalled with an api-error: reason if the
+# nudge doesn't clear it.
 #
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
@@ -112,6 +115,33 @@ STALL_IDLE="${WM_STALL_IDLE:-180}"
 STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
 STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
+# Fleet-wide correlated event grouping (wm_state group-attention, #22/#23): a
+# batch collapses into one bullet only at or above this count AND this ratio of
+# the relevant live population - see group-attention's own docstring for the
+# denominator rules. A lone death/stall is always routine, never a "batch".
+MASS_MIN_COUNT="${WM_MASS_MIN_COUNT:-2}"
+MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
+# API/connectivity-error pane signature (#23): a member showing one of these and
+# then going quiet is a likely local network blip or Anthropic-side outage, not a
+# broken agent, so it gets a one-shot nudge (a plain message into its pane) before
+# stall-check's own unmodified gates get a chance to confirm and flip it stalled.
+WM_APIERR_RE="${WM_APIERR_RE:-rate.limit|rate_limit|\\b429\\b|\\b5[0-9]{2}\\b [Ee]rror|overloaded_error|Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|[Cc]onnection error|Connection refused|fetch failed|socket hang up|Service Unavailable|Bad Gateway|Gateway Timeout}"
+WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
+# At most one nudge per this many seconds per member, so a persistent error is
+# nudged once and then left to stall-check's own escalation rather than re-sent
+# every poll.
+APIERR_NUDGE_COOLDOWN="${WM_APIERR_NUDGE_COOLDOWN:-180}"
+
+# Deliberately not given prompt_freeze_check's full UI-shape/adjacency precision:
+# there is no equivalent stable "shape" for an error banner the way a numbered-
+# options dialog has one, and this check does not need it. Its match never
+# mutates state by itself - it only decides whether to attempt a nudge (cheap and
+# reversible even if wrong) and which reason stall-check uses if and only if
+# stall-check's own independently-gated flip to stalled was going to happen
+# anyway. Reads $PANE_TEXT, set for this poll by wm_pane_snapshot.
+api_error_check() {
+  printf '%s\n' "$PANE_TEXT" | tail -n "$WM_APIERR_TAIL" | grep -qE "$WM_APIERR_RE"
+}
 
 beat_age() {
   [ -f "$BEATFILE" ] || { echo 999999; return; }
@@ -129,9 +159,12 @@ cycle_live() {
 
 case "$MODE" in
   --status)
-    if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"
-    else wm_info "no live watch-fleet cycle"; fi
-    exit 0 ;;
+    # The documented, scriptable liveness check: exit 0 iff a cycle is live, 1
+    # otherwise, so a caller can test `bin/watch-fleet --status >/dev/null 2>&1`
+    # without parsing text.
+    if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"; exit 0
+    else wm_info "no live watch-fleet cycle"; exit 1; fi
+    ;;
   --stop)
     if [ -f "$PIDFILE" ]; then
       pid="$(cat "$PIDFILE" 2>/dev/null)"
@@ -146,16 +179,70 @@ case "$MODE" in
   *) : ;;   # arm/__loop/"" fall through to arm
 esac
 
+# --- atomic check-then-claim -------------------------------------------------
+# mkdir is documented atomic on every POSIX filesystem (no flock(1) dependency,
+# which macOS does not ship), so the check-then-claim below is wrapped in a
+# short-lived lock directory: two `watch-fleet` invocations racing in the same
+# instant would otherwise both observe no live cycle and both write $PIDFILE,
+# the second silently clobbering the first and producing two competing
+# blocking loops. The lock is held only across the check+claim (well under a
+# second), never across the blocking loop itself, so it adds no contention for
+# the common case (one arm at a time). A stuck concurrent arm is bounded at 5s
+# rather than hanging forever; a stale lock directory left by a killed process
+# is cleared by the next arm once its 50 tries are exhausted, surfacing loudly
+# via wm_die instead of wedging silently.
+#
+# A `mkdir` "success" is verified, not trusted outright: two near-simultaneous
+# claimants have been observed to both see their own `mkdir` report success for
+# the identical path (surfaced empirically under this project's own test
+# environment - not expected on a well-behaved POSIX filesystem, but cheap to
+# defend against regardless of platform). The verification relies on a strictly
+# weaker guarantee than `mkdir` atomicity: ordinary sequential writes to one
+# small regular file have a well-defined last-writer-wins outcome. Every
+# claimant that gets past `mkdir` stamps its own pid into the lock dir, waits
+# briefly for any true-concurrent claimant to do the same, then re-reads the
+# file - only the single last writer sees its own pid reflected back, so a
+# mismatch is treated exactly like a failed `mkdir` (back off and retry).
+CLAIMLOCK="$PIDFILE.lock"
+# The lock dir will hold an `owner` file (the verification stamp below), so
+# releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
+# rmdir would fail (ENOTEMPTY) and leak the lock permanently.
+release_claim() { rm -f "$CLAIMLOCK/owner" 2>/dev/null; rmdir "$CLAIMLOCK" 2>/dev/null; }
+_claim_tries=0
+while :; do
+  if mkdir "$CLAIMLOCK" 2>/dev/null; then
+    # Registered the instant mkdir succeeds, before the verification below can
+    # fail - so this process's own dir is always reclaimed on exit, even if it
+    # turns out to have lost the internal write race (never a permanent wedge
+    # with no one left to clean it up).
+    trap release_claim EXIT
+    echo "$$" > "$CLAIMLOCK/owner" 2>/dev/null
+    sleep 0.1
+    [ "$(cat "$CLAIMLOCK/owner" 2>/dev/null)" = "$$" ] && break
+    trap - EXIT   # lost the internal race; the presumed winner's own trap cleans up
+  fi
+  _claim_tries=$((_claim_tries+1))
+  [ "$_claim_tries" -ge 50 ] && wm_die "watcher: could not acquire the claim lock after 5s (a concurrent arm may be stuck) - see $CLAIMLOCK"
+  sleep 0.1
+done
+
 # --- singleton guard --------------------------------------------------------
 # If a genuinely live cycle already holds the lock, do not start a rival loop.
+# The reworded line leads with "already armed" (mirroring what the caller just
+# attempted) and states explicitly that the pid is never a kill target - a fresh
+# arm reporting a bare "healthy pid=N" is what got misread as something to stop
+# in the incident this closes. The `watcher: healthy` token prefix is unchanged
+# so CLAUDE.md's documented arm-status parsing contract still holds.
 if cycle_live; then
-  wm_ok "watcher: healthy pid=$(cat "$PIDFILE") (beacon $(beat_age)s)"
+  wm_ok "watcher: already armed and healthy - one cycle is live (pid $(cat "$PIDFILE"), beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
+  release_claim
   exit 0
 fi
 
 # --- claim the cycle --------------------------------------------------------
 echo $$ > "$PIDFILE"
 : > "$BEATFILE" || true
+release_claim
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
@@ -325,19 +412,15 @@ print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()))
 #      which is why the adjacency in condition 1 must carry precision there.
 # Also sets PFC_SHAPE=1 when condition 1 held regardless of stability, so the
 # caller can hold the stall check off a prompt-shaped pane that is one INTERVAL
-# away from a definitive diagnosis. The per-member capture hash lives in
-# $WM_HOME/pane-<id>.hash (the pidfile pattern); a stale file is harmless.
+# away from a definitive diagnosis. Reads $PANE_TEXT/$PANE_STABLE, which the
+# caller must set for this poll via wm_pane_snapshot before calling this (shared
+# with the API-error check, so the pane is captured and hashed once per member
+# per poll, not twice).
 prompt_freeze_check() {
   PFC_SHAPE=0
-  _pfc_id="$1"; _pfc_win="$2"
-  _pfc_text="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_pfc_win")"
-  _pfc_hashfile="$WM_HOME/pane-$(printf '%s' "$_pfc_id" | tr -c 'A-Za-z0-9._-' '_').hash"
-  _pfc_hash="$(printf '%s' "$_pfc_text" | cksum)"
-  _pfc_prev="$(cat "$_pfc_hashfile" 2>/dev/null)"
-  printf '%s\n' "$_pfc_hash" > "$_pfc_hashfile"
-  prompt_shape_in "$(printf '%s\n' "$_pfc_text" | tail -n "$WM_PERM_TAIL")" || return 1
+  prompt_shape_in "$(printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL")" || return 1
   PFC_SHAPE=1
-  [ -n "$_pfc_prev" ] && [ "$_pfc_hash" = "$_pfc_prev" ]
+  [ "$PANE_STABLE" = 1 ]
 }
 
 # Fire the wake: the two channels carry distinct roles. Stdout is the terse
@@ -350,12 +433,19 @@ prompt_freeze_check() {
 # column is the per-event version stamp we ack below.
 fire() {
   _attention="$1"
+  # Collapse a fleet-wide correlated batch (mass death, correlated API outage)
+  # into one synthetic row for the two DISPLAY loops only (#22/#23, §3.3). This
+  # is a pure, stateless filter - it never mutates any status file - so the ack
+  # loop below deliberately keeps iterating $_attention (the real ids and their
+  # real `updated` stamps), never $_grouped (whose synthetic ids ack nothing).
+  _grouped="$(printf '%s\n' "$_attention" | wm_state group-attention \
+    --owner "$OWNER" --mass-min-count "$MASS_MIN_COUNT" --mass-min-ratio "$MASS_MIN_RATIO" 2>/dev/null)"
   {
     echo "# Crew need your attention"
     echo
     echo "## New events"
     echo
-    printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
+    printf '%s\n' "$_grouped" | while IFS=$'\t' read -r id st upd note; do
       [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
     done
     echo
@@ -363,7 +453,7 @@ fire() {
     echo
     wm_state crew-list --owner "$OWNER" 2>/dev/null
   } > "$WAKEFILE"
-  printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
+  printf '%s\n' "$_grouped" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && printf '%s: %s %s\n' "$st" "$id" "$note"
   done
   printf -- '--\n'
@@ -374,7 +464,8 @@ fire() {
   # Firing IS the delivery, so ack each surfaced (id, updated). That suppresses
   # this exact event on subsequent arms while preserving gap-safety: a different
   # crew - or this crew with a new status (new updated) - is not acked and still
-  # surfaces on the next arm's top-of-loop check.
+  # surfaces on the next arm's top-of-loop check. Acks the REAL ids from
+  # $_attention, never the synthetic $_grouped rows (see the comment above).
   printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && wm_state ack --id "$id" --updated "$upd" >/dev/null 2>&1
   done
@@ -410,7 +501,8 @@ for r in data:
 ' 2>/dev/null); do
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
-      if prompt_freeze_check "$_id" "$_win" && ! liveness_veto "$_id"; then
+      wm_pane_snapshot "$_id" "$_win"
+      if prompt_freeze_check && ! liveness_veto "$_id"; then
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
           >/dev/null 2>&1
@@ -428,10 +520,33 @@ for r in data:
       # it stalled only if nothing there is executing or armed to wake it.
       _idle="$(wm_tmux_window_activity_age "$_win")"
       _pid="$(wm_tmux_pane_pid "$_win")"
+
+      # API/connectivity-error nudge (#23): a stall-idle pane whose tail matches an
+      # error signature gets one nudge per cooldown window before stall-check gets
+      # to confirm+flip it. Only acted on once stability is confirmed (PANE_STABLE),
+      # the same "one more poll before acting" rule prompt_freeze_check uses above -
+      # otherwise a pane still scrolling past a logged error mid-turn would be
+      # nudged for no reason.
+      _api=0
+      if [ "$_idle" -ge "$STALL_IDLE" ] && api_error_check; then
+        _api=1
+        if [ "$PANE_STABLE" = 1 ]; then
+          _nudgefile="$WM_HOME/apierr-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').nudged"
+          _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || echo 0) ))
+          if [ ! -f "$_nudgefile" ] || [ "$_nudge_age" -ge "$APIERR_NUDGE_COOLDOWN" ]; then
+            wm_tmux_send_message "$WM_TMUX_SESSION:$_win" \
+              "An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."
+            : > "$_nudgefile"
+          fi
+        else
+          continue   # first sighting or still changing; one more poll before acting
+        fi
+      fi
+
       [ -n "$_pid" ] && wm_state stall-check --id "$_id" \
         --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
-        --cpu-eps "$STALL_CPU_EPS" >/dev/null 2>&1
+        --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
     done
   fi
 

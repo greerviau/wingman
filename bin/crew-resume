@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# crew-resume - relaunch a died crew member with `claude --resume <session-id>`,
+# preserving its prior conversation, session id, and place in the org tree (the
+# roster record is reused as-is, so `parent` never changes and no crew-add /
+# tree surgery is needed). The bulk remedy for a mass crew-death event (#22): a
+# tmux/host crash takes every session in it down at once, and each one is
+# otherwise only recoverable by hand via bin/crew-takeover.
+#
+# Idempotent: a member that is not currently `died` is skipped, and two
+# concurrent or retried resumes of the same id never both relaunch it - an
+# mkdir-based atomic claim per id (tmux does not enforce unique window names,
+# so a plain check-then-`new-window` would race) makes the loser skip instead.
+# Running `--all-died` twice is then naturally a no-op the second time.
+#
+# Verified, not optimistic: after relaunching, this waits briefly to confirm the
+# new window is still there. tmux destroys a window when its pane's process
+# exits (no remain-on-exit), so a `--resume` that fails fast (a stale/invalid
+# session id) manifests as the just-created window vanishing again - a real,
+# observable signal. On that path status is left `died` and nothing is
+# auto-retried; the existing manual path (bin/crew-takeover / bin/crew-standdown)
+# is printed instead.
+#
+# This is a tool wingman/a lead invokes deliberately, never something
+# bin/watch-fleet auto-fires: relaunching a session spends real compute (the
+# same "spawning is the expensive act" cost-discipline guardrail CLAUDE.md
+# already states for a fresh spawn), so the decision to resume stays with
+# whoever is supervising, not the watcher loop.
+#
+# Usage:
+#   crew-resume <id> [<id2> ...]             resume the named died member(s)
+#   crew-resume --all-died [--owner <id>]    resume every currently-died member
+#                                             (optionally scoped to one owner's
+#                                             team)
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+ALL_DIED=0
+OWNER_ARG=""
+IDS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all-died) ALL_DIED=1; shift ;;
+    --owner)    OWNER_ARG="$2"; shift 2 ;;
+    -h|--help)  sed -n '2,29p' "$0"; exit 0 ;;
+    -*)         wm_die "unknown arg: $1" ;;
+    *)          IDS="$IDS $1"; shift ;;
+  esac
+done
+
+if [ "$ALL_DIED" = 1 ]; then
+  [ -z "$IDS" ] || wm_die "pass either --all-died or explicit ids, not both"
+else
+  [ -z "$OWNER_ARG" ] || wm_die "--owner only applies to --all-died"
+  [ -n "$IDS" ] || wm_die "usage: crew-resume <id> [<id2> ...]  |  crew-resume --all-died [--owner <id>]"
+fi
+
+# Same model/effort/permission-mode resolution convention as bin/spawn-crew: no
+# CLI flags here (a resumed session has no per-call --model/--effort of its
+# own), just the same env-var defaults.
+PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
+MODEL="${WM_MODEL:-}"
+EFFORT="${WM_EFFORT:-}"
+
+# Set by resume_one() for its caller to tally: "resumed" or "skip: <reason>".
+RESUME_RESULT=""
+
+resume_one() {
+  _rid="$1"
+  _info="$(wm_state crew-get --id "$_rid" 2>/dev/null)" || {
+    wm_warn "'$_rid': no such crew member"
+    RESUME_RESULT="skip: no such member"
+    return
+  }
+  # One field per line (never tab-joined): a tab is IFS whitespace, so an empty
+  # field (worktree is commonly empty) would collapse two adjacent delimiters
+  # into one and silently shift every field after it.
+  _lines="$(printf '%s' "$_info" | wm_py -c '
+import sys, json
+d = json.load(sys.stdin)
+for k in ("repo", "session_id", "window", "worktree", "status"):
+    print(d.get(k) or "")')"
+  { read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; } <<EOF
+$_lines
+EOF
+
+  # Idempotency guard 1: only a currently-died member is a resume target.
+  if [ "$_status" != "died" ]; then
+    wm_info "'$_rid': not died (status=$_status), nothing to resume"
+    RESUME_RESULT="skip: not died"
+    return
+  fi
+  # Idempotency guard 2: an atomic per-id claim, not a check-then-act. tmux
+  # does not enforce unique window names - `new-window -n X` happily creates a
+  # second X rather than failing or deduping against an existing one - so a
+  # `grep` of the window list before `new-window` leaves a TOCTOU gap two
+  # concurrent/retried callers can both pass, each then launching its own
+  # `claude --resume` against the identical session id. mkdir is the atomic
+  # claim primitive instead (same pattern as the watcher's own singleton arm:
+  # a write-then-read-back verification, with the cleanup trap registered the
+  # instant mkdir succeeds so this process's own dir is never left behind even
+  # if it turns out to have lost that internal race).
+  _claim="$WM_HOME/crew/$_rid.resuming"
+  # A single release point, called from every exit path once the claim is
+  # held: --all-died calls resume_one once per id in the same process,
+  # reassigning $_claim each time, so an inline release duplicated at each
+  # return site is exactly the kind of thing that's easy to miss at one of
+  # them (as happened here) - one helper closes the whole class of bug.
+  release_claim() { rm -f "$_claim/owner" 2>/dev/null; rmdir "$_claim" 2>/dev/null; trap - EXIT; }
+  _claim_owned=0
+  _claim_tries=0
+  while :; do
+    if mkdir "$_claim" 2>/dev/null; then
+      trap release_claim EXIT
+      echo "$$" > "$_claim/owner" 2>/dev/null
+      sleep 0.1
+      if [ "$(cat "$_claim/owner" 2>/dev/null)" = "$$" ]; then _claim_owned=1; break; fi
+      trap - EXIT   # lost the internal race; the presumed winner's own trap cleans up
+    fi
+    _claim_tries=$((_claim_tries+1))
+    [ "$_claim_tries" -ge 20 ] && break
+    sleep 0.1
+  done
+  if [ "$_claim_owned" != 1 ]; then
+    wm_warn "'$_rid': could not claim the resume lock - another crew-resume may be relaunching it right now, or a stale claim was left by a crashed run (remove $_claim by hand if none is running). Not relaunching."
+    RESUME_RESULT="skip: could not claim resume lock"
+    return
+  fi
+  # Now that concurrent creators are excluded, a window already at this name
+  # means a previous resume already relaunched it (or left a stray window) -
+  # still worth skipping, but no longer the thing that closes the race.
+  if wm_tmux_windows | grep -qx "$_window"; then
+    wm_info "'$_rid': window '$_window' already exists, not relaunching"
+    RESUME_RESULT="skip: window already exists"
+    release_claim
+    return
+  fi
+
+  _cwd="$_repo"
+  [ -n "$_worktree" ] && _cwd="$_worktree"
+
+  # --- write the resume launch script (avoids all in-tmux quoting) -----------
+  _launch="$WM_HOME/crew/$_rid.resume.sh"
+  {
+    echo '#!/usr/bin/env bash'
+    echo "cd $(quote "$_cwd") || exit 1"
+    echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
+    echo "export WINGMAN_CREW_ID=$(quote "$_rid")"
+    echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
+    echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
+    [ -n "$_worktree" ] && echo "export WINGMAN_WORKTREE=$(quote "$_worktree")"
+    printf 'exec %s' "${WM_AGENT:-claude}"
+    printf ' --resume %s' "$(quote "$_sid")"
+    [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
+    printf ' --add-dir %s' "$(quote "$WM_HOME")"
+    printf ' --add-dir %s' "$(quote "$_repo")"
+    [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
+    [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
+    printf '\n'
+  } > "$_launch"
+  chmod +x "$_launch"
+
+  # --- relaunch the window -----------------------------------------------------
+  wm_tmux_ensure_session
+  wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$_window" "bash $(quote "$_launch")"
+  # --resume reopens the conversation but, in this unattended setup, does not
+  # itself decide to keep working - it needs the same kind of opening nudge a
+  # fresh spawn gets.
+  wm_tmux_send_message "$WM_TMUX_SESSION:$_window" \
+    "Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
+
+  # --- verify the resume actually took -----------------------------------------
+  _tries="${WM_RESUME_VERIFY_TRIES:-10}"
+  _poll="${WM_RESUME_VERIFY_POLL:-1}"
+  _i=0
+  _alive=1
+  while [ "$_i" -lt "$_tries" ]; do
+    if wm_tmux_windows | grep -qx "$_window"; then _alive=1; else _alive=0; break; fi
+    sleep "$_poll"
+    _i=$((_i+1))
+  done
+
+  if [ "$_alive" = 1 ]; then
+    wm_state crew-set --id "$_rid" --status working \
+      --summary "resumed after an interruption (was died); continuing prior session" >/dev/null
+    wm_ok "'$_rid': resumed in window '$_window'"
+    RESUME_RESULT="resumed"
+  else
+    wm_warn "'$_rid': --resume exited immediately (window vanished); status left 'died'. Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
+    RESUME_RESULT="skip: resume failed"
+  fi
+  release_claim
+}
+
+# --- resolve targets ----------------------------------------------------------
+if [ "$ALL_DIED" = 1 ]; then
+  if [ -n "$OWNER_ARG" ]; then
+    TARGETS="$(wm_state crew-list --status died --owner "$OWNER_ARG" --json 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+for r in data:
+    print(r.get("id", ""))
+')"
+  else
+    TARGETS="$(wm_state crew-list --status died --json 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+for r in data:
+    print(r.get("id", ""))
+')"
+  fi
+else
+  TARGETS="$(printf '%s\n' $IDS)"
+fi
+
+# --- run, sequentially (a shared tmux server makes concurrency risky and of no
+# benefit for a handful of window creations) -----------------------------------
+resumed=0
+skipped=0
+skip_notes=""
+for _t in $TARGETS; do
+  [ -n "$_t" ] || continue
+  resume_one "$_t"
+  case "$RESUME_RESULT" in
+    resumed) resumed=$((resumed+1)) ;;
+    *) skipped=$((skipped+1)); skip_notes="$skip_notes; $_t ($RESUME_RESULT)" ;;
+  esac
+done
+
+wm_info "$resumed resumed, $skipped skipped${skip_notes:+: ${skip_notes#; }}"

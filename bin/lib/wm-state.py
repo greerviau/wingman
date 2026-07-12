@@ -670,7 +670,11 @@ def cmd_stall_check(args):
 
     Prints 'stalled' if it flipped the member, nothing otherwise. Idempotent and safe
     to call every poll: gates fail fast, the probe runs only for nominated candidates,
-    and once flipped, status != 'working' so subsequent calls skip."""
+    and once flipped, status != 'working' so subsequent calls skip.
+
+    --api-error only changes which reason template a genuine stall is written with
+    (an 'api-error:' prefix instead of the default) - it never changes the gates or
+    the probe above, and does not by itself cause a flip."""
     ensure_home()
     live = read_json(status_path(args.id), None)
     if not isinstance(live, dict) or live.get("status") != "working":
@@ -693,10 +697,19 @@ def cmd_stall_check(args):
     live = current
 
     prior = (live.get("summary") or "").split("\n")[0][:80]
-    reason = ("no pane output, status update, running child process, or CPU activity "
-              "for >%ds while status was 'working'; the agent likely errored or went "
-              "idle. Inspect with `bin/crew-takeover %s` or stand down with "
-              "`bin/crew-standdown %s`." % (int(args.threshold), args.id, args.id))
+    if getattr(args, "api_error", 0):
+        reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
+                  "limit, connection error, 5xx, overloaded_error, or similar) and then "
+                  "went quiet for >%ds while status was 'working' - the CLI's own retry/"
+                  "backoff appears exhausted. Likely a local network blip or an Anthropic-"
+                  "side outage, not a broken agent. Already nudged once; if it does not "
+                  "recover, resume it with `bin/crew-resume %s`."
+                  % (int(args.threshold), args.id))
+    else:
+        reason = ("no pane output, status update, running child process, or CPU activity "
+                  "for >%ds while status was 'working'; the agent likely errored or went "
+                  "idle. Inspect with `bin/crew-takeover %s` or stand down with "
+                  "`bin/crew-standdown %s`." % (int(args.threshold), args.id, args.id))
     if prior:
         reason += " (last summary: %s)" % prior
 
@@ -777,6 +790,97 @@ def cmd_needs_attention(args):
                     or r.get("artifact") or r.get("summary") or "")
             print("%s\t%s\t%s\t%s" % (
                 rid, r["status"], upd or "", note))
+
+
+def cmd_group_attention(args):
+    """Read needs-attention's TSV from stdin (id, status, updated, note) and
+    collapse fleet-wide correlated batches into one synthetic row each, passing
+    every other row through unchanged. Two recognized patterns, both meaning
+    "many crew show the same abnormal signal in one pass":
+      - status == "died"                                     -> key "mass-death"
+      - status == "stalled" and note startswith "api-error:"  -> key "api-outage"
+    A group collapses only at or above --mass-min-count AND --mass-min-ratio (of
+    the relevant live population - see below); below threshold its rows pass
+    through individually, so one routine died/stalled member is untouched.
+
+    Pure filter: recomputes the roster snapshot fresh on every call and writes
+    nothing. The synthetic row's id ("correlated:mass-death"/"correlated:api-
+    outage") is not a real crew id - callers must ack/mark-handled from the
+    ORIGINAL ungrouped needs-attention output, never from this filtered one.
+    --owner scopes the ratio's denominator to the same cohort needs-attention
+    was called with ("" = top level, matching a lead's own scope), so a lead's
+    cycle judges "N of M" against its own team, not the whole fleet.
+
+    Ratio denominators: a `died` member has just left LIVE_STATES, so
+    mass-death's denominator is (current live count for this owner) + (number
+    of died rows in this batch) - "how many were live a moment before this
+    pass," not the post-death count, which would undercount and inflate the
+    ratio. `stalled` is still a LIVE_STATES member, so api-outage's denominator
+    is simply the current live count - no adjustment needed."""
+    owner = getattr(args, "owner", None)
+    min_count = args.mass_min_count
+    min_ratio = args.mass_min_ratio
+
+    rows = []
+    for line in sys.stdin:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t", 3)
+        while len(parts) < 4:
+            parts.append("")
+        rows.append(tuple(parts))  # (id, status, updated, note)
+
+    died_rows = [r for r in rows if r[1] == "died"]
+    outage_rows = [r for r in rows if r[1] == "stalled" and r[3].startswith("api-error:")]
+
+    current_live = 0
+    for r in load_roster():
+        m = merged(r)
+        if m.get("status") not in LIVE_STATES:
+            continue
+        if owner is not None and parent_of(r) != owner:
+            continue
+        current_live += 1
+    mass_denominator = current_live + len(died_rows)
+    outage_denominator = current_live
+
+    def collapses(n, denom):
+        return n >= min_count and denom > 0 and (n / float(denom)) >= min_ratio
+
+    mass_collapse = bool(died_rows) and collapses(len(died_rows), mass_denominator)
+    outage_collapse = bool(outage_rows) and collapses(len(outage_rows), outage_denominator)
+    died_ids = set(r[0] for r in died_rows)
+    outage_ids = set(r[0] for r in outage_rows)
+
+    resume_cmd = "bin/crew-resume --all-died"
+    if owner:
+        resume_cmd += " --owner %s" % owner
+
+    emitted_mass = False
+    emitted_outage = False
+    for rid, status, upd, note in rows:
+        if mass_collapse and rid in died_ids:
+            if emitted_mass:
+                continue
+            emitted_mass = True
+            names = ", ".join("`%s`" % i for i in (r[0] for r in died_rows))
+            synth_note = ("%d crew members died together (likely a tmux/host crash): %s. "
+                          "Default remedy: `%s`." % (len(died_rows), names, resume_cmd))
+            print("%s\t%s\t%s\t%s" % ("correlated:mass-death", "died", now(), synth_note))
+            continue
+        if outage_collapse and rid in outage_ids:
+            if emitted_outage:
+                continue
+            emitted_outage = True
+            names = ", ".join("`%s`" % i for i in (r[0] for r in outage_rows))
+            synth_note = ("%d crew members hit an API/connectivity error together (likely an "
+                          "outage): %s. Already nudged once each; escalate with "
+                          "`bin/crew-resume <id>` if one does not recover."
+                          % (len(outage_rows), names))
+            print("%s\t%s\t%s\t%s" % ("correlated:api-outage", "stalled", now(), synth_note))
+            continue
+        print("%s\t%s\t%s\t%s" % (rid, status, upd, note))
 
 
 def cmd_ack(args):
@@ -1167,6 +1271,10 @@ def build_parser():
     a.add_argument("--root-grace", type=int, default=30, dest="root_grace")
     a.add_argument("--probe-gap", type=int, default=10, dest="probe_gap")
     a.add_argument("--cpu-eps", type=float, default=0.5, dest="cpu_eps")
+    # Set by the watcher when the pane tail matches an API/connectivity-error
+    # signature (#23); changes only which reason template a genuine stall gets,
+    # never the gates or probe above.
+    a.add_argument("--api-error", type=int, default=0, dest="api_error")
     a.set_defaults(fn=cmd_stall_check)
 
     a = sub.add_parser("needs-attention")
@@ -1178,6 +1286,16 @@ def build_parser():
     a.add_argument("--suppress-on", default="ack", choices=("ack", "handled"), dest="suppress_on")
     a.add_argument("--only-acked", action="store_true", dest="only_acked")
     a.set_defaults(fn=cmd_needs_attention)
+
+    # Pure display filter over needs-attention's TSV: collapses a fleet-wide
+    # correlated batch (mass death, correlated API outage) into one synthetic
+    # row. Never call ack/mark-handled against its output - those must always
+    # target the real ids from the original needs-attention call.
+    a = sub.add_parser("group-attention")
+    a.add_argument("--owner", default=None)
+    a.add_argument("--mass-min-count", type=int, default=2, dest="mass_min_count")
+    a.add_argument("--mass-min-ratio", type=float, default=0.5, dest="mass_min_ratio")
+    a.set_defaults(fn=cmd_group_attention)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)

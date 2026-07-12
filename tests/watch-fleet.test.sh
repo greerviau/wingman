@@ -335,4 +335,127 @@ assert_false "watcher still fires on the real event after SIGURG" "kill -0 $upid
 assert_contains "post-SIGURG fire carries the reason" "$(cat "$WINGMAN_HOME/urg.log")" "done: u1"
 kill "$upid" 2>/dev/null
 
+# --- concurrent arms race safely (closes the TOCTOU gap, #12) ----------------
+# Two near-simultaneous arms, backgrounded and raced with &: the mkdir claim
+# lock must let exactly one win the claim, leaving exactly one live process and
+# a pidfile that names it. Assert on each racer's own printed verdict (its
+# first line of output), not on a `kill -0` process-liveness snapshot after a
+# fixed wait - liveness-by-pid over a polling window is itself timing-sensitive
+# under a shared, noisy host (a scheduling delay can make a losing racer look
+# "still alive" well after it has already decided and is mid-exit), where the
+# verdict each process writes the moment it decides is not.
+test_new_home
+wm_state crew-add --id race1 --type developer --objective race --repo /tmp --window wm-race1 --session-id sr1 >/dev/null
+wm_state crew-set --id race1 --status working --summary "in progress" >/dev/null
+"$WF" >"$WINGMAN_HOME/race-a.log" 2>&1 &
+race_a=$!
+wm_track "$race_a"
+"$WF" >"$WINGMAN_HOME/race-b.log" 2>&1 &
+race_b=$!
+wm_track "$race_b"
+# Wait (bounded) for both racers to have printed their verdict.
+_race_i=0
+while [ "$_race_i" -lt 60 ]; do
+  [ -s "$WINGMAN_HOME/race-a.log" ] && [ -s "$WINGMAN_HOME/race-b.log" ] && break
+  sleep 0.2
+  _race_i=$((_race_i+1))
+done
+race_a_out="$(cat "$WINGMAN_HOME/race-a.log" 2>/dev/null)"
+race_b_out="$(cat "$WINGMAN_HOME/race-b.log" 2>/dev/null)"
+winners=0; winner_pid=""
+case "$race_a_out" in *"watcher: armed pid="*) winners=$((winners+1)); winner_pid="$race_a" ;; esac
+case "$race_b_out" in *"watcher: armed pid="*) winners=$((winners+1)); winner_pid="$race_b" ;; esac
+losers=0
+case "$race_a_out" in *"already armed"*) losers=$((losers+1)) ;; esac
+case "$race_b_out" in *"already armed"*) losers=$((losers+1)) ;; esac
+assert_eq "exactly one racer wins the claim and arms" "$winners" "1"
+assert_eq "exactly one racer loses the claim and reports already-armed" "$losers" "1"
+pidfile_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+assert_true "the pidfile names a live process" "kill -0 $pidfile_pid"
+assert_eq "the pidfile matches the winning racer's own pid" "$pidfile_pid" "$winner_pid"
+kill "$race_a" "$race_b" 2>/dev/null
+
+# --- --status is the scriptable liveness check (#12) --------------------------
+test_new_home
+assert_false "no live cycle: --status exits nonzero" "\"$WF\" --status >/dev/null 2>&1"
+wm_state crew-add --id st1 --type developer --objective s --repo /tmp --window wm-st1 --session-id ss1 >/dev/null
+wm_state crew-set --id st1 --status working --summary "in progress" >/dev/null
+"$WF" >"$WINGMAN_HOME/status.log" 2>&1 &
+stpid=$!
+wm_track "$stpid"
+sleep 2
+assert_true "a live cycle: --status exits zero" "\"$WF\" --status >/dev/null 2>&1"
+kill "$stpid" 2>/dev/null
+
+# --- fire() collapses a correlated mass-death batch (#22) ----------------------
+# Three simultaneous deaths at/above the default min-count and min-ratio collapse
+# to one synthetic bullet naming every id; a fourth, unrelated death elsewhere
+# stays a separate individual line (group-attention's own logic is unit-tested
+# in group-attention.test.sh - this proves fire() is actually wired to it).
+test_new_home
+wm_state crew-add --id m1 --type developer --objective p --repo /tmp --window wm-m1 --session-id sm1 >/dev/null
+wm_state crew-add --id m2 --type developer --objective q --repo /tmp --window wm-m2 --session-id sm2 >/dev/null
+wm_state crew-add --id m3 --type developer --objective r --repo /tmp --window wm-m3 --session-id sm3 >/dev/null
+wm_state crew-set --id m1 --status died >/dev/null
+wm_state crew-set --id m2 --status died >/dev/null
+wm_state crew-set --id m3 --status died >/dev/null
+outm="$(wm_timeout 45 "$WF" 2>/dev/null)"
+assert_contains "the collapsed bullet is a single correlated row" "$outm" "correlated:mass-death"
+assert_contains "the collapsed row names the first member" "$outm" "m1"
+assert_contains "the collapsed row names the second member" "$outm" "m2"
+assert_contains "the collapsed row names the third member" "$outm" "m3"
+case "$outm" in
+  *"died: m1 "*) died_m1_solo=1 ;;
+  *)             died_m1_solo=0 ;;
+esac
+assert_eq "no individual 'died: m1' line remains alongside the collapse" "$died_m1_solo" "0"
+wakem="$(cat "$WINGMAN_HOME/wake")"
+assert_contains "the wake file also shows the collapsed bullet" "$wakem" "correlated:mass-death"
+
+# --- an api-error nudge fires once, not again within the cooldown (#23) -------
+# A pane whose tail matches WM_APIERR_RE, gone idle past STALL_IDLE, but with a
+# busy (silent) child so the execution probe finds activity and never confirms a
+# stall - isolates the nudge behavior from the escalation path below.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id ae1 --type developer --objective h --repo /tmp --window wm-ae1 --session-id sae1 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae1 'echo "Error: rate limit exceeded (429 Too Many Requests)"; while :; do :; done'
+wm_age_status ae1
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_APIERR_NUDGE_COOLDOWN=60 WM_WATCH_INTERVAL=1 \
+  "$WF" >/dev/null 2>&1 &
+napid=$!
+wm_track "$napid"
+nudgefile="$WINGMAN_HOME/apierr-ae1.nudged"
+_wait=0
+while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 25 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_true "the nudge marker file appears" "[ -f '$nudgefile' ]"
+assert_true "watcher keeps blocking (CPU activity suppresses the stall flip)" "kill -0 $napid"
+assert_contains "the member stays working, not flipped stalled" \
+  "$(wm_state crew-get --id ae1)" '"status": "working"'
+first_mtime="$(uv run --no-project --quiet python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$nudgefile")"
+sleep 6
+second_mtime="$(uv run --no-project --quiet python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$nudgefile")"
+assert_eq "the nudge is not re-sent within the cooldown window" "$first_mtime" "$second_mtime"
+kill "$napid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- an unrecovered api-error escalates to stalled with the api-error reason ---
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id ae2 --type developer --objective i --repo /tmp --window wm-ae2 --session-id sae2 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae2 'echo "Error: connection error (ECONNRESET)"; sleep 600'
+wm_age_status ae2
+WM_STALL_IDLE=6 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
+  "$WF" >"$WINGMAN_HOME/apierr.log" 2>&1 &
+aepid=$!
+wm_track "$aepid"
+i=0; while kill -0 "$aepid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
+assert_false "watcher exited on the api-error stall" "kill -0 $aepid"
+assert_contains "cycle exits with the stalled reason carrying api-error:" \
+  "$(cat "$WINGMAN_HOME/apierr.log")" "stalled: ae2 api-error:"
+assert_true "the nudge marker file was written before escalating" \
+  "[ -f '$WINGMAN_HOME/apierr-ae2.nudged' ]"
+kill "$aepid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary
