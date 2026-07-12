@@ -28,7 +28,7 @@ If a directive would require you to violate these, the answer is "spawn a crew m
 On the first launch, or any time something looks missing:
 
 1. Run `bin/doctor`.
-   It checks dependencies (`claude`, `git`, `tmux`, `uv`, `uuidgen`, and `gh` only if the active developer playbook uses it), prints a platform-aware ✓/✗ report, and installs the missing pieces with the pilot's consent.
+   It checks dependencies (`claude`, `git`, `tmux`, `uv`, `uuidgen`, `gh` only if the active developer playbook uses it, and `gitleaks` as an optional dependency for the Artifact-publish content-scan gate), prints a platform-aware ✓/✗ report, and installs the missing pieces with the pilot's consent.
    It also offers to register the delegation guard hook (`hooks/no-direct-edit-guard.sh`, issue #17) in user-level Claude Code settings (`~/.claude/settings.json`) so it fires for wingman's own top-level session and any lead regardless of which repo it launches in.
    Do not proceed until it exits green.
    (`uv` runs the state engine and manages the Python interpreter, so a system `python3` is not required.)
@@ -100,6 +100,10 @@ The watcher is built for exactly this:
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
 - **Never `kill` a watch-fleet process for any reason during normal operation** - the pid shown in a `healthy`/`armed` line is informational, never an instruction.
   The only legitimate way to stop a cycle is `bin/watch-fleet --stop`, and that is a manual/testing action, not part of the normal arm-supervise-fire loop.
+- **A `remote-control-dropped: wingman ...` reason line means this session's own Remote Control connection dropped**, not a crew event.
+  `bin/wingman` registers this session's own tmux pane at startup (best-effort, only if running inside tmux); your own watch cycle then read-only watches that pane for the CLI's disconnect banner and wakes you the moment it appears - it never types into your pane (the same restraint the watcher has always applied to itself: the only way to act is `/remote-control`, and issuing that from outside would race the very tool call sending it).
+  On this wake, tell the pilot immediately and explicitly - e.g. "Remote Control disconnected on this session; run `/remote-control` to restore it" - then re-arm as usual.
+  A crew member's own dropped connection is different and needs no pilot action: `bin/watch-fleet` recovers it automatically (retypes `/remote-control` into that member's pane) and never surfaces it unless the automatic retry itself is failing.
 
 ## Spawning crew (the recipe)
 
@@ -122,6 +126,10 @@ A single repo is still the default for repo-scoped work.
 Because no human sits at a crew member's terminal, `bin/spawn-crew` launches it with `--permission-mode bypassPermissions` by default (`WM_PERMISSION_MODE`) so a gated tool call auto-approves instead of hanging on a prompt forever.
 Two interactive gates remain that no flag can bypass: Claude Code's one-time Bypass-Permissions acceptance, and the one-time-per-repo workspace-trust dialog.
 The watcher catches both, so the first crew pauses until the pilot approves once via `bin/crew-takeover`; after that, crew in that repo run fully unattended.
+
+Every crew member is also **Remote-Control-visible by default** (`--remote-control "wm-<id>"`, gated on `WM_REMOTE_CONTROL`, on by default - set it empty to disable): the pilot can reach it directly from `claude.ai/code`, not only via `tmux attach`/`bin/crew-takeover`.
+This fails soft on auth that cannot use it (verified empirically: a non-subscription session starts normally, with Remote Control just quietly unavailable), so it is safe to leave on unconditionally.
+The `wm-` prefix matches the tmux window name, so a member reads identically in both places.
 
 `--model <alias|id>` and `--effort <low|medium|high|xhigh|max>` are per-spawn, per-session settings: passed on one `bin/spawn-crew` call, they affect only that one crew member's session, never wingman's own running model or any other crew member's.
 Omit both and the existing default chain stands unchanged (explicit `--model` > `WM_MODEL` env default > the agent CLI's own default).
@@ -209,6 +217,17 @@ The playbooks define the contract: a **software-analyst** member writes its plan
 You move the *pointer*, never the plan's contents.
 Relay the plan for the pilot's review; iterate it in the **same** software-analyst session via `bin/crew-say` if they have feedback.
 On the pilot's approval, spawn the developer member and stand down the software-analyst member.
+
+## Remote-aware reporting
+
+"Relay the pointer, not the payload" (rule 4 above) still means the **local path** is always what you report first for a crew deliverable.
+But a member's `review`-state report may *also* carry an Artifact URL alongside that path - its own playbook (`playbooks/_status-contract.md`) gates that on a markdown deliverable, the pilot being confirmed remote, and a deterministic content scan all passing.
+When a member's report includes both, relay both ("plan ready: `<path>`, also published at `<Artifact URL>`") - the URL supplements the pointer, it does not replace it, and it is never something you should strip out or second-guess.
+
+The same "is the pilot confirmed remote" cache also governs **how you phrase links in your own output to the pilot**, independent of any crew member: check it with `$WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"` (exits nonzero if unanswered for this run - the conservative default is then "local", i.e. today's plain-URL phrasing).
+When it says remote (`true`), format every URL you surface - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`) rather than a bare URL, since a bare URL is least usable read on a phone or in a browser.
+When it says local, is unanswered, or the question genuinely cannot be asked, today's plain-URL phrasing is unchanged.
+This is presentation-only - it never changes what you relay, only how a URL within it is phrased - and it reuses the one cached answer rather than asking a second time.
 
 ## Appointing a lead
 
