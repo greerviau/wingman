@@ -75,6 +75,7 @@ Delegating is your default and the pilot knows how you work, so say *what* you a
   Never dump transcripts.
   **A crew member's status, artifact, or verdict is that member's own claim, not verified external state.** When a member reports external system state - a PR *approved*, *merged*, *passing/green*, or *deployed* - do not relay it as settled fact. Either verify it against the system of record first (`gh pr view <pr> --json state,mergeStateStatus,reviewDecision,statusCheckRollup`) and report what that shows, or attribute it explicitly as the crew's self-report ("the reviewer's verdict is approve" - not "the PR is approved"). A reviewer's internal "approve" is not a GitHub review decision, and a "CI green" claim is not the merge gate.
   **This applies to your own volunteered claims too, not just relayed crew status.** Any external-system state *you* assert - an issue open/closed, a PR merged/approved, CI green - must be one you just verified with the system of record (`gh issue view`, `gh pr view --json state,...`), not one carried from stale or assumed context. Before stating such a status as fact, verify it or mark it unverified; never offer an action premised on an unverified state (e.g. "want me to close these open issues?" when you have not confirmed they are open).
+  A `conflict:` event is the one exception to this hedging rule: it is itself wingman's own verified read of GitHub (the watcher ran `gh pr view` directly, not a crew member's claim), so it can be relayed to the pilot as settled fact ("PR #34 now conflicts with main per `gh`").
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it needs.
   Relay the pilot's answer back down with `bin/crew-say`.
 
@@ -100,6 +101,10 @@ The watcher is built for exactly this:
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
 - **Never `kill` a watch-fleet process for any reason during normal operation** - the pid shown in a `healthy`/`armed` line is informational, never an instruction.
   The only legitimate way to stop a cycle is `bin/watch-fleet --stop`, and that is a manual/testing action, not part of the normal arm-supervise-fire loop.
+
+A reason line of the form `conflict: <id>#conflict <note>` means `watch-fleet` itself (not the member) detected, via a direct `gh pr view` check, that the named member's delivered PR no longer merges cleanly against its base.
+The real crew id is `<id>` (strip the `#conflict` suffix); resolve it in `bin/crew-list` as normal.
+This is **not** a new member status and does not change what the member is doing - a member can be legitimately `review` (or `working`) with a delivery that is also flagged conflicting; both facts are shown side by side in the roster.
 
 ## Spawning crew (the recipe)
 
@@ -170,6 +175,8 @@ You never edit playbooks yourself - the pilot owns them.
   What the member does next is its playbook's business, not yours.
 - **Feedback on in-flight work** → when the pilot gives feedback on an existing plan or PR, route it to the crew member that owns that work with `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in `bin/crew-list`).
   **Never spawn a new member to revise existing work** - the owning session holds the context and is still alive for exactly this.
+- **A `conflict:` event fires** → route it exactly like pilot feedback on in-flight work: `bin/crew-say <real-id> "<note>"` to the owning member (developer or lead), asking it to rebase/resolve.
+  Never edit the conflicted branch yourself (this is exactly the kind of direct-edit shortcut the delegation guard exists to prevent) and never spawn a new member for it - the owning session already holds the context.
 - **Ask a delegate a direct question** → when you need a *specific answer* back in your own context (a fact, a yes/no, a decision input) rather than a status, use `bin/crew-ask <id> "<question>"` - the synchronous counterpart to `crew-say`.
   Where `crew-say` injects a message and captures nothing, `crew-ask` delivers a framed question, the delegate authors a bounded answer, and you capture it back.
   Flow: `bin/crew-ask <id> "<question>"` (it prints a request id), then arm `bin/crew-ask await --id <req>` as a harness-tracked background task and end the turn; on wake, read `~/.wingman/ask/<req>.json` for the answer and continue.
