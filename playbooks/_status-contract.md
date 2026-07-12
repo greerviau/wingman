@@ -119,6 +119,50 @@ Write these artifacts formally, for a reader outside wingman.
 Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*: "pilot" is wingman's own private term for the human it flies for.
 The full rule, including where the internal terms remain legitimate, is the communication register below.
 
+## Publishing a deliverable as a hosted Artifact (only when it helps)
+
+"Relay the pointer, not the payload" still holds - the local path is always what you report in `--artifact`.
+But when your `--artifact` deliverable is a markdown file (a plan, a report, an analysis - not a one-line status, a URL, or a short chat answer, which have no rendering to lose), it may *additionally* be worth publishing as a web-viewable Artifact: a markdown report sent as a raw file attachment over Remote Control has rendered badly, while the same content published via the `Artifact` tool has rendered well.
+This is never unconditional.
+Check three conditions, all required, at the moment you are about to report a `review`-state `--artifact` deliverable:
+
+**A - the content is rendering-sensitive.** A markdown file with headers, tables, or code fences, that is itself the `--artifact` deliverable. If it isn't markdown, skip straight to reporting the path only, exactly as before this section existed.
+
+**B - the requester is confirmed remote right now, not assumed.** There is no reliable signal for this (investigated exhaustively - no hook field, no state file, no env var distinguishes it), so it is asked once and cached for the rest of one wingman run, never per-deliverable or per-crew-member:
+
+```
+$WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"
+```
+
+Prints `true` or `false` and exits 0 if this run already has an answer; exits nonzero if unanswered (a fresh `$WINGMAN_RUN_ID`, or the file is missing/unreadable).
+On a nonzero exit, ask via `AskUserQuestion` ("Are you viewing this session via Remote Control right now, or are you local at this machine?") and cache the answer for every other crew member and wingman itself to reuse:
+
+```
+$WINGMAN_STATE pilot-location-set --run-id "$WINGMAN_RUN_ID" --remote <true|false>
+```
+
+If `$WINGMAN_RUN_ID` is unset (wingman was not launched via `bin/wingman`), or the question genuinely cannot be asked, treat this condition as **not remote** - the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does.
+
+**C - the content passes the deterministic security gate.** This is a check on whether *this repo's own internal information* is safe to host externally (secrets, infra details) - a different question from the `Artifact` tool's own built-in refusal categories (which guard against misusing the hosting mechanism itself), so do not treat those as covering this. Run:
+
+```
+$WINGMAN_BIN/lib/artifact-scan.sh <path>
+```
+
+It prints one verdict line and exits accordingly:
+- `pass` (exit 0) - clean.
+- `pass-soft:<reason>` (exit 0) - publish is still allowed, but call the reason out in your report alongside the Artifact link (it flags a code-heavy document that looks more like a dump than an illustrative excerpt).
+- `fail:<reason>` (exit 1) - do not publish; report the local path only, and say plainly why ("skipped publishing as an Artifact: `<reason>`").
+
+**Only if A holds, B says remote, and C exits 0:** publish via the `Artifact` tool and report the resulting URL *alongside* (not instead of) the local path, so the local file is always the ground truth regardless of which channel is read.
+In every other case, today's behavior is unchanged - report the path only.
+
+## Formatting links when the requester is confirmed remote
+
+When condition B above says remote (cached `true` for this run), format every URL you surface to the requester - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`), never a bare URL: a bare URL read on a phone or in a browser is exactly where a plain-text link is least usable.
+When B says local, is unanswered, or could not be asked, today's plain-URL phrasing is unchanged.
+This reuses condition B's cache exactly - never a second question - and is presentation-only: it changes how you phrase a message, never what gets published or scanned, so condition C does not apply to it.
+
 ## Communication register
 
 The session-role vocabulary this repo defines - *pilot*, *crew*, *wingman*, *stand down*, and the like - is orchestration-internal.

@@ -75,6 +75,14 @@ if [ -f "$dev_playbook" ] && grep -q '\bgh\b' "$dev_playbook" 2>/dev/null; then
   check gh optional gh "used by the active developer playbook for PRs (run 'gh auth login')"
 fi
 
+# Optional: gitleaks powers bin/lib/artifact-scan.sh, the pre-publish content
+# scan gating ask 3a's Artifact-publish path (docs/plans/2026-07-12-remote-
+# control-visibility-and-auto-reconnect-design.md). Without it the scan fails
+# closed (treats "cannot verify" as "do not publish"), so a crew member can
+# still surface deliverables by local path exactly as before this feature -
+# missing gitleaks only means Artifact-publishing itself stays unavailable.
+check gitleaks optional gitleaks "secret-scanning for the Artifact-publish content-scan gate; without it, that gate always fails closed"
+
 echo
 # Offer to install queued packages.
 INSTALL_QUEUE="$(echo "$INSTALL_QUEUE" | sed 's/^ *//;s/ *$//')"
