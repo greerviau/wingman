@@ -670,7 +670,11 @@ def cmd_stall_check(args):
 
     Prints 'stalled' if it flipped the member, nothing otherwise. Idempotent and safe
     to call every poll: gates fail fast, the probe runs only for nominated candidates,
-    and once flipped, status != 'working' so subsequent calls skip."""
+    and once flipped, status != 'working' so subsequent calls skip.
+
+    --api-error only changes which reason template a genuine stall is written with
+    (an 'api-error:' prefix instead of the default) - it never changes the gates or
+    the probe above, and does not by itself cause a flip."""
     ensure_home()
     live = read_json(status_path(args.id), None)
     if not isinstance(live, dict) or live.get("status") != "working":
@@ -693,10 +697,19 @@ def cmd_stall_check(args):
     live = current
 
     prior = (live.get("summary") or "").split("\n")[0][:80]
-    reason = ("no pane output, status update, running child process, or CPU activity "
-              "for >%ds while status was 'working'; the agent likely errored or went "
-              "idle. Inspect with `bin/crew-takeover %s` or stand down with "
-              "`bin/crew-standdown %s`." % (int(args.threshold), args.id, args.id))
+    if getattr(args, "api_error", 0):
+        reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
+                  "limit, connection error, 5xx, overloaded_error, or similar) and then "
+                  "went quiet for >%ds while status was 'working' - the CLI's own retry/"
+                  "backoff appears exhausted. Likely a local network blip or an Anthropic-"
+                  "side outage, not a broken agent. Already nudged once; if it does not "
+                  "recover, resume it with `bin/crew-resume %s`."
+                  % (int(args.threshold), args.id))
+    else:
+        reason = ("no pane output, status update, running child process, or CPU activity "
+                  "for >%ds while status was 'working'; the agent likely errored or went "
+                  "idle. Inspect with `bin/crew-takeover %s` or stand down with "
+                  "`bin/crew-standdown %s`." % (int(args.threshold), args.id, args.id))
     if prior:
         reason += " (last summary: %s)" % prior
 
@@ -1258,6 +1271,10 @@ def build_parser():
     a.add_argument("--root-grace", type=int, default=30, dest="root_grace")
     a.add_argument("--probe-gap", type=int, default=10, dest="probe_gap")
     a.add_argument("--cpu-eps", type=float, default=0.5, dest="cpu_eps")
+    # Set by the watcher when the pane tail matches an API/connectivity-error
+    # signature (#23); changes only which reason template a genuine stall gets,
+    # never the gates or probe above.
+    a.add_argument("--api-error", type=int, default=0, dest="api_error")
     a.set_defaults(fn=cmd_stall_check)
 
     a = sub.add_parser("needs-attention")

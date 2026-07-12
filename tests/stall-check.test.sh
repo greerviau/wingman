@@ -152,4 +152,21 @@ wait "$scpid"
 assert_eq "mid-gap self-report is not clobbered" "$(status_of p6)" "review"
 assert_eq "no stall is reported for the self-reporting member" "$(cat "$WINGMAN_HOME/sc.out")" ""
 
+# --- --api-error 1 swaps only the reason template (#23) -----------------------
+test_new_home
+wm_state crew-add --id ae1 --type developer --objective x --repo /tmp --window wm-ae1 --session-id s9 >/dev/null
+wm_state crew-set --id ae1 --status working --summary "calling the API" >/dev/null
+wm_age_status ae1
+spawn_bg sleep 600
+ae_idle_pid=$!
+out="$(wm_state stall-check --id ae1 --pane-idle 999 --pane-pid "$ae_idle_pid" $CHECK --api-error 1)"
+assert_eq "an api-error stall is still reported as 'stalled'" "$out" "stalled"
+assert_eq "status file reads stalled" "$(status_of ae1)" "stalled"
+assert_contains "reason carries the api-error: prefix" \
+  "$(cat "$WINGMAN_HOME/crew/ae1.json")" "api-error:"
+assert_contains "reason names the resume remedy" \
+  "$(cat "$WINGMAN_HOME/crew/ae1.json")" "crew-resume ae1"
+assert_false "the default (non-api-error) reason text is not used" \
+  "grep -q 'the agent likely errored or went' '$WINGMAN_HOME/crew/ae1.json'"
+
 test_summary
