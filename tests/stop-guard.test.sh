@@ -61,4 +61,37 @@ outc="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
 case "$outc" in *ask-live*) fail "a covered ask must not block the stop" ;; *) ok "a pending ask with a live waiter does not block" ;; esac
 kill "$lpid" 2>/dev/null
 
+# --- watcher liveness is owner-scoped, not the global pidfile/beatfile --------
+# A lead (WINGMAN_CREW_ID set) has crew in flight and its OWN owner-scoped watcher
+# (watch-<_okey>.pid/.beat) live, but no global watch.pid/.beat at all. The hook
+# must recognize the owner-scoped watcher and NOT nudge to arm another one.
+test_new_home
+export WINGMAN_CREW_ID=lead1
+wm_state crew-add --id wkr1 --type developer --objective x --repo /tmp --window wm-wkr1 --session-id s1 --parent lead1 >/dev/null
+wm_state crew-set --id wkr1 --status working --summary "coding" >/dev/null
+sleep 30 & lpid=$!
+trap 'kill "$lpid" 2>/dev/null' EXIT
+echo "$lpid" > "$WINGMAN_HOME/watch-lead1.pid"
+: > "$WINGMAN_HOME/watch-lead1.beat"
+outd="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+case "$outd" in *"watch-fleet"*) fail "an owner-scoped watcher must not be reported missing" ;; *) ok "a live owner-scoped watcher satisfies the hook" ;; esac
+kill "$lpid" 2>/dev/null
+unset WINGMAN_CREW_ID
+
+# The inverse: a live GLOBAL (unscoped) watcher exists, but no owner-scoped one, and
+# the hook is checked WITH an owner set. The hook must still complain - proving the
+# fix does not just fall back to checking the wrong (global) file.
+test_new_home
+export WINGMAN_CREW_ID=lead2
+wm_state crew-add --id wkr2 --type developer --objective x --repo /tmp --window wm-wkr2 --session-id s2 --parent lead2 >/dev/null
+wm_state crew-set --id wkr2 --status working --summary "coding" >/dev/null
+sleep 30 & gpid=$!
+trap 'kill "$gpid" 2>/dev/null' EXIT
+echo "$gpid" > "$WINGMAN_HOME/watch.pid"
+: > "$WINGMAN_HOME/watch.beat"
+oute="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "a global watcher does not cover an owner with no watcher of its own" "$oute" "watch-fleet"
+kill "$gpid" 2>/dev/null
+unset WINGMAN_CREW_ID
+
 test_summary

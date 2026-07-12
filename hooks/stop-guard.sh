@@ -69,10 +69,18 @@ except Exception: print(0)')"
 
 # Is a watcher cycle live? A cycle is live iff its pid is alive AND its beacon is
 # fresh - a blocking watcher touches the beacon every loop, so a crashed one goes
-# stale within the grace even if a stale pidfile lingers.
+# stale within the grace even if a stale pidfile lingers. Owner-scoped exactly like
+# SCRATCH above: a lead's own `bin/watch-fleet --owner <id>` writes watch-<_okey>.pid/
+# .beat, not the unscoped pair wingman's own top-level watcher writes - so this must
+# key off the same _okey or it checks the wrong watcher entirely.
 watcher_up=0
-pidfile="$WM_HOME/watch.pid"
-beatfile="$WM_HOME/watch.beat"
+if [ -n "$OWNER" ]; then
+  pidfile="$WM_HOME/watch-$_okey.pid"
+  beatfile="$WM_HOME/watch-$_okey.beat"
+else
+  pidfile="$WM_HOME/watch.pid"
+  beatfile="$WM_HOME/watch.beat"
+fi
 grace="${WM_WATCH_GRACE:-30}"
 if [ -f "$pidfile" ] && [ -f "$beatfile" ]; then
   pid="$(cat "$pidfile" 2>/dev/null)"
