@@ -154,6 +154,9 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   echo "cd $(quote "$REPO") || exit 1"
   echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
   echo "export WINGMAN_CREW_ID=$(quote "$ID")"
+  # The crew type (playbook name), so a hook or the member itself can distinguish
+  # an orchestrator role (e.g. lead) from a worker role without re-deriving it.
+  echo "export WINGMAN_CREW_TYPE=$(quote "$TYPE")"
   # The full state-engine invocation, run through uv (--no-project so it ignores
   # the target repo's own pyproject). Crew run it unquoted so it word-splits.
   echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
