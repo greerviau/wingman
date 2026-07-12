@@ -19,17 +19,26 @@ Swapping harnesses means swapping that one arming primitive, exactly as it means
 A file on disk cannot rouse an idle session, so the only reliable way wingman is woken when crew need it is the **completion of a task the harness tracks**.
 The watcher, `bin/watch-fleet`, is built for exactly this:
 
-- It **blocks** - watching status files and window liveness, silently absorbing benign "still working" updates - and **exits with one reason line** the instant a crew member flips to `blocked`/`done`/`died` or freezes on a prompt.
+- It **blocks** - watching status files and window liveness, silently absorbing benign "still working" updates - and **exits with one reason line** the instant a crew member flips to `blocked`/`review`/`done`/`died`/`stalled` or freezes on a prompt.
   One run is one *cycle*.
 - It is armed as a **harness-tracked background task** (e.g. Bash `run_in_background`), on its own, never bundled onto the tail of another command.
   Because the harness tracks it, its exit re-invokes wingman - that exit **is** the wake.
   It is never run detached (`nohup`/`&`); a detached process cannot wake an idle session.
 - On each wake, wingman reads the reason line and `~/.wingman/wake`, surfaces the event to the pilot, then **arms exactly one fresh cycle**.
   The chain persists only if it re-arms after every fire.
-- The arm's status line is truth: `armed` (a fresh cycle is now blocking), `healthy` (a live cycle already exists - do not start another), or a `blocked:/done:/died:` reason (it fired).
+- The arm's status line is truth: `armed` (a fresh cycle is now blocking), `healthy` (a live cycle already exists - do not start another), or a `blocked:/review:/done:/died:/stalled:` reason (it fired).
+  An atomic claim (an `mkdir`-based lock, verified with a write-then-read-back pass rather than trusting `mkdir` alone) makes two near-simultaneous arms resolve to exactly one live cycle, never two.
   The watcher checks for pending events the moment it arms, so a crew member that finishes in the gap between one fire and the next arm is surfaced by that arm, not lost.
 
 The watcher also detects a crew frozen on a permission or trust prompt - a terminal-UI stall the status files can't see - and flips it to `blocked`.
+It detects a member gone silently idle (no pane output, no status update, no execution in its process tree) and flips it to `stalled`; a pane whose tail shows an API/connectivity-error signature (a rate limit, a 5xx, a connection reset) gets a nudge - a plain message into its pane - once per cooldown window before that same staleness check confirms and flips it, so a transient outage self-heals where possible instead of paging the pilot immediately.
+
+### Correlated fleet events
+
+A single `blocked`/`stalled`/`died` member is routine and is always reported individually.
+When several members hit the **same** signal in one pass - many crew died together (a tmux/host crash), or many are simultaneously `stalled` with an API-error reason (an outage) - the watcher collapses them into one synthetic bullet naming every affected id, rather than paging the pilot once per member.
+This grouping (`wm_state group-attention`) is a pure, stateless display filter: it only changes what the two `fire()` display channels (stdout, the wake file) render, never the underlying roster, and it is recomputed fresh on every fire rather than persisted.
+`bin/crew-resume` is the bulk recovery tool a mass-death bullet names as its default remedy: it relaunches every currently-`died` member with `claude --resume <session-id>`, reusing its roster record (parent, worktree, session id) as-is, and is idempotent - a member that is not `died`, or whose window already exists, is skipped rather than relaunched.
 
 ## The deliverable lifecycle and `review`
 
@@ -162,7 +171,7 @@ All *user-editable* customization lives in the repo as gitignored `*.local.md` /
 
 The tmux **server** owns the crew windows, so killing wingman does not kill the crew.
 On any startup wingman reads `~/.wingman/crew.json`, reconciles against the live windows (`bin/crew-list` does this automatically), re-arms the watcher if crew are in flight, and reports the current roster.
-A crew member whose window died shows as `died` and is recoverable by resuming its agent CLI in its repo (`bin/crew-takeover <id>` prints the exact command).
+A crew member whose window died shows as `died` and is recoverable either by hand (`bin/crew-takeover <id>` prints the exact resume command) or in bulk via `bin/crew-resume <id>...` / `bin/crew-resume --all-died`, which relaunches it (or every died member) with `claude --resume <session-id>` and verifies the relaunch actually took before flipping it back to `working`.
 
 ## Tests
 
@@ -170,10 +179,12 @@ A crew member whose window died shows as `died` and is recoverable by resuming i
 No real `claude`/tmux fleet is needed; each test uses an isolated throwaway state home and tmux session name.
 They cover:
 
-- the wake loop (`watch-fleet` blocks, fires on an actionable event, singleton guard),
+- the wake loop (`watch-fleet` blocks, fires on an actionable event, singleton guard, an atomic claim so two near-simultaneous arms never both win),
 - terminal-event de-duplication (an event surfaces once, re-surfaces only on a state change),
 - repo-vs-global spawn scope,
 - roster views and cleanup (`crew-list` hides `stood-down` by default, `--all` reveals it; `crew-prune` archives + removes terminal records),
+- silent-stall detection (the staleness gates, the execution probe, and the API-error reason flavor + nudge-then-escalate flow),
+- correlated-event grouping (`group-attention` collapsing a mass-death or API-outage batch into one bullet) and bulk recovery (`crew-resume`, including its idempotency guards and tree preservation),
 - PR-event evaluation including `checks-passed` (fires once on green / no-CI, re-arms after a new failing/pending rollup).
 
 Requires `bash`, `git`, `tmux`, and `uv`.
