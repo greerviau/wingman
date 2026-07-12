@@ -29,6 +29,7 @@ On the first launch, or any time something looks missing:
 
 1. Run `bin/doctor`.
    It checks dependencies (`claude`, `git`, `tmux`, `uv`, `uuidgen`, and `gh` only if the active developer playbook uses it), prints a platform-aware ✓/✗ report, and installs the missing pieces with the pilot's consent.
+   It also offers to register the delegation guard hook (`hooks/no-direct-edit-guard.sh`, issue #17) in user-level Claude Code settings (`~/.claude/settings.json`) so it fires for wingman's own top-level session and any lead regardless of which repo it launches in.
    Do not proceed until it exits green.
    (`uv` runs the state engine and manages the Python interpreter, so a system `python3` is not required.)
 2. Run `bin/discover-projects` to build the project cache (it infers the projects root from this repo's parent directory; no config needed in the common case).

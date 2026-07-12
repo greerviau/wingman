@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # E2E: the PreToolUse guard (#17). Denies direct Edit/Write/NotebookEdit and
-# direct test-runner Bash calls at the orchestrator layer (wingman's top-level,
-# or a lead), and stays inactive for every worker crew type.
+# direct test-runner Bash calls at the orchestrator layer (wingman's own
+# top-level session, or a lead) - and stays inactive for every worker crew
+# type, and for any unrelated Claude Code session elsewhere on the machine.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -16,8 +17,12 @@ run_hook() {
   fi
 }
 
-# --- top-level wingman (no WINGMAN_CREW_ID at all) ---------------------------
+OUTSIDE_DIR="$(mktemp -d)"
+trap 'rm -rf "$OUTSIDE_DIR"' EXIT
+
+# --- top-level wingman (no WINGMAN_CREW_ID at all), launched from this repo --
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+export CLAUDE_PROJECT_DIR="$TEST_REPO"
 
 out="$(run_hook Edit)"
 assert_contains "top-level: Edit is denied" "$out" '"permissionDecision": "deny"'
@@ -78,17 +83,43 @@ for cmd in "cat tests/run.sh" "grep -rn pytest ." "git log --grep=fix go test fl
   assert_eq "top-level: '$cmd' (runner word as argument, not invocation) is allowed" "$out" ""
 done
 
-# --- a lead is also an orchestrator: guarded the same as top-level -----------
-export WINGMAN_CREW_ID=lead1 WINGMAN_CREW_TYPE=lead
+# --- cwd scoping: an unset WINGMAN_CREW_ID means "wingman's own top-level
+# session" only when this session's project root actually is this checkout.
+# Every unrelated Claude Code session elsewhere on the machine also has no
+# WINGMAN_CREW_ID, and must never be affected. ------------------------------
+export CLAUDE_PROJECT_DIR="$OUTSIDE_DIR"
 
 out="$(run_hook Edit)"
-assert_contains "lead: Edit is denied" "$out" '"permissionDecision": "deny"'
+assert_eq "top-level-shaped env outside this repo: Edit is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "pytest tests/")"
+assert_eq "top-level-shaped env outside this repo: pytest is allowed (no output)" "$out" ""
+
+unset CLAUDE_PROJECT_DIR
+out="$(run_hook Edit)"
+assert_eq "top-level-shaped env with no CLAUDE_PROJECT_DIR: Edit is allowed (no output)" "$out" ""
+
+# --- a lead is also an orchestrator: guarded the same as top-level, and
+# unconditionally regardless of cwd - WINGMAN_CREW_TYPE=lead is a
+# wingman-specific signal that is never a false positive for an unrelated
+# session, so it needs no repo check. ----------------------------------------
+export WINGMAN_CREW_ID=lead1 WINGMAN_CREW_TYPE=lead
+unset CLAUDE_PROJECT_DIR
+
+out="$(run_hook Edit)"
+assert_contains "lead: Edit is denied with no CLAUDE_PROJECT_DIR at all" "$out" '"permissionDecision": "deny"'
 
 out="$(run_hook Bash "pytest -k foo")"
 assert_contains "lead: pytest is denied" "$out" '"permissionDecision": "deny"'
 
 out="$(run_hook Bash "git status")"
 assert_eq "lead: generic Bash is allowed (no output)" "$out" ""
+
+export CLAUDE_PROJECT_DIR="$OUTSIDE_DIR"
+out="$(run_hook Edit)"
+assert_contains "lead: Edit is denied from outside this repo" "$out" '"permissionDecision": "deny"'
+
+unset CLAUDE_PROJECT_DIR
 
 # --- worker crew types are workers: the guard must stay fully inactive -------
 for wtype in developer architect reviewer software-analyst research; do
@@ -114,6 +145,6 @@ unset WINGMAN_CREW_TYPE
 out="$(run_hook Edit)"
 assert_eq "unset crew type: Edit is allowed (no output)" "$out" ""
 
-unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE CLAUDE_PROJECT_DIR
 
 test_summary

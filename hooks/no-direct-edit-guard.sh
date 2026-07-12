@@ -1,32 +1,60 @@
 #!/usr/bin/env bash
-# no-direct-edit-guard.sh - a Claude Code PreToolUse hook, wired only for the
-# wingman repo. Mechanically enforces CLAUDE.md's prime directive ("never do
-# heavy work yourself") by blocking direct Edit/Write/NotebookEdit calls and
-# direct test-runner Bash invocations at the orchestrator layer, redirecting to
-# bin/spawn-crew instead of letting the call through. See issue #17: the
-# prompt-level instruction alone did not stop wingman from editing code
-# directly once "it's a small change" felt like an implicit exception.
+# no-direct-edit-guard.sh - a Claude Code PreToolUse hook. Mechanically
+# enforces CLAUDE.md's prime directive ("never do heavy work yourself") by
+# blocking direct Edit/Write/NotebookEdit calls and direct test-runner Bash
+# invocations at the orchestrator layer, redirecting to bin/spawn-crew instead
+# of letting the call through. See issue #17: the prompt-level instruction
+# alone did not stop wingman from editing code directly once "it's a small
+# change" felt like an implicit exception.
 #
-# Scoped like stop-guard.sh: active when this session is an orchestrator -
-# wingman's own top-level layer (WINGMAN_CREW_ID unset) or a lead
-# (WINGMAN_CREW_TYPE=lead, a conductor over its own crew, the same role wingman
-# plays one layer up). Every other crew type (developer, architect, reviewer,
-# software-analyst, research, ...) is a worker for whom editing files and
-# running tests is literally the job, so the guard stays inactive there.
+# Registered in user-level ~/.claude/settings.json (by bin/doctor), not this
+# repo's project-level settings, so it loads for every Claude Code session on
+# the machine regardless of which directory a session launches in - the only
+# way a lead spawned with --repo <other-project> or --scope global is actually
+# covered (a project-level entry in this repo's .claude/settings.json never
+# loads for a session whose project root is elsewhere).
 #
-# Wired in .claude/settings.json of this repo, so it applies only here.
+# Because it now runs for every session on the machine, activation must not
+# rest on WINGMAN_CREW_ID being unset alone - that is true for every unrelated
+# Claude Code session the pilot runs that has nothing to do with wingman.
+# Active when:
+#   - WINGMAN_CREW_TYPE=lead - unconditional, regardless of cwd. A lead's
+#     WINGMAN_CREW_TYPE is a wingman-specific signal set only by
+#     bin/spawn-crew, so it is never a false positive for an unrelated
+#     session; a lead is a conductor over its own crew, the same role wingman
+#     plays one layer up.
+#   - WINGMAN_CREW_ID is unset (no crew wrapper at all) AND this session's
+#     project root ($CLAUDE_PROJECT_DIR) is this wingman checkout - i.e.
+#     wingman's own top-level session, not some other repo the pilot happens
+#     to be working in.
+# Every worker crew type (developer, architect, reviewer, software-analyst,
+# research, ...) is a worker for whom editing files and running tests is
+# literally the job, so the guard stays inactive there.
+#
 # bash-3.2-safe.
 set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd -P)"
+REPO="$(dirname "$HERE")"
 
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
 
 INPUT="$(cat)"
 
-# Inactive for any worker crew type: WINGMAN_CREW_ID is set (this is a spawned
-# crew member) AND its type is not "lead". wingman's own top-level layer has no
-# WINGMAN_CREW_ID at all, and a lead is an orchestrator like wingman one layer
-# down, so both stay guarded.
-if [ -n "${WINGMAN_CREW_ID:-}" ] && [ "${WINGMAN_CREW_TYPE:-}" != "lead" ]; then
+# True iff this session's project root is this wingman checkout - the only way
+# an unset WINGMAN_CREW_ID means "wingman's own top-level session" rather than
+# some unrelated Claude Code session running elsewhere on the machine.
+wm_is_wingman_repo_session() {
+  [ -n "${CLAUDE_PROJECT_DIR:-}" ] || return 1
+  _proj="$(cd "$CLAUDE_PROJECT_DIR" 2>/dev/null && pwd -P)"
+  [ -n "$_proj" ] && [ "$_proj" = "$REPO" ]
+}
+
+if [ "${WINGMAN_CREW_TYPE:-}" = "lead" ]; then
+  : # active unconditionally - see header
+elif [ -z "${WINGMAN_CREW_ID:-}" ] && wm_is_wingman_repo_session; then
+  : # active - wingman's own top-level session
+else
   exit 0
 fi
 

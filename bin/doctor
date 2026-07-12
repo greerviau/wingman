@@ -109,6 +109,40 @@ if [ -n "$INSTALL_QUEUE" ]; then
   fi
 fi
 
+# --- delegation guard hook (issue #17), user scope --------------------------
+# Registers hooks/no-direct-edit-guard.sh in user-level Claude Code settings
+# (~/.claude/settings.json by default) so it fires for wingman's own top-level
+# session and any lead regardless of which repo it launches in - a project-
+# level entry never loads for a session whose project root is elsewhere.
+# Overridable so tests never touch a real developer machine's dotfile.
+GUARD_HOOK="$WM_REPO/hooks/no-direct-edit-guard.sh"
+GUARD_SETTINGS="${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"
+if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$GUARD_HOOK" --check >/dev/null 2>&1; then
+  wm_ok "delegation guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "delegation guard hook (issue #17) not registered in $GUARD_SETTINGS"
+  printf '    blocks direct Edit/Write/test-runner calls at wingman'"'"'s top-level\n'
+  printf '    session and any lead, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $GUARD_HOOK"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$GUARD_HOOK"; then
+      wm_ok "registered delegation guard hook"
+    else
+      wm_err "failed to register delegation guard hook"
+    fi
+  fi
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"
