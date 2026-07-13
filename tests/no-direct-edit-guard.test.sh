@@ -20,8 +20,7 @@ run_hook() {
   fi
 }
 
-OUTSIDE_DIR="$(mktemp -d)"
-trap 'rm -rf "$OUTSIDE_DIR"' EXIT
+OUTSIDE_DIR="$(wm_mktemp_dir)"
 if git -C "$OUTSIDE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fail "test setup: OUTSIDE_DIR ($OUTSIDE_DIR) is unexpectedly inside a git repo"
 fi

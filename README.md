@@ -38,23 +38,46 @@ Talk to it in plain language, or use the slash commands:
 | `/standdown <id>` | wraps up a crew member, closes its window |
 | `/prune` | clean the roster: drop fully-closed records (archived first) |
 
-**One session sees its work through.** A crew member is not spun down the moment its deliverable appears.
-When a developer crew opens a PR it parks in a `review` state and keeps running: it watches CI and fixes it if it breaks, watches for review feedback and addresses it (dropping back to `working` while it does), replies on the threads, and reports `done` only when the PR is merged or closed.
-`done` is the member's own "stand me down" signal, so wingman reaps it right then - finished members don't linger.
-Feedback you give wingman is routed back to that same session (not a fresh one), so it keeps the full context.
-It stops early only if you `/standdown` it.
+**One session sees its work through.**
+A crew member is not spun down the moment its deliverable appears:
+
+- When a developer crew opens a PR, it parks in a `review` state and keeps running: it watches CI and fixes it if it breaks, watches for review feedback and addresses it (dropping back to `working` while it does), and replies on the threads.
+- It reports `done` only when the PR is merged or closed.
+  `done` is the member's own "stand me down" signal, so wingman reaps it right then - finished members don't linger.
+- Feedback you give wingman is routed back to that same session (not a fresh one), so it keeps the full context.
+- It stops early only if you `/standdown` it.
+
 The same lifecycle applies to software-analyst and other crew types; how each state is entered lives in one shared status contract (`playbooks/_status-contract.md`), so a playbook only describes the work.
 
-**Take the wheel any time.** "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
-Detach (`Ctrl-b d`) to hand back.
-Killing wingman leaves the crew running; relaunching it rebuilds the roster.
-Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app - each launches Remote-Control-visible by default (`WM_REMOTE_CONTROL=1`, on unless set empty) - so `tmux attach` is one option, not the only one.
-If a member's connection drops, wingman's watcher notices the disconnect banner and retypes `/remote-control` for it automatically; no action needed.
+**Take the wheel any time.**
+
+- "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
+  Detach (`Ctrl-b d`) to hand back.
+- Killing wingman leaves the crew running; relaunching it rebuilds the roster.
+- Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app - each launches Remote-Control-visible by default (`WM_REMOTE_CONTROL=1`, on unless set empty) - so `tmux attach` is one option, not the only one.
+- If a member's connection drops, wingman's watcher notices the disconnect banner and retypes `/remote-control` for it automatically; no action needed.
+
+## Autonomous by default
+
+Crew launch with `--permission-mode bypassPermissions` so gated tool calls auto-approve instead of hanging forever with no human at the terminal.
+
+Two one-time interactive gates remain: Claude Code's Bypass-Permissions acceptance, and each repo's first-time workspace-trust dialog.
+Wingman detects a crew frozen on either and wakes you to approve once via `bin/crew-takeover`.
+After that, crew in that repo run unattended.
 
 ## Customizing crew behavior (playbooks)
 
 A crew type is just a playbook - plain prose in `playbooks/`, grouped by category (`playbooks/<category>/<role>.md`).
-The `software-development` category's built-ins read as an org: `software-analyst` (requirements / plan or report), `architect` (detailed technical design from an approved spec), `developer` (worktree → implement → commit → push → PR), and `reviewer` (review a plan or PR and report findings); `lead` (manage an effort end-to-end with its own crew) and `research` (an example non-dev type) live in the domain-neutral `common` category, since they apply to any discipline.
+The `software-development` category's built-ins read as an org:
+
+| Role | Purpose |
+|---|---|
+| `software-analyst` | requirements / plan or report |
+| `architect` | detailed technical design from an approved spec |
+| `developer` | worktree → implement → commit → push → PR |
+| `reviewer` | review a plan or PR and report findings |
+
+`lead` (manage an effort end-to-end with its own crew) and `research` (an example non-dev type) live in the domain-neutral `common` category, since they apply to any discipline.
 Several other categories ship too (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, `infrastructure`) - `bin/spawn-crew --list-types` shows every category's roles.
 
 - **Customize a type:** drop a `playbooks/<category>/<type>.local.md` beside the default; if present it wins.
@@ -68,20 +91,17 @@ If you have an existing `playbook/<type>.local.md` from before this reorganizati
 
 ## Run an effort as an org (leads)
 
-Your crew is a **tree** with you at the top. Small directives take the lean direct paths (a software-analyst for a plan, a developer with a plan in hand). A large, end-to-end effort - multi-phase, multi-repo, or requirements-through-ship - gets a **lead**: say *"take the lead on X"* (or let wingman suggest one) and it hires and runs its own crew, one layer down.
+Your crew is a **tree** with you at the top.
+Small directives take the lean direct paths (a software-analyst for a plan, a developer with a plan in hand).
+A large, end-to-end effort - multi-phase, multi-repo, or requirements-through-ship - gets a **lead**: say *"take the lead on X"* (or let wingman suggest one) and it hires and runs its own crew, one layer down.
 
 - The lead **decomposes** the effort, **sequences** the phases (software-analyst → architect → developer(s) → reviewer), **iterates** each deliverable with its owner, **integrates** the results, and rolls a **single status line** up to you.
 - **Each layer sees only its direct reports.** A worker's blocker surfaces to its lead, not to you; only a decision the lead can't make escalates up the chain, and your answer flows back down. You see effort-level progress ("planning → building (2/3 PRs open)"), not worker chatter.
 - **Peers collaborate directly.** Two developers negotiating an interface, or a developer and a reviewer, talk to each other without going through the lead.
 - **Drill down any time:** `/status --tree` for the whole org, `/status --owner <lead-id>` for one lead's team; `~/.wingman/board.md` renders the tree.
 
-The tree is domain-neutral - only the playbooks carry domain, so the same machinery runs a science lab (PI → experimental design → analysis → peer review) or a business team by swapping playbooks. Management depth is capped at two crew layers (a lead does not spawn leads).
-
-## Autonomous by default
-
-Crew launch with `--permission-mode bypassPermissions` so gated tool calls auto-approve instead of hanging forever with no human at the terminal.
-Two one-time interactive gates remain (Claude Code's Bypass-Permissions acceptance, and each repo's first-time workspace-trust dialog); wingman detects a crew frozen on either and wakes you to approve once via `bin/crew-takeover`.
-After that, crew in that repo run unattended.
+The tree is domain-neutral - only the playbooks carry domain, so the same machinery runs a science lab (PI → experimental design → analysis → peer review) or a business team by swapping playbooks.
+Management depth is capped at two crew layers (a lead does not spawn leads).
 
 ## Tests
 

@@ -36,7 +36,7 @@ print(json.load(sys.stdin).get(sys.argv[1]) or "")
 # Isolated workspace: a non-git root holding two git repos (no remote
 # configured on either - the has-remote=false tier) plus a third with a
 # configured remote (the has-remote=true tier).
-WS="$(mktemp -d)/workspace"
+WS="$(wm_mktemp_dir)/workspace"
 mkdir -p "$WS/repoA" "$WS/repoB" "$WS/repoC"
 git -C "$WS/repoA" init -q
 git -C "$WS/repoB" init -q
@@ -49,10 +49,10 @@ printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$WS/stub.sh"; chmod +x "$WS/stu
 
 # A real git repo reached only through a symlinked path component (C.8, first
 # half): a repo under one real directory, a symlink to its parent elsewhere.
-REALPARENT="$(mktemp -d)/realparent"
+REALPARENT="$(wm_mktemp_dir)/realparent"
 mkdir -p "$REALPARENT/repoSym"
 git -C "$REALPARENT/repoSym" init -q
-SYMBASE="$(mktemp -d)"
+SYMBASE="$(wm_mktemp_dir)"
 ln -s "$REALPARENT" "$SYMBASE/link"
 
 # A second repo reachable only through a symlinked path, resolved via the
@@ -67,10 +67,10 @@ ln -s "$REALPARENT" "$SYMBASE/link"
 # how it was discovered, which is exactly what is needed to exercise
 # spawn-crew's own `-P` normalization against a discover-projects-resolved
 # (rather than directly-typed) symlinked path.
-WS2="$(mktemp -d)/workspace2"
+WS2="$(wm_mktemp_dir)/workspace2"
 mkdir -p "$WS2/repoSymName"
 git -C "$WS2/repoSymName" init -q
-SYMWS2="$(mktemp -d)/symws2-link"
+SYMWS2="$(wm_mktemp_dir)/symws2-link"
 mkdir -p "$(dirname "$SYMWS2")"
 ln -s "$WS2" "$SYMWS2"
 
@@ -86,9 +86,7 @@ if [ -e "$CFG" ]; then echo "SKIP: $CFG exists; not overwriting"; exit 0; fi
 
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=1 WM_READY_POLL=0
 test_new_home
-
-cleanup() { rm -f "$CFG"; tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null; }
-trap cleanup EXIT
+wm_on_exit "rm -f '$CFG'"
 
 # --- global scope --------------------------------------------------------------
 id="$("$SPAWN" --type software-analyst --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"
@@ -188,7 +186,7 @@ assert_eq "a name-lookup through a symlinked root still records is_git=true" "$(
 
 # --- C.9: a bare name colliding with an existing cwd-local directory resolves
 # to the directory, not the discovered project (finding 3) --------------------
-COLLIDE_DIR="$(mktemp -d)/collide"
+COLLIDE_DIR="$(wm_mktemp_dir)/collide"
 mkdir -p "$COLLIDE_DIR/repoA"   # plain, non-git - collides by name with the
                                 # discovered (git) repoA under $WS.
 colid="$(cd "$COLLIDE_DIR" && "$SPAWN" --type market-analyst --repo repoA --objective "name collision" 2>/dev/null | tail -1)"

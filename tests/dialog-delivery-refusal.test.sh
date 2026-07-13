@@ -13,7 +13,7 @@ ASK="$TEST_REPO/bin/crew-ask"
 
 # A stub that faithfully emulates a real confirmation dialog: raw mode, and any
 # keystroke (typed message chars, Enter) only ever accepts the highlighted option.
-DIALOG_STUB="$(mktemp -d)/dialog-stub.sh"
+DIALOG_STUB="$(wm_mktemp_dir)/dialog-stub.sh"
 cat > "$DIALOG_STUB" <<'DIALOGEOF'
 #!/usr/bin/env bash
 stty -echo -icanon min 1 time 0 2>/dev/null
@@ -30,7 +30,6 @@ DIALOGEOF
 chmod +x "$DIALOG_STUB"
 
 export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.3 WM_SUBMIT_POLL=0.4 WM_READY_TRIES=20 WM_SUBMIT_TRIES=8
-trap 'tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null' EXIT
 
 # --- crew-say refuses instead of claiming delivery -----------------------------
 test_new_home

@@ -53,7 +53,7 @@ wm_state ask-new --id ask-live --from "" --to somew --question "covered?" >/dev/
 # Model a live waiter: a real backgrounded process whose pid we record, plus a
 # fresh beacon file - the exact liveness shape await maintains.
 sleep 30 & lpid=$!
-trap 'kill "$lpid" 2>/dev/null' EXIT
+wm_track "$lpid"
 mkdir -p "$WINGMAN_HOME/ask"
 echo "$lpid" > "$WINGMAN_HOME/ask/ask-live.pid"
 : > "$WINGMAN_HOME/ask/ask-live.beat"
@@ -70,7 +70,7 @@ export WINGMAN_CREW_ID=lead1
 wm_state crew-add --id wkr1 --type developer --objective x --repo /tmp --window wm-wkr1 --session-id s1 --parent lead1 >/dev/null
 wm_state crew-set --id wkr1 --status working --summary "coding" >/dev/null
 sleep 30 & lpid=$!
-trap 'kill "$lpid" 2>/dev/null' EXIT
+wm_track "$lpid"
 echo "$lpid" > "$WINGMAN_HOME/watch-lead1.pid"
 : > "$WINGMAN_HOME/watch-lead1.beat"
 outd="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
@@ -86,7 +86,7 @@ export WINGMAN_CREW_ID=lead2
 wm_state crew-add --id wkr2 --type developer --objective x --repo /tmp --window wm-wkr2 --session-id s2 --parent lead2 >/dev/null
 wm_state crew-set --id wkr2 --status working --summary "coding" >/dev/null
 sleep 30 & gpid=$!
-trap 'kill "$gpid" 2>/dev/null' EXIT
+wm_track "$gpid"
 echo "$gpid" > "$WINGMAN_HOME/watch.pid"
 : > "$WINGMAN_HOME/watch.beat"
 oute="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
