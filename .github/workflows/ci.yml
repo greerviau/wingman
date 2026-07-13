@@ -59,6 +59,13 @@ jobs:
           uv --version
 
       - name: Run test suite (bounded)
+        env:
+          # CI runners are ephemeral and always start clean, so run.sh's
+          # post-loop sweep (scoped to this run's own WM_TEST_RUN_ID token)
+          # having to reap anything at all means this run leaked past its own
+          # traps - a real regression, not an already-dirty box's unrelated
+          # residue. Local runs default this off (see tests/run.sh).
+          WM_TEST_STRICT_LEAK_CHECK: "1"
         run: |
           # The suite drives bin/watch-fleet and real tmux windows. A watcher
           # that fails to exit would otherwise block the job indefinitely, so
