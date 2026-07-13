@@ -20,8 +20,7 @@ run_tool() {
 }
 run_bash() { run_tool Bash "{\"command\":\"$1\"}"; }
 
-OUTSIDE_DIR="$(mktemp -d)"
-trap 'rm -rf "$OUTSIDE_DIR"' EXIT
+OUTSIDE_DIR="$(wm_mktemp_dir)"
 
 test_new_home
 export CLAUDE_PROJECT_DIR="$TEST_REPO"
@@ -191,7 +190,7 @@ assert_eq "generic Bash is allowed once all preferences are answered" "$out" ""
 # only actor that can satisfy it. With no wm-state.py to run, no preference can
 # ever be cached, so the guard must get out of the way - loudly - rather than
 # deny forever (issue #49's worst case).
-FIXTURE="$(mktemp -d)/broken-repo"
+FIXTURE="$(wm_mktemp_dir)/broken-repo"
 mkdir -p "$FIXTURE/hooks/lib" "$FIXTURE/bin/lib"   # bin/lib deliberately left empty
 cp "$TEST_REPO/hooks/pilot-preferences-guard.sh" "$FIXTURE/hooks/"
 cp "$TEST_REPO/hooks/lib/pilot-prefs.sh" "$TEST_REPO/hooks/lib/cmd_match.py" "$FIXTURE/hooks/lib/"
@@ -222,7 +221,7 @@ assert_eq "engine unreadable: the second call is allowed with no repeat message"
 # pref-set command would not pass its own allowlist. Verified as a genuine probe
 # failure (it resolves to the wrapper's basename, not wm-state.py) before the
 # guard is asked how it reacts.
-RUNNER="$(mktemp -d)/wm-run.sh"
+RUNNER="$(wm_mktemp_dir)/wm-run.sh"
 printf '#!/usr/bin/env bash\nexec uv run --no-project --quiet "$@"\n' > "$RUNNER"
 chmod +x "$RUNNER"
 

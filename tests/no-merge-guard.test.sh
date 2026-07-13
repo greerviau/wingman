@@ -25,8 +25,7 @@ test_new_home
 
 # --- scratch repo with a real origin/HEAD, so default-branch resolution is
 # exercised against real git state rather than the fallback guess -----------
-SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(wm_mktemp_dir)"
 BARE="$SCRATCH/origin.git"
 git init -q --bare "$BARE"
 CLONE="$SCRATCH/work"

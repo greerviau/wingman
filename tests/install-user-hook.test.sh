@@ -11,8 +11,7 @@ HOOK_PATH="$TEST_REPO/hooks/no-direct-edit-guard.sh"
 
 run_installer() { uv run --no-project --quiet "$INSTALLER" "$@"; }
 
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+WORK="$(wm_mktemp_dir)"
 
 # --- fresh install ------------------------------------------------------------
 SETTINGS="$WORK/settings.json"

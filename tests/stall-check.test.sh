@@ -27,10 +27,7 @@ for r in json.load(open(sys.argv[1])):
 ' "$WINGMAN_HOME/crew.json" "$1"
 }
 
-_BG_PIDS=""
-spawn_bg() { "$@" & _BG_PIDS="$_BG_PIDS $!"; }
-cleanup_bg() { for p in $_BG_PIDS; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; }
-trap cleanup_bg EXIT
+spawn_bg() { "$@" & wm_track "$!"; }
 
 # --- gates: fresh signals never reach the probe -------------------------------
 test_new_home
