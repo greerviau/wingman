@@ -247,6 +247,16 @@ sleep "${WM_SPAWN_DELAY:-2}"
 OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
 wm_tmux_send_message "$WM_TMUX_SESSION:$WINDOW" "$OPENING"
+_opening_rc=$?
+# A fresh window can be sitting on the one-time Bypass-Permissions/workspace-trust
+# gate (the two interactive dialogs no flag can bypass) rather than an idle chat
+# prompt; wm_tmux_send_message refuses rather than risk the objective's Enter being
+# consumed as an answer to that dialog. This is the same known startup-gate freeze
+# the watcher already flags as blocked - non-fatal here, but the objective was NOT
+# delivered, so it needs a manual crew-say once the gate is cleared.
+if [ "$_opening_rc" -eq 2 ]; then
+  wm_warn "opening objective NOT delivered to '$ID': its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $ID). Once resolved, deliver it manually: bin/crew-say $ID \"$OPENING\""
+fi
 
 if [ "$SCOPE" = global ]; then
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (global scope at $(basename "$REPO"), session $SID)"

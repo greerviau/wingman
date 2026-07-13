@@ -17,6 +17,10 @@
 #     records the pending request, and delivers a FRAMED question into the
 #     delegate's live session over the same tmux primitive crew-say uses. Prints
 #     the request id and the exact `await` command to arm. Foreground; happens once.
+#     If the delegate's pane looks like a permission/confirmation dialog rather
+#     than an idle chat input, delivery is refused rather than guessed: the
+#     request is immediately resolved undeliverable and SEND exits nonzero - there
+#     is nothing to `await`.
 #
 #   crew-ask reply --id <req> --answer "<distilled>" [--answer-file <path>]
 #                                               (delegate -> caller)  REPLY
@@ -271,6 +275,13 @@ bounded; it is captured verbatim into the asker's context. Answering does not
 change your own status - continue what you were doing afterward."
 
   wm_tmux_send_message "$WM_TMUX_SESSION:$_window" "$_framed"
+  _send_rc=$?
+  if [ "$_send_rc" -eq 2 ]; then
+    wm_state ask-resolve --id "$_req" --status undeliverable \
+      --note "delegate $_id's pane looks like a permission/confirmation dialog, not the chat input" \
+      >/dev/null 2>&1
+    wm_die "refused: '$_id's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the question (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. Request $_req marked undeliverable. Resolve it first (bin/crew-takeover $_id), then retry."
+  fi
 
   wm_ok "asked $_id (request $_req)"
   printf 'arm the wait: %s/crew-ask await --id %s --timeout %s\n' \
