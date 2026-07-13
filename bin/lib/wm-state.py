@@ -20,10 +20,10 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   crew-archive.jsonl  append-only history of records removed by `prune`, one JSON
                     object per line, so pruning keeps crew.json lean without losing
                     the record of who ran
-  pilot-location.json  the cached answer to "is the pilot genuinely remote right
-                    now" ({"remote": bool, "wingman_run_id": str}), asked once via
-                    AskUserQuestion and reused for the rest of one wingman run -
-                    see cmd_pilot_location_get/set
+  preferences.json  the cached onboarding-preference answers for one wingman run
+                    ({"wingman_run_id": str, "prefs": {key: value}}), each asked
+                    once via AskUserQuestion and reused for the rest of that run -
+                    see cmd_pref_get/cmd_pref_set/cmd_prefs_list
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
@@ -93,8 +93,8 @@ def projects_path():
     return os.path.join(home(), "projects.json")
 
 
-def pilot_location_path():
-    return os.path.join(home(), "pilot-location.json")
+def preferences_path():
+    return os.path.join(home(), "preferences.json")
 
 
 def acked_path():
@@ -990,32 +990,63 @@ def cmd_projects_lookup(args):
         sys.exit(1)
 
 
-# ---------------------------------------------------------------- pilot location
-# Condition B's shared cache (design: docs/plans/2026-07-12-remote-control-
-# visibility-and-auto-reconnect-design.md, ask 3): "is the pilot genuinely
-# remote right now" is not detectable, so the answer is asked once via
-# AskUserQuestion and cached here for every crew member and wingman itself to
-# reuse for the rest of one wingman run - never per-deliverable, never
-# per-crew-member (each crew member is an independent process with no shared
-# memory of its own, so without this file every member would ask again).
+# ---------------------------------------------------------------- preferences
+# The per-run onboarding-preference store: a generic key/value cache of the
+# pilot's answers to the required onboarding questions (`remote`,
+# `artifact_linking`, `verbosity`, ... - the required set lives in
+# hooks/lib/pilot-prefs.sh, not here). Each answer is asked once via
+# AskUserQuestion and cached for every crew member and wingman itself to reuse
+# for the rest of one wingman run - never per-deliverable, never per-crew-member
+# (each crew member is an independent process with no shared memory of its own,
+# so without this file every member would ask again).
 #
 # Invalidation is keyed to a wingman run, not a wall-clock TTL: wingman stamps a
 # fresh WINGMAN_RUN_ID at its own startup and exports it to every crew member
-# (alongside WINGMAN_HOME, in bin/spawn-crew's generated launch script). A stored
-# answer is only valid while its own wingman_run_id matches the caller's current
-# one; a mismatch (a fresh sit-down, or wingman restarted) or a missing file
-# means "not yet answered for this run" - the caller must ask again.
-def cmd_pilot_location_get(args):
-    data = read_json(pilot_location_path(), None)
-    if not isinstance(data, dict) or data.get("wingman_run_id") != args.run_id:
-        sys.exit(1)  # not yet answered for this run - unanswered defaults to "local" at the caller
-    print("true" if data.get("remote") else "false")
+# (alongside WINGMAN_HOME, in bin/spawn-crew's generated launch script). Stored
+# answers are only valid while the file's own wingman_run_id matches the
+# caller's current one; a mismatch (a fresh sit-down, or wingman restarted) or a
+# missing file means "not yet answered for this run" - the caller must ask
+# again. The first pref-set under a new run id replaces the whole file with a
+# fresh dict rather than merging across runs. Values are plain strings; the
+# store is agnostic to what any given preference means.
+def _load_prefs(run_id):
+    """The prefs dict for run_id, or None if unanswered (missing file, malformed,
+    or stamped with a different run id)."""
+    data = read_json(preferences_path(), None)
+    if not isinstance(data, dict) or data.get("wingman_run_id") != run_id:
+        return None
+    prefs = data.get("prefs")
+    return prefs if isinstance(prefs, dict) else {}
 
 
-def cmd_pilot_location_set(args):
+def cmd_pref_get(args):
+    prefs = _load_prefs(args.run_id)
+    if prefs is None or args.key not in prefs:
+        sys.exit(1)  # unset for this run - the caller applies its own conservative default
+    print(prefs[args.key])
+
+
+def cmd_pref_set(args):
     ensure_home()
-    with with_locked(pilot_location_path()):
-        write_json(pilot_location_path(), {"remote": args.remote == "true", "wingman_run_id": args.run_id})
+    with with_locked(preferences_path()):
+        data = read_json(preferences_path(), None)
+        if not isinstance(data, dict) or data.get("wingman_run_id") != args.run_id:
+            data = {"wingman_run_id": args.run_id, "prefs": {}}
+        if not isinstance(data.get("prefs"), dict):
+            data["prefs"] = {}
+        data["prefs"][args.key] = args.value
+        write_json(preferences_path(), data)
+
+
+def cmd_prefs_list(args):
+    """Every currently-set key<TAB>value pair for this run, one per line (nothing
+    if unanswered). One call answers "are all N required preferences set" for the
+    guard and nudge hooks - one subprocess, one file read, not N."""
+    prefs = _load_prefs(args.run_id)
+    if not prefs:
+        return
+    for key in sorted(prefs):
+        print("%s\t%s" % (key, prefs[key]))
 
 
 # ---------------------------------------------------------------- ask channel
@@ -1400,14 +1431,20 @@ def build_parser():
     a.add_argument("--name", required=True)
     a.set_defaults(fn=cmd_projects_lookup)
 
-    a = sub.add_parser("pilot-location-get")
+    a = sub.add_parser("pref-get")
     a.add_argument("--run-id", required=True, dest="run_id")
-    a.set_defaults(fn=cmd_pilot_location_get)
+    a.add_argument("--key", required=True)
+    a.set_defaults(fn=cmd_pref_get)
 
-    a = sub.add_parser("pilot-location-set")
+    a = sub.add_parser("pref-set")
     a.add_argument("--run-id", required=True, dest="run_id")
-    a.add_argument("--remote", required=True, choices=("true", "false"))
-    a.set_defaults(fn=cmd_pilot_location_set)
+    a.add_argument("--key", required=True)
+    a.add_argument("--value", required=True)
+    a.set_defaults(fn=cmd_pref_set)
+
+    a = sub.add_parser("prefs-list")
+    a.add_argument("--run-id", required=True, dest="run_id")
+    a.set_defaults(fn=cmd_prefs_list)
 
     # --- ask channel: request/response between a caller and its delegate -------
     a = sub.add_parser("ask-new")
