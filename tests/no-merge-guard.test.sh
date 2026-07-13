@@ -182,4 +182,93 @@ assert_eq "an ordinary crew-set (no --allow-merge) is allowed (no output)" "$out
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 
+# ============================================================================
+# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56) -
+# this hook must deny on that, and must NOT false-deny legitimate multi-line
+# shapes (a crew-set continuation, a multi-line commit message, a heredoc
+# used to build up a PR body, including one nested inside a substitution).
+# ============================================================================
+export WINGMAN_CREW_ID=dev1
+export WINGMAN_CREW_TYPE=developer
+
+CONTINUATION="$(printf '$WINGMAN_STATE crew-set --id dev1 --status working \\\n  --summary "on it"')"
+out="$(run_hook "$CONTINUATION")"
+assert_eq "the documented multi-line crew-set continuation is allowed (no output)" "$out" ""
+
+COMMIT_MSG="$(printf 'git commit -m "First line\nSecond line with an apostrophe: don'"'"'t worry"')"
+out="$(run_hook "$COMMIT_MSG")"
+assert_eq "a multi-line git commit -m message is allowed (no output)" "$out" ""
+
+BARE_HEREDOC="$(printf 'cat <<EOF\nThis doesn'"'"'t push to main.\nEOF\n')"
+out="$(run_hook "$BARE_HEREDOC")"
+assert_eq "a bare heredoc body with an apostrophe is allowed (no output)" "$out" ""
+
+GUARDED_MENTION="$(printf "cat <<'EOF'\nDon't run gh pr merge 123 --squash directly.\nEOF\n")"
+out="$(run_hook "$GUARDED_MENTION")"
+assert_eq "a quoted-delimiter heredoc merely documenting gh pr merge is allowed (no output)" "$out" ""
+
+# The r4 idiom: a heredoc nested inside a substitution, body containing both
+# an apostrophe and an unbalanced paren, in all three substitution forms -
+# must stay allowed in every one, and specifically must not trip
+# merge_reason()'s own deny text.
+NESTED_BODY="This doesn't (have both."
+for form in double-quoted unquoted backtick; do
+  case "$form" in
+    double-quoted)
+      cmd="$(printf 'gh pr create --body "$(cat <<'"'"'EOF'"'"'\n%s\nEOF\n)"' "$NESTED_BODY")" ;;
+    unquoted)
+      cmd="$(printf 'gh pr create --body $(cat <<'"'"'EOF'"'"'\n%s\nEOF\n)' "$NESTED_BODY")" ;;
+    backtick)
+      cmd="$(printf 'gh pr create --body `cat <<'"'"'EOF'"'"'\n%s\nEOF\n`' "$NESTED_BODY")" ;;
+  esac
+  out="$(run_hook "$cmd")"
+  assert_eq "nested heredoc in a $form substitution (apostrophe+paren body) is allowed (no output)" "$out" ""
+done
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ---- fail closed: a malformed command that also matches the pre-gate -------
+export WINGMAN_CREW_ID=dev1
+export WINGMAN_CREW_TYPE=developer
+out="$(run_hook "merge 'oops")"
+assert_contains "an unresolvable command mentioning a trigger word is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "the parse-failure denial names the heredoc-quoting remedy verbatim" \
+  "$out" "<<'EOF'"
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ---- an unrelated malformed command never even reaches command_segments ---
+# (the cheap substring pre-gate exits 0 before any Python/parsing runs at all)
+export WINGMAN_CREW_ID=dev1
+export WINGMAN_CREW_TYPE=developer
+out="$(run_hook "echo 'oops")"
+assert_eq "an unresolvable command mentioning no trigger word is allowed (pre-gate skips it)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# PR #72 review, finding 1 (must-fix): a here-string (<<<) is not a heredoc
+# and must never swallow a following command as an opaque "body" - that
+# would hide a real gh pr merge from this exact guard.
+# ============================================================================
+# A fresh crew id, never granted --allow-merge (dev1 was granted earlier in
+# this file and stays granted for the rest of the run - reusing it here would
+# test the grant bypass, not the here-string fix).
+export WINGMAN_CREW_ID=dev-herestring
+export WINGMAN_CREW_TYPE=developer
+
+HERESTRING_HIDDEN_MERGE="$(printf 'grep x <<<foo\ngh pr merge 5 --squash\n<foo')"
+out="$(run_hook "$HERESTRING_HIDDEN_MERGE")"
+assert_contains "a merge hidden behind a here-string is still denied (no heredoc misparse)" \
+  "$out" '"permissionDecision": "deny"'
+
+# A plain here-string with nothing further must stay allowed, not hard-deny
+# (the same misparse's other symptom: reading "<<<" as an unterminated
+# heredoc delimiter).
+out="$(run_hook 'grep foo <<< "$var"')"
+assert_eq "a plain here-string with a variable is allowed (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
 test_summary

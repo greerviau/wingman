@@ -20,6 +20,17 @@ run_hook() {
   fi
 }
 
+# run_bash_command <command> - like run_hook Bash <command>, but the command
+# is JSON-encoded via python (not %s-interpolated), so embedded quotes,
+# backslashes, and newlines (multi-line commands, heredocs) survive intact
+# instead of corrupting the hand-built JSON literal above.
+run_bash_command() {
+  uv run --no-project --quiet python3 -c '
+import json, sys
+print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))
+' "$1" | bash "$HOOK"
+}
+
 OUTSIDE_DIR="$(wm_mktemp_dir)"
 if git -C "$OUTSIDE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fail "test setup: OUTSIDE_DIR ($OUTSIDE_DIR) is unexpectedly inside a git repo"
@@ -101,6 +112,68 @@ for cmd in "cat tests/run.sh" "grep -rn pytest ." "git log --grep=fix go test fl
   out="$(run_hook Bash "$cmd")"
   assert_eq "top-level: '$cmd' (runner word as argument, not invocation) is allowed" "$out" ""
 done
+
+# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56).
+# This guard has NO cheap substring pre-gate (unlike no-merge-guard.sh and the
+# Artifact-publish contract hooks) - it reaches command_segments() for every
+# Bash call, so it must deny on an unresolvable command, and must NOT
+# false-deny legitimate multi-line shapes (a crew-set continuation, a
+# multi-line commit message, a heredoc used to build up a PR body, including
+# one nested inside a substitution).
+out="$(run_bash_command "echo 'oops")"
+assert_contains "top-level: a genuinely unterminated quote is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: the parse-failure denial names the heredoc-quoting remedy verbatim" \
+  "$out" "<<'EOF'"
+
+CONTINUATION="$(printf '$WINGMAN_STATE crew-set --id foo \\\n  --status working \\\n  --summary "on it"')"
+out="$(run_bash_command "$CONTINUATION")"
+assert_eq "top-level: the documented multi-line crew-set continuation is allowed (no output)" "$out" ""
+
+COMMIT_MSG="$(printf 'git commit -m "First line\nSecond line with an apostrophe: don'"'"'t worry"')"
+out="$(run_bash_command "$COMMIT_MSG")"
+assert_eq "top-level: a multi-line git commit -m message is allowed (no output)" "$out" ""
+
+BARE_HEREDOC="$(printf 'cat <<EOF\nThis doesn'"'"'t push to main.\nEOF\n')"
+out="$(run_bash_command "$BARE_HEREDOC")"
+assert_eq "top-level: a bare heredoc body with an apostrophe is allowed (no output)" "$out" ""
+
+GUARDED_MENTION="$(printf "cat <<'EOF'\nDon't run pytest directly.\nEOF\n")"
+out="$(run_bash_command "$GUARDED_MENTION")"
+assert_eq "top-level: a quoted-delimiter heredoc merely documenting pytest is allowed (no output)" "$out" ""
+
+# The r4 idiom: a heredoc nested inside a substitution, body containing both
+# an apostrophe and an unbalanced paren, in all three substitution forms -
+# must stay allowed in every one.
+NESTED_BODY="This doesn't (have both."
+for form in double-quoted unquoted backtick; do
+  case "$form" in
+    double-quoted)
+      cmd="$(printf 'gh pr create --body "$(cat <<'"'"'EOF'"'"'\n%s\nEOF\n)"' "$NESTED_BODY")" ;;
+    unquoted)
+      cmd="$(printf 'gh pr create --body $(cat <<'"'"'EOF'"'"'\n%s\nEOF\n)' "$NESTED_BODY")" ;;
+    backtick)
+      cmd="$(printf 'gh pr create --body `cat <<'"'"'EOF'"'"'\n%s\nEOF\n`' "$NESTED_BODY")" ;;
+  esac
+  out="$(run_bash_command "$cmd")"
+  assert_eq "top-level: nested heredoc in a $form substitution (apostrophe+paren body) is allowed (no output)" "$out" ""
+done
+
+# PR #72 review, finding 1 (must-fix): a here-string (<<<) must never be
+# misparsed as a heredoc - it never spans lines and must stay allowed, not
+# hard-denied as an "unterminated heredoc".
+for cmd in 'grep x <<< "$v"' 'read a b <<< "$line"' 'jq . <<< "$json"' 'grep x <<< "$out"'; do
+  out="$(run_bash_command "$cmd")"
+  assert_eq "top-level: '$cmd' (here-string, not a heredoc) is allowed (no output)" "$out" ""
+done
+
+# PR #72 review, finding 2 (should-fix): a trailing `#` comment is inert -
+# an apostrophe, $(...), a backtick, or << inside it must never corrupt the
+# scan into a false-deny.
+out="$(run_bash_command "echo hi  # don't")"
+assert_eq "top-level: a trailing comment with an apostrophe is allowed (no output)" "$out" ""
+
+out="$(run_bash_command 'echo hi  # $(foo) `bar` << baz')"
+assert_eq "top-level: a trailing comment with \$(, a backtick, and << is allowed (no output)" "$out" ""
 
 # Edit/Write outside any git repo passes through untouched even while active -
 # the guard's intent is to stop direct edits to code, not every Write/Edit

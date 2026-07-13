@@ -139,6 +139,16 @@ unset WINGMAN_CREW_ID
 out="$(run_guard "bin/lib/wm-state.py crew-set --id m1 --status review --artifact $NEW_DOC")"
 assert_eq "no WINGMAN_CREW_ID (not a crew session): never gated" "$out" ""
 
+# --- cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# command_segments() returns None rather than a partial segment list, and
+# this hook must deny on that rather than crash or silently allow.
+export WINGMAN_CREW_ID=m1
+out="$(run_guard "crew-set 'oops")"
+assert_contains "an unresolvable crew-set call is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "the parse-failure denial names the heredoc-quoting remedy verbatim" \
+  "$out" "<<'EOF'"
+unset WINGMAN_CREW_ID
+
 unset WINGMAN_RUN_ID
 
 test_summary

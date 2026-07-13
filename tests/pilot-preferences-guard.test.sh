@@ -20,6 +20,18 @@ run_tool() {
 }
 run_bash() { run_tool Bash "{\"command\":\"$1\"}"; }
 
+# run_bash_json <command> - like run_bash, but the command is JSON-encoded
+# via python (not hand-interpolated), so embedded quotes/backslashes/newlines
+# (a multi-line command) survive intact instead of corrupting the hand-built
+# JSON literal run_bash/run_tool build above.
+run_bash_json() {
+  uv run --no-project --quiet python3 -c '
+import json, sys
+print(json.dumps({"tool_name": "Bash", "session_id": sys.argv[2],
+                   "tool_input": {"command": sys.argv[1]}}))
+' "$1" "$SID" | bash "$GUARD"
+}
+
 OUTSIDE_DIR="$(wm_mktemp_dir)"
 
 test_new_home
@@ -33,6 +45,43 @@ assert_eq "AskUserQuestion is always allowed (no output)" "$out" ""
 
 out="$(run_bash "bin/lib/wm-state.py prefs-list --run-id run-guard")"
 assert_eq "prefs-list (relative path) is allowed" "$out" ""
+
+# --- issue #56's own regression: a segment that fails to lex must never be
+# silently dropped, letting the REST of the command's segments (which happen
+# to be allowed on their own) make the guard conclude the whole command is
+# allowed. Pre-fix, command_segments() returned only [['bin/crew-list']] -
+# the trailing-backslash `touch` line vanished without a trace - so this
+# call produced empty stdout (allowed) even though the real Bash tool call
+# still executes the touch. Confirmed directly against unfixed main.
+ISSUE56_REPRO="$(printf 'bin/crew-list\ntouch /tmp/x_from_issue56 \\\n')"
+out="$(run_bash_json "$ISSUE56_REPRO")"
+assert_contains "issue #56 repro: the touch segment is now seen and denies the whole call" \
+  "$out" '"permissionDecision": "deny"'
+
+# --- command/process-substitution bypasses (r2/r3): an otherwise-allowed
+# segment must not smuggle a hidden invocation through a substitution span.
+out="$(run_bash 'bin/crew-list $(touch /tmp/x)')"
+assert_contains 'bin/crew-list $(touch /tmp/x) is denied (substitution bypass)' \
+  "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash 'bin/crew-list `touch /tmp/x`')"
+assert_contains 'bin/crew-list `touch /tmp/x` is denied (backtick substitution bypass)' \
+  "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash 'bin/crew-list <(touch /tmp/x)')"
+assert_contains 'bin/crew-list <(touch /tmp/x) is denied (process-substitution bypass)' \
+  "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash 'bin/crew-list >(touch /tmp/x)')"
+assert_contains 'bin/crew-list >(touch /tmp/x) is denied (process-substitution bypass)' \
+  "$out" '"permissionDecision": "deny"'
+
+# --- fail closed: a genuinely unresolvable command is denied, not treated as
+# "no segments, nothing to check".
+out="$(run_bash "echo 'oops")"
+assert_contains "a genuinely unterminated quote is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "the parse-failure denial names the heredoc-quoting remedy verbatim" \
+  "$out" "<<'EOF'"
 
 out="$(run_bash "$TEST_REPO/bin/lib/wm-state.py pref-get --run-id run-guard --key remote")"
 assert_eq "pref-get (absolute path) is allowed" "$out" ""

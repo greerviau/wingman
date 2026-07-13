@@ -128,7 +128,11 @@ if tool == "Artifact":
 
 if tool == "Bash":
     command = tool_input.get("command", "") or ""
-    for seg in command_segments(command):
+    # cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56),
+    # returning None rather than a partial segment list; this is a
+    # best-effort PostToolUse recorder (not a deny-gate), so an unresolvable
+    # command just means nothing to record - `or []`, not a crash.
+    for seg in command_segments(command) or []:
         b, argv = resolve_command(seg)
         if b != "artifact-scan.sh" or len(argv) < 2:
             continue

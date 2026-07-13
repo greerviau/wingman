@@ -90,6 +90,23 @@ def deny(reason):
     sys.exit(0)
 
 
+# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# command_segments() returns None rather than a partial, truncated segment
+# list. This guard has no cheap substring pre-gate (unlike no-merge-guard.sh
+# and the Artifact-publish contract hooks) - it reaches command_segments()
+# for every Bash call, so it must deny on None here rather than skip it.
+PARSE_FAIL_REASON = (
+    "This command could not be fully parsed - an unterminated quote, an "
+    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+    "terminator line was never found - so it is denied rather than "
+    "partially checked (issue #56). If this command embeds a heredoc to "
+    "build up an argument (for example a PR body), quote its delimiter "
+    "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "
+    "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
+    "syntax and retry."
+)
+
+
 def is_inside_git_repo(path):
     d = os.path.dirname(os.path.abspath(path)) or "/"
     while d != "/" and not os.path.isdir(d):
@@ -151,7 +168,11 @@ if tool == "Bash":
             return True
         return b in RUNNER_BINS
 
-    if any(is_test_runner_segment(seg) for seg in command_segments(command)):
+    segments = command_segments(command)
+    if segments is None:
+        deny(PARSE_FAIL_REASON)
+
+    if any(is_test_runner_segment(seg) for seg in segments):
         deny(
             "Running the test suite directly is not yours to do here - you are "
             "acting as an orchestrator. Hand the change and its verification to "
