@@ -89,9 +89,41 @@ def flag_value(argv, name):
     return None
 
 
+def deny(reason):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    sys.exit(0)
+
+
+# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# command_segments() returns None rather than a partial, truncated segment
+# list. This hook has a cheap substring pre-gate above (only a *crew-set*
+# call reaches here at all), but once past it, a genuinely malformed
+# crew-set call must still be denied rather than silently let through.
+PARSE_FAIL_REASON = (
+    "This command could not be fully parsed - an unterminated quote, an "
+    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+    "terminator line was never found - so it is denied rather than "
+    "partially checked (issue #56). If this command embeds a heredoc to "
+    "build up an argument (for example a PR body), quote its delimiter "
+    "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "
+    "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
+    "syntax and retry."
+)
+
+
 # Find the first crew-set segment reporting review/done.
+segments = command_segments(command)
+if segments is None:
+    deny(PARSE_FAIL_REASON)
+
 gated = None
-for seg in command_segments(command):
+for seg in segments:
     b, argv = resolve_command(seg)
     if b == "wm-state.py" and len(argv) > 1 and argv[1] == "crew-set":
         if flag_value(argv, "--status") in ("review", "done"):

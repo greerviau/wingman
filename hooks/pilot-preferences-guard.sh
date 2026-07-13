@@ -208,6 +208,21 @@ def deny(reason):
     sys.exit(0)
 
 
+# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# command_segments()/resolved_segments() return None rather than a partial,
+# truncated segment list. This guard must deny on that, not skip it.
+PARSE_FAIL_REASON = (
+    "This command could not be fully parsed - an unterminated quote, an "
+    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+    "terminator line was never found - so it is denied rather than "
+    "partially checked (issue #56). If this command embeds a heredoc to "
+    "build up an argument (for example a PR body), quote its delimiter "
+    "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "
+    "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
+    "syntax and retry."
+)
+
+
 # The escape hatch, verified above and now safe to instruct. The $WINGMAN_STATE
 # short form is named only when it, too, resolves - so a session reading a
 # denial never sees a shape this guard would reject.
@@ -238,6 +253,8 @@ need_ask = False
 if tool == "Bash":
     command = tool_input.get("command", "") or ""
     segments = command_segments(command)
+    if segments is None:
+        deny(PARSE_FAIL_REASON)
     if segments:
         all_allowed = True
         for seg in segments:

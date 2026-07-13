@@ -93,6 +93,15 @@ assert_eq "an unrelated push posts nothing" "$(cat "$GH_LOG")" ""
 run_tracker PostToolUse "git status"
 assert_eq "a totally unrelated command posts nothing" "$(cat "$GH_LOG")" ""
 
+# --- cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# command_segments() returns None rather than a partial segment list. This
+# tracker is a best-effort PostToolUse recorder, not a deny-gate, so it must
+# not crash on that - just attribute nothing.
+: > "$GH_LOG"
+out="$(run_tracker PostToolUse "merge 'oops")"
+assert_eq "an unresolvable command does not crash the tracker (no output)" "$out" ""
+assert_eq "an unresolvable command posts no attribution" "$(cat "$GH_LOG")" ""
+
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 
 test_summary

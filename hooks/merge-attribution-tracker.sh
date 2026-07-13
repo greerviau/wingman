@@ -174,7 +174,11 @@ def handle_gh_api(argv):
             post_comment_on("https://github.com/%s/%s/pull/%s" % (owner, repo, number))
 
 
-for seg in command_segments(command):
+# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56),
+# returning None rather than a partial segment list; this is a best-effort
+# PostToolUse recorder (not a deny-gate), so an unresolvable command just
+# means nothing to attribute - `or []`, not a crash.
+for seg in command_segments(command) or []:
     b, argv = resolve_command(seg)
     if not argv:
         continue

@@ -79,4 +79,11 @@ assert_eq "a pass verdict records nothing" "$(marker_field "$DOC5_REAL" status)"
 printf '{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"cat %s"},"error":"Exit code 1\\nfail:looks-like-a-verdict-but-not-a-scan"}' "$SID" "$WORK" "$DOC5" | bash "$TRACKER"
 assert_eq "a failing non-scan command records nothing" "$(marker_field "$DOC5_REAL" status)" ""
 
+# --- cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# command_segments() returns None rather than a partial segment list. This
+# tracker is a best-effort PostToolUse recorder, not a deny-gate, so it must
+# not crash on that - just record nothing.
+out="$(printf '{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":"artifact-scan.sh '"'"'oops"},"error":"Exit code 1\\nfail:whatever"}' "$SID" "$WORK" | bash "$TRACKER")"
+assert_eq "an unresolvable artifact-scan.sh invocation does not crash the tracker (no output)" "$out" ""
+
 test_summary
