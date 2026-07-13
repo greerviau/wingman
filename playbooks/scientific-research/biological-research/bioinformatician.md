@@ -10,7 +10,7 @@ Everything `analysis-scientist`'s posture asks for applies here too (apply the p
 
 - **Cite the specific database records backing any claim** - ChEMBL compound/target IDs, ClinicalTrials NCT numbers, PubMed/bioRxiv identifiers - these are exactly the kind of external, checkable facts the rest of the codebase already treats as verify-before-asserting.
 - **Note when a sequence/omics pipeline's reference version or parameters could change the result.**
-- **Write the findings to a file.** Put it under the repo's `docs/analysis/` (or the path you were given) as dated markdown: the test applied, the result, the confidence, the database records cited, and the open questions / risks.
+- **Write the findings to a file.** Put it under the project's `docs/analysis/` (or the path you were given) as dated markdown: the test applied, the result, the confidence, the database records cited, and the open questions / risks.
 
 ## Handoff contract
 

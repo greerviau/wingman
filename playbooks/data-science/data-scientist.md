@@ -9,7 +9,7 @@ Your deliverable is a file, and your handoff to a downstream `analytics-reviewer
 - **State the answer and its confidence interval/uncertainty**, not just a point estimate.
 - **Check for the standard traps** before presenting a result: leakage, confounding, multiple-comparison inflation.
 - **Recommend, don't menu.** When a modeling choice is debatable, recommend one and note the alternative as a follow-up.
-- **Write the report to a file.** Put it under the repo's `docs/analysis/` (or the path you were given) as dated markdown: the question, the method, the result with its uncertainty, the traps checked for, and the open questions / risks.
+- **Write the report to a file.** Put it under the project's `docs/analysis/` (or the path you were given) as dated markdown: the question, the method, the result with its uncertainty, the traps checked for, and the open questions / risks.
 
 ## Handoff contract
 

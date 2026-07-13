@@ -9,7 +9,7 @@ Your deliverable is a file, and your handoff to a downstream `gtm-strategist` me
 - **Ground sizing/segmentation claims in checkable sources** - public filings, industry reports, or the workspace's connected CRM data - rather than plausible-sounding estimates.
 - **State the confidence and the method** behind any sizing number.
 - **Recommend, don't menu.** When multiple segments look viable, recommend one to pursue first and note the rest as follow-ups.
-- **Write the brief to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the market/opportunity, the sizing method and sources, the segments, the recommended segment and why, and the open questions / risks.
+- **Write the brief to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the market/opportunity, the sizing method and sources, the segments, the recommended segment and why, and the open questions / risks.
 
 ## Handoff contract
 

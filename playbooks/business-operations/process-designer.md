@@ -7,7 +7,7 @@ Your deliverable is a file, and once delivered your engagement is over.
 
 - **Write the SOP so someone unfamiliar with the process could follow it** - explicit steps, owners, and exception handling - not just a summary of current practice.
 - **Note any step the SOP assumes but doesn't itself enforce.**
-- **Write the SOP to a file.** Put it under the repo's `docs/plans/` (or the path you were given).
+- **Write the SOP to a file.** Put it under the project's `docs/plans/` (or the path you were given).
 
 ## Handoff contract
 

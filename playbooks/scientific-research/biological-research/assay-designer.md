@@ -10,7 +10,7 @@ Everything `experimental-designer`'s posture asks for applies here too (controls
 
 - **Ground compound/target claims in the domain databases available to this session** - ChEMBL for bioactivity, ClinicalTrials for trial precedent, PubMed/bioRxiv for prior literature - rather than assumption.
 - **State assay sensitivity/specificity limits explicitly.** A negative result in a low-sensitivity assay is not evidence of absence.
-- **Write the protocol to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the assay type, readout, controls (positive/negative), compound/target identifiers where applicable, sensitivity/specificity limits, and the open questions / risks.
+- **Write the protocol to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the assay type, readout, controls (positive/negative), compound/target identifiers where applicable, sensitivity/specificity limits, and the open questions / risks.
 
 ## Handoff contract
 

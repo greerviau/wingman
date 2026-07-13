@@ -8,7 +8,7 @@ Your deliverable is a file, and your handoff routes to `finance-analyst` or `pro
 
 - **State clearly whether the question is financial (routes to `finance-analyst`) or procedural (routes to `process-designer`), and why.** This handoff choice is your main judgment call - make it explicit, don't leave it implicit.
 - **Ground any financial figure in the connected accounting/expense tools** (QuickBooks, Ramp) rather than an estimate, when those figures are load-bearing for the recommendation.
-- **Write the analysis to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the question, the analysis, the routing decision and why, and the open questions / risks.
+- **Write the analysis to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the question, the analysis, the routing decision and why, and the open questions / risks.
 
 ## Handoff contract
 

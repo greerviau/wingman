@@ -63,6 +63,12 @@ case "$SCOPE" in repo|global) ;; *) wm_die "--scope must be 'repo' or 'global' (
 # --- resolve the target scope ------------------------------------------------
 # Newline list of every discovered repo path, for --add-dir in global scope.
 GLOBAL_REPO_DIRS=""
+# Declared before the scope branch (not just before use) so a global-scope spawn
+# never trips `set -u` on an unbound variable: global scope leaves these at their
+# git-agnostic default (0/0) rather than computing them - see item 5 below for why
+# global scope exports neither variable to the member itself.
+IS_GIT=0
+HAS_REMOTE=0
 if [ "$SCOPE" = global ]; then
   [ -z "$REPO_ARG" ] || wm_die "pass either --scope global or --repo <name>, not both"
   # Ground at the primary workspace root (wingman's parent in the common case).
@@ -81,12 +87,29 @@ for p in sorted(set(m.values())):
 ')"
 else
   [ -n "$REPO_ARG" ] || wm_die "--repo is required (a path or a discovered project name), or use --scope global"
-  if [ -d "$REPO_ARG/.git" ] || { [ -d "$REPO_ARG" ] && git -C "$REPO_ARG" rev-parse --git-dir >/dev/null 2>&1; }; then
-    REPO="$(cd "$REPO_ARG" && pwd)"
+  # Directory-existence, not git-ness, decides path-vs-name: an explicit path
+  # always means the path, git repo or not. Physically normalized (-P) so a
+  # symlinked route to a repo root compares equal to the direct route below.
+  if [ -d "$REPO_ARG" ]; then
+    REPO="$(cd -P "$REPO_ARG" && pwd -P)"
   else
     REPO="$("$WM_BIN/discover-projects" "$REPO_ARG")" || exit 1
+    REPO="$(cd -P "$REPO" && pwd -P)"
   fi
-  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || wm_die "'$REPO' is not a git checkout"
+  # Git-ness: IS_GIT=1 only when $REPO is the repo's own root, not merely nested
+  # inside one (the subdirectory rule - see the plan). --show-toplevel already
+  # returns a physical path, but re-normalize anyway rather than depend on that
+  # as a guarantee.
+  if TOPLEVEL="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" \
+     && TOPLEVEL="$(cd -P "$TOPLEVEL" && pwd -P)" \
+     && [ "$TOPLEVEL" = "$REPO" ]; then
+    IS_GIT=1
+    HAS_REMOTE=0
+    git -C "$REPO" remote get-url origin >/dev/null 2>&1 && HAS_REMOTE=1
+  else
+    IS_GIT=0
+    HAS_REMOTE=0
+  fi
 fi
 
 # --- resolve the playbook (local override wins) ------------------------------
@@ -98,6 +121,17 @@ fi
 # $WM_PLAYBOOKS/<category>/<type>.md (tracked) or .local.md (gitignored,
 # survives pulls) to define a new type.
 wm_resolve_playbook "$TYPE"
+
+# A software-development crew type inherently requires a git checkout to do its
+# job (worktree, branch, PR) - restore that half of the "software-dev work OR
+# confirmed git repo" requirement here, since detecting IS_GIT above only ever
+# covers the second half. Global scope is exempt: git-ness there is deliberately
+# undecided at spawn time, and a global-scope developer carries its own defensive
+# check for the repo it eventually `cd`s into (see playbooks/software-development/developer.md).
+CATEGORY="$(basename "$(dirname "$PLAYBOOK")")"
+if [ "$SCOPE" = repo ] && [ "$CATEGORY" = software-development ] && [ "$IS_GIT" -eq 0 ]; then
+  wm_die "'$TYPE' is a software-development crew type and requires a git checkout; '$REPO' is not one (or is not the repo's root - see the subdirectory rule in docs/plans/2026-07-13-conditional-git-branch-pr-workflow.md)"
+fi
 
 # Permission posture for the (unattended) crew session. Default bypassPermissions;
 # explicit empty (WM_PERMISSION_MODE=) disables it and falls back to prompting.
@@ -133,13 +167,15 @@ while wm_state crew-get --id "$ID" >/dev/null 2>&1; do
 done
 WINDOW="wm-$ID"
 
-# --- deterministic worktree path (repo scope) --------------------------------
+# --- deterministic worktree path (repo scope, git only) ----------------------
 # Recorded at spawn and exported to the member so a non-graceful exit (a
-# dead/orphaned member) can still be torn down by crew-standdown. Repo scope only:
-# global scope cannot predetermine the repo at spawn, so a global-scope member
-# self-registers its worktree via `wm-state crew-set --worktree` when it creates one.
+# dead/orphaned member) can still be torn down by crew-standdown. Repo scope AND
+# a confirmed git repo only: a worktree is meaningless without a git repo to carve
+# it from, and global scope cannot predetermine the repo at spawn anyway, so a
+# global-scope member self-registers its worktree via `wm-state crew-set
+# --worktree` when it creates one.
 WORKTREE=""
-[ "$SCOPE" = repo ] && WORKTREE="$(dirname "$REPO")/$(basename "$REPO")-$ID"
+[ "$SCOPE" = repo ] && [ "$IS_GIT" -eq 1 ] && WORKTREE="$(dirname "$REPO")/$(basename "$REPO")-$ID"
 
 # --- generate the forced session id ------------------------------------------
 if wm_have uuidgen; then SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"; else
@@ -195,6 +231,14 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # worktree at exactly this path, so teardown needs only the path. Absent for global
   # scope, whose member self-registers the path after it creates the worktree.
   [ -n "$WORKTREE" ] && echo "export WINGMAN_WORKTREE=$(quote "$WORKTREE")"
+  # The three-state git/remote signal (repo scope only): unset (never exported)
+  # means "not yet known, detect it yourself" - never the same as false. Global
+  # scope leaves both unexported deliberately: git-ness there is undecided at
+  # spawn time, since the member picks its own target repo(s) after landing.
+  if [ "$SCOPE" = repo ]; then
+    echo "export WINGMAN_IS_GIT=$([ "$IS_GIT" -eq 1 ] && echo true || echo false)"
+    [ "$IS_GIT" -eq 1 ] && echo "export WINGMAN_HAS_REMOTE=$([ "$HAS_REMOTE" -eq 1 ] && echo true || echo false)"
+  fi
   # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
   # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
   # it to substitute a stub).
@@ -258,6 +302,15 @@ ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
   --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE")
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
+# is_git/has_remote mirror the launch-script export above: recorded for repo
+# scope only, so the JSON field stays absent (not false) for global scope - the
+# same true/false/unset distinction, now on the roster record too. Passed as the
+# literal strings "true"/"false" (the crew-add flag is string-shaped so it can be
+# typed on a command line); wm-state.py converts to a real JSON boolean.
+if [ "$SCOPE" = repo ]; then
+  ADD_ARGS+=(--is-git "$([ "$IS_GIT" -eq 1 ] && echo true || echo false)")
+  [ "$IS_GIT" -eq 1 ] && ADD_ARGS+=(--has-remote "$([ "$HAS_REMOTE" -eq 1 ] && echo true || echo false)")
+fi
 wm_state crew-add "${ADD_ARGS[@]}" >/dev/null
 
 # --- deliver the opening objective as the first user message -----------------

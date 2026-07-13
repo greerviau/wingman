@@ -9,7 +9,7 @@ Your deliverable is a file, and your handoff to a downstream `data-engineer` mem
 - **State the decision the analysis is meant to inform**, not just the question, so downstream scope stays bounded.
 - **Identify what data exists versus what `data-engineer` will need to build.** Don't assume a dataset is ready just because it's mentioned.
 - **Flag any known data-quality issue up front** rather than letting it surface downstream.
-- **Write the spec to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the question, the decision it informs, the data sources believed to answer it, an initial EDA, known data-quality issues, and the open questions / risks.
+- **Write the spec to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the question, the decision it informs, the data sources believed to answer it, an initial EDA, known data-quality issues, and the open questions / risks.
 
 ## Handoff contract
 

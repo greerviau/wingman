@@ -75,12 +75,20 @@ resume_one() {
   # One field per line (never tab-joined): a tab is IFS whitespace, so an empty
   # field (worktree is commonly empty) would collapse two adjacent delimiters
   # into one and silently shift every field after it.
+  # is_git/has_remote are real JSON booleans (or None), not strings like the rest
+  # of these fields - `d.get(k) or ""` would collapse a confirmed `False` and an
+  # absent/None field to the identical empty string, silently destroying exactly
+  # the false/unset distinction the git/PR workflow depends on. Printed
+  # separately, preserving all three states as "true"/"false"/"".
   _lines="$(printf '%s' "$_info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
 for k in ("repo", "session_id", "window", "worktree", "status", "type"):
-    print(d.get(k) or "")')"
-  { read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type; } <<EOF
+    print(d.get(k) or "")
+for k in ("is_git", "has_remote"):
+    v = d.get(k)
+    print("" if v is None else ("true" if v else "false"))')"
+  { read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type; read -r _is_git; read -r _has_remote; } <<EOF
 $_lines
 EOF
 
@@ -159,6 +167,13 @@ EOF
     echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
     echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
     [ -n "$_worktree" ] && echo "export WINGMAN_WORKTREE=$(quote "$_worktree")"
+    # Carry the original spawn's git-detection result forward rather than
+    # discarding it: empty (the None/absent case - global scope, or a pre-change
+    # record) means neither line is written, leaving the resumed session in the
+    # same "unset, detect it yourself" state every branching playbook already
+    # handles.
+    [ -n "$_is_git" ] && echo "export WINGMAN_IS_GIT=$_is_git"
+    [ -n "$_has_remote" ] && echo "export WINGMAN_HAS_REMOTE=$_has_remote"
     printf 'exec %s' "${WM_AGENT:-claude}"
     printf ' --resume %s' "$(quote "$_sid")"
     [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"

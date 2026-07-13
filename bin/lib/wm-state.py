@@ -303,6 +303,17 @@ def cmd_crew_add(args):
         # itself requested it (bin/spawn-crew --allow-merge); a mid-session grant
         # goes through crew-set --allow-merge instead, never through here again.
         "allow_merge": bool(getattr(args, "allow_merge", False)),
+        # Git/PR-workflow determinant, a real tri-state (True/False/None), never a
+        # string: None means "unknown at spawn time - detect it yourself" (global
+        # scope, or a pre-change record), and must never be read as False. Only
+        # ever passed for repo scope (bin/spawn-crew); mirrors the `allow_merge`
+        # idiom just above (string arg -> real bool) rather than storing the raw
+        # "true"/"false" string, which every downstream reader would misread as
+        # truthy regardless of value.
+        "is_git": None if getattr(args, "is_git", None) is None else args.is_git == "true",
+        # Only meaningful when is_git is True; None otherwise (no remote to speak
+        # of when there's no repo, or the repo-ness itself is undecided).
+        "has_remote": None if getattr(args, "has_remote", None) is None else args.has_remote == "true",
         # The prior parent of a re-adopted orphan (set by reconcile's dead-owner
         # pass): standing down the dead owner still reaps a member whose
         # orphaned_from names it, even though its live parent was moved to the
@@ -1224,14 +1235,26 @@ def cmd_ask_prune(args):
 # ---------------------------------------------------------------- rendering
 
 
+def _git_suffix(r):
+    """Display-only annotation for is_git/has_remote - never feeds back into a
+    member's own branch logic, which always re-detects for itself when the
+    roster field is absent (global scope, or a pre-change record)."""
+    is_git = r.get("is_git")
+    if is_git is False:
+        return " (no git)"
+    if is_git is True and r.get("has_remote") is False:
+        return " (git, no remote)"
+    return ""
+
+
 def render_roster_text(rows):
     if not rows:
         return "(no crew)"
     lines = []
     for r in rows:
-        line = "  [%-10s] %-22s %-9s %s" % (
+        line = "  [%-10s] %-22s %-9s %s%s" % (
             r.get("type", "?"), r.get("id", "?"), r.get("status", "?"),
-            (r.get("summary") or "").split("\n")[0][:60],
+            (r.get("summary") or "").split("\n")[0][:60], _git_suffix(r),
         )
         lines.append(line)
         if r.get("status") == "blocked" and r.get("blocker"):
@@ -1280,10 +1303,14 @@ def render_board():
         for r, depth in order_tree(active):
             marker = ("&nbsp;&nbsp;" * depth) + ("↳ " if depth else "")
             id_cell = r.get("id", "") + (" (merge-authorized)" if r.get("allow_merge") else "")
+            repo_cell = (
+                os.path.basename(r.get("repo", "") or "")
+                + (" (global)" if r.get("scope") == "global" else "")
+                + _git_suffix(r)
+            )
             out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), marker, id_cell, r.get("status", ""),
-                r.get("window", ""),
-                os.path.basename(r.get("repo", "") or "") + (" (global)" if r.get("scope") == "global" else ""),
+                r.get("window", ""), repo_cell,
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
             ))
     else:
@@ -1350,6 +1377,13 @@ def build_parser():
     # when the tmux server does, so this is an optional precision key, never
     # the primary identity (the window name is).
     a.add_argument("--window-id", default="", dest="window_id")
+    # Git/PR-workflow determinant (repo scope only; bin/spawn-crew never passes
+    # these for --scope global, leaving the roster field None/absent - "unknown,
+    # detect yourself" rather than a false that would be wrong the instant the
+    # member cds into a real repo). String-shaped only because a command-line
+    # flag is typed as a string; cmd_crew_add converts to a real bool/None.
+    a.add_argument("--is-git", default=None, choices=("true", "false"), dest="is_git")
+    a.add_argument("--has-remote", default=None, choices=("true", "false"), dest="has_remote")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")

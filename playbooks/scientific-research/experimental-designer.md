@@ -9,7 +9,7 @@ Your deliverable is a file, and your handoff to a downstream `experimentalist` m
 - **Specify controls and confounds to rule out up front**, not after data comes back.
 - **State the statistical test the analysis will use *before* execution**, so the design is falsifiable rather than fit after the fact.
 - **Note any resource or ethical constraint** on the experiment.
-- **Write the protocol to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the hypothesis, the design, controls, sample size/power, measured variables, the pre-specified analysis plan, and the open questions / risks.
+- **Write the protocol to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the hypothesis, the design, controls, sample size/power, measured variables, the pre-specified analysis plan, and the open questions / risks.
 
 ## Handoff contract
 
