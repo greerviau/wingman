@@ -212,6 +212,66 @@ EOF
   fi
 fi
 
+# --- Merge-authorization contract hooks (crew sessions, any repo), user scope
+# hooks/no-merge-guard.sh (PreToolUse) denies gh pr merge/gh api merge-endpoint
+# calls/a direct push to the default branch from a crew session absent an
+# explicit, per-effort allow_merge grant (issue #46); hooks/merge-attribution-
+# tracker.sh (PostToolUse) posts a PR comment identifying the crew member
+# whenever an authorized merge does succeed, since crew act under the pilot's
+# own GitHub credentials and mergedBy/author alone can never distinguish the
+# two (issue #50). Both must fire inside crew sessions whose project root is
+# some other repo entirely, so like the other crew-facing hooks they need
+# user-level registration - a project-level entry in this repo's settings
+# never loads there.
+merge_hook_specs() {
+  cat <<EOF
+$WM_REPO/hooks/no-merge-guard.sh PreToolUse Bash
+$WM_REPO/hooks/merge-attribution-tracker.sh PostToolUse Bash
+EOF
+}
+merge_hooks_missing=0
+while read -r _h _e _m; do
+  [ -n "$_h" ] || continue
+  uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+      --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --check >/dev/null 2>&1 \
+    || merge_hooks_missing=1
+done <<EOF
+$(merge_hook_specs)
+EOF
+if [ "$merge_hooks_missing" = 0 ]; then
+  wm_ok "merge-authorization contract hooks registered ($GUARD_SETTINGS)"
+else
+  wm_warn "merge-authorization contract hooks (issue #46) not registered in $GUARD_SETTINGS"
+  printf '    denies crew-session merges by default and attributes any authorized one,\n'
+  printf '    for crew sessions in any repo, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register them now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; re-run bin/doctor -y to register them"
+  fi
+  if [ "$do_it" = 1 ]; then
+    merge_install_failed=0
+    while read -r _h _e _m; do
+      [ -n "$_h" ] || continue
+      uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+          --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --matcher "$_m" >/dev/null \
+        || merge_install_failed=1
+    done <<EOF
+$(merge_hook_specs)
+EOF
+    if [ "$merge_install_failed" = 0 ]; then
+      wm_ok "registered merge-authorization contract hooks"
+    else
+      wm_err "failed to register merge-authorization contract hooks"
+    fi
+  fi
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"

@@ -134,7 +134,7 @@ Use the script - never hand-roll tmux:
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   --objective "<one-line task>" [--input <plan-path>] \
-  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
+  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--allow-merge]
 ```
 
 The script resolves the repo, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
@@ -155,6 +155,11 @@ The `wm-` prefix matches the tmux window name, so a member reads identically in 
 `--model <alias|id>` and `--effort <low|medium|high|xhigh|max>` are per-spawn, per-session settings: passed on one `bin/spawn-crew` call, they affect only that one crew member's session, never wingman's own running model or any other crew member's.
 Omit both and the existing default chain stands unchanged (explicit `--model` > `WM_MODEL` env default > the agent CLI's own default).
 See "Command vocabulary" for when to pass them.
+
+**A crew member never merges its own PR by default** (issue #46): a mechanical guard (`hooks/no-merge-guard.sh`) denies `gh pr merge` and equivalents from every crew session, and a developer's own playbook leaves the merge itself to the pilot.
+Only pass `--allow-merge` when the pilot has explicitly said this one effort may merge on its own - never as a default, never because a PR "looks done."
+It is per-spawn and visible (`bin/crew-list`/board.md show `allow_merge`); to grant it after a member is already spawned, run `$WINGMAN_STATE crew-set --id <id> --allow-merge true` instead of respawning.
+If a merge does happen from a crew session, `hooks/merge-attribution-tracker.sh` automatically posts a PR comment naming the crew member - never rely on the member to remember this itself.
 
 ## Crew types are open-ended
 
@@ -179,6 +184,10 @@ You never edit playbooks yourself - the pilot owns them.
   This affects only the one spawn: wingman's own model and every other crew member - already running or spawned afterward without a model request - are untouched.
   Absent a named model or effort, behavior is unchanged: explicit `--model` beats the `WM_MODEL` env default, which beats the agent CLI's own default, exactly as before this existed.
   When appointing a **lead**, a model preference stated for a specific phase ("use Opus for the developer phase") is not yours to apply - pass it through as part of the lead's objective so the lead threads it onto that phase's worker spawn only (see `playbooks/common/lead.md`); a preference stated for "everything" is likewise relayed in the objective, not applied by you spawning the lead itself on that model.
+- **The pilot grants merge autonomy** (e.g. "you can merge this one", "go ahead and merge it yourself") → the pilot alone can grant this, never inferred from a PR "looking done" or CI passing.
+  Spawning fresh: pass `--allow-merge` on that one `bin/spawn-crew` call.
+  A developer already spawned and shepherding a PR: `$WINGMAN_STATE crew-set --id <id> --allow-merge true` - takes effect on its next merge attempt, no respawn needed.
+  Either way this is per-effort and never a global default; see CLAUDE.md's "Spawning crew" section and issue #46.
 - **"Status" / "what's my crew doing?"** → run `bin/crew-list` and summarize the roster compactly, **including each member's status**.
   Describe each effort by its repo and objective/deliverable when talking to the pilot; keep the crew id as your own lookup key for running a command, not something you say out loud.
   `bin/crew-list` shows your **direct reports** (a lead appears as one line); for the whole org use `bin/crew-list --tree`, and to see inside a lead's team use `bin/crew-list --owner <lead-id>`.

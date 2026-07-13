@@ -298,6 +298,10 @@ def cmd_crew_add(args):
         # crew-standdown. Empty when unknown at spawn (global scope self-registers it
         # later via crew-set --worktree).
         "worktree": getattr(args, "worktree", "") or "",
+        # Explicit, per-effort merge autonomy (issue #46). False unless the spawn
+        # itself requested it (bin/spawn-crew --allow-merge); a mid-session grant
+        # goes through crew-set --allow-merge instead, never through here again.
+        "allow_merge": bool(getattr(args, "allow_merge", False)),
         # The prior parent of a re-adopted orphan (set by reconcile's dead-owner
         # pass): standing down the dead owner still reaps a member whose
         # orphaned_from names it, even though its live parent was moved to the
@@ -375,6 +379,11 @@ def cmd_crew_set(args):
             # the path here so a later teardown can find it.
             if getattr(args, "worktree", None) is not None:
                 r["worktree"] = args.worktree
+            # allow_merge is likewise roster-only (issue #46): a grant/revoke is
+            # never part of a member's own live-status report, so it never touches
+            # crew/<id>.json - only the roster record hooks/no-merge-guard.sh reads.
+            if getattr(args, "allow_merge", None) is not None:
+                r["allow_merge"] = args.allow_merge == "true"
             r["updated"] = live["updated"]
     write_json(crew_json_path(), roster)
     render_board()
@@ -1223,6 +1232,8 @@ def render_roster_text(rows):
             lines.append("      blocker: %s" % r["blocker"])
         if r.get("delivery"):
             lines.append("      delivery: %s" % r["delivery"])
+        if r.get("allow_merge"):
+            lines.append("      merge: AUTHORIZED for this effort (issue #46)")
     return "\n".join(lines)
 
 
@@ -1243,6 +1254,8 @@ def render_tree_text(rows):
             lines.append("%s    blocker: %s" % (indent, r["blocker"]))
         if r.get("delivery"):
             lines.append("%s    delivery: %s" % (indent, r["delivery"]))
+        if r.get("allow_merge"):
+            lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
     return "\n".join(lines)
 
 
@@ -1260,8 +1273,9 @@ def render_board():
         # letting a human read the org rather than a flat list.
         for r, depth in order_tree(active):
             marker = ("&nbsp;&nbsp;" * depth) + ("↳ " if depth else "")
+            id_cell = r.get("id", "") + (" (merge-authorized)" if r.get("allow_merge") else "")
             out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s |" % (
-                r.get("type", ""), marker, r.get("id", ""), r.get("status", ""),
+                r.get("type", ""), marker, id_cell, r.get("status", ""),
                 r.get("window", ""),
                 os.path.basename(r.get("repo", "") or "") + (" (global)" if r.get("scope") == "global" else ""),
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
@@ -1317,6 +1331,13 @@ def build_parser():
     # The git worktree the member works in, recorded at spawn (repo scope) for
     # teardown; empty when unknown at spawn (global scope self-registers via crew-set).
     a.add_argument("--worktree", default="")
+    # Explicit, per-effort merge authorization (issue #46): unset by default. Set
+    # only via bin/spawn-crew --allow-merge at spawn time, or later via crew-set
+    # --allow-merge (itself gated by hooks/no-merge-guard.sh so a crew member can
+    # never grant this to itself). hooks/no-merge-guard.sh reads it fresh off this
+    # roster record on every merge attempt, so a mid-session grant takes effect
+    # without needing to respawn the member.
+    a.add_argument("--allow-merge", action="store_true", dest="allow_merge")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
@@ -1329,6 +1350,10 @@ def build_parser():
     # Self-register the worktree path after spawn (global scope, whose repo/path is
     # not knowable at spawn time). Roster-only field, not a live-status field.
     a.add_argument("--worktree", default=None)
+    # Grant (or revoke) merge autonomy for this member's effort - roster-only
+    # field, see crew-add's --allow-merge above. Never provided by the member on
+    # its own --id; hooks/no-merge-guard.sh enforces that boundary.
+    a.add_argument("--allow-merge", default=None, choices=("true", "false"), dest="allow_merge")
     # Update status/summary/artifact/delivery without re-firing the watcher/Stop-
     # hook wake (see the `announced` field and playbooks/_status-contract.md,
     # "Re-entering review without re-announcing"). Refused with --status
