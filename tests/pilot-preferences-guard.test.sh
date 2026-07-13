@@ -32,6 +32,18 @@ unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 out="$(run_tool AskUserQuestion '{}')"
 assert_eq "AskUserQuestion is always allowed (no output)" "$out" ""
 
+# The /prefs skill is the one narrow Skill-tool exemption: it exists only to
+# run this exact gate, so it must be runnable while the gate is unsatisfied -
+# but no other skill gets the same pass.
+out="$(run_tool Skill '{"skill":"prefs"}')"
+assert_eq "the prefs skill is allowed" "$out" ""
+
+out="$(run_tool Skill '{"skill":"watch"}')"
+assert_contains "every other skill still falls through to deny" "$out" '"permissionDecision": "deny"'
+
+out="$(run_tool Skill '{"skill":"status"}')"
+assert_contains "an unrelated skill is denied too" "$out" '"permissionDecision": "deny"'
+
 out="$(run_bash "bin/lib/wm-state.py prefs-list --run-id run-guard")"
 assert_eq "prefs-list (relative path) is allowed" "$out" ""
 
