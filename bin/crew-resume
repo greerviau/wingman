@@ -159,6 +159,7 @@ EOF
     echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
     echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
     [ -n "$_worktree" ] && echo "export WINGMAN_WORKTREE=$(quote "$_worktree")"
+    wm_guard_test_fixture_agent "${WM_AGENT:-claude}"
     printf 'exec %s' "${WM_AGENT:-claude}"
     printf ' --resume %s' "$(quote "$_sid")"
     [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"

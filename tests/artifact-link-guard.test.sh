@@ -29,8 +29,7 @@ scan_failed() {
 }
 
 test_new_home
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+WORK="$(wm_mktemp_dir)"
 PLAN="$WORK/plan.md"
 printf '# the plan\n' > "$PLAN"
 

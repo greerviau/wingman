@@ -198,6 +198,7 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
   # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
   # it to substitute a stub).
+  wm_guard_test_fixture_agent "${WM_AGENT:-claude}"
   printf 'exec %s' "${WM_AGENT:-claude}"
   # Crew run unattended, disposably, and scoped to one repo, so the default
   # bypassPermissions keeps a gated tool call from hanging forever on a prompt no

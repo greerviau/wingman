@@ -7,7 +7,7 @@ set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 EVAL="$TEST_REPO/bin/lib/pr-eval.py"
-D="$(mktemp -d)"
+D="$(wm_mktemp_dir)"
 PRJ="$D/pr.json"; CUR="$D/cur.json"
 ev() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me 2>/dev/null; }
 

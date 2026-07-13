@@ -28,7 +28,7 @@ SH
 
 test_new_home
 export WINGMAN_CREW_ID=pw1
-D="$(mktemp -d)"
+D="$(wm_mktemp_dir)"
 GH="$D/gh"; make_fake_gh "$GH"
 export WM_GH="$GH"
 export FAKE_PR="$D/pr.json"

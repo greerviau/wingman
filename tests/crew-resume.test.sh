@@ -14,14 +14,11 @@ export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2
 field_of() { wm_state crew-get --id "$1" | uv run --no-project --quiet python -c 'import sys,json
 print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$2"; }
 
-STUB_DIR="$(mktemp -d)"
+STUB_DIR="$(wm_mktemp_dir)"
 ALIVE_STUB="$STUB_DIR/alive.sh"
 DEAD_STUB="$STUB_DIR/dead.sh"
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$ALIVE_STUB"; chmod +x "$ALIVE_STUB"
 printf '#!/usr/bin/env bash\nexit 7\n' > "$DEAD_STUB"; chmod +x "$DEAD_STUB"
-
-cleanup() { rm -rf "$STUB_DIR"; }
-trap cleanup EXIT
 
 # --- a died member with a live session resumes --------------------------------
 test_new_home

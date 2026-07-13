@@ -10,8 +10,7 @@ NUDGE="$TEST_REPO/hooks/pilot-preferences-nudge.sh"
 
 run_nudge() { printf '{"session_id":"sess-nudge","source":"%s"}' "${1:-startup}" | bash "$NUDGE"; }
 
-OUTSIDE_DIR="$(mktemp -d)"
-trap 'rm -rf "$OUTSIDE_DIR"' EXIT
+OUTSIDE_DIR="$(wm_mktemp_dir)"
 
 test_new_home
 export CLAUDE_PROJECT_DIR="$TEST_REPO"
@@ -50,7 +49,7 @@ assert_eq "fully answered: no output" "$out" ""
 # A session starting into a broken install learns it here, rather than through a
 # wall of denials it cannot act on: no preference can be cached, so the guard has
 # failed open and the questions are pointless.
-FIXTURE="$(mktemp -d)/broken-repo"
+FIXTURE="$(wm_mktemp_dir)/broken-repo"
 mkdir -p "$FIXTURE/hooks/lib" "$FIXTURE/bin/lib"   # bin/lib deliberately left empty
 cp "$TEST_REPO/hooks/pilot-preferences-nudge.sh" "$FIXTURE/hooks/"
 cp "$TEST_REPO/hooks/lib/pilot-prefs.sh" "$FIXTURE/hooks/lib/"

@@ -16,7 +16,7 @@ set -u
 SPAWN="$TEST_REPO/bin/spawn-crew"
 STANDDOWN="$TEST_REPO/bin/crew-standdown"
 
-WS="$(mktemp -d)/workspace"
+WS="$(wm_mktemp_dir)/workspace"
 mkdir -p "$WS/repoA"
 git -C "$WS/repoA" init -q
 printf '#!/usr/bin/env bash\nexec sleep 120\n' > "$WS/stub.sh"; chmod +x "$WS/stub.sh"
@@ -27,18 +27,13 @@ printf 'WM_ROOTS=%q\n' "$WS" > "$CFG"
 
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0
 test_new_home
+wm_on_exit "rm -f '$CFG'"
 
 # The decoy: a session whose name has the crew session's name as a PREFIX,
 # standing in for wingman-main / a user's own session. The real crew session
 # does not exist yet - exactly the live failure shape.
 DECOY="$WM_TMUX_SESSION-main"
-
-cleanup() {
-  rm -f "$CFG"
-  tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
-  tmux kill-session -t "=$DECOY" 2>/dev/null
-}
-trap cleanup EXIT
+wm_track_tmux "$DECOY"
 
 tmux new-session -d -s "$DECOY" -n orchestrator "sleep 120"
 

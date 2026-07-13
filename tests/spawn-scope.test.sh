@@ -10,7 +10,7 @@ set -u
 SPAWN="$TEST_REPO/bin/spawn-crew"
 
 # Isolated workspace: a non-git root holding two git repos.
-WS="$(mktemp -d)/workspace"
+WS="$(wm_mktemp_dir)/workspace"
 mkdir -p "$WS/repoA" "$WS/repoB"
 git -C "$WS/repoA" init -q
 git -C "$WS/repoB" init -q
@@ -24,9 +24,7 @@ printf 'WM_ROOTS=%q\n' "$WS" > "$CFG"
 
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0
 test_new_home
-
-cleanup() { rm -f "$CFG"; tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null; }
-trap cleanup EXIT
+wm_on_exit "rm -f '$CFG'"
 
 # --- global scope ------------------------------------------------------------
 id="$("$SPAWN" --type software-analyst --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"

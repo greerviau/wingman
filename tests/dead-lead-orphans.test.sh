@@ -56,7 +56,7 @@ assert_eq "the re-adopt fires exactly once (idempotent)" "$(field_of lead1 updat
 # worktree is force-removed when the dead lead is stood down.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
-REPO_B="$(mktemp -d)/repoB"
+REPO_B="$(wm_mktemp_dir)/repoB"
 mkdir -p "$REPO_B"
 git -C "$REPO_B" init -q
 git -C "$REPO_B" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -87,7 +87,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # crew-standdown must not error, and an unset/empty worktree must be skipped safely.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
-REPO_C="$(mktemp -d)/repoC"
+REPO_C="$(wm_mktemp_dir)/repoC"
 mkdir -p "$REPO_C"
 git -C "$REPO_C" init -q
 git -C "$REPO_C" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
