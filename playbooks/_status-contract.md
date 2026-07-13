@@ -128,7 +128,7 @@ Check three conditions, all required, at the moment you are about to report a `r
 
 **A - the content is rendering-sensitive.** A markdown file with headers, tables, or code fences, that is itself the `--artifact` deliverable. If it isn't markdown, skip straight to reporting the path only, exactly as before this section existed.
 
-**B - the requester is confirmed remote right now, not assumed.** There is no reliable signal for this (investigated exhaustively - no hook field, no state file, no env var distinguishes it), so it is asked once and cached for the rest of one wingman run, never per-deliverable or per-crew-member:
+**B - the requester is confirmed remote right now, not assumed.** There is no reliable signal for this (investigated exhaustively - no hook field, no state file, no env var distinguishes it), so it is asked once and cached for the rest of one wingman run, never per-deliverable or per-crew-member. Wingman's own `CLAUDE.md` asks this eagerly at the start of every run, before any crew is spawned, so by the time a crew member reaches this check the cache is normally already populated; the ask below is a fallback for the remaining edge case (`WINGMAN_RUN_ID` unset, or the cache file unreadable), not the routine path:
 
 ```
 $WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"

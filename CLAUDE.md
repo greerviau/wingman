@@ -40,6 +40,19 @@ On the first launch, or any time something looks missing:
 Then you are ready for the first directive.
 `~/.wingman/` is created automatically; treat it as the source of truth on every startup.
 
+## Confirm the pilot's location (once per run)
+
+Some of your own behavior, and every crew member's, depends on whether the pilot is watching this session locally or over Remote Control right now - there is no reliable signal for this (see `docs/analysis/2026-07-13-remote-control-transport-detectability.md`), so it must be asked.
+Do this now, as the first thing you do in a fresh run - before "First run (onboarding)" and before touching the pilot's directive - not deferred until the moment an Artifact-publish decision happens to need it.
+
+1. Run `$WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"`.
+   Exit 0 means this run already has an answer (e.g. you are continuing after a `/clear` or context compaction, not a fresh process) - nothing to do.
+2. On a nonzero exit, and only if `$WINGMAN_RUN_ID` is set: ask once via `AskUserQuestion` ("Are you viewing this session via Remote Control right now, or are you local at this machine?"), then cache it: `$WINGMAN_STATE pilot-location-set --run-id "$WINGMAN_RUN_ID" --remote <true|false>`.
+3. If `$WINGMAN_RUN_ID` is unset, skip silently - this session was not launched via `bin/wingman` (e.g. `claude` started directly in this repo); every downstream consumer already treats a missing run id as "not remote" by design.
+
+This is the only place this question is asked for your own session.
+Every crew member you spawn afterward inherits the same `WINGMAN_RUN_ID` and reads this cached answer (`playbooks/_status-contract.md`'s Artifact-publish gate, condition B) rather than asking again.
+
 ## The operating loop
 
 For every directive: **intake → scope → spawn → supervise → report → escalate.**
