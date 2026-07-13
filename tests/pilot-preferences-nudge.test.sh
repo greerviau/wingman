@@ -26,6 +26,11 @@ for src in startup resume clear compact; do
   assert_contains "source=$src: names the artifact_linking prompt" "$out" "hosted Artifact link"
   assert_contains "source=$src: names the verbosity prompt" "$out" "narrate my own reasoning"
   assert_contains "source=$src: points at the one batched ask" "$out" "ONE batched AskUserQuestion"
+  # The same concrete, absolute command the guard derives and verifies, so the
+  # front-loaded instruction and the enforced one are one string.
+  assert_contains "source=$src: quotes the concrete absolute pref-set command" \
+    "$out" "$TEST_REPO/bin/lib/wm-state.py pref-set"
+  assert_contains "source=$src: fills in the actual run id" "$out" "run-nudge"
 done
 
 # --- partially answered: only what is left is named -----------------------------
@@ -41,7 +46,28 @@ wm_state pref-set --run-id run-nudge --key verbosity --value concise >/dev/null
 out="$(run_nudge startup)"
 assert_eq "fully answered: no output" "$out" ""
 
+# --- the state engine is unusable: say so, do not ask the unanswerable -----------
+# A session starting into a broken install learns it here, rather than through a
+# wall of denials it cannot act on: no preference can be cached, so the guard has
+# failed open and the questions are pointless.
+FIXTURE="$(mktemp -d)/broken-repo"
+mkdir -p "$FIXTURE/hooks/lib" "$FIXTURE/bin/lib"   # bin/lib deliberately left empty
+cp "$TEST_REPO/hooks/pilot-preferences-nudge.sh" "$FIXTURE/hooks/"
+cp "$TEST_REPO/hooks/lib/pilot-prefs.sh" "$FIXTURE/hooks/lib/"
+
+test_new_home
+export CLAUDE_PROJECT_DIR="$FIXTURE"
+export WINGMAN_RUN_ID="run-nudge-broken"
+out="$(printf '{"session_id":"sess-nudge","source":"startup"}' | bash "$FIXTURE/hooks/pilot-preferences-nudge.sh")"
+assert_contains "engine unusable: still emits additionalContext" "$out" '"additionalContext"'
+assert_contains "engine unusable: says the engine cannot be used" "$out" "unusable"
+assert_contains "engine unusable: says the guard has failed open" "$out" "failed open"
+assert_not_contains "engine unusable: does not ask questions it cannot cache" \
+  "$out" "ONE batched AskUserQuestion"
+
 # --- inactive shapes -------------------------------------------------------------
+test_new_home
+export CLAUDE_PROJECT_DIR="$TEST_REPO"
 unset WINGMAN_RUN_ID
 out="$(run_nudge startup)"
 assert_eq "no WINGMAN_RUN_ID: no output" "$out" ""

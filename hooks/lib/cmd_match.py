@@ -15,12 +15,27 @@ option flags to reach the script name.
 Hooks import this via PYTHONPATH=<hooks>/lib under the same `uv run
 --no-project python` interpreter they already embed.
 
-Known caveat: the uv flag-skipping treats every leading `-`-token as
-value-free. That is exactly right for `$WINGMAN_STATE`'s own flags
-(--no-project --quiet), but a value-taking flag (`uv run -p 3.12 pytest`)
-misparses - `3.12` is taken as the command, so the segment fails to resolve.
-That is a false negative only (a non-standard shape may dodge a deny rule); it
-never causes a wrong allow, since an unresolved segment matches no allowlist.
+A Python interpreter in front of a script (`python3 <abs>/wm-state.py ...`,
+`uv run --no-project --quiet python <abs>/wm-state.py ...`) is unwrapped the
+same way, so the script - not the interpreter - is what resolves. `-c` (inline
+code) and `-m` (module) are deliberately NOT unwrapped: they are not script
+invocations, inline code must never be resolved into whatever it happens to
+mention, and hooks/no-direct-edit-guard.sh detects a test runner on exactly the
+un-unwrapped shape (basename `python`/`python3` with `-m` in argv).
+
+Known caveats, both false-negative-only:
+
+- The uv flag-skipping treats every leading `-`-token as value-free. That is
+  exactly right for `$WINGMAN_STATE`'s own flags (--no-project --quiet), but a
+  value-taking flag (`uv run -p 3.12 pytest`) misparses - `3.12` is taken as the
+  command, so the segment fails to resolve.
+- The interpreter unwrap requires the script token to end in `.py`, keeping it
+  to the one shape it is meant for; a non-`.py` first argument leaves the
+  segment resolving to the interpreter.
+
+Neither ever causes a wrong allow: an unresolved segment (or one resolving to
+the interpreter) matches no allowlist, so a non-standard shape may dodge a deny
+rule but can never slip past a gate.
 """
 import os
 import re
@@ -28,6 +43,7 @@ import shlex
 
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _VAR_TOKEN_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+_PY_RE = re.compile(r"^python[0-9.]*$")
 
 
 def basename(tok):
@@ -105,6 +121,20 @@ def resolve_command(tokens):
         if not rest:
             return ("", [])
         return resolve_command(rest)
+    # A Python interpreter in front of a script resolves to the script, so
+    # `python3 <abs>/wm-state.py pref-set` reads as a wm-state.py call rather
+    # than as `python3`. Value-free interpreter flags only: `-c` (inline code)
+    # and `-m` (module) are not script invocations and are deliberately NOT
+    # unwrapped - inline code must never be resolved into whatever it happens
+    # to mention, and hooks/no-direct-edit-guard.sh matches `python -m pytest`
+    # on exactly this shape (basename `python` with `-m` present in argv).
+    if _PY_RE.match(b) and len(tokens) > 1:
+        rest = tokens[1:]
+        while rest and rest[0].startswith("-") and rest[0] not in ("-c", "-m"):
+            rest = rest[1:]
+        if rest and rest[0].endswith(".py"):
+            return resolve_command(rest)
+        return (b, tokens)
     return (b, tokens)
 
 

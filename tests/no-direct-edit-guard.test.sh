@@ -76,8 +76,16 @@ assert_contains "top-level: uv run pytest is denied" "$out" '"permissionDecision
 out="$(run_hook Bash "uv run --no-project --quiet pytest")"
 assert_contains "top-level: uv run --no-project --quiet pytest is denied" "$out" '"permissionDecision": "deny"'
 
+# The regression fence around cmd_match's Python-interpreter unwrap: an
+# interpreter in front of a *script* resolves to that script, but `-m` (a module)
+# is deliberately never unwrapped - this guard detects a test runner on exactly
+# the un-unwrapped shape (basename python/python3 with `-m` in argv), so both the
+# bare and the uv-wrapped module forms must keep resolving to the interpreter.
 out="$(run_hook Bash "python3 -m pytest")"
 assert_contains "top-level: python3 -m pytest is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "uv run --no-project python -m pytest")"
+assert_contains "top-level: uv run --no-project python -m pytest is denied" "$out" '"permissionDecision": "deny"'
 
 # Generic Bash - the orchestration wingman itself depends on - must stay open.
 for cmd in "gh pr view 26" "git status" "ls -la" "grep -rn foo ." "cat README.md" \

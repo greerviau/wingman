@@ -58,6 +58,12 @@ An unattended launch (e.g. a machine-local boot-time autostart with no human att
 This is measured behavior, not assumption - see `docs/analysis/2026-07-13-unattended-boot-launch-behavior.md`.
 
 This step is also mechanically enforced: `hooks/pilot-preferences-guard.sh` (a `PreToolUse` hook registered project-level in this repo's `.claude/settings.json`) denies every other tool call while any required preference is unanswered, so a session that skips this section is blocked rather than silently proceeding.
+`$WINGMAN_STATE` is the supported shape to type and is exported into every session from `bin/lib/common.sh`, so the commands above are the ones to use.
+You never depend on it being there, though: every denial the guard emits quotes a complete, absolute `pref-set` command with the run id already filled in, and it has verified through its own allowlist that it accepts that command before printing it.
+Run what the denial prints and the gate clears, whatever the environment looks like.
+If the guard ever cannot name a way out at all - the state engine is missing or broken, or its own escape command stops resolving - it fails open rather than denying: it stops gating, says so through a `systemMessage`, and records the reason in `$WINGMAN_HOME/prefs-guard-failopen-<session_id>`.
+Preferences then stay unanswered and every consumer applies its conservative default, so a broken install degrades loudly instead of stranding the run.
+
 This is the only place these questions are asked for your own session.
 Every crew member you spawn afterward inherits the same `WINGMAN_RUN_ID` and reads the cached answers (e.g. `playbooks/_status-contract.md`'s Artifact-publish gate) rather than asking again.
 
