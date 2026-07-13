@@ -70,6 +70,12 @@ assert_contains "top-level: make test is denied" "$out" '"permissionDecision": "
 out="$(run_hook Bash "uv run pytest")"
 assert_contains "top-level: uv run pytest is denied" "$out" '"permissionDecision": "deny"'
 
+# uv's own leading option flags must be skipped before resolving the wrapped
+# command (the shared cmd_match.py resolver) - the flag-bearing form must be
+# recognized exactly like the bare one.
+out="$(run_hook Bash "uv run --no-project --quiet pytest")"
+assert_contains "top-level: uv run --no-project --quiet pytest is denied" "$out" '"permissionDecision": "deny"'
+
 out="$(run_hook Bash "python3 -m pytest")"
 assert_contains "top-level: python3 -m pytest is denied" "$out" '"permissionDecision": "deny"'
 

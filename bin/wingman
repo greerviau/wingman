@@ -14,8 +14,8 @@ wm_state init >/dev/null
 # A fresh id per wingman run, stamped and exported so every crew member spawned
 # during this run (bin/spawn-crew embeds it into the generated launch script,
 # alongside WINGMAN_HOME) can tell whether a cached answer in
-# pilot-location.json (ask 3, condition B) was written during THIS run or a
-# stale prior one. uuidgen if available (matches spawn-crew's own session-id
+# preferences.json (the onboarding-preference store) was written during THIS
+# run or a stale prior one. uuidgen if available (matches spawn-crew's own session-id
 # generation), else a python uuid fallback - either way just needs to be unique
 # per run, not cryptographically meaningful.
 if wm_have uuidgen; then WINGMAN_RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"; else

@@ -28,12 +28,38 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r1 --type developer --objective x --repo /tmp --window wm-r1 --session-id sess-r1 >/dev/null
 wm_state crew-set --id r1 --status died >/dev/null
-out="$(WM_AGENT="$ALIVE_STUB" "$CR" r1 2>&1)"
+out="$(WM_AGENT="$ALIVE_STUB" WINGMAN_RUN_ID=run-resume-test "$CR" r1 2>&1)"
 assert_contains "resume reports one resumed" "$out" "1 resumed"
 assert_true "window wm-r1 exists after resume" \
   "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-r1"
 assert_eq "status flips to working" "$(field_of r1 status)" "working"
 assert_eq "parent is unchanged (top-level)" "$(field_of r1 parent)" ""
+# The generated launch script restores the full guard-relevant environment:
+# the resuming session's own WINGMAN_RUN_ID (so the resumed member reads the
+# current sit-down's cached preferences) and the record's own crew type (so a
+# resumed lead keeps its orchestrator hooks).
+launch="$(cat "$WINGMAN_HOME/crew/r1.resume.sh")"
+assert_contains "the resume script exports the resuming session's run id" \
+  "$launch" "export WINGMAN_RUN_ID='run-resume-test'"
+assert_contains "the resume script exports the record's crew type" \
+  "$launch" "export WINGMAN_CREW_TYPE='developer'"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- a resume outside any wingman run exports an empty run id ------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id r1b --type lead --objective x --repo /tmp --window wm-r1b --session-id sess-r1b >/dev/null
+wm_state crew-set --id r1b --status died >/dev/null
+_saved_run_id="${WINGMAN_RUN_ID:-}"
+unset WINGMAN_RUN_ID
+out="$(WM_AGENT="$ALIVE_STUB" "$CR" r1b 2>&1)"
+[ -n "$_saved_run_id" ] && export WINGMAN_RUN_ID="$_saved_run_id"
+assert_contains "resume without a run id still resumes" "$out" "1 resumed"
+launch="$(cat "$WINGMAN_HOME/crew/r1b.resume.sh")"
+assert_contains "no run id in the resuming environment exports empty" \
+  "$launch" "export WINGMAN_RUN_ID=''"
+assert_contains "a resumed lead's crew type is lead" \
+  "$launch" "export WINGMAN_CREW_TYPE='lead'"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- idempotency guard 1: --all-died twice resumes zero the second time -------

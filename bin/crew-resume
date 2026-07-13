@@ -78,9 +78,9 @@ resume_one() {
   _lines="$(printf '%s' "$_info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
-for k in ("repo", "session_id", "window", "worktree", "status"):
+for k in ("repo", "session_id", "window", "worktree", "status", "type"):
     print(d.get(k) or "")')"
-  { read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; } <<EOF
+  { read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type; } <<EOF
 $_lines
 EOF
 
@@ -145,7 +145,17 @@ EOF
     echo '#!/usr/bin/env bash'
     echo "cd $(quote "$_cwd") || exit 1"
     echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
+    # The resuming session's own run id, exactly as spawn-crew captures it at
+    # spawn time: a resume is an action of the CURRENT wingman sit-down, so the
+    # preferences answered for that sit-down govern the resumed member (the
+    # artifact-link-guard's pref-get and the status contract's condition B both
+    # key off it). Empty when the resume happens outside a wingman run.
+    echo "export WINGMAN_RUN_ID=$(quote "${WINGMAN_RUN_ID:-}")"
     echo "export WINGMAN_CREW_ID=$(quote "$_rid")"
+    # The crew type from the member's own roster record, so a resumed lead
+    # keeps its orchestrator-role hooks (no-direct-edit-guard.sh keys off
+    # WINGMAN_CREW_TYPE=lead) exactly like a freshly-spawned one.
+    echo "export WINGMAN_CREW_TYPE=$(quote "$_type")"
     echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
     echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
     [ -n "$_worktree" ] && echo "export WINGMAN_WORKTREE=$(quote "$_worktree")"

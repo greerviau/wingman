@@ -101,6 +101,76 @@ print(len(d['hooks']['PreToolUse']))
 ")"
 assert_eq "our entry is appended alongside the existing one" "$pretool_count" "2"
 
+# --- --event: registers under the named event, idempotently -------------------
+SETTINGS_EV="$WORK/settings-event.json"
+TRACKER_PATH="$TEST_REPO/hooks/artifact-publish-tracker.sh"
+
+if run_installer --settings "$SETTINGS_EV" --hook "$TRACKER_PATH" --event PostToolUse --check >/dev/null 2>&1; then
+  fail "--event check reports not registered before install"
+else
+  ok "--event check reports not registered before install"
+fi
+
+run_installer --settings "$SETTINGS_EV" --hook "$TRACKER_PATH" --event PostToolUse --matcher "Artifact|Bash" >/dev/null
+ev_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_EV'))
+print(d['hooks']['PostToolUse'][0]['hooks'][0]['command'])
+")"
+assert_eq "the entry lands under the named event" "$ev_cmd" "$TRACKER_PATH"
+ev_matcher="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_EV'))
+print(d['hooks']['PostToolUse'][0]['matcher'])
+")"
+assert_eq "the entry carries the given matcher" "$ev_matcher" "Artifact|Bash"
+
+if run_installer --settings "$SETTINGS_EV" --hook "$TRACKER_PATH" --event PostToolUse --check >/dev/null 2>&1; then
+  ok "--event check reports registered after install"
+else
+  fail "--event check reports registered after install"
+fi
+
+# The idempotency check keys off --event too: re-registering the same hook
+# under the same non-default event is a no-op...
+run_installer --settings "$SETTINGS_EV" --hook "$TRACKER_PATH" --event PostToolUse >/dev/null
+ev_count="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_EV'))
+print(len(d['hooks']['PostToolUse']))
+")"
+assert_eq "re-registering under the same event is a no-op" "$ev_count" "1"
+
+# ...while the same hook under a DIFFERENT event is a separate registration,
+# independent of the existing one (the tracker genuinely needs two events).
+if run_installer --settings "$SETTINGS_EV" --hook "$TRACKER_PATH" --event PostToolUseFailure --check >/dev/null 2>&1; then
+  fail "the same hook under a different event reads as not yet registered"
+else
+  ok "the same hook under a different event reads as not yet registered"
+fi
+run_installer --settings "$SETTINGS_EV" --hook "$TRACKER_PATH" --event PostToolUseFailure --matcher "Artifact|Bash" >/dev/null
+ev2_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_EV'))
+print(d['hooks']['PostToolUseFailure'][0]['hooks'][0]['command'])
+")"
+assert_eq "the second event's entry lands under its own key" "$ev2_cmd" "$TRACKER_PATH"
+ev_count="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_EV'))
+print(len(d['hooks']['PostToolUse']))
+")"
+assert_eq "the first event's group is untouched by the second" "$ev_count" "1"
+
+# Default event stays PreToolUse (the delegation guard's existing behavior).
+run_installer --settings "$SETTINGS_EV" --hook "$HOOK_PATH" >/dev/null
+def_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_EV'))
+print(d['hooks']['PreToolUse'][0]['hooks'][0]['command'])
+")"
+assert_eq "no --event defaults to PreToolUse" "$def_cmd" "$HOOK_PATH"
+
 # --- refuses to clobber invalid JSON ------------------------------------------
 SETTINGS3="$WORK/settings-broken.json"
 printf 'not valid json{' > "$SETTINGS3"
@@ -126,5 +196,28 @@ d = json.load(open('$SETTINGS4'))
 print(d['hooks']['PreToolUse'][0]['hooks'][0]['command'])
 " 2>/dev/null)"
 assert_eq "doctor's registered entry references the absolute hook path" "$doctor_cmd" "$HOOK_PATH"
+
+# doctor also registers the Artifact-publish contract pair: the tracker under
+# BOTH result events, the link guard under PreToolUse.
+assert_contains "doctor reports the artifact hooks registered" "$out" "registered Artifact-publish contract hooks"
+for ev in PostToolUse PostToolUseFailure; do
+  ev_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+print(d['hooks']['$ev'][0]['hooks'][0]['command'])
+" 2>/dev/null)"
+  assert_eq "doctor registers the tracker under $ev" "$ev_cmd" "$TEST_REPO/hooks/artifact-publish-tracker.sh"
+done
+link_found="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/artifact-link-guard.sh' in cmds else 'no')
+" 2>/dev/null)"
+assert_eq "doctor registers the link guard under PreToolUse" "$link_found" "yes"
+
+# Re-running doctor is a no-op for the already-registered set.
+out2="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a second doctor run reports the artifact hooks already registered" "$out2" "Artifact-publish contract hooks registered"
 
 test_summary

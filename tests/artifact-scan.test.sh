@@ -37,7 +37,15 @@ else
 fi
 
 # --- gitleaks missing: fails closed, never silently skipped -------------------
-out="$(env PATH="/usr/bin:/bin" "$SCRIPT" "$CLEAN")"; rc=$?
+# Simulated with a stub PATH holding only the externals this code path needs,
+# never by pointing PATH at real system dirs - gitleaks may legitimately be
+# installed in /usr/bin, which would silently void the simulation.
+NOGL_BIN="$FIXDIR/no-gitleaks-bin"
+mkdir -p "$NOGL_BIN"
+for _t in bash sh dirname basename grep sed cat uname; do
+  _p="$(command -v "$_t" 2>/dev/null)" && ln -s "$_p" "$NOGL_BIN/$_t"
+done
+out="$(env PATH="$NOGL_BIN" "$SCRIPT" "$CLEAN")"; rc=$?
 assert_eq "a file cannot be verified without gitleaks - fails closed" "$rc" "1"
 assert_contains "the reason names the missing dependency" "$out" "fail:gitleaks not installed"
 

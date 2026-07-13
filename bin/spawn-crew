@@ -161,9 +161,9 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   echo '#!/usr/bin/env bash'
   echo "cd $(quote "$REPO") || exit 1"
   echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
-  # The current wingman run's id (ask 3, condition B), so this member can tell
-  # whether a cached pilot-location.json answer was written during this same run
-  # (still valid) or a stale prior one (must ask again). Empty if wingman wasn't
+  # The current wingman run's id, so this member can tell whether a cached
+  # preferences.json answer was written during this same run (still valid) or a
+  # stale prior one (must ask again). Empty if wingman wasn't
   # launched via bin/wingman (no run id stamped) - a member then treats the cache
   # as never valid, the same conservative default as a missing/unreadable file.
   echo "export WINGMAN_RUN_ID=$(quote "${WINGMAN_RUN_ID:-}")"
