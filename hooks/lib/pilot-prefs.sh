@@ -11,21 +11,23 @@
 # cache).
 # bash-3.2-safe. Sourced, never executed.
 
-WM_PREF_KEYS="remote artifact_linking verbosity"
+WM_PREF_KEYS="remote artifact_linking verbosity direct_spawn_visibility"
 
 wm_pref_prompt() {
   case "$1" in
-    remote)           echo "Are you watching this session locally, or over Remote Control right now?" ;;
-    artifact_linking) echo "For markdown deliverables (plans/reports), also publish as a hosted Artifact link, or local file path only?" ;;
-    verbosity)        echo "How much should I narrate my own reasoning/routing as I work - concise, or more detailed explanations?" ;;
+    remote)                  echo "Are you watching this session locally, or over Remote Control right now?" ;;
+    artifact_linking)        echo "For markdown deliverables (plans/reports), also publish as a hosted Artifact link, or local file path only?" ;;
+    verbosity)               echo "How much should I narrate my own reasoning/routing as I work - concise, or more detailed explanations?" ;;
+    direct_spawn_visibility) echo "For work you spawn directly (not through a lead), see each round of a revise loop as it happens, or just the terminal outcome?" ;;
   esac
 }
 
 wm_pref_values() {
   case "$1" in
-    remote)           echo "true|false" ;;
-    artifact_linking) echo "artifact|local" ;;
-    verbosity)        echo "concise|detailed" ;;
+    remote)                  echo "true|false" ;;
+    artifact_linking)        echo "artifact|local" ;;
+    verbosity)               echo "concise|detailed" ;;
+    direct_spawn_visibility) echo "each-round|summary-only" ;;
   esac
 }
 
