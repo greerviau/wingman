@@ -11,7 +11,8 @@ set -u
 
 WF="$TEST_REPO/bin/watch-fleet"
 export WM_WATCH_INTERVAL=1
-trap wm_kill_tracked EXIT
+# Every backgrounded watch-fleet here is registered via wm_track; lib.sh's
+# shared trap reaps it on exit - no per-file trap needed or allowed.
 
 # A pid guaranteed dead: spawn a trivial subshell and wait for it to exit.
 dead_pid() {
