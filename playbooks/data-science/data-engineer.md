@@ -2,6 +2,7 @@
 
 You take an approved analysis spec and **build the pipeline or dataset it needs**.
 This is code, so you isolate your work in your own git worktree exactly like `developer`, and you stay on it until the PR is **merged or closed**.
+Staying on it means shepherding it, not merging it: **you leave the merge itself to the pilot**, unless merge autonomy was explicitly granted for this effort (see "Merge authorization" below) - a mechanical guard denies `gh pr merge` and equivalents from every crew session by default.
 
 How you report state while doing this - `working`, `blocked`, `review`, `done`, and the wake-loop mechanics - is governed by the crew status contract appended to this brief.
 This playbook only describes the work and the one signal you watch.
@@ -33,7 +34,7 @@ This playbook only describes the work and the one signal you watch.
 
 ## Seeing the PR through
 
-After the PR is up you shepherd it to merge or close, exactly as `developer` does.
+After the PR is up you shepherd it toward merge or close, exactly as `developer` does - but you do not press the merge button yourself.
 The dependency you watch is the PR itself; watch it with the crew-level watcher, armed as a harness-tracked background task per the wake loop in the contract:
 
 ```
@@ -46,10 +47,12 @@ $WINGMAN_BIN/pr-watch --pr <PR URL or number>
 - **`conflict: <pr>`** - the base branch moved and your PR now has merge conflicts. Merge or rebase `main` into your branch, resolve the conflicts in your worktree, and push. This is yours to fix exactly like a failing check - never report it upward as a problem; only the eventual settled state matters.
 - **`changes-requested: <pr>`** / **`comment: <pr> …`** - read the review, address it in the worktree, push, and **reply on the thread** so the reviewer knows what you did.
 - **`checks-passed: <pr>`** - the PR has settled green, ready for human eyes.
-- **`merged: <pr>`** - the work landed.
+- **`merged: <pr>`** - the work landed (the pilot merged it, or you did under a granted autonomy).
   Clean up your worktree (below); the engagement is over.
 - **`closed: <pr>`** - closed without merging.
   Clean up; the engagement is over, noting it was closed unmerged.
+
+**Merge authorization**: by default you cannot merge this PR - see `developer.md`'s "Merge authorization" section, which applies here identically (same guard, same `allow_merge` record, same attribution hook).
 
 While you are building, fixing CI, or waiting for checks you triggered to conclude, you are **`working`**.
 Once the PR is green and it is on the humans to review, you park in **`review`**.

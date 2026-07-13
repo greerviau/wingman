@@ -3,6 +3,7 @@
 You take a plan and **implement + ship it**, then **see it all the way through**.
 You isolate your work in your own git worktree, implement the plan, commit, push, and open a PR - and then you stay on it until the PR is **merged or closed**.
 One session owns the PR from first commit to final disposition; you are not finished when the PR opens.
+Staying on it means shepherding it, not merging it: **you leave the merge itself to the pilot**, unless merge autonomy was explicitly granted for this effort (see "Merge authorization" below) - a mechanical guard denies `gh pr merge` and equivalents from every crew session by default, so this is enforced, not just a convention to remember.
 
 How you report state while doing this - `working`, `blocked`, `review`, `done`, and the wake-loop mechanics - is governed by the crew status contract appended to this brief.
 This playbook only describes the work and the one signal you watch.
@@ -37,7 +38,8 @@ This playbook only describes the work and the one signal you watch.
 
 ## Seeing the PR through
 
-After the PR is up you shepherd it to merge or close.
+After the PR is up you shepherd it toward merge or close - fix CI, resolve conflicts, address review feedback - but **you do not press the merge button yourself**.
+Once the PR is green, park in `review` and wait: the pilot merges it (or closes it), or explicitly grants you merge autonomy for this one effort.
 The dependency you watch is the PR itself; watch it with the crew-level watcher, armed as a harness-tracked background task per the wake loop in the contract:
 
 ```
@@ -50,10 +52,18 @@ $WINGMAN_BIN/pr-watch --pr <PR URL or number>
 - **`conflict: <pr>`** - the base branch moved and your PR now has merge conflicts. Merge or rebase `main` into your branch, resolve the conflicts in your worktree, and push. This is yours to fix exactly like a failing check - never report it upward as a problem; only the eventual settled state matters.
 - **`changes-requested: <pr>`** / **`comment: <pr> …`** - read the review, address it in the worktree, push, and **reply on the thread** (`gh pr comment`, or reply to the specific review comment) so the reviewer knows what you did.
 - **`checks-passed: <pr>`** - the PR has settled green (or the repo has no CI), so it is ready for human eyes.
-- **`merged: <pr>`** - the work landed.
+- **`merged: <pr>`** - the work landed (the pilot merged it, or you did under a granted autonomy - either way this fires once GitHub reports it merged).
   Clean up your worktree (below); the engagement is over.
 - **`closed: <pr>`** - closed without merging.
   Clean up; the engagement is over, noting it was closed unmerged.
+
+### Merge authorization
+
+By default you **cannot** merge this PR - a `PreToolUse` hook (`hooks/no-merge-guard.sh`) denies `gh pr merge`, a `gh api` call hitting the merge endpoint, and a direct push to the default branch, from every crew session.
+This is deliberate, not a bug to work around: per issue #46, crew never merge without the pilot's explicit, per-effort authorization, because a crew session acts under the pilot's own GitHub credentials - an unauthorized agent merge would be indistinguishable from the pilot's own.
+Once the PR is green, `review` is where you stop and wait; the pilot merges it directly, or grants **this specific effort** merge autonomy (visible on your own crew record as `allow_merge: true` - set only by the pilot or your lead, never by you on yourself, and never a global default).
+If it is granted, `gh pr merge` then succeeds, and a `PostToolUse` hook (`hooks/merge-attribution-tracker.sh`) automatically posts a PR comment attributing the merge to you - do not also try to leave that marker yourself; the hook's record is the one that counts.
+If you believe this PR urgently needs your own merge and autonomy hasn't been granted, report `blocked` and say so - never work around the guard.
 
 How this maps to your state (the contract's rule applied to this work): while you are writing code, fixing CI, or waiting for the checks you just triggered to conclude, there is active work in flight, so you are **`working`**.
 Once the PR is green and it is on the humans to review, you are delivered-and-waiting, so you park in **`review`**.

@@ -6,7 +6,8 @@
 #   spawn-crew --type <software-analyst|architect|developer|reviewer|lead> (--repo <path-or-name> | --scope global) \
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
-#              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
+#              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] \
+#              [--allow-merge]
 #
 # --repo grounds the member in one git checkout (the default). --scope global
 # grounds it at the workspace root with every discovered repo added, so it can work
@@ -17,6 +18,16 @@
 # Model selection: an explicit --model always wins; otherwise $WM_MODEL (if set)
 # is the default for every spawn; with neither, the agent CLI's own default stands.
 #
+# --allow-merge (issue #46): grants THIS member merge autonomy for its own effort
+# from the moment it spawns - hooks/no-merge-guard.sh otherwise denies `gh pr
+# merge` and equivalents from every crew session by default. Explicit (only ever
+# set here, by the caller spawning the member, never by the member itself),
+# per-effort (recorded on this one crew record, nothing global), and visible
+# (`bin/crew-list` / board.md show it). Omit it (the default) and grant later
+# instead if the decision to allow a merge is made mid-session: `$WINGMAN_STATE
+# crew-set --id <id> --allow-merge true` takes effect on the member's very next
+# merge attempt, no respawn required.
+#
 # Remote Control: every crew member launches Remote-Control-visible by default
 # (reachable from claude.ai/code, not only via tmux attach), as name "wm-<id>".
 # Set WM_REMOTE_CONTROL= (empty) to disable.
@@ -24,7 +35,7 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
-TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"
+TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --type)      TYPE="$2"; shift 2 ;;
@@ -35,8 +46,9 @@ while [ $# -gt 0 ]; do
     --input)     INPUT="$2"; shift 2 ;;
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
+    --allow-merge) ALLOW_MERGE=1; shift 1 ;;
     --list-types) wm_crew_types; exit 0 ;;
-    -h|--help)   sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,22p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
@@ -240,10 +252,11 @@ WINDOW_ID="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "
 # --parent stamps ownership from the spawning crew's id: empty for wingman (the
 # top orchestrator has no $WINGMAN_CREW_ID), the lead's own id when a lead spawns.
 # Owner-scoping (surfacing, the watcher, crew-list) all fall out of this field.
-wm_state crew-add --id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
+ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
-  --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" \
-  --worktree "$WORKTREE" >/dev/null
+  --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE")
+[ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
+wm_state crew-add "${ADD_ARGS[@]}" >/dev/null
 
 # --- deliver the opening objective as the first user message -----------------
 # A small head start off the window launch; wm_tmux_send_message then waits for the
@@ -269,5 +282,6 @@ if [ "$SCOPE" = global ]; then
 else
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 fi
+[ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort (issue #46)"
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
 echo "$ID"
