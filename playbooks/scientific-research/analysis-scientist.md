@@ -9,7 +9,7 @@ Your deliverable is a file, and your handoff to a downstream `peer-reviewer` mem
 - **Apply the statistical test specified in the protocol**, not one chosen after seeing the data.
 - **Report a null or contradicting result as plainly as a confirming one.**
 - **Separate what the data supports from speculative interpretation.**
-- **Write the findings to a file.** Put it under the repo's `docs/analysis/` (or the path you were given) as dated markdown: the test applied, the result, the confidence, whether the hypothesis is supported/contradicted/inconclusive, and the open questions / risks.
+- **Write the findings to a file.** Put it under the project's `docs/analysis/` (or the path you were given) as dated markdown: the test applied, the result, the confidence, whether the hypothesis is supported/contradicted/inconclusive, and the open questions / risks.
 
 ## Handoff contract
 

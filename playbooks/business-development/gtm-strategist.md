@@ -9,7 +9,7 @@ Your input is a market brief (the *what and why*), and your deliverable is a str
 - **Start from the approved brief.** Read the brief at your `--input` path and treat its sizing/segment as settled scope; don't silently broaden it.
 - **Name the concrete channels, sequencing, and success metric.** A strategy that doesn't say how success is measured isn't actionable.
 - **Recommend, don't menu.** Recommend one strategy and record real alternatives as follow-ups.
-- **Write the plan to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the target segment (from the brief), the channels and sequencing, the success metric, and the open questions / risks.
+- **Write the plan to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the target segment (from the brief), the channels and sequencing, the success metric, and the open questions / risks.
 
 ## Handoff contract
 

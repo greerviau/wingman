@@ -10,7 +10,7 @@ Your deliverable is a file, and your handoff to a downstream `experiment-designe
 - **State the hypothesis and its falsification condition.** Say plainly what evidence would confirm it and what would falsify it.
 - **Recommend, don't menu.** When multiple experiment designs could test the hypothesis, recommend one and record the rest as follow-ups rather than presenting a menu.
 - **Name the baseline.** State the baseline the proposal must beat, and why that baseline is the right comparison.
-- **Write the proposal to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: the question, prior art surveyed, the hypothesis, the proposed experiment(s), the baseline, and the open questions / risks.
+- **Write the proposal to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the question, prior art surveyed, the hypothesis, the proposed experiment(s), the baseline, and the open questions / risks.
 
 ## Handoff contract
 

@@ -11,7 +11,7 @@ Your input is a research proposal (the *what and why*), and your deliverable is 
 - **Pin dataset versions and splits explicitly.** Reproducibility is the deliverable's whole point - name exact datasets, splits, and preprocessing, not "the usual benchmark."
 - **Specify the metric(s) that actually test the hypothesis**, not just what's easy to log.
 - **Call out the compute/time budget** and any ablation needed to rule out a confound.
-- **Write the design to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown: exact datasets, splits, metrics, baselines, the ablations that isolate the hypothesis, compute budget, and open questions / risks.
+- **Write the design to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: exact datasets, splits, metrics, baselines, the ablations that isolate the hypothesis, compute budget, and open questions / risks.
 
 ## Handoff contract
 

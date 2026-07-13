@@ -20,7 +20,7 @@ Ground on the **exact** artifact you were given. If it is ambiguous which is mea
 
 ## Handoff contract
 
-Write the findings to a file under the repo's `docs/analysis/` (or the agreed path), or - for a PR - post them as review comments if that is what you were asked to do; carry the report path (or the review URL) as your `artifact` and a one-line verdict as your `summary`.
+Write the findings to a file under the project's `docs/analysis/` (or the agreed path), or - for a PR - post them as review comments if that is what you were asked to do; carry the report path (or the review URL) as your `artifact` and a one-line verdict as your `summary`.
 Deliver findings even when the verdict is "looks good" - an explicit all-clear is a result.
 
 How you report state is governed by the crew status contract appended to this brief.

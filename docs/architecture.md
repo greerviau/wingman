@@ -132,7 +132,7 @@ It is absent by default; the defaults cover the common case.
 
 ## Spawning crew (the recipe)
 
-Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target repo:
+Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target project:
 
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
@@ -140,18 +140,24 @@ bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
 ```
 
-The script resolves the repo, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
+The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
 It prints the crew `id`.
 
 Pass `--scope global` (instead of `--repo`) to ground a crew member at the global project scope: it launches at the workspace root with every discovered repo added, so it can read and work across all of them and choose the target repo(s) itself.
 Use it for cross-repo work or when the repo is genuinely unclear.
 
+The git/branch/PR workflow (worktrees, branches, opening a PR, the no-merge guard) is conditional on git-ness, not universal: it applies whenever the crew type is a `software-development` role (`bin/spawn-crew` refuses to spawn one against a target that isn't a confirmed git repo), or whenever the target project happens to be a confirmed git repo regardless of category.
+`bin/spawn-crew` detects this mechanically at spawn time - for `--repo` targets, `git -C "$REPO" rev-parse --show-toplevel` compared (physically, symlink-resolved) against `$REPO` itself, so a directory merely nested inside a repo reads as non-git - and exports the result as two roster-scoped env vars: `WINGMAN_IS_GIT=true|false` and, only when a repo, `WINGMAN_HAS_REMOTE=true|false` (whether `origin` is configured, i.e. whether there's anywhere to open a PR against).
+Both are a real tri-state: absent (never exported for `--scope global`, and not carried forward by `bin/crew-resume` for a pre-change roster record) means "not yet known - detect it yourself" for whatever directory the member decides to work in, and must never be conflated with `false`.
+A non-software-development member (e.g. `data-engineer`, `ml-engineer`, `experimentalist`) branches on these two variables to choose between the full worktree/branch/PR flow, a git-but-no-remote local-commits-only flow, or a plain-files-no-git flow; `developer` has no non-git fallback by design and blocks if it ever finds itself in one.
+
 ## State home - `~/.wingman/`
 
 Machine-local runtime state, created on first run, never committed:
 
-- `crew.json` - the live roster (id, type, session id, tmux window name and window id, repo, status, `parent`).
+- `crew.json` - the live roster (id, type, session id, tmux window name and window id, repo, status, `parent`, `is_git`/`has_remote`).
   `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
+  `is_git`/`has_remote` are recorded for repo scope only (`null`/absent for global scope) - see "Spawning crew" above.
 - `crew/<id>.json` - each crew member's distilled status record.
 - `board.md` - the human-readable render of the roster, its Active section indented as a tree so a reader sees the org.
 - `watch.pid` / `watch.beat` - wingman's (owner `""`) watcher cycle's pid and liveness beacon.

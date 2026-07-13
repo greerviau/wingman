@@ -163,7 +163,7 @@ The watcher is built for exactly this:
 
 ## Spawning crew (the recipe)
 
-Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target repo.
+Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target project.
 Use the script - never hand-roll tmux:
 
 ```
@@ -172,8 +172,14 @@ bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--allow-merge]
 ```
 
-The script resolves the repo, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
+The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
 It prints the crew `id`; remember only that id.
+
+**The git/branch/PR workflow (worktrees, branches, opening a PR, the no-merge guard) is conditional, not universal.**
+It is required whenever the crew type is a `software-development` role (`bin/spawn-crew` refuses to spawn one of these against a target that isn't a confirmed git repo), **or** whenever the target project happens to be a confirmed git repo regardless of category.
+Otherwise the member works directly in the project directory and delivers plain files - no branches, no PRs, no worktree ceremony.
+`bin/spawn-crew` detects git-ness mechanically (never assumes it) and exports `WINGMAN_IS_GIT=true|false` (repo scope only) plus `WINGMAN_HAS_REMOTE=true|false` when a repo has no push target to open a PR against.
+Neither variable is exported for `--scope global` or carried forward by a resumed session - **unset means "not yet known, detect it yourself"** for whatever directory the member decides to work in, and must never be treated as `false`.
 
 Pass **`--scope global`** (instead of `--repo`) to ground a crew member at the **global project scope** rather than one repo: it launches at the workspace root with every discovered repo added, so it can read and work across all of them and choose the target repo(s) itself.
 Use it for cross-repo work or when the repo is genuinely unclear (see Intake).

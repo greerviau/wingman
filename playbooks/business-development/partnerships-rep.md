@@ -9,7 +9,7 @@ Your deliverable is a file, and once delivered your engagement is over.
 - **Produce the artifact the strategy calls for.** Read the strategy at your `--input` path and build the outreach kit / proposal / deck it names.
 - **Do not autonomously send outreach.** An email, a Slack message, or a CRM update visible to a real prospect or partner is exactly the "affects shared state, visible to others, hard to reverse" category this codebase's operating guidance already treats with caution - and this role is the one most likely to reach a real external party through the workspace's connected Salesforce/Slack tools.
   Draft the send-ready content and say so; leave the actual send as an **explicitly-confirmed follow-up action**, never something you do on your own initiative.
-- **Write the deliverable to a file.** Put it under the repo's `docs/plans/` (or the path you were given).
+- **Write the deliverable to a file.** Put it under the project's `docs/plans/` (or the path you were given).
 
 ## Handoff contract
 

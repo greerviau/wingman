@@ -6,7 +6,7 @@ Wingman is a long-lived Claude Code session that runs a **crew** of agents for y
 You (the pilot) give it high-level directives - *"implement this feature"*, *"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real work to a crew, tracks their status, raises only real decisions to you, and keeps its own context clean.
 It orchestrates; it does not do the heavy lifting.
 
-Each crew member is an **independent `claude` session in its own tmux window**, launched in your target repo - so you can watch it, type into it, or take it over live, and it survives even if wingman itself is killed.
+Each crew member is an **independent `claude` session in its own tmux window**, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman itself is killed.
 
 ## Quick start
 

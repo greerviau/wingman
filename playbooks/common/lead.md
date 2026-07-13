@@ -25,7 +25,7 @@ Your reports are **automatically owned by you** - `bin/spawn-crew` stamps each w
 - **Announce before you hire.** State your intended crew (the roles and count) before spawning more than ~2 at once. If the effort needs a large fan-out, surface that upward (set your `summary`/`blocker`) for wingman's awareness before committing - a lead running a whole team is the most expensive thing in the system.
 - **Spawn your own crew.** You have the same scripts:
   ```
-  bin/spawn-crew --type <software-analyst|architect|developer|reviewer> --repo <name-or-path> --objective "<task>" \
+  bin/spawn-crew --type <software-analyst|architect|developer|reviewer> (--repo <name-or-path> | --scope global) --objective "<task>" \
     [--input <plan>] [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
   bin/crew-say <id> "<message>"     # answer a worker, or introduce two peers
   bin/crew-ask <id> "<question>"    # ask a worker a direct question, capture its answer

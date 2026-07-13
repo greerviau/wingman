@@ -128,7 +128,7 @@ A reviewer's internal "approve" is not a GitHub review decision, and a developer
 
 ## Keep detail out of chat, on disk
 
-Substantial output (an analysis, a design, a plan) goes in a **file** (under the repo's `docs/` or the agreed path), and your status carries only the path.
+Substantial output (an analysis, a design, a plan) goes in a **file** (under the project's `docs/` or the agreed path), and your status carries only the path.
 Do not paste large content back; wingman never ingests it.
 
 Write these artifacts formally, for a reader outside wingman.
