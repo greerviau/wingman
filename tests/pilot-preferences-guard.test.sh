@@ -112,6 +112,49 @@ assert_eq "the expanded uv form of pref-set is allowed after the marker" "$out" 
 out="$(run_bash "\$WINGMAN_STATE pref-set --run-id run-guard --key remote --value true")"
 assert_eq "the literal unexpanded \$WINGMAN_STATE pref-set is allowed after the marker" "$out" ""
 
+# --- interpreter-wrapper shapes -------------------------------------------------
+# A Python interpreter in front of the script resolves to the script, so the
+# shape a session improvising the escape hatch from stale memory produces is
+# recognized rather than denied as a bare `python`.
+out="$(run_bash "uv run --no-project --quiet python $TEST_REPO/bin/lib/wm-state.py pref-set --run-id run-guard --key remote --value true")"
+assert_eq "the uv-wrapped interpreter form of pref-set is allowed" "$out" ""
+
+out="$(run_bash "python3 $TEST_REPO/bin/lib/wm-state.py prefs-list --run-id run-guard")"
+assert_eq "the bare python3 interpreter form of prefs-list is allowed" "$out" ""
+
+# ...but `-m` and `-c` are never unwrapped: a module and inline code are not
+# script invocations, so they resolve to the interpreter and match no allowlist.
+out="$(run_bash "uv run --no-project --quiet python -m http.server")"
+assert_contains "python -m <module> is not unwrapped (still denied)" "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash "python3 -c 'import os; os.system(\\\"rm -rf /tmp/x\\\")'")"
+assert_contains "python -c <code> is not unwrapped (still denied)" "$out" '"permissionDecision": "deny"'
+
+# --- the deny reason quotes a command the guard has verified it accepts ----------
+# The core of issue #49: the guard must never instruct a shape its own allowlist
+# would reject. The concrete absolute command is always named; the $WINGMAN_STATE
+# short form only when it, too, resolves.
+out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
+assert_contains "the denial quotes the concrete absolute pref-set command" \
+  "$out" "$TEST_REPO/bin/lib/wm-state.py pref-set"
+assert_contains "the denial fills in the actual run id" "$out" "run-guard"
+assert_contains "with WINGMAN_STATE exported the denial also names the short form" \
+  "$out" '$WINGMAN_STATE pref-set'
+
+out="$(WINGMAN_STATE= run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
+assert_contains "with WINGMAN_STATE unset the denial still quotes the absolute command" \
+  "$out" "$TEST_REPO/bin/lib/wm-state.py pref-set"
+assert_not_contains "with WINGMAN_STATE unset the denial does not name the short form" \
+  "$out" '$WINGMAN_STATE pref-set'
+
+# --- fail-open does NOT trigger on the healthy path ------------------------------
+# The regression fence around the valve: a normal unanswered run denies, and
+# leaves no fail-open marker behind.
+assert_contains "a healthy unanswered run still denies" "$out" '"permissionDecision": "deny"'
+assert_not_contains "a healthy unanswered run does not fail open" "$out" "FAILED OPEN"
+assert_false "no fail-open marker is written on the healthy path" \
+  "[ -f '$WINGMAN_HOME/prefs-guard-failopen-$SID' ]"
+
 # --- two of three answered: the denial narrows to what is left -----------------
 wm_state pref-set --run-id run-guard --key remote --value true >/dev/null
 wm_state pref-set --run-id run-guard --key artifact_linking --value artifact >/dev/null
@@ -130,6 +173,66 @@ out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
 assert_eq "Edit is allowed once all preferences are answered" "$out" ""
 out="$(run_bash "git status")"
 assert_eq "generic Bash is allowed once all preferences are answered" "$out" ""
+
+# --- fail-open: the state engine is unreadable -----------------------------------
+# A guard that denies every tool call while unable to name a way out strands the
+# only actor that can satisfy it. With no wm-state.py to run, no preference can
+# ever be cached, so the guard must get out of the way - loudly - rather than
+# deny forever (issue #49's worst case).
+FIXTURE="$(mktemp -d)/broken-repo"
+mkdir -p "$FIXTURE/hooks/lib" "$FIXTURE/bin/lib"   # bin/lib deliberately left empty
+cp "$TEST_REPO/hooks/pilot-preferences-guard.sh" "$FIXTURE/hooks/"
+cp "$TEST_REPO/hooks/lib/pilot-prefs.sh" "$TEST_REPO/hooks/lib/cmd_match.py" "$FIXTURE/hooks/lib/"
+
+test_new_home
+export CLAUDE_PROJECT_DIR="$FIXTURE"
+export WINGMAN_RUN_ID="run-broken"
+BSID="sess-broken"
+
+broken_edit() {
+  printf '{"tool_name":"Edit","session_id":"%s","tool_input":{"file_path":"/x.py"}}' "$BSID" \
+    | bash "$FIXTURE/hooks/pilot-preferences-guard.sh"
+}
+
+out="$(broken_edit)"
+assert_not_contains "engine unreadable: the call is NOT denied" "$out" '"permissionDecision"'
+assert_contains "engine unreadable: a systemMessage is emitted" "$out" "systemMessage"
+assert_contains "engine unreadable: it says the guard failed open" "$out" "FAILED OPEN"
+assert_true "engine unreadable: the fail-open marker is written" \
+  "[ -f '$WINGMAN_HOME/prefs-guard-failopen-$BSID' ]"
+
+out="$(broken_edit)"
+assert_eq "engine unreadable: the second call is allowed with no repeat message" "$out" ""
+
+# --- fail-open: the escape hatch does not resolve --------------------------------
+# The third condition, isolated: the engine is fine and Python still runs, but
+# $WM_UV is a wrapper cmd_match cannot see through, so the guard's own canonical
+# pref-set command would not pass its own allowlist. Verified as a genuine probe
+# failure (it resolves to the wrapper's basename, not wm-state.py) before the
+# guard is asked how it reacts.
+RUNNER="$(mktemp -d)/wm-run.sh"
+printf '#!/usr/bin/env bash\nexec uv run --no-project --quiet "$@"\n' > "$RUNNER"
+chmod +x "$RUNNER"
+
+probe="$(PYTHONPATH="$TEST_REPO/hooks/lib" uv run --no-project --quiet python -c "
+from cmd_match import command_segments, resolve_command
+b, _ = resolve_command(command_segments('$RUNNER $TEST_REPO/bin/lib/wm-state.py pref-set')[0])
+print(b)")"
+assert_eq "the chosen WM_UV override provably fails the probe" "$probe" "wm-run.sh"
+
+test_new_home
+export CLAUDE_PROJECT_DIR="$TEST_REPO"
+export WINGMAN_RUN_ID="run-probefail"
+PSID="sess-probefail"
+
+out="$(printf '{"tool_name":"Edit","session_id":"%s","tool_input":{"file_path":"/x.py"}}' "$PSID" \
+  | WM_UV="$RUNNER" bash "$GUARD")"
+assert_not_contains "unresolvable escape hatch: the call is NOT denied" "$out" '"permissionDecision"'
+assert_contains "unresolvable escape hatch: it says the guard failed open" "$out" "FAILED OPEN"
+assert_contains "unresolvable escape hatch: the reason names the probe failure" \
+  "$out" "does not resolve to an allowed shape"
+assert_true "unresolvable escape hatch: the fail-open marker is written" \
+  "[ -f '$WINGMAN_HOME/prefs-guard-failopen-$PSID' ]"
 
 # --- inactive shapes -------------------------------------------------------------
 test_new_home

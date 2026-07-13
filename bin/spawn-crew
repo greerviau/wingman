@@ -185,7 +185,9 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   echo "export WINGMAN_CREW_TYPE=$(quote "$TYPE")"
   # The full state-engine invocation, run through uv (--no-project so it ignores
   # the target repo's own pyproject). Crew run it unquoted so it word-splits.
-  echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
+  # Built once in bin/lib/common.sh, so a crew session and wingman's own session
+  # carry the identical string and the hooks that resolve it cannot drift.
+  echo "export WINGMAN_STATE=$(quote "$WINGMAN_STATE")"
   # The wingman bin/ dir, so a crew grounded in another repo can still invoke the
   # crew-level tools it needs by absolute path (e.g. $WINGMAN_BIN/pr-watch).
   echo "export WINGMAN_BIN=$(quote "$WM_BIN")"

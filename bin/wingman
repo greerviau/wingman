@@ -23,14 +23,6 @@ if wm_have uuidgen; then WINGMAN_RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')
 fi
 export WINGMAN_RUN_ID
 
-# The state-engine invocation, exported for wingman's own session exactly as
-# bin/spawn-crew exports it into every crew session: CLAUDE.md instructs this
-# session to run `$WINGMAN_STATE pref-set ...` / `prefs-list ...`, and the
-# PreToolUse preference guard resolves that literal shape by expanding the
-# variable from the session environment - both need the export to exist.
-WINGMAN_STATE="$WM_UV $WM_STATE_PY"
-export WINGMAN_STATE
-
 # Register this session's own pane (ask 2, wingman-side): if running inside tmux
 # ($TMUX_PANE set - the common case the existing crew tooling already assumes
 # elsewhere), record it so bin/watch-fleet can read-only watch it for a dropped

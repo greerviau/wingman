@@ -30,6 +30,19 @@ export WM_PLAYBOOKS
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
 WM_STATE_PY="$WM_LIB/wm-state.py"
 
+# The state engine as a session-facing command string: the exact shape CLAUDE.md
+# and playbooks/_status-contract.md tell every session to run ($WINGMAN_STATE
+# prefs-list / pref-set / crew-set ...), and the exact shape hooks/lib/cmd_match.py
+# resolves back to `wm-state.py`. Exported from the one file both launch paths
+# already source, so wingman's own session (bin/wingman execs claude with this
+# environment) and every crew session (bin/spawn-crew writes it into the generated
+# launch script) carry one definition that cannot drift from the other. That
+# single definition is what makes the preferences guard's activation condition
+# safe: WINGMAN_RUN_ID (the only thing that turns the guard on) is set by
+# bin/wingman, which cannot run without sourcing this file.
+WINGMAN_STATE="$WM_UV $WM_STATE_PY"
+export WINGMAN_STATE
+
 # wm_py runs an inline snippet or `python ...` under the managed interpreter.
 wm_py() { $WM_UV python "$@"; }
 # wm_state runs the state engine.

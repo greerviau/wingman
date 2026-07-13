@@ -31,12 +31,31 @@ wm_pref_values() {
 
 # Compute the still-missing required keys for one run, in one prefs-list call:
 # sets WM_PREFS_MISSING_KEYS (space-separated key names, empty when fully
-# answered) and WM_PREFS_MISSING_LINES ("- <key> (<values>): <prompt>" lines).
+# answered), WM_PREFS_MISSING_LINES ("- <key> (<values>): <prompt>" lines), and
+# WM_PREFS_ENGINE_OK (1/0).
+#
+# WM_PREFS_ENGINE_OK distinguishes "the pilot has answered nothing" from "the
+# state engine cannot tell us anything": it is 0 when wm-state.py is missing or
+# unreadable, or when prefs-list exits non-zero. Both used to be
+# indistinguishable from a fully-unanswered run, which is what let a broken
+# install put hooks/pilot-preferences-guard.sh into permanent deny with no
+# runnable way out. The missing-key outputs stay populated with the full
+# required set when the engine is unusable, so a caller that only wants the
+# question list is unaffected.
 # Usage: wm_prefs_missing <wm-state.py path> <run-id>
 wm_prefs_missing() {
   _pm_state_py="$1"; _pm_run_id="$2"
   _pm_uv="${WM_UV:-uv run --no-project --quiet}"
-  _pm_prefs="$($_pm_uv "$_pm_state_py" prefs-list --run-id "$_pm_run_id" 2>/dev/null)"
+  WM_PREFS_ENGINE_OK=1
+  if [ -r "$_pm_state_py" ]; then
+    if ! _pm_prefs="$($_pm_uv "$_pm_state_py" prefs-list --run-id "$_pm_run_id" 2>/dev/null)"; then
+      WM_PREFS_ENGINE_OK=0
+      _pm_prefs=""
+    fi
+  else
+    WM_PREFS_ENGINE_OK=0
+    _pm_prefs=""
+  fi
   _pm_tab="$(printf '\t')"
   WM_PREFS_MISSING_KEYS=""
   WM_PREFS_MISSING_LINES=""
