@@ -19,12 +19,14 @@ $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
   --summary "<=10 lines, plain text, what you're doing / did" \
   [--blocker "the specific decision or input you need to proceed"] \
   [--artifact "path to the file you produced (plan, report, analysis)"] \
-  [--delivery "branch or PR URL when ready for review"]
+  [--delivery "branch or PR URL when ready for review"] \
+  [--silent]
 ```
 
 `$WINGMAN_STATE` (the full `uv run ... wm-state.py` invocation), `$WINGMAN_CREW_ID`, `$WINGMAN_HOME`, and `$WINGMAN_BIN` (the wingman `bin/` dir, for crew-level tools) are exported into your environment.
 Run `$WINGMAN_STATE` unquoted so it word-splits into the command.
 Only pass the flags that changed.
+`--silent` is for one specific case - a `review` re-entry that is self-managed churn, not a new result - see "Re-entering `review` without re-announcing" below.
 
 ## The states
 
@@ -40,6 +42,20 @@ Only pass the flags that changed.
 - **`done`** - your terminal condition is met and the whole engagement is over.
   This is your signal to wingman that you are ready to be stood down, and **wingman reaps you as soon as it sees it**.
   A deliverable that is merely ready is `review`, never `done`; reach `done` only at the true end (the PR merged/closed, the plan approved and handed off) or an explicit stand-down.
+
+## Re-entering `review` without re-announcing
+
+This rule is **universal**: it binds every crew type in this library today, and any type added later, whatever domain-specific loop its `working` state covers - a PR's CI/merge cycle, an infra-operator's apply-and-verify cycle, a re-run experiment or training run, a re-triggered data pipeline, a rebuilt report. It is not a PR-specific or developer-specific rule; the examples below (a merge conflict, a failing check) are illustrations of the general case, not its scope.
+
+Returning to `review` after a stint in `working` announces again **only when you are handing back a direct response to a request the party watching you made** - feedback that arrived as a message from your owner (the pilot, your lead, or a peer via `bin/crew-say`/`crew-ask`), where they are genuinely waiting to hear the outcome.
+
+It must **not** announce again when you cycled through `working` to silently resolve something that was **yours to fix** and that **nobody upstream asked about**.
+The domain varies but the shape never does: a failing check, a merge conflict, a stale branch, a routine review comment you've already replied to at its own source (e.g. the PR thread), a failed data-pipeline run you re-triggered, a broken build you repaired, an experiment or training run you re-executed after a bad result, a calculation you corrected, an applied change you had to retry and re-verify - any self-detected, self-resolved hiccup in work that was already yours to own, on which no one upstream raised a question, is the same case.
+Your owner already knows this deliverable exists and is in flight; telling them again that it's "ready" for the second or third time is exactly the noise the reporting contract rules out.
+
+Use `crew-set --status review --silent` for the second kind of transition: it updates your status/summary/artifact/delivery exactly like a normal call (so `bin/crew-list`/`board.md` stay accurate for anyone who looks), but does not re-fire the watcher/Stop-hook wake.
+Reserve the plain (non-`--silent`) call for: the very first time a deliverable reaches `review`, and any return to `review` that answers feedback your owner gave you.
+Never pass `--silent` with `--status blocked` or `--status done` - those are always genuine, always announce.
 
 ## A state you never set yourself: `stalled`
 
@@ -58,7 +74,7 @@ You do not need per-playbook state instructions - apply this one rule to whateve
 - Terminal condition met, engagement over → **`done`**.
 
 Moving back and forth between `working` and `review` is normal and expected: you park in `review`, an event pulls you back to `working` to act on it, and when you settle again you return to `review`.
-Each entry into `review` re-announces once (a fresh event for the pilot); while you sit idle in `review` you write nothing, so a parked member never spams.
+Whether that return announces again depends on what pulled you back - see "Re-entering `review` without re-announcing" above; while you sit idle in `review` you write nothing either way, so a parked member never spams.
 
 ## Watching a dependency while in `review` (the wake loop)
 

@@ -19,18 +19,6 @@
 # once per cooldown window, then flagged stalled with an api-error: reason if the
 # nudge doesn't clear it.
 #
-# Merge-conflict drift covers a different blind spot: an EXTERNAL fact (a live
-# member's delivered PR no longer merges cleanly against its base, because of what
-# landed on main after it was opened) that changes nothing in the member's own
-# status file, so needs-attention would otherwise never see it. Rather than write
-# into a self-reporting member's status file (which would race its own crew-set
-# calls), this cycle polls `gh pr view` directly for members due a recheck and
-# records the result in a separate store (wm-state's mergeability-*
-# subcommands/mergeability.json), which needs-attention reads as a second,
-# independent signal. On the transition into a conflicting state this fires a
-# synthetic `conflict: <id>#conflict <note>` reason line alongside the normal
-# status-based ones - watch-fleet's own verified read, not a member self-report.
-#
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
 # snapshot to report from.
@@ -143,21 +131,6 @@ WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
 # nudged once and then left to stall-check's own escalation rather than re-sent
 # every poll.
 APIERR_NUDGE_COOLDOWN="${WM_APIERR_NUDGE_COOLDOWN:-180}"
-# Merge-conflict drift polling: a direct `gh pr view` check (not a member
-# self-report) of whether a live member's delivered PR still merges cleanly
-# against its base - see wm-state's mergeability-* subcommands. WM_GH reuses the
-# exact knob pr-watch already defines, so one env var retargets both watchers.
-# 120s (~24 poll cycles at the default 5s INTERVAL) is deliberately conservative:
-# merge-conflict drift is caused by other PRs merging, which does not happen on
-# sub-minute timescales, and this must never be the thing that trips a rate limit
-# or adds latency to the common "nothing to do" poll.
-GH="${WM_GH:-gh}"
-MERGE_CHECK_INTERVAL="${WM_MERGE_CHECK_INTERVAL:-120}"
-# Checked once, before the loop: if `gh` is absent the whole feature is silently
-# inert (no error) - `gh` is optional infrastructure pr-watch already treats as
-# best-effort-present, not a watch-fleet hard dependency.
-MERGE_CHECK_ENABLED=0
-wm_have "$GH" && MERGE_CHECK_ENABLED=1
 
 # Remote Control disconnect signature (design: docs/plans/2026-07-12-remote-
 # control-visibility-and-auto-reconnect-design.md, ask 2): the CLI's own
@@ -673,26 +646,6 @@ for r in data:
         --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
         --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
-    done
-  fi
-
-  # Merge-conflict drift: for every live (review/working) member whose delivery is
-  # a full PR URL and is due a recheck (mergeability-poll-list decides "due" so
-  # this spawns at most one `gh` call + one wm_state call per member actually due
-  # this cycle, not one per member per 5s tick), ask `gh` directly whether the PR
-  # still merges cleanly against its base. Needs no tmux access at all (unlike the
-  # pane backstop above), so it runs unconditionally when MERGE_CHECK_ENABLED. The
-  # unmodified needs-attention call below picks up any freshly-set
-  # conflict_detected on its own; no extra wiring connects the poll to the fire.
-  if [ "$MERGE_CHECK_ENABLED" = 1 ]; then
-    _due="$(wm_state mergeability-poll-list --owner "$OWNER" --interval "$MERGE_CHECK_INTERVAL" 2>/dev/null)"
-    printf '%s\n' "$_due" | while IFS=$'\t' read -r _id _url; do
-      [ -n "$_id" ] || continue
-      if _pr_json="$($GH pr view "$_url" --json mergeStateStatus,mergeable,url,number 2>/dev/null)" && [ -n "$_pr_json" ]; then
-        printf '%s' "$_pr_json" | wm_state mergeability-set --id "$_id" --pr-json - >/dev/null 2>&1
-      else
-        wm_state mergeability-set --id "$_id" --fail >/dev/null 2>&1
-      fi
     done
   fi
 

@@ -35,11 +35,15 @@ export FAKE_PR="$D/pr.json"
 
 run() { "$PRWATCH" --pr 42 --once 2>/dev/null; }
 
+# All fixtures below carry an explicit mergeable=MERGEABLE/mergeStateStatus=CLEAN
+# pair, matching what a real `gh pr view --json ...,mergeable,mergeStateStatus`
+# call always returns (never an absent field) now that pr-watch requests it.
+
 # 1. open PR with a failing check -> ci-failed
 cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,
  "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE"}],
- "reviews":[],"comments":[]}
+ "reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
 assert_contains "a failing check fires ci-failed" "$(run)" "ci-failed: #42"
 
@@ -51,7 +55,8 @@ cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,
  "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
  "reviews":[],
- "comments":[{"author":{"login":"reviewer1"},"body":"nit","createdAt":"2026-07-10T10:00:00Z"}]}
+ "comments":[{"author":{"login":"reviewer1"},"body":"nit","createdAt":"2026-07-10T10:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
 assert_contains "a new reviewer comment fires comment" "$(run)" "comment: #42"
 # with the comment handled and the checks green, the PR has settled -> checks-passed
@@ -64,7 +69,8 @@ cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,
  "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
  "reviews":[{"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-10T11:00:00Z"}],
- "comments":[{"author":{"login":"reviewer1"},"body":"nit","createdAt":"2026-07-10T10:00:00Z"}]}
+ "comments":[{"author":{"login":"reviewer1"},"body":"nit","createdAt":"2026-07-10T10:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
 assert_contains "a changes-requested review fires changes-requested" "$(run)" "changes-requested: #42"
 
@@ -73,13 +79,15 @@ cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,
  "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
  "reviews":[{"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-10T11:00:00Z"}],
- "comments":[{"author":{"login":"botuser"},"body":"fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"}]}
+ "comments":[{"author":{"login":"botuser"},"body":"fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
 assert_eq "the crew's own reply does not fire" "$(run)" ""
 
 # 6. merged wins and fires the terminal event
 cat > "$FAKE_PR" <<'JSON'
-{"number":42,"state":"MERGED","mergedAt":"2026-07-10T13:00:00Z","statusCheckRollup":[],"reviews":[],"comments":[]}
+{"number":42,"state":"MERGED","mergedAt":"2026-07-10T13:00:00Z","statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
 assert_contains "a merged PR fires merged" "$(run)" "merged: #42"
 
@@ -89,7 +97,8 @@ test_new_home
 export WINGMAN_CREW_ID=pw2
 cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],
- "comments":[{"author":{"login":"reviewer1"},"body":"old","createdAt":"2026-07-10T13:00:00Z"}]}
+ "comments":[{"author":{"login":"reviewer1"},"body":"old","createdAt":"2026-07-10T13:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
 r7="$(run)"
 assert_contains "first arm on a no-CI PR fires checks-passed" "$r7" "checks-passed: #42"
@@ -101,5 +110,21 @@ cat > "$FAKE_RC" <<'JSON'
 [{"user":{"login":"reviewer1"},"body":"inline nit","created_at":"2026-07-10T14:00:00Z","path":"a.py","line":3}]
 JSON
 assert_contains "a later inline review-thread comment fires comment" "$(run)" "comment: #42"
+
+# 8. mergeability drift: a real poll_once call fires conflict: on CONFLICTING,
+#    then goes quiet once mergeability resolves back to MERGEABLE (no other change).
+test_new_home
+export WINGMAN_CREW_ID=pw3
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}
+JSON
+assert_contains "a conflicting PR fires conflict: via a real poll_once call" "$(run)" "conflict: #42"
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+assert_contains "resolving fires checks-passed, not a second conflict event" "$(run)" "checks-passed: #42"
+assert_eq "no further event once settled" "$(run)" ""
 
 test_summary

@@ -10,7 +10,8 @@ Python so the shell stays a thin poll loop and the logic is unit-testable with
 canned JSON. It reads:
 
   --pr-json <path|->        output of `gh pr view <pr> --json
-                            state,mergedAt,statusCheckRollup,reviews,comments,number,url`
+                            state,mergedAt,statusCheckRollup,reviews,comments,number,url,
+                            mergeable,mergeStateStatus`
   --review-comments <path>  a JSON array of inline review-thread comments
                             (`gh api repos/{owner}/{repo}/pulls/{n}/comments`), optional
   --cursor <path>           the on-disk cursor of what has already been surfaced
@@ -20,18 +21,23 @@ canned JSON. It reads:
 It prints ONE reason line and advances the cursor for exactly that dimension, or
 prints nothing when there is no new event. Priority (highest first):
 
-  merged > closed > changes-requested > ci-failed > comment > checks-passed
+  merged > closed > changes-requested > ci-failed > conflict > comment > checks-passed
 
 Only the fired dimension's cursor advances, so a co-occurring event of lower
 priority still surfaces on the next poll instead of being skipped. A CI rollup
 that has gone green resets the ci cursor (a later failure re-fires); a pending or
-unchanged-failing rollup is not an event.
+unchanged-failing rollup is not an event. `conflict` mirrors the same edge-
+triggered shape: it fires once on the transition into a conflicting mergeability
+and is cleared (without re-firing) the moment the base moves back to mergeable -
+see `_map_mergeability`.
 
-`checks-passed` fires once when the PR has nothing failing and nothing pending -
-covering both an all-green rollup and a repo with no CI at all - so a member that
-stays `working` through CI is woken to move into `review` the moment it settles.
-It sits below `comment` so unaddressed feedback is handled before the member parks,
-and it re-arms (fires again) once checks return to pending/failing and settle anew.
+`checks-passed` fires once when the PR has nothing failing, nothing pending, and
+is mergeable - covering both an all-green rollup and a repo with no CI at all - so
+a member that stays `working` through CI (and any merge-conflict drift) is woken
+to move into `review` the moment it settles. It sits below `comment` so
+unaddressed feedback is handled before the member parks, and it re-arms (fires
+again) once checks or mergeability go back to pending/failing/conflicting and
+settle anew.
 """
 import argparse
 import json
@@ -96,6 +102,21 @@ def checks_pending(pr):
     return False
 
 
+def _map_mergeability(mergeable, merge_state_status):
+    """Collapse gh's mergeable/mergeStateStatus pair into MERGEABLE/CONFLICTING/
+    UNKNOWN. Either field can lag (GitHub computes them asynchronously), so a
+    CONFLICTING/DIRTY reading from either wins outright; only when BOTH are absent
+    or UNKNOWN is the result UNKNOWN (not yet computed); everything else
+    (CLEAN/BEHIND/BLOCKED/UNSTABLE/HAS_HOOKS/DRAFT) is MERGEABLE."""
+    mergeable = (mergeable or "UNKNOWN").upper()
+    merge_state_status = (merge_state_status or "UNKNOWN").upper()
+    if mergeable == "CONFLICTING" or merge_state_status == "DIRTY":
+        return "CONFLICTING"
+    if mergeable == "UNKNOWN" and merge_state_status == "UNKNOWN":
+        return "UNKNOWN"
+    return "MERGEABLE"
+
+
 def _login(item):
     a = item.get("author") or item.get("user") or {}
     if isinstance(a, dict):
@@ -128,6 +149,7 @@ def evaluate(pr, review_comments, cursor, me):
     """Return (reason_or_None, new_cursor)."""
     cur = dict(cursor) if isinstance(cursor, dict) else {}
     cur.setdefault("ci", "")
+    cur.setdefault("mergeable", "")
     # First run: treat conversation already present as seen (so we don't fire on
     # the crew's own PR-open state), but leave ci empty so an already-red build
     # still fires.
@@ -158,15 +180,31 @@ def evaluate(pr, review_comments, cursor, me):
         cur["ci"] = sig
         return ("ci-failed: %s %s" % (_pr_ref(pr), sig), cur)
 
+    # Mergeability: edge-triggered exactly like ci above. UNKNOWN (GitHub hasn't
+    # finished computing it) touches neither the cursor nor ready_fired below - it
+    # is treated like a pending check, not a resolved one, so it never clears an
+    # open conflict and never causes a spurious checks-passed re-fire once GitHub
+    # settles back to whatever it already was.
+    mergeability = _map_mergeability(pr.get("mergeable"), pr.get("mergeStateStatus"))
+    if mergeability == "CONFLICTING":
+        if cur["mergeable"] != "CONFLICTING":
+            cur["mergeable"] = "CONFLICTING"
+            return ("conflict: %s" % _pr_ref(pr), cur)
+    elif mergeability == "MERGEABLE":
+        cur["mergeable"] = "MERGEABLE"
+
     if fresh:
         cur["conv_hwm"] = convo_max
         return ("comment: %s %d new" % (_pr_ref(pr), len(fresh)), cur)
 
-    # checks-passed: the PR has settled with nothing failing and nothing pending
-    # (all-green, or no CI at all). Fire once per settle so the member moves into
-    # `review`; a later pending/failing rollup re-arms it for the next recovery.
-    ready = (not fail) and (not checks_pending(pr))
-    if not ready:
+    # checks-passed: the PR has settled with nothing failing, nothing pending, and
+    # mergeable (all-green, or no CI at all - and no open conflict). Fire once per
+    # settle so the member moves into `review`; a later pending/failing/conflicting
+    # reading re-arms it for the next recovery.
+    ready = (not fail) and (not checks_pending(pr)) and mergeability == "MERGEABLE"
+    if mergeability == "UNKNOWN":
+        pass  # not yet resolved - leave ready_fired exactly as it was
+    elif not ready:
         cur["ready_fired"] = False
     elif not cur.get("ready_fired"):
         cur["ready_fired"] = True
