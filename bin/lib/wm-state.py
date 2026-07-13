@@ -287,6 +287,7 @@ def cmd_crew_add(args):
         # falls out of who is spawning - a lead's spawns carry the lead's id.
         "parent": getattr(args, "parent", "") or "",
         "window": args.window,
+        "window_id": getattr(args, "window_id", "") or "",
         "session_id": args.session_id,
         "status": "working",
         "summary": "",
@@ -375,6 +376,11 @@ def cmd_crew_set(args):
             # the path here so a later teardown can find it.
             if getattr(args, "worktree", None) is not None:
                 r["worktree"] = args.worktree
+            # window_id is likewise roster-only: crew-resume re-registers the id
+            # of the replacement window it creates, so stray-window adoption
+            # (wm_tmux_adopt_strays) keeps an exact identity to match on.
+            if getattr(args, "window_id", None) is not None:
+                r["window_id"] = args.window_id
             r["updated"] = live["updated"]
     write_json(crew_json_path(), roster)
     render_board()
@@ -1317,6 +1323,12 @@ def build_parser():
     # The git worktree the member works in, recorded at spawn (repo scope) for
     # teardown; empty when unknown at spawn (global scope self-registers via crew-set).
     a.add_argument("--worktree", default="")
+    # The tmux window id (@N) of the member's window, recorded at spawn so
+    # stray-window adoption can match the exact window rather than a name.
+    # Empty when the spawner could not capture it. Note: window ids restart
+    # when the tmux server does, so this is an optional precision key, never
+    # the primary identity (the window name is).
+    a.add_argument("--window-id", default="", dest="window_id")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
@@ -1329,6 +1341,8 @@ def build_parser():
     # Self-register the worktree path after spawn (global scope, whose repo/path is
     # not knowable at spawn time). Roster-only field, not a live-status field.
     a.add_argument("--worktree", default=None)
+    # Re-register the window id after crew-resume replaces the window. Roster-only.
+    a.add_argument("--window-id", default=None, dest="window_id")
     # Update status/summary/artifact/delivery without re-firing the watcher/Stop-
     # hook wake (see the `announced` field and playbooks/_status-contract.md,
     # "Re-entering review without re-announcing"). Refused with --status

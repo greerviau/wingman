@@ -208,7 +208,40 @@ print("ok" if ok else "deny")
 # All tmux calls live behind this boundary so a future backend swap is localized.
 WM_TMUX_SESSION="${WM_TMUX_SESSION:-wingman}"
 
+# Exact-match target forms (issue #39). tmux resolves a bare `-t <name>` by
+# exact name, then PREFIX, then fnmatch - so with no session literally named
+# "wingman", every `-t wingman` silently binds to e.g. "wingman-main" or a
+# user's own "wingman-server", and the whole crew layer follows the
+# misresolution consistently (windows injected into wingman's own or an
+# unrelated session, defeating the crew/orchestrator session separation).
+# The "=" prefix disables prefix/fnmatch resolution for the part it precedes;
+# every session or window target must be built from these forms, never from a
+# bare "$WM_TMUX_SESSION".
+WM_TMUX_TARGET="=$WM_TMUX_SESSION"
+# Exact session:window target for one crew window.
+wm_tmux_win_target() { printf '=%s:=%s' "$WM_TMUX_SESSION" "$1"; }
+
 wm_tmux() { tmux "$@"; }
+
+# Run a tmux command that may fork a brand-new tmux server (the first tmux
+# call on a machine, or after the server died). Such a call must not run
+# directly in a mortal cgroup: under a systemd user service (e.g. a
+# Type=oneshot boot-time starter), every process left in the service's cgroup
+# is killed the instant the service's main process exits - the freshly-forked
+# server dies within seconds, taking every session it hosts with it, silently
+# (no stderr, no crash, and later spawns then prefix-match into the wrong
+# session). A transient systemd scope detaches the server's lifetime from the
+# caller's unit; when a server already exists the wrapped call is a mere
+# client and the scope evaporates with it (--collect). Without systemd
+# (macOS) the call runs plainly - the reap hazard is systemd-specific.
+wm_tmux_scoped() {
+  if wm_have systemd-run && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+     && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
+    systemd-run --user --scope --collect --quiet -- tmux "$@"
+  else
+    tmux "$@"
+  fi
+}
 
 # Print the visible text of a target's active pane. Used by the watcher to detect
 # a crew member frozen on an interactive prompt (a terminal-UI state that never
@@ -223,7 +256,7 @@ wm_tmux_pane_text() { wm_tmux capture-pane -p -t "$1" 2>/dev/null; }
 # $WM_HOME/pane-<id>.hash (the pidfile-naming pattern); a stale file is harmless.
 wm_pane_snapshot() {
   _id="$1"; _win="$2"
-  PANE_TEXT="$(wm_tmux_pane_text "$WM_TMUX_SESSION:$_win")"
+  PANE_TEXT="$(wm_tmux_pane_text "$(wm_tmux_win_target "$_win")")"
   _hashfile="$WM_HOME/pane-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').hash"
   _hash="$(printf '%s' "$PANE_TEXT" | cksum)"
   _prev="$(cat "$_hashfile" 2>/dev/null)"
@@ -234,7 +267,7 @@ wm_pane_snapshot() {
 # Pid of the root process of a window's first pane (the agent CLI itself - spawn-crew
 # execs it as the pane command). Empty if the window is unknown.
 wm_tmux_pane_pid() {
-  wm_tmux list-panes -t "$WM_TMUX_SESSION:$1" -F '#{pane_pid}' 2>/dev/null | head -1
+  wm_tmux list-panes -t "$(wm_tmux_win_target "$1")" -F '#{pane_pid}' 2>/dev/null | head -1
 }
 
 # Seconds since the last output in a window's pane, from tmux's own
@@ -245,7 +278,7 @@ wm_tmux_pane_pid() {
 # Harness-neutral: any TUI that repaints while working keeps this fresh.
 wm_tmux_window_activity_age() {
   _win="$1"
-  _act="$(wm_tmux list-windows -t "$WM_TMUX_SESSION" \
+  _act="$(wm_tmux list-windows -t "$WM_TMUX_TARGET" \
             -F '#{window_name} #{window_activity}' 2>/dev/null \
           | awk -v w="$_win" '$1==w {print $2; exit}')"
   [ -n "$_act" ] || { echo 999999; return; }
@@ -458,16 +491,70 @@ wm_tmux_send_message() {
   return 0
 }
 
-# Ensure the shared tmux server + wingman session exist (detached).
+# Ensure the shared tmux server + crew session exist (detached). The check is
+# exact-match, so a prefix sibling ("wingman-main", a user's "wingman-server")
+# never satisfies it, and the create is scope-wrapped so a server forked here
+# outlives a mortal caller cgroup (see wm_tmux_scoped). Verified after the
+# create: crew must land in a session wingman genuinely owns, or fail loudly -
+# never silently fall through to a prefix-matched neighbour.
 wm_tmux_ensure_session() {
-  if ! wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
-    wm_tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
-  fi
+  wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null && return 0
+  wm_tmux_scoped new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+  wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null \
+    || wm_die "failed to create tmux session '$WM_TMUX_SESSION'"
 }
 
-# List live window names in the wingman session, one per line.
+# List live window names in the crew session, one per line.
 wm_tmux_windows() {
-  wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null
+  wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null
+}
+
+# Adopt stray crew windows: a roster member's window found in some OTHER tmux
+# session is moved into the crew session, process intact. That is the
+# transitional shape left behind by bare-name prefix matching (issue #39): a
+# member spawned while no exact-named crew session existed landed in a
+# prefix-matched neighbour (e.g. wingman's own session), and the moment the
+# real crew session appears, name-scoped liveness stops seeing it - the live
+# member would be reported died and then reaped, leaving an unsupervised
+# agent process running in the wrong session. Every reconcile caller runs
+# this first, so liveness never declares a member dead while its window
+# exists elsewhere on the server. A window is matched by its recorded
+# window_id when one matches (exact identity), else by exact window name;
+# the move targets the id, which tmux resolves without any name matching.
+wm_tmux_adopt_strays() {
+  wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null || return 0
+  _as_known="$(wm_py -c '
+import json, os
+path = os.path.join(os.environ.get("WINGMAN_HOME", ""), "crew.json")
+try:
+    with open(path) as f:
+        roster = json.load(f)
+except Exception:
+    roster = []
+for r in roster if isinstance(roster, list) else []:
+    if r.get("status") == "stood-down":
+        continue
+    w = r.get("window") or ""
+    if w:
+        print("%s\t%s" % (w, r.get("window_id") or ""))
+' 2>/dev/null)"
+  [ -n "$_as_known" ] || return 0
+  _as_tab="$(printf '\t')"
+  _as_all="$(wm_tmux list-windows -a \
+    -F "#{session_name}${_as_tab}#{window_name}${_as_tab}#{window_id}" 2>/dev/null)"
+  [ -n "$_as_all" ] || return 0
+  printf '%s\n' "$_as_known" | while IFS="$_as_tab" read -r _as_w _as_id; do
+    [ -n "$_as_w" ] || continue
+    _as_src="$(printf '%s\n' "$_as_all" | awk -F "$_as_tab" \
+      -v s="$WM_TMUX_SESSION" -v w="$_as_w" -v i="$_as_id" '
+        $2==w && $1==s {home=1}
+        $2==w && $1!=s && i!="" && $3==i && !srci {srci=$3}
+        $2==w && $1!=s && !srcn {srcn=$3}
+        END {if (!home) {if (srci) print srci; else if (srcn) print srcn}}')"
+    [ -n "$_as_src" ] || continue
+    wm_tmux move-window -d -s "$_as_src" -t "$WM_TMUX_TARGET:" 2>/dev/null || true
+  done
+  return 0
 }
 
 # Comma-joined window list (for wm-state reconcile --windows).

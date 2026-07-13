@@ -180,7 +180,7 @@ except Exception:
     pass
 ' 2>/dev/null)"
     case "$_dg_st" in died|stood-down) return 0 ;; esac
-    if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+    if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
       wm_tmux_windows | grep -qx "wm-$_to" || return 0
     fi
     return 1
@@ -251,7 +251,7 @@ cmd_send() {
 
   # Refuse fast for a dead delegate: no point minting a request nobody can answer.
   _window="wm-$_id"
-  wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
+  wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null \
     | grep -qx "$_window" || wm_die "no live window for '$_id' (see: bin/crew-takeover $_id)"
 
   # Mint a short, collision-safe request id (uuid path like spawn-crew).
@@ -274,7 +274,7 @@ own work, by running:
 bounded; it is captured verbatim into the asker's context. Answering does not
 change your own status - continue what you were doing afterward."
 
-  wm_tmux_send_message "$WM_TMUX_SESSION:$_window" "$_framed"
+  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_framed"
   _send_rc=$?
   if [ "$_send_rc" -eq 2 ]; then
     wm_state ask-resolve --id "$_req" --status undeliverable \

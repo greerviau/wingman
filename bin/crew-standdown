@@ -28,8 +28,8 @@ closed=0
 removed=0
 for cid in $AFFECTED; do
   WINDOW="wm-$cid"
-  if wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
-    wm_tmux kill-window -t "$WM_TMUX_SESSION:$WINDOW" 2>/dev/null || true
+  if wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
+    wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
     closed=$((closed+1))
   fi
 

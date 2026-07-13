@@ -460,8 +460,10 @@ while :; do
     exit 0
   fi
 
-  # Reconcile liveness so a dead window becomes 'died'.
-  if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+  # Reconcile liveness so a dead window becomes 'died'. Strays are adopted
+  # first (a live window in the wrong session is moved home, never flagged).
+  if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
+    wm_tmux_adopt_strays
     # Pass this cycle's owner so the dead-owner re-adopt pass runs only under
     # wingman's watcher (--owner ""); a lead's cycle does the death-flip only (N4).
     wm_state reconcile --windows "$(wm_tmux_windows_csv)" --owner "$OWNER" >/dev/null 2>&1
@@ -512,7 +514,7 @@ for r in data:
           # pane looks dialog-shaped, not the chat input) means nothing went out,
           # so the next cycle should try again rather than sit out a cooldown for
           # a retry that never happened.
-          if wm_tmux_send_message "$WM_TMUX_SESSION:$_win" "/remote-control"; then
+          if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"; then
             : > "$_rcfile"
           fi
         fi
@@ -559,7 +561,7 @@ for r in data:
             # As above: only mark the cooldown when the nudge actually sent, not
             # when wm_tmux_send_message refused because the pane looks
             # dialog-shaped rather than the chat input.
-            if wm_tmux_send_message "$WM_TMUX_SESSION:$_win" \
+            if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" \
               "An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."; then
               : > "$_nudgefile"
             fi
