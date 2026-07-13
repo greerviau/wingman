@@ -247,4 +247,28 @@ assert_eq "an unresolvable command mentioning no trigger word is allowed (pre-ga
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 
+# ============================================================================
+# PR #72 review, finding 1 (must-fix): a here-string (<<<) is not a heredoc
+# and must never swallow a following command as an opaque "body" - that
+# would hide a real gh pr merge from this exact guard.
+# ============================================================================
+# A fresh crew id, never granted --allow-merge (dev1 was granted earlier in
+# this file and stays granted for the rest of the run - reusing it here would
+# test the grant bypass, not the here-string fix).
+export WINGMAN_CREW_ID=dev-herestring
+export WINGMAN_CREW_TYPE=developer
+
+HERESTRING_HIDDEN_MERGE="$(printf 'grep x <<<foo\ngh pr merge 5 --squash\n<foo')"
+out="$(run_hook "$HERESTRING_HIDDEN_MERGE")"
+assert_contains "a merge hidden behind a here-string is still denied (no heredoc misparse)" \
+  "$out" '"permissionDecision": "deny"'
+
+# A plain here-string with nothing further must stay allowed, not hard-deny
+# (the same misparse's other symptom: reading "<<<" as an unterminated
+# heredoc delimiter).
+out="$(run_hook 'grep foo <<< "$var"')"
+assert_eq "a plain here-string with a variable is allowed (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
 test_summary

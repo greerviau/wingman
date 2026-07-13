@@ -158,6 +158,23 @@ for form in double-quoted unquoted backtick; do
   assert_eq "top-level: nested heredoc in a $form substitution (apostrophe+paren body) is allowed (no output)" "$out" ""
 done
 
+# PR #72 review, finding 1 (must-fix): a here-string (<<<) must never be
+# misparsed as a heredoc - it never spans lines and must stay allowed, not
+# hard-denied as an "unterminated heredoc".
+for cmd in 'grep x <<< "$v"' 'read a b <<< "$line"' 'jq . <<< "$json"' 'grep x <<< "$out"'; do
+  out="$(run_bash_command "$cmd")"
+  assert_eq "top-level: '$cmd' (here-string, not a heredoc) is allowed (no output)" "$out" ""
+done
+
+# PR #72 review, finding 2 (should-fix): a trailing `#` comment is inert -
+# an apostrophe, $(...), a backtick, or << inside it must never corrupt the
+# scan into a false-deny.
+out="$(run_bash_command "echo hi  # don't")"
+assert_eq "top-level: a trailing comment with an apostrophe is allowed (no output)" "$out" ""
+
+out="$(run_bash_command 'echo hi  # $(foo) `bar` << baz')"
+assert_eq "top-level: a trailing comment with \$(, a backtick, and << is allowed (no output)" "$out" ""
+
 # Edit/Write outside any git repo passes through untouched even while active -
 # the guard's intent is to stop direct edits to code, not every Write/Edit
 # regardless of target (e.g. wingman's own auto-memory files).

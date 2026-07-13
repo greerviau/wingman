@@ -75,6 +75,28 @@ re-checked through command_segments() on its own - so detection is unaffected
 by the placeholder, but the outer line is always safe to lex regardless of
 what the substitution's own content contains.
 
+Two other constructs the scanner must get right, both found in PR #72's
+review of the first version of this rewrite:
+
+- A here-string (`<<<WORD`) is checked for, and handled as an ordinary
+  redirect operator, BEFORE the `<<`/`<<-` heredoc check - it feeds one word
+  to a single command's stdin on the same line and never spans lines or
+  introduces a multi-line terminated body. Treating it as a heredoc (matching
+  on the first two `<` and reading `<<<WORD`'s own `WORD` as a heredoc
+  delimiter) swallowed every real command up to a later matching line as an
+  opaque "body," hiding them from every guard - the exact bypass class this
+  module exists to close, just reached through `<<<` instead of the original
+  issue #56 repro. It also hard-denied ordinary here-string usage with
+  nothing following it (no terminator line was ever found), since idiomatic
+  bash here-strings are common (e.g. this repo's own bin/lib/common.sh).
+- An unquoted `#` at a word boundary (the start of whatever region _walk()
+  is scanning, or preceded by whitespace/`;`/`&`/`|`) starts a comment
+  running to the next newline, matching bash and the shlex default
+  (`commenters='#'`) the per-line predecessor of this module relied on.
+  Comment text is skipped as one atomic span - never quoted, never scanned
+  for substitutions or heredocs - so a stray apostrophe, `$(`, backtick, or
+  `<<` in a trailing comment can never corrupt the scan into a false-deny.
+
 Residual gaps, deliberately out of scope (see docs/plans/2026-07-13-issue-56-
 cmd-match-fail-closed.md): arithmetic expansion (`$((...))`) is not extracted
 the way command/process substitution is; redirection (`> /path`) is not
@@ -287,6 +309,24 @@ def _walk(s, i, n, close):
             j += 1
             continue
 
+        # An unquoted `#` at a word boundary (start of this region, or
+        # preceded by whitespace/a statement separator) starts a comment
+        # running to the next newline - matching bash, and the shlex
+        # default (`commenters='#'`) the old per-line path relied on.
+        # Comment text is completely inert: never quoted, never scanned for
+        # substitutions or heredocs, so a stray apostrophe/`$(`/backtick/`<<`
+        # in a trailing comment can never corrupt the scan (a false-deny
+        # regression from `main`) - and, since it is skipped as one atomic
+        # span rather than walked character-by-character, a `)` or backtick
+        # inside a comment can never be mistaken for a substitution's own
+        # close either. `#` mid-token (`foo#bar`) is deliberately NOT a
+        # comment - only preceded by whitespace/`;`/`&`/`|`/a newline, or the
+        # very start of this region.
+        if c == "#" and (j == i or s[j - 1] in " \t\n;&|"):
+            nl = s.find("\n", j)
+            j = nl if nl != -1 else n
+            continue
+
         if close == ")" and c == ")":
             return j + 1, logical_lines, pending
         if close == "`" and c == "`":
@@ -315,6 +355,24 @@ def _walk(s, i, n, close):
             pending.append(("code", s[j + 2:end - 1]))
             out.append('">(...)"')
             j = end
+            continue
+
+        # A here-string (`<<<WORD`) is fundamentally different from a
+        # heredoc (`<<`/`<<-`) and must be checked FIRST: it feeds a single
+        # word to one command's stdin on the same line, never introduces a
+        # multi-line terminated body, and never spans lines. Treating it as
+        # a heredoc (matching on the first two `<` and reading `<<<WORD`'s
+        # own `WORD` as a heredoc delimiter) swallows everything up to a
+        # later matching line as an opaque "body" - silently hiding whatever
+        # real commands are in there from every guard, the exact bypass
+        # class this module exists to close. It is a plain redirect operator
+        # here: consumed as ordinary text (the same as `main`'s old shlex-
+        # per-line path, which tokenized `<<<foo` as one glued token) so the
+        # rest of the line keeps scanning normally rather than being
+        # swallowed as a heredoc body.
+        if c == "<" and j + 2 < n and s[j + 1] == "<" and s[j + 2] == "<":
+            out.append("<<<")
+            j += 3
             continue
 
         if c == "<" and j + 1 < n and s[j + 1] == "<":

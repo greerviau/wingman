@@ -139,6 +139,52 @@ for body_label, body in bodies.items():
                        not any("merge" in tok for seg in got for tok in seg))
 
 # ============================================================================
+# Here-strings (<<<) are NOT heredocs (PR #72 review, finding 1 - must-fix):
+# a here-string feeds one word to a single command's stdin on the same line
+# and never spans lines or introduces a multi-line terminated body.
+# Misreading `<<<WORD` as a heredoc whose delimiter is `<WORD` swallows
+# whatever real commands follow as an opaque "body," hiding them from every
+# guard - the exact bypass class this module exists to close, just via a
+# different construct than the original issue #56 repro.
+# ============================================================================
+
+check("a here-string does not swallow the following command as a heredoc body",
+      "grep x <<<foo\ngh pr merge 5 --squash\n<foo",
+      [["grep", "x", "<<<foo"], ["gh", "pr", "merge", "5", "--squash"], ["<foo"]])
+
+check("a plain here-string with a variable is allowed, not hard-denied",
+      'grep foo <<< "$var"',
+      [["grep", "foo", "<<<", "$var"]])
+
+check("read ... <<< is allowed, not hard-denied",
+      'read a b <<< "$line"',
+      [["read", "a", "b", "<<<", "$line"]])
+
+check("jq ... <<< is allowed, not hard-denied",
+      'jq . <<< "$json"',
+      [["jq", ".", "<<<", "$json"]])
+
+# ============================================================================
+# `#` comments (PR #72 review, finding 2 - should-fix): a trailing comment is
+# completely inert - never quoted, never scanned for substitutions or
+# heredocs - matching bash and the old shlex-based path's default
+# `commenters='#'`. False-deny only if unhandled (never a bypass), but still
+# a regression from main worth closing.
+# ============================================================================
+
+check("a trailing comment containing an apostrophe does not corrupt the scan",
+      "echo hi  # don't",
+      [["echo", "hi"]])
+
+check("a trailing comment containing $(, a backtick, and << does not corrupt the scan",
+      "echo hi  # $(foo) `bar` << baz",
+      [["echo", "hi"]])
+
+check("a comment can open a command-substitution span (word boundary at region start)",
+      "echo $(# comment\ntouch /tmp/x\n)",
+      [["echo", "$(...)"], ["touch", "/tmp/x"]])
+
+# ============================================================================
 # Substitution / process-substitution lifting
 # ============================================================================
 
