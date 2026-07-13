@@ -56,6 +56,21 @@
 #   watch-fleet --status   report whether a live cycle exists (pid + beacon).
 #   watch-fleet --stop      stop the current cycle (manual/testing).
 #   watch-fleet --start    deprecated alias for arming; warns, then blocks.
+#   watch-fleet --classify [--owner <id>]
+#                          classify the just-completed cycle's exit with no
+#                          stdin: reads (and consumes) the exit-record this
+#                          script itself wrote at its own exit point, or, if
+#                          none is present, checks whether a fresh cycle is
+#                          already live. Prints exactly one of five outcomes on
+#                          stdout - `healthy`, `fire`, `remote-control-dropped`
+#                          (bare tokens), or `spurious <count> <hint>` /
+#                          `spurious-repeated <count> <hint>` (a consecutive-
+#                          failure count and a forensic hint) - and exits 0.
+#                          Dispatched before claim-lock acquisition: never
+#                          creates the claim lock, never mutates $PIDFILE/
+#                          $BEATFILE (it legitimately reads both via the
+#                          cycle_live check). Intended caller: the `/watch`
+#                          skill, immediately after its armed cycle exits.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -82,9 +97,9 @@ MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --owner) OWNER="${2:-}"; shift 2 ;;
-    --status|--stop|--start|arm|__loop) MODE="$1"; shift ;;
+    --status|--stop|--start|--classify|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,73p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -97,11 +112,28 @@ if [ -n "$OWNER" ]; then
   PIDFILE="$WM_HOME/watch-$_key.pid"
   WAKEFILE="$WM_HOME/wake-$_key"
   BEATFILE="$WM_HOME/watch-$_key.beat"
+  EXITFILE="$WM_HOME/watch-exit-$_key"
+  SPURCOUNTFILE="$WM_HOME/watch-spurious-count-$_key"
 else
   PIDFILE="$WM_HOME/watch.pid"
   WAKEFILE="$WM_HOME/wake"
   BEATFILE="$WM_HOME/watch.beat"
+  EXITFILE="$WM_HOME/watch-exit"
+  SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
 fi
+# The claim-lock path is needed both by --classify's stale-claim-lock check
+# (dispatched before claim-lock acquisition) and by the claim loop itself
+# further below, so it is defined once, here, ahead of both.
+CLAIMLOCK="$PIDFILE.lock"
+# One shared forensic log across every owner (never owner-keyed): each line
+# carries its own owner column, so a human reading it after the fact sees the
+# whole fleet's history in one place rather than needing to know which
+# per-owner file to open.
+SPURLOG="$WM_HOME/watch-spurious.log"
+spurlog() {
+  # timestamp \t owner \t kind \t detail
+  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${OWNER:-<top>}" "$1" "$2" >> "$SPURLOG"
+}
 INTERVAL="${WM_WATCH_INTERVAL:-5}"
 # A cycle is "live" iff its recorded pid is alive AND its beacon is fresher than
 # this grace window. Touched every loop iteration, so a genuinely blocking watcher
@@ -223,6 +255,85 @@ cycle_live() {
 }
 
 case "$MODE" in
+  --classify)
+    # Dispatched here, alongside --status/--stop/--start, deliberately BEFORE
+    # claim-lock acquisition below: this call must never mkdir "$CLAIMLOCK",
+    # never mutate $PIDFILE/$BEATFILE (cycle_live legitimately reads both),
+    # and never enter the blocking loop. Order, exactly as verified correct
+    # through seven review rounds: (1) exit-record present - trust it and
+    # stop; (2) else cycle_live - a live cycle always means healthy,
+    # regardless of any leaked lock coexisting with it; only within the
+    # "no cycle live" branch: (3) a leaked claim-lock; (4) the exhaustive
+    # pidfile-residue hints. Checking cycle_live before the lock is what
+    # keeps a stale, unrelated leaked lock from being misclassified as a
+    # live cycle's own failure.
+    if [ -f "$EXITFILE" ]; then
+      _outcome="$(cat "$EXITFILE" 2>/dev/null)"
+      rm -f "$EXITFILE"
+      # Rule 2: any non-spurious classify outcome resets the consecutive
+      # failure count. All three count-file mutation rules live here, inside
+      # --classify, and nowhere else in this script (see the claim-time
+      # comment below for why a claim-time reset would silently revert the
+      # fix this budget exists to provide).
+      printf '0\n' > "$SPURCOUNTFILE"
+      printf '%s\n' "$_outcome"
+      exit 0
+    fi
+    if cycle_live; then
+      printf '0\n' > "$SPURCOUNTFILE"
+      printf 'healthy\n'
+      exit 0
+    fi
+    # No record, no live cycle: genuinely spurious. Determine the forensic
+    # hint - checked first, before the pidfile-residue branches, because it is
+    # the one hint that is actually about the arm whose death is being
+    # classified (a leaked lock blocking every subsequent arm attempt),
+    # rather than about residue left behind by an entirely different, earlier
+    # cycle. A lock left by a kill landing inside the sub-second claim window
+    # (below) is the mechanism; a cycle already past that window and into the
+    # blocking loop has already released the lock and cannot leak it this way.
+    if [ -d "$CLAIMLOCK" ]; then
+      _hint="stale-claim-lock"
+    elif [ ! -f "$PIDFILE" ]; then
+      _hint="clean-exit-or-sigterm"
+    else
+      _dead_pid="$(cat "$PIDFILE" 2>/dev/null)"
+      if [ -n "$_dead_pid" ] && ! kill -0 "$_dead_pid" 2>/dev/null; then
+        # A SIGKILL cannot run the INT TERM trap that removes $PIDFILE, so a
+        # survived pidfile naming a dead pid is diagnostic of exactly that.
+        _hint="sigkill-suspected"
+      else
+        # pidfile present, pid alive, beacon stale (cycle_live already ruled
+        # out "and beacon fresh") - a wedged process, not a clean death.
+        _hint="hung-or-stale-pidfile"
+      fi
+    fi
+    # Pure consecutive count, no wall-clock term anywhere in the trip
+    # condition (five review rounds of timing-dependent budgets each found
+    # broken in a new way is why this one measures nothing but the sequence
+    # of outcomes). A missing or unreadable count file reads as 0 under set
+    # -u: the command substitution itself never errors on a missing file (cat
+    # fails silently into an empty string), and the case below normalizes
+    # both "empty" and "anything non-numeric" to 0 before the arithmetic
+    # expansion ever runs, so $((...)) always sees an assigned value.
+    _count="$(cat "$SPURCOUNTFILE" 2>/dev/null)"
+    case "$_count" in ''|*[!0-9]*) _count=0 ;; esac
+    _count=$((_count + 1))
+    _budget="${WM_SPURIOUS_BUDGET_COUNT:-3}"
+    if [ "$_count" -ge "$_budget" ]; then
+      # Rule 3: the trip consumes the budget - reset in the same call that
+      # reports it, so a lone stray death long after a genuine recovery is
+      # once again absorbed as ordinary `spurious`, not an immediate re-trip.
+      spurlog spurious-repeated "$_hint"
+      printf '0\n' > "$SPURCOUNTFILE"
+      printf 'spurious-repeated %s %s\n' "$_count" "$_hint"
+    else
+      spurlog spurious "$_hint"
+      printf '%s\n' "$_count" > "$SPURCOUNTFILE"
+      printf 'spurious %s %s\n' "$_count" "$_hint"
+    fi
+    exit 0
+    ;;
   --status)
     # The documented, scriptable liveness check: exit 0 iff a cycle is live, 1
     # otherwise, so a caller can test `bin/watch-fleet --status >/dev/null 2>&1`
@@ -268,7 +379,8 @@ esac
 # briefly for any true-concurrent claimant to do the same, then re-reads the
 # file - only the single last writer sees its own pid reflected back, so a
 # mismatch is treated exactly like a failed `mkdir` (back off and retry).
-CLAIMLOCK="$PIDFILE.lock"
+# ($CLAIMLOCK itself is defined earlier, alongside $PIDFILE, so --classify's
+# stale-claim-lock check above can read it without duplicating the path.)
 # The lock dir will hold an `owner` file (the verification stamp below), so
 # releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
 # rmdir would fail (ENOTEMPTY) and leak the lock permanently.
@@ -300,12 +412,31 @@ done
 # so CLAUDE.md's documented arm-status parsing contract still holds.
 if cycle_live; then
   wm_ok "watcher: already armed and healthy - one cycle is live (pid $(cat "$PIDFILE"), beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
+  # Non-clobbering: a `fire`/`remote-control-dropped` record from the live
+  # cycle this redundant arm just raced against outranks a `healthy` write -
+  # --classify's own cycle_live check already derives `healthy` independently
+  # from "record absent + a cycle is live", so skipping this write when a
+  # record already exists costs nothing and protects the one write that
+  # cannot be reconstructed after the fact.
+  [ -f "$EXITFILE" ] || printf 'healthy\n' > "$EXITFILE"
   release_claim
   exit 0
 fi
 
 # --- claim the cycle --------------------------------------------------------
 echo $$ > "$PIDFILE"
+# Loud, not silent: the only way a record can still be present at a fresh
+# claim is that a wake was never classified - i.e. the record is the last
+# remaining trace of an event `fire()` already acked. Append it to the
+# forensic log before clearing it, so a lost wake leaves evidence rather than
+# vanishing without a trace. This code path never touches
+# $SPURCOUNTFILE - the count file's only three writers are inside
+# --classify (see the comments there); a claim-time reset would silently
+# revert the whole fix for any failure that claims successfully before dying.
+if [ -f "$EXITFILE" ]; then
+  spurlog dropped-wake "$(cat "$EXITFILE" 2>/dev/null)"
+  rm -f "$EXITFILE"
+fi
 : > "$BEATFILE" || true
 release_claim
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
@@ -434,6 +565,11 @@ fire() {
   printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && wm_state ack --id "$id" --updated "$upd" >/dev/null 2>&1
   done
+  # Unconditional: the highest-priority writer. A `fire` record is the only
+  # trace of an event that is already acked above - it must never lose to a
+  # racing `healthy` write from a redundant arm evaluating the singleton guard
+  # in the narrow window before this process's own $PIDFILE removal below.
+  printf 'fire\n' > "$EXITFILE"
   rm -f "$PIDFILE"
   exit 0
 }
@@ -456,6 +592,7 @@ while :; do
       echo "retry budget is exhausted. Run \`/remote-control\` in this session to restore it."
     } > "$WAKEFILE"
     echo "remote-control-dropped: wingman run /remote-control in this session to restore it"
+    printf 'remote-control-dropped\n' > "$EXITFILE"
     rm -f "$PIDFILE"
     exit 0
   fi

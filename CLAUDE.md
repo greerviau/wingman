@@ -146,20 +146,24 @@ The watcher is built for exactly this:
   One run of it is one *cycle*.
 - **Arm it as a harness-tracked background task** (run it in the background with the harness's own background mechanism, e.g. Bash `run_in_background`), on its own, never bundled onto the tail of another command.
   Because the harness tracks it, its exit re-invokes you - that exit **is** the wake.
-- **On each wake:** the fire's stdout carries the state-change deltas plus a directive naming the wake file to read; that file holds the new events **and** the full roster for the cycle's owner scope.
-  Read it (or run `bin/crew-list`), surface each blocker/PR to the pilot (or answer via `bin/crew-say`), and report a compact roster status - who is on what, what is blocked, what is stalled, what is ready - then **arm exactly one fresh cycle** before you end the turn.
-  This roster report is itself the Report step (see "The operating loop" → Report): under `summary-only`, a wake caused solely by an absorbable round of a direct revise loop produces no roster report at all - just re-arm and end the turn silently.
-  The chain persists only if you re-arm after every fire.
+- **On each wake, run `/watch`.** It runs `bin/watch-fleet --classify` (a testable `bin/` verb, not skill prose) to turn the just-completed cycle's exit into one of five outcomes - `healthy`, `fire`, `remote-control-dropped`, `spurious <count> <hint>`, `spurious-repeated <count> <hint>` - and handles each correctly: `fire` reports the roster and re-arms, `remote-control-dropped` relays the reconnect instruction and re-arms, a one-off `spurious` re-arms silently, and `spurious-repeated` (the watcher failing to stay up, not a single transient death) stops and surfaces to you instead of re-arming into a silent livelock.
+  On `fire`, the roster report is itself the Report step (see "The operating loop" → Report): under `summary-only`, a wake caused solely by an absorbable round of a direct revise loop produces no roster report at all - just re-arm and end the turn silently.
+  Use the same command for your own very first arm of a fresh run (nothing yet to classify - it goes straight to arming).
+  **Exception, while onboarding preferences are still unanswered** (see "Confirm onboarding preferences" above): `/watch` is a `Skill` tool call, which `hooks/pilot-preferences-guard.sh` does not allow during that window.
+  Arm and process `bin/watch-fleet` via the raw `Bash` form directly instead (already exempted by the guard) - `bin/watch-fleet` to arm, `bin/watch-fleet --classify` to process a wake - and switch to `/watch` once preferences resolve (the common case, resolved once at the very start of a run before most work happens).
 - **Read the arm's status line as truth:** `armed` (a fresh cycle is now blocking), `healthy` (a live cycle already exists - do **not** start another), or a `blocked:/review:/done:/died:/stalled:` reason (it fired - handle it, then re-arm).
   Do not churn extra arms while one is `healthy`.
 - The watcher checks for pending events the moment it arms, so a crew member that finishes in the gap between one fire and the next arm is surfaced by that arm, not lost.
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
 - **Never `kill` a watch-fleet process for any reason during normal operation** - the pid shown in a `healthy`/`armed` line is informational, never an instruction.
   The only legitimate way to stop a cycle is `bin/watch-fleet --stop`, and that is a manual/testing action, not part of the normal arm-supervise-fire loop.
-- **A `remote-control-dropped: wingman ...` reason line means this session's own Remote Control connection dropped**, not a crew event.
+- **A `remote-control-dropped` outcome means this session's own Remote Control connection dropped**, not a crew event.
   `bin/wingman` registers this session's own tmux pane at startup (best-effort, only if running inside tmux); your own watch cycle then read-only watches that pane for the CLI's disconnect banner and wakes you the moment it appears - it never types into your pane (the same restraint the watcher has always applied to itself: the only way to act is `/remote-control`, and issuing that from outside would race the very tool call sending it).
   On this wake, tell the pilot immediately and explicitly - e.g. "Remote Control disconnected on this session; run `/remote-control` to restore it" - then re-arm as usual.
   A crew member's own dropped connection is different and needs no pilot action: `bin/watch-fleet` recovers it automatically (retypes `/remote-control` into that member's pane) and never surfaces it unless the automatic retry itself is failing.
+
+This section, and `/watch` itself, cover **wingman's own top-level watch cycle only** (owner `""`).
+A lead's own watch cycle (`--owner <lead-id>`) has no `/watch`-equivalent skill yet - it continues to arm and read `bin/watch-fleet` directly per its own playbook, unchanged by this section.
 
 ## Spawning crew (the recipe)
 
@@ -216,7 +220,7 @@ You never edit playbooks yourself - the pilot owns them.
 - **"Implement feature X"** → apply the lead test first (see Intake); on the direct path, spawn a **software-analyst** crew member to produce a plan.
   When it reports `review` with an `artifact` (the plan path), relay it for the pilot's review - this is the **pilot-facing** hand-off (see Report); a `review` state that is only an input to a review round wingman itself commissioned or is about to commission, and has not yet concluded, is not an instance of this bullet and is subject to `direct_spawn_visibility` instead.
   On the pilot's approval, spawn a **developer** crew member with `--input <plan-path>` and then stand down the software-analyst member (approval is its disposition).
-  If the pilot has feedback on the plan instead, route it to the same software-analyst member with `bin/crew-say` - do not spawn a new one.
+  If the pilot has feedback on the plan instead, route it to the same software-analyst member with `/say` - do not spawn a new one.
 - **"Investigate issue Y"** → apply the lead test first (see Intake); on the direct path, spawn a **software-analyst** crew member in *report mode* (no developer handoff).
   For a bug, its brief tells it to reproduce end-to-end before hypothesizing.
   It leaves a report; you relay the path.
@@ -250,14 +254,16 @@ You never edit playbooks yourself - the pilot owns them.
   `review` means "ready for you, still alive"; it is not a cue to reap.
   Announce it as the member's own report ("the developer reports its PR ready for review"); do not upgrade that into a claim about GitHub's review or merge state you have not checked yourself.
   What the member does next is its playbook's business, not yours.
-- **Feedback on in-flight work** → when the pilot gives feedback on an existing plan or PR, route it to the crew member that owns that work with `bin/crew-say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in `bin/crew-list`).
+- **Feedback on in-flight work** → when the pilot gives feedback on an existing plan or PR, route it to the crew member that owns that work with `/say <id> "<feedback>"` (match it by repo + `artifact`/`delivery` in `bin/crew-list`).
   **Never spawn a new member to revise existing work** - the owning session holds the context and is still alive for exactly this.
-- **Ask a delegate a direct question** → when you need a *specific answer* back in your own context (a fact, a yes/no, a decision input) rather than a status, use `bin/crew-ask <id> "<question>"` - the synchronous counterpart to `crew-say`.
-  Where `crew-say` injects a message and captures nothing, `crew-ask` delivers a framed question, the delegate authors a bounded answer, and you capture it back.
-  Flow: `bin/crew-ask <id> "<question>"` (it prints a request id), then arm `bin/crew-ask await --id <req>` as a harness-tracked background task and end the turn; on wake, read `~/.wingman/ask/<req>.json` for the answer and continue.
+- **Send a delegate a follow-up message** → `/say <id> "<message>"` (a thin wrapper around `bin/crew-say`, pre-authorized so it never triggers a permission prompt).
+  It already owns the team guardrail (you may message only your own direct reports, a sibling under the same lead, or your own lead) and the dialog-freeze refusal (declines to send if the target's pane looks like a permission dialog rather than an idle chat input) - relay either refusal verbatim rather than retrying with `--force` on your own judgment.
+- **Ask a delegate a direct question** → when you need a *specific answer* back in your own context (a fact, a yes/no, a decision input) rather than a status, use `/ask <id> "<question>"` (a thin wrapper around `bin/crew-ask`) - the synchronous counterpart to `/say`.
+  Where `/say` injects a message and captures nothing, `/ask` delivers a framed question, the delegate authors a bounded answer, and you capture it back.
+  Flow: `/ask` runs `bin/crew-ask <id> "<question>"` (prints a request id), then arms `bin/crew-ask await --id <req>` as a harness-tracked background task and ends the turn; on wake, the fire's stdout embeds the distilled answer directly (`answered: <req> <inline answer>`) for the common case - no further read needed, and a `(detail: <path>)` suffix means read that path for the full answer.
   The reply is a **captured answer, not a roster event** - it never appears in `crew-list`/`needs-attention` and does not change the delegate's own status, so do not report it as roster status.
   An ask consumes a delegate turn, so ask when you genuinely need the answer to proceed; prefer reading distilled status when that suffices.
-  The same team guardrail as `crew-say` applies (you may ask only your own reports, a sibling under the same lead, or your lead).
+  The same team guardrail as `/say` applies (you may ask only your own reports, a sibling under the same lead, or your lead).
 - **Crew done** → when the watcher surfaces a `done` member, relay its outcome to the pilot **and reap it in the same turn** with `bin/crew-standdown <id>`.
   Under `summary-only` (see Report), an intermediate (non-terminal) member's `done` may have its relay absorbed, but the reap always happens in the same turn regardless.
   `done` is the member's own "my whole engagement is over, stand me down" signal; do **not** wait for the pilot to acknowledge before reaping - relaying and reaping happen together, so `done` members never pile up.

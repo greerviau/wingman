@@ -7,6 +7,17 @@
 # resolve the gate itself and keep an already-running fleet supervised:
 #
 #   - AskUserQuestion: always allowed - it is how the gate gets satisfied.
+#   - Skill, but only when the invoked skill is exactly `prefs`: this is the
+#     ONLY skill that can run at all while the gate is unsatisfied (every
+#     other Skill call reaches the unconditional deny() at the bottom) - the
+#     one deliberate, narrow expansion of the guard's trust surface, since
+#     `/prefs`'s entire job (calling AskUserQuestion, then pref-set-ing each
+#     answer) exists only as skill logic with no bare-command fallback to fall
+#     back on the way `/watch` has one (CLAUDE.md documents arming raw
+#     `bin/watch-fleet` directly during this same window). Confirmed
+#     empirically against a live PreToolUse payload for a Skill tool call: the
+#     invoked skill's bare name (no leading slash, no path) is
+#     `tool_input.skill`.
 #   - Bash resolving to `wm-state.py prefs-list|pref-get`: read-only checks of
 #     the preference cache, always allowed.
 #   - Bash resolving to `wm-state.py pref-set`: allowed only once an
@@ -235,6 +246,13 @@ if resolves_to_pref_set("$WINGMAN_STATE"):
 
 # The gate is satisfied through this tool, so it is always allowed.
 if tool == "AskUserQuestion":
+    allow()
+
+# One deliberate, narrow expansion of the guard trust surface: the /prefs
+# skill exists only to run this exact gate (AskUserQuestion, then pref-set
+# each answer), so it must itself be runnable while the gate is unsatisfied -
+# but nothing broader. Any other Skill call still falls through to deny().
+if tool == "Skill" and tool_input.get("skill") == "prefs":
     allow()
 
 # Has a real AskUserQuestion completed this session? (Marker written by

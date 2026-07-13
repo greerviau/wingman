@@ -1,6 +1,6 @@
 ---
 description: List crew members that are blocked and the decision each one needs
-allowed-tools: Bash(bin/crew-list:*)
+allowed-tools: Bash(bin/crew-list:*), Bash(bin/crew-say:*)
 ---
 
 Run `bin/crew-list --status blocked`. For each blocked crew member, surface its id
