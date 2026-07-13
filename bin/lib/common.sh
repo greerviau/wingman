@@ -252,6 +252,113 @@ wm_tmux_window_activity_age() {
   echo $(( $(date +%s) - _act ))
 }
 
+# Signature of an interactive prompt (a permission/confirmation dialog, the
+# one-time workspace-trust dialog, the one-time Bypass Permissions acceptance) as
+# opposed to a normal idle chat input box. Shared by watch-fleet's pane backstop
+# (a member frozen on this) and wm_tmux_send_message below (about to type/submit
+# into this) so both act on one detector instead of two independently-drifting
+# copies. Covers the gates a crew can hit: every per-tool permission phrasing ("Do
+# you want to proceed?", "Do you want to make this edit…?", "Do you want to
+# create…?" - the case-sensitive prefix catches them all), the workspace-trust
+# dialog (matched by its "Yes, I trust this folder" option row - the question text
+# varies across CLI versions and sits outside the adjacency window; verified
+# against a live capture, Claude Code v2.1.206), and the Bypass Permissions mode
+# acceptance (likewise matched by its acceptance rows). Precision against pane
+# content that merely *mentions* a prompt (a diff, a plan, a test fixture) is
+# carried by the UI-shape adjacency and stability conditions in each caller, not
+# by the phrase list. Overridable (e.g. for another harness).
+WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Yes, I trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
+# A real dialog pairs the question with a numbered options list rendered with it.
+WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
+# The highlighted-option glyph, if the CLI renders one. Used ONLY to reject a
+# block that carries more than one such row (a real dialog highlights at most one
+# option; a loose verbatim quote may duplicate the glyph). It is never required to
+# accept: real captures render none (the live workspace-trust dialog signals the
+# selection by indentation, not a glyph), so requiring a marker would miss the
+# highest-value freeze. See WM_PERM_MIN_OPTS for the actual content discriminator.
+WM_PERM_MARK_RE="${WM_PERM_MARK_RE:-^[[:space:]]*❯[[:space:]]*[0-9]+\.[[:space:]]}"
+# A real gate offers a choice, so its option block holds at least this many rows
+# (counting the anchor row when the anchor is itself an option). This is the
+# content discriminator: it rejects a single stray numbered item whose text merely
+# begins with a question phrase (one row) while every true gate - per-tool,
+# workspace-trust, Bypass - renders two or more.
+WM_PERM_MIN_OPTS="${WM_PERM_MIN_OPTS:-2}"
+# A real dialog renders at the bottom of the screen; only this many trailing
+# lines of the capture are searched, so transcript content mid-screen never
+# matches.
+WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
+# ...and renders its options directly under the question: the option block must
+# begin within this many lines after the phrase line. A quoted phrase in prose
+# with an unrelated numbered list elsewhere in the tail stops matching.
+WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
+# ...and renders the question as its own line: only non-alphanumeric characters
+# (whitespace, border glyphs) and optionally an option-row prefix ("❯ 1. ", so
+# the trust/Bypass acceptance rows - where the phrase IS an option row - still
+# match) may precede the phrase. Transcript quotes and diff hunks carry prose
+# before it and stop matching.
+WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
+
+# True if the given text contains the question phrase - rendered as its own line
+# per WM_PERM_LEAD_RE - anchoring a full contiguous option block of at least
+# WM_PERM_MIN_OPTS rows bearing at most one selection marker: the one-block shape a
+# real dialog renders, which transcript prose about prompts almost never
+# reproduces. For each phrase hit the option block is found by scanning both
+# directions from the anchor:
+#   - if the anchor line itself is an option row (the trust/Bypass case, where the
+#     matched phrase IS an option), the block starts at the anchor;
+#   - otherwise (the per-tool case, where the phrase is a header) the block starts
+#     at the first option row within WM_PERM_ADJ lines below the anchor.
+# From there it walks downward through consecutive option rows, tolerating blank
+# lines between them (the live trust capture has a blank line before its footer),
+# stopping at the first non-blank non-option line. The block is then accepted iff
+# it holds >=WM_PERM_MIN_OPTS option rows AND <=1 marker rows. The outward walk is
+# capped at WM_PERM_TAIL lines so a pathological pane cannot make it walk far.
+prompt_shape_in() {
+  _ps_text="$1"
+  _ps_hits="$(printf '%s\n' "$_ps_text" \
+    | grep -nE "${WM_PERM_LEAD_RE}(${WM_PERM_PROMPT_RE})" | cut -d: -f1)"
+  [ -n "$_ps_hits" ] || return 1
+  _ps_total="$(printf '%s\n' "$_ps_text" | grep -c '')"
+  for _ps_n in $_ps_hits; do
+    # Locate the first option row of the block (its start line).
+    if printf '%s\n' "$_ps_text" | sed -n "${_ps_n}p" | grep -qE "$WM_PERM_OPTION_RE"; then
+      _ps_start="$_ps_n"                       # anchor is itself an option row
+    else
+      _ps_start=""
+      _ps_j="$((_ps_n+1))"; _ps_jmax="$((_ps_n+WM_PERM_ADJ))"
+      while [ "$_ps_j" -le "$_ps_jmax" ] && [ "$_ps_j" -le "$_ps_total" ]; do
+        if printf '%s\n' "$_ps_text" | sed -n "${_ps_j}p" | grep -qE "$WM_PERM_OPTION_RE"; then
+          _ps_start="$_ps_j"; break
+        fi
+        _ps_j="$((_ps_j+1))"
+      done
+      [ -n "$_ps_start" ] || continue
+    fi
+    # Walk downward to the last contiguous option row (blank lines tolerated),
+    # capped at WM_PERM_TAIL lines from the block start.
+    _ps_end="$_ps_start"
+    _ps_k="$((_ps_start+1))"; _ps_kmax="$((_ps_start+WM_PERM_TAIL))"
+    while [ "$_ps_k" -le "$_ps_kmax" ] && [ "$_ps_k" -le "$_ps_total" ]; do
+      _ps_line="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_k}p")"
+      if printf '%s\n' "$_ps_line" | grep -qE "$WM_PERM_OPTION_RE"; then
+        _ps_end="$_ps_k"
+      elif printf '%s\n' "$_ps_line" | grep -qE '^[[:space:]]*$'; then
+        :                                      # blank line: tolerate, do not extend
+      else
+        break                                  # first non-blank non-option ends it
+      fi
+      _ps_k="$((_ps_k+1))"
+    done
+    _ps_block="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_start},${_ps_end}p")"
+    _ps_opts="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_OPTION_RE")"
+    _ps_marks="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_MARK_RE")"
+    if [ "$_ps_opts" -ge "$WM_PERM_MIN_OPTS" ] && [ "$_ps_marks" -le 1 ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Wait until a target pane's interactive TUI has finished starting and is ready to
 # accept input, rather than guessing with a fixed delay. A freshly launched agent
 # paints a splash/prompt and connects MCP servers before it will honour keystrokes;
@@ -260,7 +367,14 @@ wm_tmux_window_activity_age() {
 # byte-stable across two consecutive reads (startup paints, then settles at an idle
 # prompt). An already-idle session (the crew-say path) satisfies this on the first
 # check. Best-effort and bounded (WM_READY_TRIES polls of WM_READY_POLL seconds), so
-# a pane that never settles still proceeds rather than hanging.
+# a pane that never settles still proceeds rather than hanging (returns 0, same as
+# an ordinary ready pane - there is nothing more specific to report).
+#
+# A pane that settles stable but dialog-shaped (prompt_shape_in matches its tail)
+# is NOT ready for chat text - it is a permission/confirmation/trust prompt, and
+# byte-stability alone cannot tell that apart from an idle chat prompt (a frozen
+# dialog is just as stable as a parked one). Returns 2 in that case so the caller
+# refuses to type into it rather than guessing.
 wm_tmux_pane_ready() {
   _pr_target="$1"
   _pr_prev=""; _pr_i=0
@@ -269,6 +383,9 @@ wm_tmux_pane_ready() {
     _pr_text="$(wm_tmux_pane_text "$_pr_target")"
     _pr_cur="$(printf '%s' "$_pr_text" | cksum)"
     if [ -n "$_pr_text" ] && [ "$_pr_cur" = "$_pr_prev" ]; then
+      if prompt_shape_in "$(printf '%s\n' "$_pr_text" | tail -n "$WM_PERM_TAIL")"; then
+        return 2
+      fi
       return 0
     fi
     _pr_prev="$_pr_cur"
@@ -282,34 +399,59 @@ wm_tmux_pane_ready() {
 # type the (possibly large) text, submit with Enter, then confirm the submit
 # actually registered and re-press Enter if it did not.
 #
-# Two failure modes motivate this. First, an interactive TUI (e.g. Claude Code)
-# ingests a rapid bulk burst as a bracketed paste - the "[Pasted text #N]"
-# placeholder - and an Enter fired in the same burst is absorbed as a newline
+# Two failure modes motivate the confirm-and-retry: an interactive TUI (e.g.
+# Claude Code) ingests a rapid bulk burst as a bracketed paste - the "[Pasted text
+# #N]" placeholder - and an Enter fired in the same burst is absorbed as a newline
 # inside that paste instead of submitting; the WM_SUBMIT_DELAY settle between the
-# text and the Enter lets the paste finalize first. Second, during a freshly
-# spawned session's startup the Enter can be swallowed by the startup transition
-# even after the text lands, leaving the message unexecuted in the input box (a
-# fixed delay cannot cover a variable startup). Submitting always consumes the
-# input box and advances the pane, so the confirm loop compares the pane against
-# its just-composed state and re-presses Enter until it advances (bounded by
+# text and the Enter lets the paste finalize first. And during a freshly spawned
+# session's startup the Enter can be swallowed by the startup transition even
+# after the text lands, leaving the message unexecuted in the input box (a fixed
+# delay cannot cover a variable startup). Submitting always consumes the input box
+# and advances the pane, so the confirm loop compares the pane against its
+# just-composed state and re-presses Enter until it advances (bounded by
 # WM_SUBMIT_TRIES). Extra Enters against an already-submitted, empty prompt are
 # inert, so the retry is safe for the already-reliable crew-say path too.
+#
+# A third failure mode motivates the dialog check below: a target pane can be
+# sitting on a permission/confirmation dialog rather than an idle chat prompt -
+# byte-stable, so wm_tmux_pane_ready alone cannot tell it apart from "ready". Text
+# typed there lands as noise in front of the dialog and Enter (plus every retry)
+# is consumed as that dialog's own "accept" rather than a chat submit - the exact
+# mechanism that let a "do not reboot" crew-say land as an accepted reboot
+# confirmation instead of reaching the chat input. So this function never blindly
+# sends a keystroke into a pane that looks dialog-shaped: it checks before typing
+# (via wm_tmux_pane_ready's own return) and again before every Enter (the initial
+# one and each retry, since a dialog can appear in the gap between typing and
+# submitting), and refuses - sending nothing further - the instant one matches.
+# Returns 0 on a confirmed (or best-effort, unconfirmed-but-not-refused) delivery,
+# 2 if refused because the pane looks dialog-shaped rather than a chat input.
 wm_tmux_send_message() {
   _target="$1"; _text="$2"
   wm_tmux_pane_ready "$_target"
+  [ $? -eq 2 ] && return 2
   wm_tmux send-keys -t "$_target" -l "$_text"
   sleep "${WM_SUBMIT_DELAY:-1}"
-  # Snapshot the pane with the text composed in the input box, then submit.
-  _sm_composed="$(wm_tmux_pane_text "$_target" | cksum)"
+  # Snapshot the pane with the text composed in the input box, then submit -
+  # unless a dialog has appeared in the delay above, in which case refuse instead
+  # of pressing Enter into it.
+  _sm_composed_text="$(wm_tmux_pane_text "$_target")"
+  if prompt_shape_in "$(printf '%s\n' "$_sm_composed_text" | tail -n "$WM_PERM_TAIL")"; then
+    return 2
+  fi
+  _sm_composed="$(printf '%s' "$_sm_composed_text" | cksum)"
   wm_tmux send-keys -t "$_target" Enter
   _sm_i=0
   _sm_max="${WM_SUBMIT_TRIES:-6}"
   while [ "$_sm_i" -lt "$_sm_max" ]; do
     sleep "${WM_SUBMIT_POLL:-0.8}"
-    _sm_now="$(wm_tmux_pane_text "$_target" | cksum)"
+    _sm_now_text="$(wm_tmux_pane_text "$_target")"
+    _sm_now="$(printf '%s' "$_sm_now_text" | cksum)"
     # A registered submit clears the composed input and echoes/streams below it, so
     # any change from the composed snapshot means the Enter took.
     [ "$_sm_now" != "$_sm_composed" ] && return 0
+    if prompt_shape_in "$(printf '%s\n' "$_sm_now_text" | tail -n "$WM_PERM_TAIL")"; then
+      return 2
+    fi
     wm_tmux send-keys -t "$_target" Enter
     _sm_i=$((_sm_i+1))
   done

@@ -338,50 +338,11 @@ release_claim
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 
-# Signature of an interactive prompt that has frozen a crew member. Covers the
-# gates a crew can hit: every per-tool permission phrasing ("Do you want to
-# proceed?", "Do you want to make this edit…?", "Do you want to create…?" - the
-# case-sensitive prefix catches them all), the one-time workspace-trust dialog
-# (matched by its "Yes, I trust this folder" option row - the question text
-# varies across CLI versions and sits outside the adjacency window; verified
-# against a live capture, Claude Code v2.1.206), and the one-time Bypass
-# Permissions mode acceptance (likewise matched by its acceptance rows).
-# Precision against pane content that merely *mentions* a prompt (a diff, a
-# plan, a test fixture) is carried by the UI-shape adjacency and stability
-# conditions below, not by the phrase list. Overridable (e.g. for another
-# harness).
-WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Yes, I trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
-# A real dialog pairs the question with a numbered options list rendered with it.
-WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"
-# The highlighted-option glyph, if the CLI renders one. Used ONLY to reject a
-# block that carries more than one such row (a real dialog highlights at most one
-# option; a loose verbatim quote may duplicate the glyph). It is never required to
-# accept: real captures render none (the live workspace-trust dialog signals the
-# selection by indentation, not a glyph), so requiring a marker would miss the
-# highest-value freeze. See WM_PERM_MIN_OPTS for the actual content discriminator.
-WM_PERM_MARK_RE="${WM_PERM_MARK_RE:-^[[:space:]]*❯[[:space:]]*[0-9]+\.[[:space:]]}"
-# A real gate offers a choice, so its option block holds at least this many rows
-# (counting the anchor row when the anchor is itself an option). This is the
-# content discriminator: it rejects a single stray numbered item whose text merely
-# begins with a question phrase (one row) while every true gate - per-tool,
-# workspace-trust, Bypass - renders two or more.
-WM_PERM_MIN_OPTS="${WM_PERM_MIN_OPTS:-2}"
-# A real dialog renders at the bottom of the screen; only this many trailing
-# lines of the capture are searched, so transcript content mid-screen never
-# matches.
-WM_PERM_TAIL="${WM_PERM_TAIL:-25}"
-# ...and renders its options directly under the question: the option block must
-# begin within this many lines after the phrase line. A quoted phrase in prose
-# with an unrelated numbered list elsewhere in the tail stops matching.
-WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
-# ...and renders the question as its own line: only non-alphanumeric characters
-# (whitespace, border glyphs) and optionally an option-row prefix ("❯ 1. ", so
-# the trust/Bypass acceptance rows - where the phrase IS an option row - still
-# match) may precede the phrase. Transcript quotes and diff hunks carry prose
-# before it and stop matching. The accepted residual is now strictly narrower: a
-# parked pane whose tail holds a verbatim >=WM_PERM_MIN_OPTS-row option block at
-# column zero that has also not self-reported within the liveness grace.
-WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
+# The prompt-shape detector (prompt_shape_in) and its WM_PERM_PROMPT_RE/
+# WM_PERM_OPTION_RE/WM_PERM_MARK_RE/WM_PERM_MIN_OPTS/WM_PERM_TAIL/WM_PERM_ADJ/
+# WM_PERM_LEAD_RE config live in lib/common.sh (shared with wm_tmux_send_message,
+# which uses the same detector before typing/submitting into a target pane).
+#
 # Negative-liveness grace: a member whose status file self-reported more recently
 # than this is too fresh to be frozen, so the blocked-flip is vetoed. Defaults to
 # two poll intervals. The veto applies ONLY once a member has genuinely
@@ -389,67 +350,6 @@ WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
 # spawned_at stamp), so a member frozen on the one-time startup gate - which never
 # runs crew-set, leaving status.updated at the spawn stamp - is never vetoed.
 WM_PERM_LIVENESS_GRACE="${WM_PERM_LIVENESS_GRACE:-$(( INTERVAL * 2 ))}"
-
-# True if the given text contains the question phrase - rendered as its own line
-# per WM_PERM_LEAD_RE - anchoring a full contiguous option block of at least
-# WM_PERM_MIN_OPTS rows bearing at most one selection marker: the one-block shape a
-# real dialog renders, which transcript prose about prompts almost never
-# reproduces. For each phrase hit the option block is found by scanning both
-# directions from the anchor:
-#   - if the anchor line itself is an option row (the trust/Bypass case, where the
-#     matched phrase IS an option), the block starts at the anchor;
-#   - otherwise (the per-tool case, where the phrase is a header) the block starts
-#     at the first option row within WM_PERM_ADJ lines below the anchor.
-# From there it walks downward through consecutive option rows, tolerating blank
-# lines between them (the live trust capture has a blank line before its footer),
-# stopping at the first non-blank non-option line. The block is then accepted iff
-# it holds >=WM_PERM_MIN_OPTS option rows AND <=1 marker rows. The outward walk is
-# capped at WM_PERM_TAIL lines so a pathological pane cannot make it walk far.
-prompt_shape_in() {
-  _ps_text="$1"
-  _ps_hits="$(printf '%s\n' "$_ps_text" \
-    | grep -nE "${WM_PERM_LEAD_RE}(${WM_PERM_PROMPT_RE})" | cut -d: -f1)"
-  [ -n "$_ps_hits" ] || return 1
-  _ps_total="$(printf '%s\n' "$_ps_text" | grep -c '')"
-  for _ps_n in $_ps_hits; do
-    # Locate the first option row of the block (its start line).
-    if printf '%s\n' "$_ps_text" | sed -n "${_ps_n}p" | grep -qE "$WM_PERM_OPTION_RE"; then
-      _ps_start="$_ps_n"                       # anchor is itself an option row
-    else
-      _ps_start=""
-      _ps_j="$((_ps_n+1))"; _ps_jmax="$((_ps_n+WM_PERM_ADJ))"
-      while [ "$_ps_j" -le "$_ps_jmax" ] && [ "$_ps_j" -le "$_ps_total" ]; do
-        if printf '%s\n' "$_ps_text" | sed -n "${_ps_j}p" | grep -qE "$WM_PERM_OPTION_RE"; then
-          _ps_start="$_ps_j"; break
-        fi
-        _ps_j="$((_ps_j+1))"
-      done
-      [ -n "$_ps_start" ] || continue
-    fi
-    # Walk downward to the last contiguous option row (blank lines tolerated),
-    # capped at WM_PERM_TAIL lines from the block start.
-    _ps_end="$_ps_start"
-    _ps_k="$((_ps_start+1))"; _ps_kmax="$((_ps_start+WM_PERM_TAIL))"
-    while [ "$_ps_k" -le "$_ps_kmax" ] && [ "$_ps_k" -le "$_ps_total" ]; do
-      _ps_line="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_k}p")"
-      if printf '%s\n' "$_ps_line" | grep -qE "$WM_PERM_OPTION_RE"; then
-        _ps_end="$_ps_k"
-      elif printf '%s\n' "$_ps_line" | grep -qE '^[[:space:]]*$'; then
-        :                                      # blank line: tolerate, do not extend
-      else
-        break                                  # first non-blank non-option ends it
-      fi
-      _ps_k="$((_ps_k+1))"
-    done
-    _ps_block="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_start},${_ps_end}p")"
-    _ps_opts="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_OPTION_RE")"
-    _ps_marks="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_MARK_RE")"
-    if [ "$_ps_opts" -ge "$WM_PERM_MIN_OPTS" ] && [ "$_ps_marks" -le 1 ]; then
-      return 0
-    fi
-  done
-  return 1
-}
 
 # Negative-liveness veto: a genuinely frozen session cannot run crew-set, so its
 # status file goes stale. Returns 0 (VETO the blocked flip) iff the member has
@@ -593,22 +493,32 @@ while :; do
     # wingman's watcher (--owner ""); a lead's cycle does the death-flip only (N4).
     wm_state reconcile --windows "$(wm_tmux_windows_csv)" --owner "$OWNER" >/dev/null 2>&1
 
-    # Pane backstop over every working member: two failure shapes never reach the
-    # status files (they stay "working"). A member frozen on an interactive
-    # permission/trust prompt is flipped to blocked (independent of the crew's
-    # permission mode, so it still catches freezes when bypass is disabled); a
+    # Pane backstop over every working OR already-blocked member: two failure
+    # shapes never reach the status files on their own. A member frozen on an
+    # interactive permission/trust prompt is flipped to blocked (independent of
+    # the crew's permission mode, so it still catches freezes when bypass is
+    # disabled) - this applies whether the member was "working" or already
+    # "blocked" for an unrelated reason (a member can answer one blocker and walk
+    # straight into a fresh confirmation dialog, which would otherwise be
+    # invisible: the backstop below used to scan only "working" members, so a
+    # dialog freeze on top of a pre-existing blocker never got a second look). A
     # member gone silently idle - agent errored, nothing executing - is flipped to
-    # stalled by wm-state stall-check. Both then flow through the normal
-    # needs-attention/fire path below.
-    for _id in $(wm_state crew-list --status working --owner "$OWNER" --json 2>/dev/null | wm_py -c '
+    # stalled by wm-state stall-check; that diagnosis only makes sense for a
+    # member that claims to be "working", since a "blocked" member sitting idle
+    # is already exactly where it is supposed to be. Both then flow through the
+    # normal needs-attention/fire path below.
+    for _row in $(wm_state crew-list --owner "$OWNER" --json 2>/dev/null | wm_py -c '
 import sys, json
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = []
 for r in data:
-    print(r.get("id", ""))
+    st = r.get("status", "")
+    if st in ("working", "blocked"):
+        print(r.get("id", "") + ":" + st)
 ' 2>/dev/null); do
+      _id="${_row%%:*}"; _orig_status="${_row##*:}"
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
       wm_pane_snapshot "$_id" "$_win"
@@ -618,13 +528,20 @@ for r in data:
       # `/remote-control` retry per cooldown window - the existing
       # message-delivery primitive, aimed at a pane it already has a target for.
       # Purely self-healing: it never changes crew status, so it stays quiet the
-      # overwhelming majority of the time.
-      if [ "$PANE_STABLE" = 1 ] && remote_control_dropped_check; then
+      # overwhelming majority of the time. Working members only: an already-
+      # blocked member's pane is not expected to be showing a live agent to
+      # reconnect.
+      if [ "$_orig_status" = working ] && [ "$PANE_STABLE" = 1 ] && remote_control_dropped_check; then
         _rcfile="$WM_HOME/rcdrop-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').sent"
         _rc_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_rcfile" 2>/dev/null || echo 0) ))
         if [ ! -f "$_rcfile" ] || [ "$_rc_age" -ge "$RC_DROPPED_COOLDOWN" ]; then
-          wm_tmux_send_message "$WM_TMUX_SESSION:$_win" "/remote-control"
-          : > "$_rcfile"
+          # Only mark the cooldown when the retry actually sent: a refusal (the
+          # pane looks dialog-shaped, not the chat input) means nothing went out,
+          # so the next cycle should try again rather than sit out a cooldown for
+          # a retry that never happened.
+          if wm_tmux_send_message "$WM_TMUX_SESSION:$_win" "/remote-control"; then
+            : > "$_rcfile"
+          fi
         fi
       fi
 
@@ -632,8 +549,14 @@ for r in data:
         wm_state crew-set --id "$_id" --status blocked \
           --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
           >/dev/null 2>&1
-        continue   # the permission freeze is the more specific diagnosis
+        continue   # the permission freeze is the more specific diagnosis, superseding any prior blocker reason
       fi
+      # An already-blocked member with no dialog freeze detected needs no further
+      # diagnosis here: its existing blocker reason is left untouched, and the
+      # stall/api-error checks below only make sense for a member that claims to
+      # be actively working.
+      [ "$_orig_status" = blocked ] && continue
+
       # A prompt-shaped pane whose stability is not yet confirmed (first sighting,
       # no prior hash) is one INTERVAL from a definitive diagnosis; hold the stall
       # check off it, or a dialog frozen longer than STALL_IDLE before our first
@@ -660,9 +583,13 @@ for r in data:
           _nudgefile="$WM_HOME/apierr-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').nudged"
           _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || echo 0) ))
           if [ ! -f "$_nudgefile" ] || [ "$_nudge_age" -ge "$APIERR_NUDGE_COOLDOWN" ]; then
-            wm_tmux_send_message "$WM_TMUX_SESSION:$_win" \
-              "An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."
-            : > "$_nudgefile"
+            # As above: only mark the cooldown when the nudge actually sent, not
+            # when wm_tmux_send_message refused because the pane looks
+            # dialog-shaped rather than the chat input.
+            if wm_tmux_send_message "$WM_TMUX_SESSION:$_win" \
+              "An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."; then
+              : > "$_nudgefile"
+            fi
           fi
         else
           continue   # first sighting or still changing; one more poll before acting

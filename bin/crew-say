@@ -3,6 +3,12 @@
 # correction, a peer hand-off) into a crew member's live claude session via tmux.
 # The session resumes with full context.
 #
+# Delivery can be refused (exit 1, via wm_die) rather than guessed: if the
+# target's pane looks like a permission/confirmation dialog rather than an idle
+# chat input, wm_tmux_send_message (lib/common.sh) sends nothing rather than risk
+# the message/Enter being consumed as an answer to that dialog. Resolve the dialog
+# (bin/crew-takeover <id>) and retry.
+#
 # Team guardrail: collaboration stays within a team. The caller (identified by its
 # own $WINGMAN_CREW_ID; empty for wingman) may message only:
 #   - its own direct reports        (wingman -> its top level; a lead -> its workers)
@@ -41,4 +47,8 @@ wm_tmux list-windows -t "$WM_TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
   | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (see: bin/crew-takeover $ID)"
 
 wm_tmux_send_message "$WM_TMUX_SESSION:$WINDOW" "$MSG"
+_rc=$?
+if [ "$_rc" -eq 2 ]; then
+  wm_die "refused: '$ID's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the message (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. Resolve it first (bin/crew-takeover $ID), then retry."
+fi
 wm_ok "delivered to $ID"

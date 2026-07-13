@@ -165,9 +165,17 @@ EOF
   wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$_window" "bash $(quote "$_launch")"
   # --resume reopens the conversation but, in this unattended setup, does not
   # itself decide to keep working - it needs the same kind of opening nudge a
-  # fresh spawn gets.
+  # fresh spawn gets. A freshly resumed window can land back on a startup gate
+  # (workspace-trust/Bypass) rather than an idle chat prompt; wm_tmux_send_message
+  # then refuses (rc 2) rather than risk the nudge's Enter being consumed as an
+  # answer to that dialog. Non-fatal here - the window and roster record are
+  # already in place - but the nudge was NOT delivered, so it is surfaced rather
+  # than silently assumed to have landed.
   wm_tmux_send_message "$WM_TMUX_SESSION:$_window" \
     "Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
+  if [ $? -eq 2 ]; then
+    wm_warn "'$_rid': resume nudge NOT delivered - its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $_rid)"
+  fi
 
   # --- verify the resume actually took -----------------------------------------
   _tries="${WM_RESUME_VERIFY_TRIES:-10}"

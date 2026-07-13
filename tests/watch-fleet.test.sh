@@ -560,4 +560,53 @@ assert_true "a second arm on the same unresolved banner keeps blocking, not re-f
 kill "$rearm_pid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- an already-blocked member also gets caught by a NEW dialog freeze --------
+# The pane backstop used to scan only "working" members, so a member already
+# blocked for an unrelated reason (e.g. awaiting a decision) that then freezes on
+# a fresh permission/confirmation dialog was invisible - it never got a second
+# look. This is a real incident shape: a developer already blocked on a
+# reboot-approval question got frozen on a confirmation dialog afterward and
+# nothing caught it. Proves the backstop now also scans "blocked" members and
+# supersedes the stale blocker reason with the freeze diagnosis once the dialog
+# shape is confirmed stable.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id zb1 --type developer --objective j --repo /tmp --window wm-zb1 --session-id s15 >/dev/null
+wm_state crew-set --id zb1 --status blocked --blocker "need a decision about the reboot" >/dev/null
+# Ack the original blocked event so only a genuinely NEW event (the freeze
+# rewriting the blocker) is what the assertions below catch.
+na_zb1="$(wm_state needs-attention)"
+upd_zb1="$(printf '%s\n' "$na_zb1" | cut -f3)"
+wm_state ack --id zb1 --updated "$upd_zb1" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-zb1 'printf "Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell it what to do differently\n"; sleep 600'
+out15="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
+assert_contains "an already-blocked member frozen on a NEW dialog still fires" "$out15" "blocked: zb1"
+assert_contains "the fire carries the fresh freeze note, not the stale blocker" "$out15" "frozen on a permission/trust prompt"
+assert_contains "the member's blocker is superseded by the freeze diagnosis" "$(wm_state crew-get --id zb1)" "frozen on a permission/trust prompt"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- an already-blocked member's unrelated blocker is left untouched ----------
+# The flip side of the case above: when the check now also looks at blocked
+# members, a blocked member whose pane shows no dialog must not have its existing
+# blocker reason clobbered, and must not manufacture a spurious re-fire (no dialog
+# shape present, so needs-attention has nothing new to report once the original
+# event is acked).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id zb2 --type developer --objective k --repo /tmp --window wm-zb2 --session-id s16 >/dev/null
+wm_state crew-set --id zb2 --status blocked --blocker "need a decision about the deploy window" >/dev/null
+na_zb2="$(wm_state needs-attention)"
+upd_zb2="$(printf '%s\n' "$na_zb2" | cut -f3)"
+wm_state ack --id zb2 --updated "$upd_zb2" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-zb2 'printf "waiting on the pilot, nothing else to do here\n"; sleep 600'
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
+  "$WF" >/dev/null 2>&1 &
+zb2_pid=$!
+wm_track "$zb2_pid"
+sleep 8
+assert_true "watcher keeps blocking on a blocked member with no dialog present" "kill -0 $zb2_pid"
+assert_contains "the unrelated blocker reason is left untouched" "$(wm_state crew-get --id zb2)" "need a decision about the deploy window"
+kill "$zb2_pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary
