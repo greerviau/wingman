@@ -523,6 +523,28 @@ wm_tmux_windows() {
 # the move targets the id, which tmux resolves without any name matching.
 wm_tmux_adopt_strays() {
   wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null || return 0
+  _as_roster="$WM_HOME/crew.json"
+  [ -s "$_as_roster" ] || return 0
+  # Fast path: this runs on every watcher poll, so the steady state (every
+  # roster window home in the crew session, or belonging to a stood-down
+  # record whose window was deliberately closed) must cost one grep and one
+  # list-windows, not a python interpreter and an all-sessions listing. The
+  # grep keys on the exact field format wm-state.py's json.dump writes; if it
+  # yields nothing despite a non-empty roster (format drift), fall through to
+  # the authoritative pass rather than silently skipping adoption.
+  _as_wins="$(grep -o '"window": *"[^"]*"' "$_as_roster" 2>/dev/null \
+              | sed 's/.*: *"//; s/"$//')"
+  if [ -n "$_as_wins" ]; then
+    _as_live="$(wm_tmux_windows)"
+    _as_missing=0
+    for _as_w in $_as_wins; do
+      printf '%s\n' "$_as_live" | grep -qx "$_as_w" && continue
+      # A stood-down member's window is gone by design (window name is wm-<id>).
+      grep -q '"status": "stood-down"' "$WM_HOME/crew/${_as_w#wm-}.json" 2>/dev/null && continue
+      _as_missing=1; break
+    done
+    [ "$_as_missing" = 1 ] || return 0
+  fi
   _as_known="$(wm_py -c '
 import json, os
 path = os.path.join(os.environ.get("WINGMAN_HOME", ""), "crew.json")
