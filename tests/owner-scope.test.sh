@@ -12,8 +12,7 @@ set -u
 WF="$TEST_REPO/bin/watch-fleet"
 export WM_WATCH_INTERVAL=1
 # Reap any backgrounded watcher on exit so a blocking one can never outlive the
-# test and leak into later suites.
-trap wm_kill_tracked EXIT
+# test and leak into later suites (lib.sh's shared trap; wm_track registers it).
 
 # --- owner-scoped surfacing (escalation bubble-up) ---------------------------
 test_new_home
