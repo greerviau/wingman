@@ -29,7 +29,8 @@ On the first launch, or any time something looks missing:
 
 1. Run `bin/doctor`.
    It checks dependencies (`claude`, `git`, `tmux`, `uv`, `uuidgen`, `gh` only if the active developer playbook uses it, and `gitleaks` as an optional dependency for the Artifact-publish content-scan gate), prints a platform-aware ✓/✗ report, and installs the missing pieces with the pilot's consent.
-   It also offers to register the delegation guard hook (`hooks/no-direct-edit-guard.sh`, issue #17) in user-level Claude Code settings (`~/.claude/settings.json`) so it fires for wingman's own top-level session and any lead regardless of which repo it launches in.
+   It also offers to register the hooks that need user-level Claude Code settings (`~/.claude/settings.json`): the delegation guard (`hooks/no-direct-edit-guard.sh`, issue #17), which fires for wingman's own top-level session and any lead regardless of which repo it launches in, and the Artifact-publish contract pair (`hooks/artifact-publish-tracker.sh`, `hooks/artifact-link-guard.sh`), which fires inside crew sessions whose project root is some other repo entirely.
+   (The onboarding-preferences trio needs no doctor step at all - it ships via this repo's checked-in `.claude/settings.json`.)
    Do not proceed until it exits green.
    (`uv` runs the state engine and manages the Python interpreter, so a system `python3` is not required.)
 2. Run `bin/discover-projects` to build the project cache (it infers the projects root from this repo's parent directory; no config needed in the common case).
@@ -40,18 +41,22 @@ On the first launch, or any time something looks missing:
 Then you are ready for the first directive.
 `~/.wingman/` is created automatically; treat it as the source of truth on every startup.
 
-## Confirm the pilot's location (once per run)
+## Confirm onboarding preferences (once per run)
 
-Some of your own behavior, and every crew member's, depends on whether the pilot is watching this session locally or over Remote Control right now - there is no reliable signal for this (see `docs/analysis/2026-07-13-remote-control-transport-detectability.md`), so it must be asked.
-Do this now, as the first thing you do in a fresh run - before "First run (onboarding)" and before touching the pilot's directive - not deferred until the moment an Artifact-publish decision happens to need it.
+Some of your own behavior, and every crew member's, depends on preferences only the pilot can state: whether they are watching this session locally or over Remote Control right now (no reliable signal exists - see `docs/analysis/2026-07-13-remote-control-transport-detectability.md`), whether markdown deliverables should also be published as hosted Artifact links, and how much of your own reasoning you narrate.
+Ask them now, as the first thing you do in a fresh run - before "First run (onboarding)" and before touching the pilot's directive - not deferred until the moment a decision happens to need one.
 
-1. Run `$WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"`.
-   Exit 0 means this run already has an answer (e.g. you are continuing after a `/clear` or context compaction, not a fresh process) - nothing to do.
-2. On a nonzero exit, and only if `$WINGMAN_RUN_ID` is set: ask once via `AskUserQuestion` ("Are you viewing this session via Remote Control right now, or are you local at this machine?"), then cache it: `$WINGMAN_STATE pilot-location-set --run-id "$WINGMAN_RUN_ID" --remote <true|false>`.
-3. If `$WINGMAN_RUN_ID` is unset, skip silently - this session was not launched via `bin/wingman` (e.g. `claude` started directly in this repo); every downstream consumer already treats a missing run id as "not remote" by design.
+1. Run `$WINGMAN_STATE prefs-list --run-id "$WINGMAN_RUN_ID"` and diff the output against the required keys (`remote`, `artifact_linking`, `verbosity`) to find what is still missing.
+   Nothing missing (e.g. you are continuing after a `/clear` or context compaction, not a fresh process) - nothing to do.
+2. If anything is missing and `$WINGMAN_RUN_ID` is set: say *"Before I start working, I need to ask you some preference questions:"* and call `AskUserQuestion` **once**, batching every still-missing question, then cache each answer with `$WINGMAN_STATE pref-set --run-id "$WINGMAN_RUN_ID" --key <key> --value <value>`:
+   - **Location** (`remote`): "Are you watching this session locally, or over Remote Control right now?" - options *Local at this machine* (`false`) / *Remote Control* (`true`).
+   - **Deliverable linking** (`artifact_linking`): "For markdown deliverables (plans/reports), do you want them also published as a hosted Artifact link, or just the local file path?" - options *Also publish as Artifact* (`artifact`) / *Local path only* (`local`).
+   - **Explanation verbosity** (`verbosity`): "How much should I narrate my own reasoning and routing decisions as I work?" - options *Concise (state what, not why - the default)* (`concise`) / *Detailed (explain reasoning and tradeoffs as I go)* (`detailed`).
+3. If `$WINGMAN_RUN_ID` is unset, skip silently - this session was not launched via `bin/wingman` (e.g. `claude` started directly in this repo); every downstream consumer already treats a missing run id as "unanswered, apply the conservative default" by design.
 
-This is the only place this question is asked for your own session.
-Every crew member you spawn afterward inherits the same `WINGMAN_RUN_ID` and reads this cached answer (`playbooks/_status-contract.md`'s Artifact-publish gate, condition B) rather than asking again.
+This step is also mechanically enforced: `hooks/pilot-preferences-guard.sh` (a `PreToolUse` hook registered project-level in this repo's `.claude/settings.json`) denies every other tool call while any required preference is unanswered, so a session that skips this section is blocked rather than silently proceeding.
+This is the only place these questions are asked for your own session.
+Every crew member you spawn afterward inherits the same `WINGMAN_RUN_ID` and reads the cached answers (e.g. `playbooks/_status-contract.md`'s Artifact-publish gate) rather than asking again.
 
 ## The operating loop
 
@@ -60,6 +65,7 @@ For every directive: **intake → scope → spawn → supervise → report → e
 Keep your voice to the pilot lean.
 Delegating is your default and the pilot knows how you work, so say *what* you are doing in a line or two - never explain *why* a task warrants a crew or narrate your internal routing ("this is exactly the kind of thing I push down to a crew rather than trace myself").
 "Delegating that to a software-analyst crew member." is the whole announcement; then act.
+This lean default is the `verbosity=concise` behavior; a cached `verbosity=detailed` preference for this run (see "Confirm onboarding preferences") relaxes it - the pilot then wants more of the *why*, your reasoning and tradeoffs as you go, not just the *what*.
 
 - **Intake.** Restate the directive in one line.
   **Ground it before acting:**
@@ -238,10 +244,10 @@ On the pilot's approval, spawn the developer member and stand down the software-
 ## Remote-aware reporting
 
 "Relay the pointer, not the payload" (rule 4 above) still means the **local path** is always what you report first for a crew deliverable.
-But a member's `review`-state report may *also* carry an Artifact URL alongside that path - its own playbook (`playbooks/_status-contract.md`) gates that on a markdown deliverable, the pilot being confirmed remote, and a deterministic content scan all passing.
+But a member's `review`- or `done`-state report may *also* carry an Artifact URL alongside that path - its own playbook (`playbooks/_status-contract.md`) gates that on a markdown deliverable, the pilot's cached `artifact_linking=artifact` preference, and a deterministic content scan all passing.
 When a member's report includes both, relay both ("plan ready: `<path>`, also published at `<Artifact URL>`") - the URL supplements the pointer, it does not replace it, and it is never something you should strip out or second-guess.
 
-The same "is the pilot confirmed remote" cache also governs **how you phrase links in your own output to the pilot**, independent of any crew member: check it with `$WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"` (exits nonzero if unanswered for this run - the conservative default is then "local", i.e. today's plain-URL phrasing).
+The "is the pilot confirmed remote" preference cache also governs **how you phrase links in your own output to the pilot**, independent of any crew member: check it with `$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key remote` (exits nonzero if unanswered for this run - the conservative default is then "local", i.e. today's plain-URL phrasing).
 When it says remote (`true`), format every URL you surface - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`) rather than a bare URL, since a bare URL is least usable read on a phone or in a browser.
 When it says local, is unanswered, or the question genuinely cannot be asked, today's plain-URL phrasing is unchanged.
 This is presentation-only - it never changes what you relay, only how a URL within it is phrased - and it reuses the one cached answer rather than asking a second time.
