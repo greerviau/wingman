@@ -150,7 +150,7 @@ Use it for cross-repo work or when the repo is genuinely unclear.
 
 Machine-local runtime state, created on first run, never committed:
 
-- `crew.json` - the live roster (id, type, session id, tmux window, repo, status, `parent`).
+- `crew.json` - the live roster (id, type, session id, tmux window name and window id, repo, status, `parent`).
   `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
 - `crew/<id>.json` - each crew member's distilled status record.
 - `board.md` - the human-readable render of the roster, its Active section indented as a tree so a reader sees the org.
@@ -170,7 +170,9 @@ All *user-editable* customization lives in the repo as gitignored `*.local.md` /
 ## Survival & reconciliation
 
 The tmux **server** owns the crew windows, so killing wingman does not kill the crew.
+Every session and window target is exact-match (`-t "=name"`; tmux otherwise resolves bare names by prefix, which is how crew once landed inside a similarly-named session - issue #39), and `bin/spawn-crew` guarantees the crew session itself exists before creating a window in it.
 On any startup wingman reads `~/.wingman/crew.json`, reconciles against the live windows (`bin/crew-list` does this automatically), re-arms the watcher if crew are in flight, and reports the current roster.
+Before judging liveness, reconcile callers adopt strays: a roster member's window found in another tmux session is moved back into the crew session (`tmux move-window`, process intact), so a live member is never reported `died` merely for sitting in an unexpected session (issue #44).
 A crew member whose window died shows as `died` and is recoverable either by hand (`bin/crew-takeover <id>` prints the exact resume command) or in bulk via `bin/crew-resume <id>...` / `bin/crew-resume --all-died`, which relaunches it (or every died member) with `claude --resume <session-id>` and verifies the relaunch actually took before flipping it back to `working`.
 
 ## Tests

@@ -3,11 +3,14 @@
 Every guard that inspects a Bash tool call needs the same two primitives:
 split the command string into invocation segments (one per `;`/`&&`/`||`/pipe
 link), and resolve what each segment actually invokes regardless of how it is
-typed - a relative path, an absolute path, or wrapped in `env`/`sudo`/a shell/
-`uv run [flags]`. The `uv run` case matters most: `$WINGMAN_STATE` expands to
-`uv run --no-project --quiet <abs-path>/wm-state.py`, the literal shape
-CLAUDE.md tells every session to run, so a guard's allowlist must see through
-uv's own leading option flags to reach the script name.
+typed - a relative path, an absolute path, a leading `$VAR`/`${VAR}` token
+(expanded from the hook's own environment, since hooks receive the command
+string before shell expansion), or wrapped in `env`/`sudo`/a shell/
+`uv run [flags]`. The `$WINGMAN_STATE` case matters most: CLAUDE.md tells
+every session to run that literal shape, it arrives at the hook unexpanded,
+and its exported value is `uv run --no-project --quiet <abs>/wm-state.py` -
+so resolution must expand the variable and then see through uv's own leading
+option flags to reach the script name.
 
 Hooks import this via PYTHONPATH=<hooks>/lib under the same `uv run
 --no-project python` interpreter they already embed.
@@ -19,10 +22,12 @@ misparses - `3.12` is taken as the command, so the segment fails to resolve.
 That is a false negative only (a non-standard shape may dodge a deny rule); it
 never causes a wrong allow, since an unresolved segment matches no allowlist.
 """
+import os
 import re
 import shlex
 
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_VAR_TOKEN_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 
 
 def basename(tok):
@@ -68,6 +73,23 @@ def resolve_command(tokens):
     tokens = tokens[i:]
     if not tokens:
         return ("", [])
+    # A hook sees the command string BEFORE shell expansion, so the literal
+    # `$WINGMAN_STATE prefs-list ...` shape CLAUDE.md instructs arrives as a
+    # `$WINGMAN_STATE` token, not as the uv invocation it expands to. Expand a
+    # leading variable token from this hook's own environment - the same
+    # environment the tool's shell will expand it from - and resolve the
+    # result. An unset variable stays unresolved (("", [])): a false negative
+    # only, never a wrong allow.
+    m = _VAR_TOKEN_RE.match(tokens[0])
+    if m:
+        val = os.environ.get(m.group(1), "")
+        if not val:
+            return ("", [])
+        try:
+            expanded = shlex.split(val)
+        except ValueError:
+            return ("", [])
+        return resolve_command(expanded + tokens[1:])
     b = basename(tokens[0])
     if b in ("sudo", "env"):
         return resolve_command(tokens[1:])

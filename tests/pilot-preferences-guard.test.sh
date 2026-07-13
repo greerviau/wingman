@@ -38,11 +38,23 @@ assert_eq "prefs-list (relative path) is allowed" "$out" ""
 out="$(run_bash "$TEST_REPO/bin/lib/wm-state.py pref-get --run-id run-guard --key remote")"
 assert_eq "pref-get (absolute path) is allowed" "$out" ""
 
-# The literal exported $WINGMAN_STATE form - uv run with its own leading flags
-# in front of the script path - must be recognized too (the shape CLAUDE.md
-# itself tells the session to run; regression test for the cmd_match uv fix).
+# The expanded $WINGMAN_STATE value - uv run with its own leading flags in
+# front of the script path - must be recognized (regression test for the
+# cmd_match uv flag-skipping fix).
 out="$(run_bash "uv run --no-project --quiet $TEST_REPO/bin/lib/wm-state.py prefs-list --run-id run-guard")"
-assert_eq "the literal \$WINGMAN_STATE form of prefs-list is allowed" "$out" ""
+assert_eq "the expanded uv form of prefs-list is allowed" "$out" ""
+
+# The truly literal, UNexpanded `$WINGMAN_STATE ...` string - what the hook
+# actually receives, since hooks see the command before shell expansion. With
+# the variable exported (bin/wingman exports it for wingman's own session),
+# cmd_match expands it from the hook environment and the call is allowed;
+# without it, the segment stays unresolved and the deny stands (never a wrong
+# allow).
+export WINGMAN_STATE="uv run --no-project --quiet $TEST_REPO/bin/lib/wm-state.py"
+out="$(run_bash "\$WINGMAN_STATE prefs-list --run-id \\\"\$WINGMAN_RUN_ID\\\"")"
+assert_eq "the literal unexpanded \$WINGMAN_STATE prefs-list is allowed" "$out" ""
+out="$(WINGMAN_STATE= run_bash "\$WINGMAN_STATE prefs-list --run-id run-guard")"
+assert_contains "the literal shape with WINGMAN_STATE unset stays denied" "$out" '"permissionDecision": "deny"'
 
 out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
 assert_contains "Edit is denied" "$out" '"permissionDecision": "deny"'
@@ -95,7 +107,10 @@ out="$(run_bash "bin/lib/wm-state.py pref-set --run-id run-guard --key remote --
 assert_eq "pref-set after the ask marker is allowed" "$out" ""
 
 out="$(run_bash "uv run --no-project --quiet $TEST_REPO/bin/lib/wm-state.py pref-set --run-id run-guard --key remote --value true")"
-assert_eq "the literal \$WINGMAN_STATE form of pref-set is allowed after the marker" "$out" ""
+assert_eq "the expanded uv form of pref-set is allowed after the marker" "$out" ""
+
+out="$(run_bash "\$WINGMAN_STATE pref-set --run-id run-guard --key remote --value true")"
+assert_eq "the literal unexpanded \$WINGMAN_STATE pref-set is allowed after the marker" "$out" ""
 
 # --- two of three answered: the denial narrows to what is left -----------------
 wm_state pref-set --run-id run-guard --key remote --value true >/dev/null

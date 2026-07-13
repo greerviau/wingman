@@ -24,13 +24,13 @@ OLDIFS="$IFS"; IFS=$(printf '\t'); set -- $fields; IFS="$OLDIFS"
 REPO="${1:-}"; SID="${2:-}"; WINDOW="${3:-}"
 
 live=0
-if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
   wm_tmux_windows | grep -qx "$WINDOW" && live=1
 fi
 
 if [ "$live" = 1 ]; then
   wm_info "Take the wheel of '$ID' (live). Run in your own shell:"
-  printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_SESSION" "$WINDOW"
+  printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
   echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
 else
   wm_warn "'$ID' has no live window (it may have finished or died)."
