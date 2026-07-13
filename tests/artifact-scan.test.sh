@@ -12,7 +12,7 @@ set -u
 . "$TEST_REPO/bin/lib/common.sh"
 
 SCRIPT="$TEST_REPO/bin/lib/artifact-scan.sh"
-FIXDIR="$(mktemp -d)"
+FIXDIR="$(wm_mktemp_dir)"
 # The allowlist checks for /docs/(plans|analysis|tickets)/ in the absolute
 # path, so fixtures live under a real docs/plans/ subtree.
 ALLOWED_DIR="$FIXDIR/docs/plans"

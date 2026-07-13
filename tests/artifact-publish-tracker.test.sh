@@ -25,8 +25,7 @@ import hashlib, sys
 print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$1"; }
 
 test_new_home
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+WORK="$(wm_mktemp_dir)"
 DOC="$WORK/plan.md"
 printf '# a plan\n' > "$DOC"
 DOC_REAL="$(uv run --no-project --quiet python -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$DOC")"

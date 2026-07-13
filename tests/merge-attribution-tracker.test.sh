@@ -10,8 +10,7 @@ set -u
 
 TRACKER="$TEST_REPO/hooks/merge-attribution-tracker.sh"
 
-SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(wm_mktemp_dir)"
 mkdir -p "$SCRATCH/bin"
 GH_LOG="$SCRATCH/gh.log"
 : > "$GH_LOG"

@@ -17,17 +17,17 @@ set -u
 
 SPAWN="$TEST_REPO/bin/spawn-crew"
 
-REPO_DIR="$(mktemp -d)/repo"
+REPO_DIR="$(wm_mktemp_dir)/repo"
 mkdir -p "$REPO_DIR"
 git -C "$REPO_DIR" init -q
 
-STUB="$(mktemp -d)/stub.sh"
+STUB="$(wm_mktemp_dir)/stub.sh"
 printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$STUB"
 chmod +x "$STUB"
 
 # Isolated fixture tree mirroring the real playbooks/ layout with minimal
 # stand-in content.
-PB="$(mktemp -d)/playbooks"
+PB="$(wm_mktemp_dir)/playbooks"
 mkdir -p "$PB/common" "$PB/software-development"
 printf '# Crew status contract (all crew types)\n\nFixture status contract text.\n' > "$PB/_status-contract.md"
 printf '# Playbook: `lead` crew member\n\nFixture lead playbook.\n' > "$PB/common/lead.md"
@@ -35,9 +35,6 @@ printf '# Playbook: `developer` crew member\n\nFixture developer playbook.\n' > 
 
 export WM_AGENT="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB"
 test_new_home
-
-cleanup() { tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null; }
-trap cleanup EXIT
 
 # --- bare unique name resolves to the correct category file ------------------
 id1="$("$SPAWN" --type developer --repo "$REPO_DIR" --objective "bare name" 2>/dev/null | tail -1)"
@@ -68,7 +65,7 @@ if "$SPAWN" --type nonexistent-role --repo "$REPO_DIR" --objective x >/dev/null 
 assert_true "unknown type is rejected with non-zero exit" "[ $rc -ne 0 ]"
 
 # --- a glob-metacharacter type is matched literally, not as a pattern --------
-ERR0="$(mktemp)"
+ERR0="$(wm_mktemp_file)"
 if "$SPAWN" --type '*' --repo "$REPO_DIR" --objective x >/dev/null 2>"$ERR0"; then rc=0; else rc=$?; fi
 assert_true "'*' as --type is rejected rather than matching everything" "[ $rc -ne 0 ]"
 assert_contains "'*' is reported as an unknown type, not an ambiguous collision across every fixture playbook" \
@@ -81,7 +78,7 @@ COL_A="$PB/software-development/$COL_NAME.md"
 COL_B="$PB/common/$COL_NAME.md"
 echo "# fixture A" > "$COL_A"
 echo "# fixture B" > "$COL_B"
-ERR="$(mktemp)"
+ERR="$(wm_mktemp_file)"
 if "$SPAWN" --type "$COL_NAME" --repo "$REPO_DIR" --objective collide >/dev/null 2>"$ERR"; then rc=0; else rc=$?; fi
 assert_true "cross-category collision is rejected" "[ $rc -ne 0 ]"
 assert_contains "collision error names the software-development form" "$(cat "$ERR")" "software-development/$COL_NAME"

@@ -11,8 +11,8 @@ WF="$TEST_REPO/bin/watch-fleet"
 STOP_GUARD="$TEST_REPO/hooks/stop-guard.sh"
 export WM_WATCH_INTERVAL=1
 # Never let a blocking watcher wedge the suite: every foreground watch-fleet run is
-# bounded by wm_timeout, and any backgrounded one is reaped on exit.
-trap wm_kill_tracked EXIT
+# bounded by wm_timeout, and any backgrounded one is reaped on exit by lib.sh's
+# shared trap (wm_track "$pid" below registers it).
 
 # --- needs-attention emits once, then is quiet after an explicit ack ----------
 test_new_home

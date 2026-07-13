@@ -11,9 +11,9 @@ set -u
 WF="$TEST_REPO/bin/watch-fleet"
 export WM_WATCH_INTERVAL=1
 # The watcher blocks until an event fires, so bound every foreground run with
-# wm_timeout and reap any backgrounded one on exit; a watcher that never fires can
-# then never wedge this file or, through run.sh, the whole suite.
-trap wm_kill_tracked EXIT
+# wm_timeout and reap any backgrounded one on exit (lib.sh's shared trap; every
+# background pid here is registered via wm_track). A watcher that never fires
+# can then never wedge this file or, through run.sh, the whole suite.
 
 # --- fires immediately when an event is already pending on arm ---------------
 test_new_home

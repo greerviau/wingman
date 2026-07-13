@@ -18,10 +18,15 @@
 # option.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
-# The tmux/send helpers under test live in common.sh, not lib.sh.
+# The tmux/send helpers under test live in common.sh, not lib.sh. Call
+# test_new_home immediately after sourcing it (before this file mints
+# anything of its own) so $WM_TMUX_SESSION carries this run's token before
+# common.sh's own WM_TMUX_SESSION="${WM_TMUX_SESSION:-wingman}" default could
+# otherwise take effect, and so SESS below can be derived from it.
 . "$TEST_REPO/bin/lib/common.sh"
+test_new_home
 
-STUB="$(mktemp -d)/tui-stub.sh"
+STUB="$(wm_mktemp_dir)/tui-stub.sh"
 cat > "$STUB" <<'STUBEOF'
 #!/usr/bin/env bash
 # Raw mode: the terminal never echoes, so the pane advances only when this stub
@@ -45,8 +50,8 @@ chmod +x "$STUB"
 # Fast, deterministic polling so the suite stays quick.
 export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.3 WM_SUBMIT_POLL=0.4 WM_READY_TRIES=20 WM_SUBMIT_TRIES=8
 
-SESS="wm-test-submit-$$-$RANDOM"
-trap 'tmux kill-session -t "$SESS" 2>/dev/null' EXIT
+SESS="$WM_TMUX_SESSION-submit"
+wm_track_tmux "$SESS"
 
 # --- a swallowed first Enter is recovered by the confirm-and-retry loop -------
 tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=1 bash '$STUB'"
@@ -73,7 +78,7 @@ tmux kill-session -t "$SESS" 2>/dev/null
 # and Enter) only ever "accepts" the highlighted option; nothing is ever treated as
 # chat text. wm_tmux_send_message must detect the dialog shape and refuse (return
 # 2) rather than type into it and press Enter.
-DIALOG_STUB="$(mktemp -d)/dialog-stub.sh"
+DIALOG_STUB="$(wm_mktemp_dir)/dialog-stub.sh"
 cat > "$DIALOG_STUB" <<'DIALOGEOF'
 #!/usr/bin/env bash
 stty -echo -icanon min 1 time 0 2>/dev/null
