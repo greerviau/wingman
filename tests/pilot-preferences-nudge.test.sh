@@ -24,6 +24,7 @@ for src in startup resume clear compact; do
   assert_contains "source=$src: names the remote prompt" "$out" "Remote Control right now"
   assert_contains "source=$src: names the artifact_linking prompt" "$out" "hosted Artifact link"
   assert_contains "source=$src: names the verbosity prompt" "$out" "narrate my own reasoning"
+  assert_contains "source=$src: names the direct_spawn_visibility prompt" "$out" "each round of a revise loop"
   assert_contains "source=$src: points at the one batched ask" "$out" "ONE batched AskUserQuestion"
   # The same concrete, absolute command the guard derives and verifies, so the
   # front-loaded instruction and the enforced one are one string.
@@ -42,6 +43,7 @@ assert_contains "partially answered: a missing prompt is still named" "$out" "ho
 # --- fully answered: silent ------------------------------------------------------
 wm_state pref-set --run-id run-nudge --key artifact_linking --value local >/dev/null
 wm_state pref-set --run-id run-nudge --key verbosity --value concise >/dev/null
+wm_state pref-set --run-id run-nudge --key direct_spawn_visibility --value each-round >/dev/null
 out="$(run_nudge startup)"
 assert_eq "fully answered: no output" "$out" ""
 
