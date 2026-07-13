@@ -19,8 +19,11 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
-# Reconcile liveness before rendering (cheap, zero-token).
-if wm_tmux has-session -t "$WM_TMUX_SESSION" 2>/dev/null; then
+# Reconcile liveness before rendering (cheap, zero-token). Strays are adopted
+# first, so a member whose window sits in another session (spawned before the
+# exact-named crew session existed) is moved home rather than flagged died.
+if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
+  wm_tmux_adopt_strays
   wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null
 fi
 

@@ -54,6 +54,9 @@ Ask them now, as the first thing you do in a fresh run - before "First run (onbo
    - **Explanation verbosity** (`verbosity`): "How much should I narrate my own reasoning and routing decisions as I work?" - options *Concise (state what, not why - the default)* (`concise`) / *Detailed (explain reasoning and tradeoffs as I go)* (`detailed`).
 3. If `$WINGMAN_RUN_ID` is unset, skip silently - this session was not launched via `bin/wingman` (e.g. `claude` started directly in this repo); every downstream consumer already treats a missing run id as "unanswered, apply the conservative default" by design.
 
+An unattended launch (e.g. a machine-local boot-time autostart with no human attached) needs no special handling here: with no directive there is nothing to act on, and on the first directive the batched ask simply pends until a human attaches and answers, with fleet supervision still available through the guard's allowlist.
+This is measured behavior, not assumption - see `docs/analysis/2026-07-13-unattended-boot-launch-behavior.md`.
+
 This step is also mechanically enforced: `hooks/pilot-preferences-guard.sh` (a `PreToolUse` hook registered project-level in this repo's `.claude/settings.json`) denies every other tool call while any required preference is unanswered, so a session that skips this section is blocked rather than silently proceeding.
 This is the only place these questions are asked for your own session.
 Every crew member you spawn afterward inherits the same `WINGMAN_RUN_ID` and reads the cached answers (e.g. `playbooks/_status-contract.md`'s Artifact-publish gate) rather than asking again.

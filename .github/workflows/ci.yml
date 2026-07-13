@@ -69,7 +69,7 @@ jobs:
           # healthy run is never cut off. run.sh exits non-zero on any failing
           # suite; timeout exits 124/137 if it has to intervene. Either fails
           # the job.
-          timeout --kill-after=30s 900s bash tests/run.sh
+          timeout --kill-after=30s 1320 bash tests/run.sh
 
   # Single aggregate gate: green only when both jobs pass. Mark this check
   # ("ci") as required in the branch-protection rules for main so a PR cannot

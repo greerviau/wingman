@@ -287,6 +287,7 @@ def cmd_crew_add(args):
         # falls out of who is spawning - a lead's spawns carry the lead's id.
         "parent": getattr(args, "parent", "") or "",
         "window": args.window,
+        "window_id": getattr(args, "window_id", "") or "",
         "session_id": args.session_id,
         "status": "working",
         "summary": "",
@@ -384,6 +385,11 @@ def cmd_crew_set(args):
             # crew/<id>.json - only the roster record hooks/no-merge-guard.sh reads.
             if getattr(args, "allow_merge", None) is not None:
                 r["allow_merge"] = args.allow_merge == "true"
+            # window_id is likewise roster-only: crew-resume re-registers the id
+            # of the replacement window it creates, so stray-window adoption
+            # (wm_tmux_adopt_strays) keeps an exact identity to match on.
+            if getattr(args, "window_id", None) is not None:
+                r["window_id"] = args.window_id
             r["updated"] = live["updated"]
     write_json(crew_json_path(), roster)
     render_board()
@@ -1338,6 +1344,12 @@ def build_parser():
     # roster record on every merge attempt, so a mid-session grant takes effect
     # without needing to respawn the member.
     a.add_argument("--allow-merge", action="store_true", dest="allow_merge")
+    # The tmux window id (@N) of the member's window, recorded at spawn so
+    # stray-window adoption can match the exact window rather than a name.
+    # Empty when the spawner could not capture it. Note: window ids restart
+    # when the tmux server does, so this is an optional precision key, never
+    # the primary identity (the window name is).
+    a.add_argument("--window-id", default="", dest="window_id")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
@@ -1354,6 +1366,8 @@ def build_parser():
     # field, see crew-add's --allow-merge above. Never provided by the member on
     # its own --id; hooks/no-merge-guard.sh enforces that boundary.
     a.add_argument("--allow-merge", default=None, choices=("true", "false"), dest="allow_merge")
+    # Re-register the window id after crew-resume replaces the window. Roster-only.
+    a.add_argument("--window-id", default=None, dest="window_id")
     # Update status/summary/artifact/delivery without re-firing the watcher/Stop-
     # hook wake (see the `announced` field and playbooks/_status-contract.md,
     # "Re-entering review without re-announcing"). Refused with --status

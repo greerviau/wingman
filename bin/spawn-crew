@@ -240,8 +240,13 @@ wm_tmux_ensure_session
 # runs wingman in a tmux window named "wingman"), tmux binds the target to that
 # window's index and fails with "create window failed: index N in use". The
 # trailing colon forces session-scope resolution, so tmux inserts at the next
-# free index in our session regardless of window names elsewhere.
-wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$WINDOW" "bash $(quote "$LAUNCH")"
+# free index in our session regardless of window names elsewhere. The "="
+# prefix (WM_TMUX_TARGET) makes the session part exact-match, so the window
+# can only ever land in the crew session wm_tmux_ensure_session just
+# guaranteed - never in a prefix-matched neighbour like "wingman-main".
+# -PF prints the new window's id (@N); recorded in the roster so stray-window
+# adoption can match this exact window, not just its name.
+WINDOW_ID="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "$WINDOW" "bash $(quote "$LAUNCH")")"
 
 # --- record in the roster ----------------------------------------------------
 # --parent stamps ownership from the spawning crew's id: empty for wingman (the
@@ -249,7 +254,7 @@ wm_tmux new-window -d -t "$WM_TMUX_SESSION:" -n "$WINDOW" "bash $(quote "$LAUNCH
 # Owner-scoping (surfacing, the watcher, crew-list) all fall out of this field.
 ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
-  --window "$WINDOW" --session-id "$SID" --worktree "$WORKTREE")
+  --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE")
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
 wm_state crew-add "${ADD_ARGS[@]}" >/dev/null
 
@@ -260,7 +265,7 @@ wm_state crew-add "${ADD_ARGS[@]}" >/dev/null
 sleep "${WM_SPAWN_DELAY:-2}"
 OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
-wm_tmux_send_message "$WM_TMUX_SESSION:$WINDOW" "$OPENING"
+wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$OPENING"
 _opening_rc=$?
 # A fresh window can be sitting on the one-time Bypass-Permissions/workspace-trust
 # gate (the two interactive dialogs no flag can bypass) rather than an idle chat
@@ -278,5 +283,5 @@ else
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 fi
 [ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort (issue #46)"
-printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_SESSION" "$WINDOW"
+printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
 echo "$ID"
