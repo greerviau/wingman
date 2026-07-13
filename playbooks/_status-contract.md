@@ -140,24 +140,28 @@ The full rule, including where the internal terms remain legitimate, is the comm
 "Relay the pointer, not the payload" still holds - the local path is always what you report in `--artifact`.
 But when your `--artifact` deliverable is a markdown file (a plan, a report, an analysis - not a one-line status, a URL, or a short chat answer, which have no rendering to lose), it may *additionally* be worth publishing as a web-viewable Artifact: a markdown report sent as a raw file attachment over Remote Control has rendered badly, while the same content published via the `Artifact` tool has rendered well.
 This is never unconditional.
-Check three conditions, all required, at the moment you are about to report a `review`-state `--artifact` deliverable:
+Check three conditions, all required, at the moment you are about to report a markdown `--artifact` deliverable via `--status review` **or** `--status done` (a reviewer-type member's delivery is terminal and never passes through `review`; the same conditions apply to it):
 
 **A - the content is rendering-sensitive.** A markdown file with headers, tables, or code fences, that is itself the `--artifact` deliverable. If it isn't markdown, skip straight to reporting the path only, exactly as before this section existed.
 
-**B - the requester is confirmed remote right now, not assumed.** There is no reliable signal for this (investigated exhaustively - no hook field, no state file, no env var distinguishes it), so it is asked once and cached for the rest of one wingman run, never per-deliverable or per-crew-member. Wingman's own `CLAUDE.md` asks this eagerly at the start of every run, before any crew is spawned, so by the time a crew member reaches this check the cache is normally already populated; the ask below is a fallback for the remaining edge case (`WINGMAN_RUN_ID` unset, or the cache file unreadable), not the routine path:
+**B - the requester asked for Artifact links, not assumed.** Whether markdown deliverables should also be published is the requester's own preference (`artifact_linking`), independent of whether they are remote - a remote requester may still prefer local-only paths, and a local one may want a shareable link. It is asked once and cached for the rest of one wingman run, never per-deliverable or per-crew-member. Wingman's own `CLAUDE.md` asks it eagerly at the start of every run (its batched onboarding-preferences step), before any crew is spawned, so by the time a crew member reaches this check the cache is normally already populated:
 
 ```
-$WINGMAN_STATE pilot-location-get --run-id "$WINGMAN_RUN_ID"
+$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key artifact_linking
 ```
 
-Prints `true` or `false` and exits 0 if this run already has an answer; exits nonzero if unanswered (a fresh `$WINGMAN_RUN_ID`, or the file is missing/unreadable).
-On a nonzero exit, ask via `AskUserQuestion` ("Are you viewing this session via Remote Control right now, or are you local at this machine?") and cache the answer for every other crew member and wingman itself to reuse:
+Prints the cached value and exits 0 if this run already has an answer; exits nonzero if unanswered.
+Publish only if it prints `artifact`.
+When it is unanswered, two cases, resolved differently:
 
-```
-$WINGMAN_STATE pilot-location-set --run-id "$WINGMAN_RUN_ID" --remote <true|false>
-```
+- **`$WINGMAN_RUN_ID` is unset, or the preferences file is unreadable** (not launched via `bin/wingman`, or corrupted state): treat the answer as `local` without asking - the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does.
+- **`$WINGMAN_RUN_ID` is set but `artifact_linking` has no cached value:** ask via `AskUserQuestion` ("For markdown deliverables (plans/reports), do you want them also published as a hosted Artifact link, or just the local file path?") and cache the answer for every other crew member and wingman itself to reuse:
 
-If `$WINGMAN_RUN_ID` is unset (wingman was not launched via `bin/wingman`), or the question genuinely cannot be asked, treat this condition as **not remote** - the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does.
+  ```
+  $WINGMAN_STATE pref-set --run-id "$WINGMAN_RUN_ID" --key artifact_linking --value <artifact|local>
+  ```
+
+  This fallback is less common than it once was, but not rare - expect all three of the ways that still reach it: a member resumed by a tool predating the resume-path environment fix; manual interference with `preferences.json` mid-run (a true edge case); and - the most common - **a wingman restart with crew already in flight**. A restart mints a fresh `WINGMAN_RUN_ID`, and the first answer cached under it replaces the preferences file wholesale, so every member spawned *before* the restart keeps carrying the old run id and finds nothing, permanently. For those members this crew-side ask is the correct, intended degradation - and it means a fleet spanning a restart can hold members with genuinely different, freshly-re-asked answers to the same preference.
 
 **C - the content passes the deterministic security gate.** This is a check on whether *this repo's own internal information* is safe to host externally (secrets, infra details) - a different question from the `Artifact` tool's own built-in refusal categories (which guard against misusing the hosting mechanism itself), so do not treat those as covering this. Run:
 
@@ -170,14 +174,22 @@ It prints one verdict line and exits accordingly:
 - `pass-soft:<reason>` (exit 0) - publish is still allowed, but call the reason out in your report alongside the Artifact link (it flags a code-heavy document that looks more like a dump than an illustrative excerpt).
 - `fail:<reason>` (exit 1) - do not publish; report the local path only, and say plainly why ("skipped publishing as an Artifact: `<reason>`").
 
-**Only if A holds, B says remote, and C exits 0:** publish via the `Artifact` tool and report the resulting URL *alongside* (not instead of) the local path, so the local file is always the ground truth regardless of which channel is read.
+**Only if A holds, B prints `artifact`, and C exits 0:** publish via the `Artifact` tool and report the resulting URL *alongside* (not instead of) the local path, so the local file is always the ground truth regardless of which channel is read.
 In every other case, today's behavior is unchanged - report the path only.
+
+This contract is also mechanically enforced at report time: a `PreToolUse` hook (`hooks/artifact-link-guard.sh`, registered user-level by `bin/doctor`) denies a `crew-set --status review|done` naming a markdown artifact while `artifact_linking=artifact` is cached and the file has not been published (or a publish/scan attempt recorded) - its denial reason names every legitimate next step, and the publish, a failed attempt, or a `fail:` scan verdict each unblock it automatically.
 
 ## Formatting links when the requester is confirmed remote
 
-When condition B above says remote (cached `true` for this run), format every URL you surface to the requester - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`), never a bare URL: a bare URL read on a phone or in a browser is exactly where a plain-text link is least usable.
-When B says local, is unanswered, or could not be asked, today's plain-URL phrasing is unchanged.
-This reuses condition B's cache exactly - never a second question - and is presentation-only: it changes how you phrase a message, never what gets published or scanned, so condition C does not apply to it.
+Whether the requester is remote is its own cached preference (`remote`), asked in the same once-per-run onboarding step and read the same way:
+
+```
+$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key remote
+```
+
+When it prints `true` for this run, format every URL you surface to the requester - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`), never a bare URL: a bare URL read on a phone or in a browser is exactly where a plain-text link is least usable.
+When it prints `false`, is unanswered, or could not be asked, today's plain-URL phrasing is unchanged.
+This is one cached answer reused - never a second question - and is presentation-only: it changes how you phrase a message, never what gets published or scanned, so condition C does not apply to it.
 
 ## Communication register
 

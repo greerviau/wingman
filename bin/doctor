@@ -151,6 +151,67 @@ else
   fi
 fi
 
+# --- Artifact-publish contract hooks (crew sessions, any repo), user scope --
+# hooks/artifact-publish-tracker.sh (PostToolUse + PostToolUseFailure) records
+# Artifact publishes/failures and artifact-scan.sh fail-verdicts as markers;
+# hooks/artifact-link-guard.sh (PreToolUse) gates a crew member's `crew-set
+# --status review|done` on those markers (the status contract's condition B).
+# Both must fire inside crew sessions whose project root is some other repo
+# entirely, so like the delegation guard they need user-level registration - a
+# project-level entry in this repo's settings never loads there. (The
+# onboarding-preferences trio is the opposite case: wingman's own top-level
+# session only, shipped via this repo's checked-in .claude/settings.json, no
+# doctor step at all.)
+artifact_hook_specs() {
+  cat <<EOF
+$WM_REPO/hooks/artifact-publish-tracker.sh PostToolUse Artifact|Bash
+$WM_REPO/hooks/artifact-publish-tracker.sh PostToolUseFailure Artifact|Bash
+$WM_REPO/hooks/artifact-link-guard.sh PreToolUse Bash
+EOF
+}
+artifact_hooks_missing=0
+while read -r _h _e _m; do
+  [ -n "$_h" ] || continue
+  uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+      --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --check >/dev/null 2>&1 \
+    || artifact_hooks_missing=1
+done <<EOF
+$(artifact_hook_specs)
+EOF
+if [ "$artifact_hooks_missing" = 0 ]; then
+  wm_ok "Artifact-publish contract hooks registered ($GUARD_SETTINGS)"
+else
+  wm_warn "Artifact-publish contract hooks not registered in $GUARD_SETTINGS"
+  printf '    records Artifact publishes and gates crew deliverable reports on them,\n'
+  printf '    for crew sessions in any repo, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register them now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; re-run bin/doctor -y to register them"
+  fi
+  if [ "$do_it" = 1 ]; then
+    artifact_install_failed=0
+    while read -r _h _e _m; do
+      [ -n "$_h" ] || continue
+      uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+          --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --matcher "$_m" >/dev/null \
+        || artifact_install_failed=1
+    done <<EOF
+$(artifact_hook_specs)
+EOF
+    if [ "$artifact_install_failed" = 0 ]; then
+      wm_ok "registered Artifact-publish contract hooks"
+    else
+      wm_err "failed to register Artifact-publish contract hooks"
+    fi
+  fi
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"
