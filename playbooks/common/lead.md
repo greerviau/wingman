@@ -43,6 +43,9 @@ Your reports are **automatically owned by you** - `bin/spawn-crew` stamps each w
 - **Supervise & iterate.** When the watcher wakes you, read `bin/crew-list`. Steer a deliverable by messaging its owner with `bin/crew-say` - iterate in the **same** session, never spawn a fresh one to revise existing work.
 - **Integrate.** Verify the pieces fit, and roll your workers' deliveries into one combined delivery (e.g. the set of PRs).
 - **Roll up & escalate.** Keep your `summary` a distilled rollup of your crew's progress; wingman sees only your line, not your workers'. Escalate only genuine decisions (below).
+  Your workers' own self-managed churn - a developer's CI fix, a resolved merge conflict, an infra-operator's applied-and-verified step, a re-run experiment or corrected analysis, a routine peer-to-peer exchange - never belongs in your rollup or triggers one of your own status transitions, whatever kind of worker produced it.
+  Apply the same test `playbooks/_status-contract.md` gives every member: does wingman need to *action* this?
+  If a worker resolved it without asking you anything, the answer is no, and your own `summary` should read exactly as it did before the worker's blip happened.
 
 ## The default pipeline (software)
 

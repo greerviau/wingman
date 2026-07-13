@@ -90,4 +90,58 @@ assert_eq "stop_hook_active marks handled and allows the stop" "$r3" ""
 r4="$(printf '{"stop_hook_active": false}' | WINGMAN_HOME="$WINGMAN_HOME" bash "$STOP_GUARD")"
 assert_eq "a handled event no longer blocks the stop" "$r4" ""
 
+# --- --silent / announced: self-managed review churn does not re-fire ---------
+# (see playbooks/_status-contract.md, "Re-entering review without re-announcing")
+test_new_home
+wm_state crew-add --id g1 --type developer --objective w --repo /tmp --window wm-g1 --session-id s5 >/dev/null
+wm_state crew-set --id g1 --status review --delivery "https://gh/pr/1" --summary "PR open" >/dev/null
+
+na_g1="$(wm_state needs-attention)"
+assert_contains "a plain review entry (no prior review) emits a row" "$na_g1" "g1"
+upd_g1="$(printf '%s\n' "$na_g1" | head -n1 | cut -f3)"
+wm_state ack --id g1 --updated "$upd_g1" >/dev/null
+assert_eq "acking it suppresses a repeat with the same announced" "$(wm_state needs-attention)" ""
+
+# working -> review --silent: self-managed churn, nothing to re-fire, but
+# crew-list/board.md still show the fresh summary.
+wm_state crew-set --id g1 --status working --summary "fixing ci" >/dev/null
+wm_state crew-set --id g1 --status review --silent --summary "ci fixed, settled again" >/dev/null
+assert_eq "a silent review re-entry emits nothing" "$(wm_state needs-attention)" ""
+assert_contains "crew-list shows the fresh summary despite the silent write" \
+  "$(wm_state crew-list)" "ci fixed, settled again"
+assert_contains "board.md shows the fresh summary despite the silent write" \
+  "$(cat "$WINGMAN_HOME/board.md")" "ci fixed, settled again"
+
+# a subsequent PLAIN review re-entry (answering real feedback) does emit a fresh row
+wm_state crew-set --id g1 --status working --summary "addressing feedback" >/dev/null
+wm_state crew-set --id g1 --status review --summary "responded to feedback" >/dev/null
+na_g1b="$(wm_state needs-attention)"
+assert_contains "a plain review re-entry emits a fresh row" "$na_g1b" "g1"
+upd_g1b="$(printf '%s\n' "$na_g1b" | head -n1 | cut -f3)"
+assert_false "the fresh row carries a new announced stamp" "[ \"$upd_g1b\" = \"$upd_g1\" ]"
+
+# --silent is refused with blocked/done - always genuine, always announce
+err_blocked="$(wm_state crew-set --id g1 --status blocked --silent --blocker "x" 2>&1)"; rc_blocked=$?
+assert_false "--silent with --status blocked exits non-zero" "[ $rc_blocked -eq 0 ]"
+assert_contains "the blocked refusal names the reason" "$err_blocked" "silent"
+err_done="$(wm_state crew-set --id g1 --status done --silent --summary "shipped" 2>&1)"; rc_done=$?
+assert_false "--silent with --status done exits non-zero" "[ $rc_done -eq 0 ]"
+
+# A record written before `announced` existed (only `updated` present) still
+# dedups correctly via the r.get("announced") or r.get("updated") fallback.
+wm_state crew-add --id g2 --type developer --objective v --repo /tmp --window wm-g2 --session-id s6 >/dev/null
+wm_state crew-set --id g2 --status review --delivery "https://gh/pr/2" >/dev/null
+uv run --no-project --quiet python - "$WINGMAN_HOME/crew/g2.json" <<'EOF'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d.pop("announced", None)
+json.dump(d, open(p, "w"))
+EOF
+na_g2="$(wm_state needs-attention)"
+assert_contains "a pre-announced-field record still surfaces via the updated fallback" "$na_g2" "g2"
+upd_g2="$(printf '%s\n' "$na_g2" | grep '^g2' | cut -f3)"
+wm_state ack --id g2 --updated "$upd_g2" >/dev/null
+assert_not_contains "acking a fallback-keyed record suppresses it" "$(wm_state needs-attention)" "g2"
+
 test_summary

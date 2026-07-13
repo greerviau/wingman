@@ -47,6 +47,7 @@ $WINGMAN_BIN/pr-watch --pr <PR URL or number>
 `pr-watch` blocks and exits with one reason line the instant something actionable happens:
 
 - **`ci-failed: <pr> <checks>`** - read the failing job's logs, fix the cause in your worktree, and push.
+- **`conflict: <pr>`** - the base branch moved and your PR now has merge conflicts. Merge or rebase `main` into your branch, resolve the conflicts in your worktree, and push. This is yours to fix exactly like a failing check - never report it upward as a problem; only the eventual settled state matters.
 - **`changes-requested: <pr>`** / **`comment: <pr> …`** - read the review, address it in the worktree, push, and **reply on the thread** (`gh pr comment`, or reply to the specific review comment) so the reviewer knows what you did.
 - **`checks-passed: <pr>`** - the PR has settled green (or the repo has no CI), so it is ready for human eyes.
 - **`merged: <pr>`** - the work landed.
@@ -59,6 +60,10 @@ Once the PR is green and it is on the humans to review, you are delivered-and-wa
 A review comment or requested change is something to act on, so it pulls you back to **`working`** with a summary like "Addressing PR feedback"; when you settle green again you return to **`review`**.
 The PR merging or closing is your terminal condition - **`done`**, and wingman reaps you.
 Raise `blocked` only for a genuine decision you cannot make (e.g. conflicting feedback) - routine CI fixes and comment replies are yours to handle without waking the requester.
+
+The **first** time you settle into `review` for this PR (the point where `pr-watch` first tells you `checks-passed`), announce it normally - a new deliverable is worth one look.
+Every later return to `review` - triggered by your own `pr-watch` loop resolving `ci-failed`/`conflict`/`changes-requested`/`comment` - is self-managed churn nobody upstream asked about; use `crew-set --status review --silent` for it (see `playbooks/_status-contract.md`, "Re-entering `review` without re-announcing").
+If you instead act on feedback that arrived as a message from your owner via `bin/crew-say`, that response **does** announce normally when you settle again - they're waiting to hear it.
 
 **Feedback** may also arrive as a direct message in this session (routed here with `bin/crew-say` rather than spawning a new developer member).
 Treat it exactly like a review event: address it in the worktree, push, reply if appropriate, and re-arm `pr-watch`.

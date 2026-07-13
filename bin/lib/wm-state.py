@@ -20,12 +20,6 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   crew-archive.jsonl  append-only history of records removed by `prune`, one JSON
                     object per line, so pruning keeps crew.json lean without losing
                     the record of who ran
-  mergeability.json  {id: {"pr", "state", "checked", "conflict_detected"}} - the
-                    watcher's own polled read of whether a live member's delivered
-                    PR still merges cleanly against its base. Separate from
-                    crew/<id>.json because the watcher writes it directly (never the
-                    member itself), so it must never race a member's own crew-set
-                    calls; see wm-state's mergeability-* subcommands
   pilot-location.json  the cached answer to "is the pilot genuinely remote right
                     now" ({"remote": bool, "wingman_run_id": str}), asked once via
                     AskUserQuestion and reused for the rest of one wingman run -
@@ -44,7 +38,6 @@ import contextlib
 import datetime
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -54,7 +47,7 @@ try:
 except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
     fcntl = None
 
-STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "updated")
+STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "updated", "announced")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -110,15 +103,6 @@ def acked_path():
 
 def handled_path():
     return os.path.join(home(), "handled.json")
-
-
-def mergeability_path():
-    return os.path.join(home(), "mergeability.json")
-
-
-# A full GitHub PR URL - the only `delivery` shape the mergeability poller trusts
-# (see mergeability-poll-list's docstring for why a bare branch/number is skipped).
-PR_URL_RE = re.compile(r"^https://github\.com/[^/]+/[^/]+/pull/[0-9]+")
 
 
 @contextlib.contextmanager
@@ -213,11 +197,6 @@ def merged(record):
             if field in live and live[field] is not None:
                 out[field] = live[field]
     return out
-
-
-def load_mergeability():
-    data = read_json(mergeability_path(), {})
-    return data if isinstance(data, dict) else {}
 
 
 def parent_of(record):
@@ -353,13 +332,34 @@ def cmd_crew_set(args):
     provided fields change; the roster record is mirrored for the terminal fields.
     """
     ensure_home()
+    if args.silent and args.status in ("blocked", "done"):
+        sys.exit("wm-state: --silent may not be used with --status %s - "
+                  "blocked/done are always genuine and must always announce" % args.status)
     live = read_json(status_path(args.id), {"id": args.id})
     live["id"] = args.id
-    for field in STATUS_FIELDS[:-1]:  # everything but 'updated'
+    for field in STATUS_FIELDS[:-2]:  # everything but 'updated' and 'announced'
         val = getattr(args, field, None)
         if val is not None:
             live[field] = None if val == "" and field in ("blocker", "artifact", "delivery") else val
     live["updated"] = now()
+    # `announced` is the dedup key needs-attention actually watches (see its
+    # docstring), and it must survive an intervening `working` dip untouched: a
+    # developer's review -> working (fixing CI) -> review round trip must leave
+    # `announced` exactly where it was before the dip, or the silent re-entry
+    # below would find it already bumped by the plain `working` call and
+    # wrongly surface. So it only ever advances on a call that both (a) is not
+    # silent and (b) actually sets status to one of the attention states this
+    # dedup key exists for (review/blocked/done - died/stalled are set directly
+    # by reconcile/stall-check, not through here). Every other call - a
+    # `working` transition, a mid-review summary refresh, or an explicit
+    # `--silent` - leaves `announced` exactly as it was (seeded via setdefault
+    # only if this is the very first write for this id, so a record is never
+    # left without one). See playbooks/_status-contract.md, "Re-entering
+    # review without re-announcing".
+    if not args.silent and args.status in ATTENTION_STATES:
+        live["announced"] = live["updated"]
+    else:
+        live.setdefault("announced", live["updated"])
     write_json(status_path(args.id), live)
 
     # Mirror the durable fields back into the roster so a stale crew.json alone
@@ -408,7 +408,6 @@ def cmd_crew_list(args):
         # Default view: current crew only. `stood-down` is fully-closed history and
         # is noise on the live roster; pass --all (or --status stood-down) for it.
         rows = [r for r in rows if r.get("status") != "stood-down"]
-    rows = _annotate_mergeability(rows)
     if args.tree:
         print(render_tree_text(rows))
     elif args.json:
@@ -448,6 +447,7 @@ def cmd_reconcile(args):
             live = read_json(status_path(r["id"]), {"id": r["id"]})
             live["status"] = "died"
             live["updated"] = r["updated"]
+            live["announced"] = live["updated"]  # a died event always announces
             write_json(status_path(r["id"]), live)
             changed.append(r["id"])
 
@@ -490,6 +490,7 @@ def cmd_reconcile(args):
             live = read_json(status_path(dead_id), {"id": dead_id})
             live["summary"] = msg
             live["updated"] = stamp
+            live["announced"] = stamp  # re-fires the died event; always genuine
             write_json(status_path(dead_id), live)
 
     write_json(crew_json_path(), roster)
@@ -516,7 +517,6 @@ def cmd_standdown(args):
             live["updated"] = stamp
             write_json(status_path(r["id"]), live)
     write_json(crew_json_path(), roster)
-    _cleanup_mergeability(affected)
     render_board()
     # Deterministic order (target first, then its reports) for a readable report.
     for cid in sorted(affected, key=lambda c: (c != args.id, c)):
@@ -610,142 +610,9 @@ def cmd_prune(args):
                 for cid in removed_ids:
                     store.pop(cid, None)
                 write_json(store_path, store)
-    _cleanup_mergeability(removed_ids)
 
     render_board()
     print(len(remove))
-
-
-# ---------------------------------------------------------------- mergeability
-# The watcher's own polled read of a live member's delivered PR (see
-# mergeability.json in the module docstring). Written only by wm-state, under
-# with_locked, and only from these subcommands - never from crew-set - so it never
-# races a member's own status-file writes.
-
-
-def _map_mergeability(mergeable, merge_state_status):
-    """Collapse gh's mergeable/mergeStateStatus pair into MERGEABLE/CONFLICTING/
-    UNKNOWN. Either field can lag (GitHub computes them asynchronously), so a
-    CONFLICTING/DIRTY reading from either wins outright; only when BOTH are absent
-    or UNKNOWN is the result UNKNOWN (not yet computed); everything else
-    (CLEAN/BEHIND/BLOCKED/UNSTABLE/HAS_HOOKS/DRAFT) is MERGEABLE."""
-    if mergeable == "CONFLICTING" or merge_state_status == "DIRTY":
-        return "CONFLICTING"
-    if mergeable == "UNKNOWN" and merge_state_status == "UNKNOWN":
-        return "UNKNOWN"
-    return "MERGEABLE"
-
-
-def cmd_mergeability_poll_list(args):
-    """Print the (id, delivery-url) pairs due for a merge-conflict poll this cycle:
-    a live (review/working) member, scoped to --owner, whose `delivery` is a full
-    PR URL, and which is due - no mergeability.json entry yet, the delivery URL
-    changed since the last entry (always recheck immediately, ignoring the
-    interval), or --interval seconds have passed since the last check attempt
-    (success or failure). Pure read; watch-fleet uses this to decide which members
-    are worth a `gh` round trip this cycle, instead of spawning a subprocess per
-    member per poll just to ask "is it due"."""
-    owner = getattr(args, "owner", None)
-    interval = args.interval
-    store = load_mergeability()
-    now_dt = datetime.datetime.now(datetime.timezone.utc)
-    for r in (merged(x) for x in load_roster()):
-        if owner is not None and parent_of(r) != owner:
-            continue
-        if r.get("status") not in ("review", "working"):
-            continue
-        delivery = r.get("delivery") or ""
-        if not PR_URL_RE.match(delivery):
-            continue
-        rid = r["id"]
-        entry = store.get(rid)
-        if entry is None or entry.get("pr") != delivery:
-            due = True
-        else:
-            checked = _parse_updated(entry.get("checked"))
-            due = checked is None or (now_dt - checked).total_seconds() >= interval
-        if due:
-            print("%s\t%s" % (rid, delivery))
-
-
-def cmd_mergeability_set(args):
-    """Update one member's mergeability.json entry (under with_locked, since more
-    than one watch-fleet cycle can poll concurrently against this shared file).
-
-    --pr-json <path|-> parses a `gh pr view --json mergeStateStatus,mergeable,url`
-    payload, maps it (see _map_mergeability), and updates state/checked/pr plus the
-    edge-triggered conflict_detected: set to now() only on the transition INTO
-    CONFLICTING, cleared to null the moment state leaves CONFLICTING. A mapped
-    result of UNKNOWN never touches state/conflict_detected (GitHub has not
-    finished computing it yet - must not clear an existing CONFLICTING flag), but
-    still bumps checked so the poll cadence advances.
-
-    --fail (the `gh` call itself errored) only bumps checked, leaving
-    pr/state/conflict_detected untouched, so a persistent failure is retried at the
-    normal --interval cadence rather than hot-looped."""
-    ensure_home()
-    if bool(args.pr_json) == bool(args.fail):
-        sys.exit("wm-state: mergeability-set needs exactly one of --pr-json or --fail")
-    path = mergeability_path()
-    with with_locked(path):
-        store = read_json(path, {})
-        if not isinstance(store, dict):
-            store = {}
-        entry = store.get(args.id, {})
-        stamp = now()
-        if args.fail:
-            entry["checked"] = stamp
-        else:
-            raw = sys.stdin.read() if args.pr_json == "-" else open(args.pr_json).read()
-            try:
-                data = json.loads(raw) if raw.strip() else {}
-            except ValueError:
-                data = {}
-            mergeable = (data.get("mergeable") or "UNKNOWN").upper()
-            merge_state_status = (data.get("mergeStateStatus") or "UNKNOWN").upper()
-            new_state = _map_mergeability(mergeable, merge_state_status)
-            entry["pr"] = data.get("url") or entry.get("pr")
-            entry["checked"] = stamp
-            if new_state == "UNKNOWN":
-                entry.setdefault("state", "UNKNOWN")
-                entry.setdefault("conflict_detected", None)
-            else:
-                if new_state == "CONFLICTING" and entry.get("state") != "CONFLICTING":
-                    entry["conflict_detected"] = stamp
-                elif new_state != "CONFLICTING":
-                    entry["conflict_detected"] = None
-                entry["state"] = new_state
-        store[args.id] = entry
-        write_json(path, store)
-    print(args.id)
-
-
-def _cleanup_mergeability(ids):
-    """Remove mergeability.json entries and their `<id>#conflict` acked/handled
-    keys for every id in `ids`. Called by standdown/prune so a member reaped
-    mid-conflict does not leave a permanent stale entry behind."""
-    ids = [i for i in ids if i]
-    if not ids:
-        return
-    with with_locked(mergeability_path()):
-        store = read_json(mergeability_path(), {})
-        if isinstance(store, dict):
-            removed = False
-            for cid in ids:
-                if store.pop(cid, None) is not None:
-                    removed = True
-            if removed:
-                write_json(mergeability_path(), store)
-    for p in (acked_path(), handled_path()):
-        with with_locked(p):
-            store = read_json(p, {})
-            if isinstance(store, dict):
-                removed = False
-                for cid in ids:
-                    if store.pop(cid + "#conflict", None) is not None:
-                        removed = True
-                if removed:
-                    write_json(p, store)
 
 
 def _parse_ps_seconds(field):
@@ -880,6 +747,7 @@ def cmd_stall_check(args):
     live["status"] = "stalled"
     live["summary"] = reason
     live["updated"] = now()
+    live["announced"] = live["updated"]  # a stall flip always announces
     write_json(status_path(args.id), live)
 
     # Mirror into the roster, as crew-set does, so a later loss of the status
@@ -895,9 +763,8 @@ def cmd_stall_check(args):
 
 
 def _attention_suppressed(rid, upd, suppress_on, only_acked, acked, handled):
-    """Shared gate for both needs-attention loops (the roster loop and the
-    mergeability-conflict loop): True iff the (rid, upd) event should be withheld
-    under the selector rules documented on cmd_needs_attention."""
+    """Shared gate for needs-attention: True iff the (rid, upd) event should be
+    withheld under the selector rules documented on cmd_needs_attention."""
     if suppress_on == "handled":
         if handled.get(rid) == upd:
             return True  # already fully handled
@@ -926,6 +793,14 @@ def cmd_needs_attention(args):
     never re-announce. A genuine new event (a later `blocked`, or terminal `done`)
     carries a new `updated` and surfaces again.
 
+    The dedup key is `announced` (falling back to `updated` for a record written
+    before that field existed), not `updated` directly: a plain `crew-set --status
+    review` bumps both, so it surfaces normally, while `crew-set --status review
+    --silent` bumps only `updated` (see cmd_crew_set), so self-managed churn - the
+    member cycling through `working` to resolve something that was its own to fix -
+    settles back into `review` without re-firing this loop, even though `updated`
+    itself has visibly advanced for anyone who looks at the roster directly.
+
     Output is tab-separated: id, status, updated, note. The `updated` column lets a
     deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects).
 
@@ -938,16 +813,7 @@ def cmd_needs_attention(args):
         (guaranteeing the roster report) before the owner may stop.
       --only-acked: additionally restrict to events currently in acked.json;
         `--suppress-on handled --only-acked` therefore enumerates exactly the set
-        acked-minus-handled.
-
-    After the roster loop, a second pass walks mergeability.json: for every entry
-    with a truthy conflict_detected, whose real member (re-resolved from the
-    roster, not cached from polling time) is still live (review/working) and in
-    --owner's scope, emit a synthetic row keyed "<id>#conflict" with status
-    "conflict" and updated=conflict_detected. This is watch-fleet's OWN verified
-    `gh pr view` read (see mergeability-set), not a member self-report - it is
-    surfaced under a synthetic id specifically so its ack/handled timeline is
-    independent of the real member's own status events and cannot clobber them."""
+        acked-minus-handled."""
     owner = getattr(args, "owner", None)
     suppress_on = getattr(args, "suppress_on", None) or "ack"
     only_acked = getattr(args, "only_acked", False)
@@ -963,7 +829,7 @@ def cmd_needs_attention(args):
             continue
         if r.get("status") in ATTENTION_STATES:
             rid = r["id"]
-            upd = r.get("updated")
+            upd = r.get("announced") or r.get("updated")
             if _attention_suppressed(rid, upd, suppress_on, only_acked, acked, handled):
                 continue
             # The note is a short hint for wingman to relay; prefer the pointer the
@@ -973,29 +839,6 @@ def cmd_needs_attention(args):
                     or r.get("artifact") or r.get("summary") or "")
             print("%s\t%s\t%s\t%s" % (
                 rid, r["status"], upd or "", note))
-
-    mergeability = load_mergeability()
-    if mergeability:
-        roster_by_id = dict((x.get("id"), x) for x in roster)
-        for cid, entry in mergeability.items():
-            cd = entry.get("conflict_detected")
-            if not cd:
-                continue
-            base = roster_by_id.get(cid)
-            if base is None:
-                continue
-            r = merged(base)
-            if r.get("status") not in ("review", "working"):
-                continue  # re-checked at emission time, not polling time
-            if owner is not None and parent_of(base) != owner:
-                continue
-            synth_id = "%s#conflict" % cid
-            if _attention_suppressed(synth_id, cd, suppress_on, only_acked, acked, handled):
-                continue
-            pr = entry.get("pr") or r.get("delivery") or ""
-            note = ("PR %s now shows merge conflicts with main (mergeStateStatus=DIRTY) - "
-                    "relay to %s via bin/crew-say; do not resolve it yourself." % (pr, cid))
-            print("%s\t%s\t%s\t%s" % (synth_id, "conflict", cd, note))
 
 
 def cmd_group_attention(args):
@@ -1335,21 +1178,6 @@ def cmd_ask_prune(args):
 # ---------------------------------------------------------------- rendering
 
 
-def _annotate_mergeability(rows):
-    """Annotate each row dict in place with merge_conflict (bool) and
-    merge_checked (the last poll timestamp, or None) from mergeability.json - a
-    pure display annotation, never persisted back to crew.json/crew/<id>.json.
-    Reflects the CURRENT polled state (not just the edge-triggered
-    conflict_detected), so the marker stays visible on every render for as long as
-    a conflict is open, not just on the poll that first found it."""
-    mergeability = load_mergeability()
-    for r in rows:
-        entry = mergeability.get(r.get("id"))
-        r["merge_conflict"] = bool(entry) and entry.get("state") == "CONFLICTING"
-        r["merge_checked"] = entry.get("checked") if entry else None
-    return rows
-
-
 def render_roster_text(rows):
     if not rows:
         return "(no crew)"
@@ -1364,8 +1192,6 @@ def render_roster_text(rows):
             lines.append("      blocker: %s" % r["blocker"])
         if r.get("delivery"):
             lines.append("      delivery: %s" % r["delivery"])
-        if r.get("merge_conflict"):
-            lines.append("      CONFLICT: merge conflicts with main (checked %s)" % r.get("merge_checked"))
     return "\n".join(lines)
 
 
@@ -1386,32 +1212,28 @@ def render_tree_text(rows):
             lines.append("%s    blocker: %s" % (indent, r["blocker"]))
         if r.get("delivery"):
             lines.append("%s    delivery: %s" % (indent, r["delivery"]))
-        if r.get("merge_conflict"):
-            lines.append("%s    CONFLICT: merge conflicts with main (checked %s)" % (indent, r.get("merge_checked")))
     return "\n".join(lines)
 
 
 def render_board():
     rows = [merged(r) for r in load_roster()]
-    rows = _annotate_mergeability(rows)
     active = [r for r in rows if r.get("status") in LIVE_STATES]
     done = [r for r in rows if r.get("status") not in LIVE_STATES]
     out = ["# Wingman crew board", "", "_Updated %s_" % now(), ""]
     out.append("## Active (%d)" % len(active))
     out.append("")
     if active:
-        out.append("| type | id | status | window | repo | summary | blocker | delivery | conflict |")
-        out.append("|---|---|---|---|---|---|---|---|---|")
+        out.append("| type | id | status | window | repo | summary | blocker | delivery |")
+        out.append("|---|---|---|---|---|---|---|---|")
         # Depth-first so each report sits under its owner, its id indented by depth,
         # letting a human read the org rather than a flat list.
         for r, depth in order_tree(active):
             marker = ("&nbsp;&nbsp;" * depth) + ("↳ " if depth else "")
-            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s |" % (
+            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), marker, r.get("id", ""), r.get("status", ""),
                 r.get("window", ""),
                 os.path.basename(r.get("repo", "") or "") + (" (global)" if r.get("scope") == "global" else ""),
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
-                "CONFLICTING" if r.get("merge_conflict") else "",
             ))
     else:
         out.append("_(none)_")
@@ -1476,6 +1298,11 @@ def build_parser():
     # Self-register the worktree path after spawn (global scope, whose repo/path is
     # not knowable at spawn time). Roster-only field, not a live-status field.
     a.add_argument("--worktree", default=None)
+    # Update status/summary/artifact/delivery without re-firing the watcher/Stop-
+    # hook wake (see the `announced` field and playbooks/_status-contract.md,
+    # "Re-entering review without re-announcing"). Refused with --status
+    # blocked/done, which must always announce.
+    a.add_argument("--silent", action="store_true")
     a.set_defaults(fn=cmd_crew_set)
 
     a = sub.add_parser("crew-get")
@@ -1551,20 +1378,6 @@ def build_parser():
     a.add_argument("--mass-min-count", type=int, default=2, dest="mass_min_count")
     a.add_argument("--mass-min-ratio", type=float, default=0.5, dest="mass_min_ratio")
     a.set_defaults(fn=cmd_group_attention)
-
-    # Merge-conflict drift polling (watch-fleet only; see mergeability.json in the
-    # module docstring). --interval is seconds; poll-list ignores it for a
-    # never-checked id or one whose delivery URL just changed.
-    a = sub.add_parser("mergeability-poll-list")
-    a.add_argument("--owner", default=None)
-    a.add_argument("--interval", type=int, required=True)
-    a.set_defaults(fn=cmd_mergeability_poll_list)
-
-    a = sub.add_parser("mergeability-set")
-    a.add_argument("--id", required=True)
-    a.add_argument("--pr-json", default=None, dest="pr_json")
-    a.add_argument("--fail", action="store_true")
-    a.set_defaults(fn=cmd_mergeability_set)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)

@@ -15,8 +15,10 @@
 #   closed: <pr>                  PR closed unmerged   -> crew cleans up, sets done
 #   changes-requested: <pr>       a review requested changes
 #   ci-failed: <pr> <checks>      a required check concluded failure
+#   conflict: <pr>                the base branch moved and the PR now conflicts
 #   comment: <pr> <n> new         new review/issue comment(s) since last handled
-#   checks-passed: <pr>           PR settled green (or no CI) -> crew moves to review
+#   checks-passed: <pr>           PR settled green and mergeable (or no CI) -> crew
+#                                 moves to review
 #
 # A cursor at $WINGMAN_HOME/pr/<crew-id>.json records what has already been
 # surfaced, so a persistently-red build or an already-seen comment does not re-fire,
@@ -66,7 +68,7 @@ ME="$($GH api user --jq .login 2>/dev/null || true)"
 # Prints the reason line (and returns 0) iff there is a fresh actionable event.
 poll_once() {
   _pr_json="$($GH pr view "$PR" \
-    --json state,mergedAt,statusCheckRollup,reviews,comments,number,url \
+    --json state,mergedAt,statusCheckRollup,reviews,comments,number,url,mergeable,mergeStateStatus \
     2>/dev/null)" || return 1
   [ -n "$_pr_json" ] || return 1
 
