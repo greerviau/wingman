@@ -758,7 +758,18 @@ def _probe_execution(root_pid, root_grace, gap, eps):
 def cmd_stall_check(args):
     """Flag a WORKING crew member as 'stalled' iff it shows no external sign of life:
     BOTH staleness gates (pane_idle from the watcher, status_idle computed here) at
-    or past --threshold, AND the execution probe over --pane-pid finds no evidence.
+    or past --threshold, AND the execution probe over --pane-pid finds no evidence,
+    AND (#61) a check-in nudge has already had a full cooldown window to work.
+
+    --nudge-age is the age in seconds of the watcher's per-id nudge marker file, or
+    -1 if no marker exists yet. A genuine stall only flips once --nudge-age is >= 0
+    and >= --threshold - i.e. the watcher already sent one check-in nudge (the
+    marker exists) and a full window has passed with no activity. On the first
+    confirmed-idle poll (no marker yet, --nudge-age -1) or before the marker has
+    aged past --threshold, this returns without flipping: the watcher sends (or
+    already sent) the nudge and the flip is deferred to a later poll. A member that
+    self-reports in the meantime never reaches this gate at all - the read-back
+    re-check above already bails once status stops being 'working'.
 
     Prints 'stalled' if it flipped the member, nothing otherwise. Idempotent and safe
     to call every poll: gates fail fast, the probe runs only for nominated candidates,
@@ -788,6 +799,14 @@ def cmd_stall_check(args):
         return
     live = current
 
+    # #61: a genuine stall only flips once a check-in nudge has already had a full
+    # cooldown window to produce activity - not on the very poll that first detects
+    # it. No marker yet (-1) or too young (< threshold) means the watcher's nudge
+    # hasn't had time to work yet; defer without mutating anything.
+    nudge_age = getattr(args, "nudge_age", -1)
+    if nudge_age < 0 or nudge_age < args.threshold:
+        return
+
     prior = (live.get("summary") or "").split("\n")[0][:80]
     if getattr(args, "api_error", 0):
         reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
@@ -799,9 +818,10 @@ def cmd_stall_check(args):
                   % (int(args.threshold), args.id))
     else:
         reason = ("no pane output, status update, running child process, or CPU activity "
-                  "for >%ds while status was 'working'; the agent likely errored or went "
-                  "idle. Inspect with `bin/crew-takeover %s` or stand down with "
-                  "`bin/crew-standdown %s`." % (int(args.threshold), args.id, args.id))
+                  "for >%ds while status was 'working', even after a check-in nudge - the "
+                  "agent likely errored or went idle. Inspect with `bin/crew-takeover %s` "
+                  "or stand down with `bin/crew-standdown %s`."
+                  % (int(args.threshold), args.id, args.id))
     if prior:
         reason += " (last summary: %s)" % prior
 
@@ -1504,6 +1524,10 @@ def build_parser():
     # signature (#23); changes only which reason template a genuine stall gets,
     # never the gates or probe above.
     a.add_argument("--api-error", type=int, default=0, dest="api_error")
+    # Age in seconds of the watcher's per-id check-in nudge marker, or -1 if no
+    # marker exists yet (#61). Required to be >= 0 and >= --threshold before a
+    # genuine stall is allowed to flip - see cmd_stall_check's docstring.
+    a.add_argument("--nudge-age", type=int, default=-1, dest="nudge_age")
     a.set_defaults(fn=cmd_stall_check)
 
     a = sub.add_parser("needs-attention")

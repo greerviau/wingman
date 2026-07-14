@@ -8,8 +8,11 @@
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-# Fast probe knobs for every stall-check call in this file.
-CHECK="--threshold 5 --root-grace 2 --probe-gap 2 --cpu-eps 0.5"
+# Fast probe knobs for every stall-check call in this file. --nudge-age 999 is
+# far past --threshold, so these calls exercise only the pane/status/probe gates
+# below - the dedicated nudge-age precondition tests further down cover the #61
+# nudge-then-wait gate on its own.
+CHECK="--threshold 5 --root-grace 2 --probe-gap 2 --cpu-eps 0.5 --nudge-age 999"
 
 wm_py() { uv run --no-project --quiet python "$@"; }
 
@@ -141,7 +144,7 @@ wm_age_status p6
 spawn_bg sleep 600
 idle2_pid=$!
 wm_state stall-check --id p6 --pane-idle 999 --pane-pid "$idle2_pid" \
-  --threshold 5 --root-grace 2 --probe-gap 5 --cpu-eps 0.5 > "$WINGMAN_HOME/sc.out" &
+  --threshold 5 --root-grace 2 --probe-gap 5 --cpu-eps 0.5 --nudge-age 999 > "$WINGMAN_HOME/sc.out" &
 scpid=$!
 sleep 2
 wm_state crew-set --id p6 --status review --artifact /tmp/p6-report.md >/dev/null
@@ -165,5 +168,53 @@ assert_contains "reason names the resume remedy" \
   "$(cat "$WINGMAN_HOME/crew/ae1.json")" "crew-resume ae1"
 assert_false "the default (non-api-error) reason text is not used" \
   "grep -q 'the agent likely errored or went' '$WINGMAN_HOME/crew/ae1.json'"
+
+# --- #61: a genuine stall defers the flip until a nudge has had a full window ---
+NUDGECHECK="--threshold 5 --root-grace 2 --probe-gap 2 --cpu-eps 0.5"
+
+# No nudge marker yet (--nudge-age -1, the value bin/watch-fleet passes when the
+# marker file doesn't exist): otherwise-confirmed stall does NOT flip yet.
+test_new_home
+wm_state crew-add --id n1 --type developer --objective x --repo /tmp --window wm-n1 --session-id sn1 >/dev/null
+wm_state crew-set --id n1 --status working --summary "digging" >/dev/null
+wm_age_status n1
+spawn_bg sleep 600
+n1_pid=$!
+out="$(wm_state stall-check --id n1 --pane-idle 999 --pane-pid "$n1_pid" $NUDGECHECK --nudge-age -1)"
+assert_eq "first confirmed-idle poll with no nudge marker defers, does not flip" "$out" ""
+assert_eq "member is left working, awaiting the nudge's cooldown window" "$(status_of n1)" "working"
+
+# A nudge marker exists but is younger than --threshold: still deferred - the
+# nudge has not had its full cooldown window yet.
+out="$(wm_state stall-check --id n1 --pane-idle 999 --pane-pid "$n1_pid" $NUDGECHECK --nudge-age 2)"
+assert_eq "a too-young nudge marker still defers the flip" "$out" ""
+assert_eq "member still working" "$(status_of n1)" "working"
+
+# The nudge marker is now at least as old as --threshold: the flip proceeds, with
+# the reworded reason noting a nudge already ran and produced nothing.
+out="$(wm_state stall-check --id n1 --pane-idle 999 --pane-pid "$n1_pid" $NUDGECHECK --nudge-age 5)"
+assert_eq "a nudge marker past the cooldown window allows the flip" "$out" "stalled"
+assert_eq "status file reads stalled" "$(status_of n1)" "stalled"
+assert_contains "reason states a check-in nudge already ran" \
+  "$(cat "$WINGMAN_HOME/crew/n1.json")" "even after a check-in nudge"
+assert_contains "reason still names the takeover/stand-down remedy" \
+  "$(cat "$WINGMAN_HOME/crew/n1.json")" "crew-takeover n1"
+
+# A self-report between the deferred poll and the post-cooldown recheck cancels
+# the flip entirely, exactly like the mid-probe-gap recovery case above (p6) -
+# stall-check's own status != "working" gate makes the nudge-age precondition
+# moot once the member has spoken for itself.
+test_new_home
+wm_state crew-add --id n2 --type developer --objective y --repo /tmp --window wm-n2 --session-id sn2 >/dev/null
+wm_state crew-set --id n2 --status working --summary "still going" >/dev/null
+wm_age_status n2
+spawn_bg sleep 600
+n2_pid=$!
+out="$(wm_state stall-check --id n2 --pane-idle 999 --pane-pid "$n2_pid" $NUDGECHECK --nudge-age -1)"
+assert_eq "first poll defers (no marker yet)" "$out" ""
+wm_state crew-set --id n2 --status working --summary "actually still here" >/dev/null
+out="$(wm_state stall-check --id n2 --pane-idle 999 --pane-pid "$n2_pid" $NUDGECHECK --nudge-age 5)"
+assert_eq "a fresh self-report before the recheck cancels the flip" "$out" ""
+assert_eq "member stays working" "$(status_of n2)" "working"
 
 test_summary

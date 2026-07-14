@@ -82,21 +82,35 @@ wake5="$(cat "$WINGMAN_HOME/wake-lead-x")"
 assert_contains "lead wake roster names the lead's member" "$wake5" "w1"
 assert_false "lead wake file excludes the top-level member" "grep -q t1 '$WINGMAN_HOME/wake-lead-x'"
 
-# --- stall fires end-to-end (tmux integration) --------------------------------
+# --- stall fires end-to-end, but only after a check-in nudge + cooldown (#61) --
 # An errored/idle agent: a window running a bare sleep - no output, no
-# late-started children, no CPU - with a stale status file.
+# late-started children, no CPU - with a stale status file. The general (non-
+# api-error) path now gets the same one-shot nudge + wait as the api-error path
+# below, using the generic "checking in" wording since the pane shows no
+# recognized error signature.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z1 --type developer --objective e --repo /tmp --window wm-z1 --session-id s8 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z1 'sleep 600'
 wm_age_status z1
-WM_STALL_IDLE=6 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_STALL_NUDGE_COOLDOWN=3 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/stall.log" 2>&1 &
 spid=$!
 wm_track "$spid"
+nudgefile="$WINGMAN_HOME/stall-z1.nudged"
+_wait=0
+while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 40 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_true "the generic check-in nudge marker appears" "[ -f '$nudgefile' ]"
+assert_contains "the pane receives the generic check-in message, not the api-error one" \
+  "$(tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-z1")" "Checking in: if you're mid-task"
+assert_true "watcher is still blocking right after the nudge (flip is deferred)" "kill -0 $spid"
+assert_contains "the member is still working, not yet flipped stalled" \
+  "$(wm_state crew-get --id z1)" '"status": "working"'
 i=0; while kill -0 "$spid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
-assert_false "watcher exited on the stall" "kill -0 $spid"
+assert_false "watcher exited on the stall once the cooldown elapsed" "kill -0 $spid"
 assert_contains "cycle exits with the stalled reason" "$(cat "$WINGMAN_HOME/stall.log")" "stalled: z1"
+assert_contains "the reason notes a check-in nudge already ran" \
+  "$(cat "$WINGMAN_HOME/stall.log")" "even after a check-in nudge"
 assert_contains "wake file names the stalled member" "$(cat "$WINGMAN_HOME/wake")" "z1"
 kill "$spid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
@@ -421,14 +435,16 @@ tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id ae1 --type developer --objective h --repo /tmp --window wm-ae1 --session-id sae1 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae1 'echo "Error: rate limit exceeded (429 Too Many Requests)"; while :; do :; done'
 wm_age_status ae1
-WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_APIERR_NUDGE_COOLDOWN=60 WM_WATCH_INTERVAL=1 \
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_STALL_NUDGE_COOLDOWN=60 WM_WATCH_INTERVAL=1 \
   "$WF" >/dev/null 2>&1 &
 napid=$!
 wm_track "$napid"
-nudgefile="$WINGMAN_HOME/apierr-ae1.nudged"
+nudgefile="$WINGMAN_HOME/stall-ae1.nudged"
 _wait=0
 while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 25 ]; do sleep 1; _wait=$((_wait+1)); done
 assert_true "the nudge marker file appears" "[ -f '$nudgefile' ]"
+assert_contains "the pane receives the api-error-specific message, not the generic one" \
+  "$(tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-ae1")" "This is usually transient"
 assert_true "watcher keeps blocking (CPU activity suppresses the stall flip)" "kill -0 $napid"
 assert_contains "the member stays working, not flipped stalled" \
   "$(wm_state crew-get --id ae1)" '"status": "working"'
@@ -439,22 +455,22 @@ assert_eq "the nudge is not re-sent within the cooldown window" "$first_mtime" "
 kill "$napid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
-# --- an unrecovered api-error escalates to stalled with the api-error reason ---
+# --- an unrecovered api-error escalates to stalled only after nudge+cooldown --
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id ae2 --type developer --objective i --repo /tmp --window wm-ae2 --session-id sae2 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae2 'echo "Error: connection error (ECONNRESET)"; sleep 600'
 wm_age_status ae2
-WM_STALL_IDLE=6 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_STALL_NUDGE_COOLDOWN=3 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/apierr.log" 2>&1 &
 aepid=$!
 wm_track "$aepid"
-i=0; while kill -0 "$aepid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
+i=0; while kill -0 "$aepid" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 1; i=$((i+1)); done
 assert_false "watcher exited on the api-error stall" "kill -0 $aepid"
 assert_contains "cycle exits with the stalled reason carrying api-error:" \
   "$(cat "$WINGMAN_HOME/apierr.log")" "stalled: ae2 api-error:"
 assert_true "the nudge marker file was written before escalating" \
-  "[ -f '$WINGMAN_HOME/apierr-ae2.nudged' ]"
+  "[ -f '$WINGMAN_HOME/stall-ae2.nudged' ]"
 kill "$aepid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 

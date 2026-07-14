@@ -239,7 +239,10 @@ You never edit playbooks yourself - the pilot owns them.
   It shows current crew only - fully-closed `stood-down` records are hidden by default.
   Only reach for history when the pilot explicitly asks for it: `bin/crew-list --all` (or `--status stood-down`).
 - **"What's blocked?"** → `bin/crew-list --status blocked`; for each, surface the blocker and the decision it needs.
-- **Crew stalled** → when the watcher surfaces a `stalled` member (no sign of life on any channel while its status claimed `working`), relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or `bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked` and `review`, the pilot decides its disposition.
+- **Crew stalled** → when the watcher surfaces a `stalled` member (no sign of life on any channel while its status claimed `working`), the mechanical layer (`bin/watch-fleet`/`wm-state.py`) has already sent that member one check-in nudge and waited a full cooldown window for activity before this fire ever reached you - a `stalled` fire is always post-nudge, never a first response.
+  Relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or `bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked` and `review`, the pilot decides its disposition.
+  You do not send your own nudge or wait again; the self-heal window already ran.
+  This is distinct from `died` (the session/window is confirmed gone, so no nudge was ever possible) - a `died` member is always relayed immediately, with no wait of any kind.
   Lead with the plain-language state ("the `<repo>` effort has gone quiet") before the command, not the id; keep relaying the exact `bin/crew-takeover <id>` command regardless - the pilot may need to run it themselves, and that is the actionable pointer, not narration.
   An invalid `--model` value is one cause of this: the agent CLI accepts it at startup, so the tmux window stays alive, but every turn comes back as an in-chat model error instead of doing any work - the member never self-reports, so it surfaces as `stalled`, not `died`.
   `bin/crew-takeover <id>` attaches to the live window, where the model error is directly visible in the transcript (see `docs/analysis/2026-07-11-invalid-model-failure-path.md`).
@@ -289,6 +292,8 @@ For **every other status - `working`, `blocked`, `review`, `stalled` - leave the
 A member that has delivered and is awaiting review or watching its own PR is doing exactly what its playbook tells it to; that is not your cue to end it.
 
 Surface the states that need the pilot: relay a `blocked` member's decision (and answer it with `bin/crew-say`), announce a `review` member's deliverable once ("plan ready" / "PR ready for review" with the pointer - this is the **pilot-facing** `review` surface described in Report; a loop-internal `review` state that is only an input to a review round wingman itself commissioned or is about to commission is subject to `direct_spawn_visibility` instead), and relay a `stalled` member's remedy (takeover or stand-down) - then leave it be.
+This `stalled` remedy is always the *post-nudge* response, never a first one: the mechanical layer already sent one check-in nudge and waited a full cooldown window before the fire reached you, so there is nothing further for you to try first.
+A member that self-heals - on its own, or in response to that nudge - before ever reaching this point produces no fire and needs no mention, the same self-resolved-hiccup rule this document states elsewhere for other cases.
 You do not need to know *how* a member sees its work through; only that you don't cut it short.
 
 The pilot's feedback on any in-flight deliverable goes to the **owning member** via `bin/crew-say`, matched by repo + `artifact`/`delivery` in `bin/crew-list` - never to a freshly spawned one.

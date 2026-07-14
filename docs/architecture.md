@@ -31,7 +31,7 @@ The watcher, `bin/watch-fleet`, is built for exactly this:
   The watcher checks for pending events the moment it arms, so a crew member that finishes in the gap between one fire and the next arm is surfaced by that arm, not lost.
 
 The watcher also detects a crew frozen on a permission or trust prompt - a terminal-UI stall the status files can't see - and flips it to `blocked`.
-It detects a member gone silently idle (no pane output, no status update, no execution in its process tree) and flips it to `stalled`; a pane whose tail shows an API/connectivity-error signature (a rate limit, a 5xx, a connection reset) gets a nudge - a plain message into its pane - once per cooldown window before that same staleness check confirms and flips it, so a transient outage self-heals where possible instead of paging the pilot immediately.
+It detects a member gone silently idle (no pane output, no status update, no execution in its process tree) and, before flipping it to `stalled`, sends it a one-shot check-in nudge - a plain message into its pane, worded for an API/connectivity-error signature (a rate limit, a 5xx, a connection reset) if the pane tail shows one, generic otherwise - and waits a full cooldown window for activity; only silence through that whole window confirms the flip. This lets a transient outage, or any other self-resolvable hiccup, self-heal where possible instead of paging the pilot immediately.
 
 ### Correlated fleet events
 
