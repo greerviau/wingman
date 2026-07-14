@@ -130,6 +130,25 @@ _wm_run_sweep() {
 }
 trap _wm_run_sweep EXIT
 
+# teardown.test.sh's case2 proves a member's real Ctrl-C handling: it
+# backgrounds a job under `set -m` and sends SIGINT to its process group,
+# relying on bash's own job-control signal-disposition handling (not
+# anything this suite controls) to let the child's trap catch it rather
+# than have bash's ordinary "ignore SIGINT/SIGQUIT for an async command"
+# default win. Under heavy concurrent fork/exec load from every other file's
+# own tmux/agent-spawning activity, that disposition race can go the wrong
+# way often enough to flake the assertion (observed reproducing both locally
+# and on GitHub Actions once the suite runs concurrently) - not a bug in the
+# member-teardown behavior itself, which passes reliably in isolation, so
+# this file alone runs solo, before the concurrent pool below starts, rather
+# than fighting that unrelated fork/exec load for a file that costs under
+# two seconds anyway.
+_wm_solo="teardown.test.sh"
+if [ -f "$HERE/$_wm_solo" ]; then
+  printf '\n=== %s ===\n' "$_wm_solo"
+  bash "$HERE/$_wm_solo" || fails=$((fails+1))
+fi
+
 # Longest-known-file-first: with a fixed number of job slots, starting the
 # heaviest files immediately is what actually gets them running concurrently
 # instead of queuing behind quick files that merely sort earlier
@@ -150,6 +169,7 @@ for t in "$HERE"/*.test.sh; do
   case " $_wm_priority " in
     *" $(basename "$t") "*) continue ;;
   esac
+  [ "$(basename "$t")" = "$_wm_solo" ] && continue
   _wm_ordered[${#_wm_ordered[@]}]="$t"
 done
 
