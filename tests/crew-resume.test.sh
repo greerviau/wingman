@@ -9,7 +9,7 @@ set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 CR="$TEST_REPO/bin/crew-resume"
-export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2
+export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 
 field_of() { wm_state crew-get --id "$1" | uv run --no-project --quiet python -c 'import sys,json
 print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$2"; }

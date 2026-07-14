@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run every tests/*.test.sh and roll up the result. bash-3.2-safe.
+# Run every tests/*.test.sh, up to WM_TEST_JOBS at a time, and roll up the
+# result. bash-3.2-safe.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -49,8 +50,30 @@ fi
 # running one *.test.sh by hand while this run is also in flight) is never
 # mistaken for this run's own leak - identity, not a creation timestamp,
 # is what tells the two apart (see the plan's "Scoping the sweep" section for
-# why timestamp-based scoping does not actually achieve this).
+# why timestamp-based scoping does not actually achieve this). This same
+# per-process derivation is also what makes running the files below
+# concurrently safe: every test's WINGMAN_HOME and tmux session name is keyed
+# off its own $$, so sibling test processes never collide (tests/lib.sh:35-46).
 export WM_TEST_RUN_ID="$$-$(date +%s)"
+
+# --- parallelism: how many *.test.sh files run at once ------------------------
+# See docs/analysis/2026-07-14-test-suite-runtime.md, Finding 1: the suite was
+# purely serial despite every file already being isolated by design, making
+# wall time additive across all 33+ files for no reason. WM_TEST_JOBS overrides
+# for a slower/more constrained box; the default follows the machine's own core
+# count so a laptop and a CI runner each parallelize to what they actually have.
+_wm_jobs="${WM_TEST_JOBS:-}"
+if [ -z "$_wm_jobs" ]; then
+  if command -v nproc >/dev/null 2>&1; then
+    _wm_jobs="$(nproc)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    _wm_jobs="$(sysctl -n hw.ncpu 2>/dev/null)"
+  fi
+fi
+case "$_wm_jobs" in ''|*[!0-9]*) _wm_jobs=4 ;; esac
+[ "$_wm_jobs" -ge 1 ] || _wm_jobs=4
+
+_wm_logdir="$(mktemp -d "${TMPDIR:-/tmp}/wm-test-run.XXXXXXXX")"
 
 fails=0
 swept=0
@@ -87,6 +110,8 @@ _wm_run_sweep() {
     swept_dirs=$((swept_dirs+1))
   done <<<"$_dirs"
 
+  rm -rf "$_wm_logdir"
+
   printf '\n=== teardown sweep (run %s) ===\n' "$WM_TEST_RUN_ID"
   printf "this run's leaked tmux sessions swept (swept):        %d\n" "$swept"
   printf 'stale (pre-existing or concurrent) wm-test-* sessions found, left alone: %d (rerun with WM_TEST_SWEEP_STALE=1 to remove)\n' "$stale"
@@ -105,11 +130,83 @@ _wm_run_sweep() {
 }
 trap _wm_run_sweep EXIT
 
+# Longest-known-file-first: with a fixed number of job slots, starting the
+# heaviest files immediately is what actually gets them running concurrently
+# instead of queuing behind quick files that merely sort earlier
+# alphabetically (a plain directory-order launch would let a slot free up
+# from a fast file and start another fast file well before a slow file later
+# in the alphabet ever gets a slot). Ranking is from
+# docs/analysis/2026-07-14-test-suite-runtime.md's per-file timings; a file
+# not in this list, or a rank that has since drifted, still just runs - this
+# is a scheduling hint, not a required inventory.
+_wm_priority="watch-fleet.test.sh crew-resume.test.sh playbook-resolution.test.sh watch-fleet-classify.test.sh spawn-scope.test.sh tmux-session-targeting.test.sh stall-check.test.sh"
+
+_wm_ordered=()
+for _p in $_wm_priority; do
+  [ -f "$HERE/$_p" ] && _wm_ordered[${#_wm_ordered[@]}]="$HERE/$_p"
+done
 for t in "$HERE"/*.test.sh; do
   [ -f "$t" ] || continue
-  printf '\n=== %s ===\n' "$(basename "$t")"
-  bash "$t" || fails=$((fails+1))
+  case " $_wm_priority " in
+    *" $(basename "$t") "*) continue ;;
+  esac
+  _wm_ordered[${#_wm_ordered[@]}]="$t"
 done
+
+# --- job pool: up to $_wm_jobs files in flight at once ------------------------
+# Plain indexed-array bookkeeping, not `wait -n` or associative arrays, to stay
+# bash-3.2-safe. A finished slot is marked by blanking its pid (never removed
+# mid-array), so every array reference below is either a length check
+# (`${#_wm_pids[@]}`, always safe under `set -u`) or a single-element access
+# (`${_wm_pids[$_i]}`) - never a bare `${arr[@]}` expansion, which bash 3.2
+# rejects under `set -u` for an empty array.
+_wm_names=()
+_wm_pids=()
+_wm_logs=()
+_wm_live=0
+
+_wm_reap_one() {
+  while :; do
+    _i=0
+    while [ "$_i" -lt "${#_wm_pids[@]}" ]; do
+      _pid="${_wm_pids[$_i]}"
+      if [ -n "$_pid" ] && ! kill -0 "$_pid" 2>/dev/null; then
+        wait "$_pid" 2>/dev/null
+        _rc=$?
+        printf '\n=== %s ===\n' "${_wm_names[$_i]}"
+        cat "${_wm_logs[$_i]}"
+        rm -f "${_wm_logs[$_i]}"
+        [ "$_rc" -eq 0 ] || fails=$((fails+1))
+        _wm_pids[$_i]=""
+        _wm_live=$((_wm_live-1))
+        return
+      fi
+      _i=$((_i+1))
+    done
+    sleep 0.2
+  done
+}
+
+printf 'running %d file(s), up to %d at a time\n' "${#_wm_ordered[@]}" "$_wm_jobs"
+
+for t in "${_wm_ordered[@]}"; do
+  while [ "$_wm_live" -ge "$_wm_jobs" ]; do
+    _wm_reap_one
+  done
+  printf 'start: %s\n' "$(basename "$t")"
+  _wm_log="$_wm_logdir/$(basename "$t").log"
+  bash "$t" >"$_wm_log" 2>&1 &
+  _idx=${#_wm_pids[@]}
+  _wm_pids[$_idx]=$!
+  _wm_names[$_idx]="$(basename "$t")"
+  _wm_logs[$_idx]="$_wm_log"
+  _wm_live=$((_wm_live+1))
+done
+
+while [ "$_wm_live" -gt 0 ]; do
+  _wm_reap_one
+done
+
 printf '\n============================\n'
 if [ "$fails" -eq 0 ]; then printf 'ALL SUITES PASSED\n'; else printf '%d SUITE(S) FAILED\n' "$fails"; fi
 exit "$fails"

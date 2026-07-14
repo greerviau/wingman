@@ -84,7 +84,8 @@ if [ -e "$CFG" ]; then echo "SKIP: $CFG exists; not overwriting"; exit 0; fi
   printf 'WM_PINS=%q\n' "repoSymName|$SYMWS2/repoSymName"
 } > "$CFG"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=1 WM_READY_POLL=0
+export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=1 WM_READY_POLL=0 \
+  WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 wm_on_exit "rm -f '$CFG'"
 

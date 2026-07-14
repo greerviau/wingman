@@ -207,15 +207,16 @@ EOF
   fi
 
   # --- verify the resume actually took -----------------------------------------
-  _tries="${WM_RESUME_VERIFY_TRIES:-10}"
-  _poll="${WM_RESUME_VERIFY_POLL:-1}"
-  _i=0
-  _alive=1
-  while [ "$_i" -lt "$_tries" ]; do
-    if wm_tmux_windows | grep -qx "$_window"; then _alive=1; else _alive=0; break; fi
-    sleep "$_poll"
-    _i=$((_i+1))
-  done
+  # A single check: by the time we get here, the preceding wm_tmux_send_message
+  # call above has already spent WM_SUBMIT_DELAY plus (on failure to detect a
+  # change) up to WM_SUBMIT_TRIES x WM_SUBMIT_POLL - several seconds in the
+  # default production config - so a --resume that fails fast (a stale/invalid
+  # session id, see docs/plans/2026-07-11-watch-fleet-reliability-track-b-design.md)
+  # has already had that same window to manifest as the just-created window
+  # vanishing. Re-polling here on top of that answers a question this first
+  # check already settles, at a real ~10s tax on every successful resume for no
+  # further verification value.
+  if wm_tmux_windows | grep -qx "$_window"; then _alive=1; else _alive=0; fi
 
   if [ "$_alive" = 1 ]; then
     wm_state crew-set --id "$_rid" --status working \
