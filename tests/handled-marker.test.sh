@@ -138,4 +138,48 @@ for p in $pids; do wait "$p" 2>/dev/null; done
 assert_eq "no acked key lost under concurrent writers"   "$(count_keys acked.json)"   "$N"
 assert_eq "no handled key lost under concurrent writers" "$(count_keys handled.json)" "$N"
 
+# --- #73: a member sitting in unchanged review across several turns blocks
+# and is reported exactly once, not on every turn -----------------------------
+test_new_home
+wm_state crew-add --id rv1 --type software-analyst --objective x --repo /tmp --window wm-rv1 --session-id s9 >/dev/null
+wm_state crew-set --id rv1 --status review --artifact "docs/plans/x.md" --summary "plan ready" >/dev/null
+
+# Turn 1: pass 1 blocks and reports rv1, pass 2 (stop_hook_active) marks it handled.
+t1a="$(printf '{"stop_hook_active": false}' | bash "$STOP_GUARD")"
+assert_contains "turn 1 blocks on the review event" "$t1a" '"decision": "block"'
+assert_contains "turn 1 reports rv1" "$t1a" "rv1"
+printf '{"stop_hook_active": true}' | bash "$STOP_GUARD" >/dev/null   # pass 2: mark handled
+handled_after_1="$(store_val handled.json rv1)"
+
+# Turns 2-4: the member is still parked in review, genuinely unchanged, and
+# uses the documented anti-stall escape hatch (a same-status summary refresh,
+# no --silent) between turns - exactly the call shape that reproduced #73.
+for i in 2 3 4; do
+  wm_state crew-set --id rv1 --status review --summary "still watching, no change ($i)" >/dev/null
+  out="$(printf '{"stop_hook_active": false}' | bash "$STOP_GUARD")"
+  assert_not_contains "turn $i does not re-surface the review event" "$out" "Crew need your attention"
+  case "$out" in *rv1*) fail "turn $i's block (if any) must not name rv1" ;; *) ok "turn $i's block (if any) does not name rv1" ;; esac
+  # This is the assertion that actually discriminates pass/fail: on unfixed
+  # code, `announced` visibly advances past handled_after_1 on every turn.
+  assert_eq "turn $i: announced is unchanged" \
+    "$(wm_state crew-get --id rv1 | _py -c 'import json,sys; print(json.load(sys.stdin)["announced"])')" \
+    "$handled_after_1"
+  # handled.json itself is never touched by a benign refresh (only stop-guard's
+  # pass 2 writes it) - this holds even on unfixed code, so it does not by
+  # itself distinguish fixed from broken. Kept anyway to document that the
+  # store and the record's `announced` value stay in sync; do not read its
+  # passing as proof of the fix - the `announced` assertion above is.
+  assert_eq "turn $i: handled.json's stored value is unchanged" "$(store_val handled.json rv1)" "$handled_after_1"
+done
+
+# A genuine new round (a real transition out of and back into review - the
+# working-dip a re-delivery MUST make, per the doc updates below) still
+# re-blocks exactly once.
+wm_state crew-set --id rv1 --status working --summary "revising per pilot feedback" >/dev/null
+wm_state crew-set --id rv1 --status review --artifact "docs/plans/x.md" --summary "plan revised" >/dev/null
+t5="$(printf '{"stop_hook_active": false}' | bash "$STOP_GUARD")"
+assert_contains "a genuine new review round re-blocks" "$t5" '"decision": "block"'
+assert_contains "the new round reports rv1" "$t5" "rv1"
+printf '{"stop_hook_active": true}' | bash "$STOP_GUARD" >/dev/null
+
 test_summary

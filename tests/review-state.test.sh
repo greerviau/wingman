@@ -35,6 +35,20 @@ assert_eq "dropping to working after review stays quiet" "$(wm_state needs-atten
 wm_state crew-set --id r1 --status working --summary "still fixing CI" >/dev/null
 assert_eq "a working summary refresh stays quiet" "$(wm_state needs-attention)" ""
 
+# --- a same-status review refresh (the anti-stall escape hatch) does not
+# re-announce, but a material change while still in review does -----------
+wm_state crew-set --id r1 --status review --delivery "https://gh/pr/1" --summary "PR open" >/dev/null
+na0="$(wm_state needs-attention)"
+upd0="$(printf '%s\n' "$na0" | head -n1 | cut -f3)"
+wm_state ack --id r1 --updated "$upd0" >/dev/null   # ack the real, genuine entry first
+
+wm_state crew-set --id r1 --status review --summary "still watching, no change" >/dev/null
+wm_state crew-set --id r1 --status review --summary "still watching, no change (2)" >/dev/null
+assert_eq "a benign same-status refresh does not re-announce" "$(wm_state needs-attention)" ""
+
+wm_state crew-set --id r1 --status review --delivery "https://gh/pr/1-updated" --summary "new commits pushed" >/dev/null
+assert_contains "a material pointer change while still in review re-announces" "$(wm_state needs-attention)" "r1"
+
 # --- reaching done (PR merged/closed) surfaces the terminal outcome ----------
 wm_state crew-set --id r1 --status done --summary "merged" >/dev/null
 assert_contains "done after review surfaces the terminal outcome" "$(wm_state needs-attention)" "r1"

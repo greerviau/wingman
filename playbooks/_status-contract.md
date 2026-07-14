@@ -57,6 +57,8 @@ Use `crew-set --status review --silent` for the second kind of transition: it up
 Reserve the plain (non-`--silent`) call for: the very first time a deliverable reaches `review`, and any return to `review` that answers feedback your owner gave you.
 Never pass `--silent` with `--status blocked` or `--status done` - those are always genuine, always announce.
 
+This working-dip is not just a lifecycle nicety - it is *how* a genuine re-delivery is distinguished from self-managed churn under the hood: the same `review` -> `working` -> `review` shape covers both "silently fixed something of my own" (use `--silent` on the way back in) and "here is round 2 for you" (plain call, no `--silent`). The dip itself is what makes the second case re-announce at all - a same-status `--status review` call that never leaves `review` only re-announces if it also changes the `artifact`/`blocker`/`delivery` pointer, so restating the same deliverable in place without dipping through `working` first is silently suppressed, not delivered.
+
 ## A state you never set yourself: `stalled`
 
 The supervisor watching you may externally flip your line to `stalled` when you show no sign of life on any channel - no pane output, no status update, no running child process, no CPU activity - for an extended period (default 180s) while your status claims `working`.
@@ -117,6 +119,7 @@ Update your status at these moments, without being asked:
 2. **On meaningful progress** - refresh `--summary`.
 3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`, then wait.
 4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for a PR, `--delivery <PR>`; then park and watch per the wake loop.
+   A **re-delivery that answers feedback on an already-`review` deliverable** must first report `--status working` (even briefly, while revising) **before** re-entering `--status review` - the record's dedup key (`announced`) only advances on a status transition or a changed `artifact`/`blocker`/`delivery` pointer, so revising a plan or report in place and going straight back to `review` without that dip is silently suppressed and never reaches the requester.
 5. **When the terminal condition is met** - `--status done --summary "<one-line outcome>"`.
 
 ## Self-report is a claim, not verified external truth
