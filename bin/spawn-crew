@@ -112,6 +112,14 @@ else
   fi
 fi
 
+# True only when this spawn's cwd will be the wingman repo's own root, i.e.
+# the one case where Claude Code's automatic CLAUDE.md load pulls in the
+# orchestrator's own first-person persona file for a crew session to read
+# (issue #69). Repo scope only: global scope's cwd is the workspace root,
+# not this repo, even when $WM_REPO is among the discovered repos.
+TARGET_IS_WM_REPO=0
+[ "$SCOPE" = repo ] && [ "$REPO" = "$WM_REPO" ] && TARGET_IS_WM_REPO=1
+
 # --- resolve the playbook (local override wins) ------------------------------
 # A crew type is valid iff a playbook exists for it under $WM_PLAYBOOKS. A bare
 # name (e.g. "developer") is searched across every category - role names are
@@ -193,6 +201,9 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
     printf 'This work is not tied to one repo: **determine the target repo(s) yourself** from the objective, and `cd` into a specific repo for any repo-local work (branches, commits, PRs). If it turns out the work belongs to a single repo, just operate there.\n\n'
   else
     printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$ID" "$TYPE" "$REPO"
+  fi
+  if [ "$TARGET_IS_WM_REPO" -eq 1 ]; then
+    printf '**About this repo'"'"'s CLAUDE.md:** the file `CLAUDE.md` at this repo'"'"'s root, which your harness just loaded automatically as project context, is written entirely in first person for the **wingman orchestrator** role - the top-level session the pilot starts directly, not this session. Nothing in it is a rule for you. You are a **%s** crew member: your role, permissions, and instructions are the playbook below and the objective above - follow those. Where CLAUDE.md says "you" (e.g. "you never edit playbooks yourself," "never do heavy work yourself"), it describes the orchestrator session'"'"'s own behavior, not a restriction on this one; treat CLAUDE.md only as optional background reading about how wingman is built, useful if it helps your actual task.\n\n' "$TYPE"
   fi
   if [ -n "$INPUT" ]; then
     printf 'Input handoff: read the plan/spec at `%s` and follow it.\n\n' "$INPUT"
