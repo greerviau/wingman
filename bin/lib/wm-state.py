@@ -20,10 +20,12 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   crew-archive.jsonl  append-only history of records removed by `prune`, one JSON
                     object per line, so pruning keeps crew.json lean without losing
                     the record of who ran
-  preferences.json  the cached onboarding-preference answers for one wingman run
-                    ({"wingman_run_id": str, "prefs": {key: value}}), each asked
-                    once via AskUserQuestion and reused for the rest of that run -
-                    see cmd_pref_get/cmd_pref_set/cmd_prefs_list
+  preferences.json  the cached onboarding-preference answers, keyed by wingman run
+                    id ({run_id: {key: value}}) so multiple concurrently-alive
+                    runs each keep their own answers without clobbering each
+                    other. Each answer is asked once via AskUserQuestion and
+                    reused for the rest of its run - see
+                    cmd_pref_get/cmd_pref_set/cmd_prefs_list
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
@@ -1028,20 +1030,20 @@ def cmd_projects_lookup(args):
 #
 # Invalidation is keyed to a wingman run, not a wall-clock TTL: wingman stamps a
 # fresh WINGMAN_RUN_ID at its own startup and exports it to every crew member
-# (alongside WINGMAN_HOME, in bin/spawn-crew's generated launch script). Stored
-# answers are only valid while the file's own wingman_run_id matches the
-# caller's current one; a mismatch (a fresh sit-down, or wingman restarted) or a
-# missing file means "not yet answered for this run" - the caller must ask
-# again. The first pref-set under a new run id replaces the whole file with a
-# fresh dict rather than merging across runs. Values are plain strings; the
-# store is agnostic to what any given preference means.
+# (alongside WINGMAN_HOME, in bin/spawn-crew's generated launch script). The
+# store is a dict of run_id -> {key: value}, so multiple concurrently-alive
+# wingman runs (e.g. a top-level session plus a lead's tree spawned by an
+# earlier, since-restarted run) each keep their own cached answers without
+# clobbering each other. A run_id with no entry means "not yet answered for
+# this run" - the caller must ask again. Values are plain strings; the store
+# is agnostic to what any given preference means.
 def _load_prefs(run_id):
-    """The prefs dict for run_id, or None if unanswered (missing file, malformed,
-    or stamped with a different run id)."""
+    """The prefs dict for run_id, or None if unanswered (missing entry, or the
+    file/entry is malformed)."""
     data = read_json(preferences_path(), None)
-    if not isinstance(data, dict) or data.get("wingman_run_id") != run_id:
+    if not isinstance(data, dict) or run_id not in data:
         return None
-    prefs = data.get("prefs")
+    prefs = data.get(run_id)
     return prefs if isinstance(prefs, dict) else {}
 
 
@@ -1056,11 +1058,11 @@ def cmd_pref_set(args):
     ensure_home()
     with with_locked(preferences_path()):
         data = read_json(preferences_path(), None)
-        if not isinstance(data, dict) or data.get("wingman_run_id") != args.run_id:
-            data = {"wingman_run_id": args.run_id, "prefs": {}}
-        if not isinstance(data.get("prefs"), dict):
-            data["prefs"] = {}
-        data["prefs"][args.key] = args.value
+        if not isinstance(data, dict):
+            data = {}
+        if not isinstance(data.get(args.run_id), dict):
+            data[args.run_id] = {}
+        data[args.run_id][args.key] = args.value
         write_json(preferences_path(), data)
 
 
