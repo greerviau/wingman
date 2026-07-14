@@ -20,5 +20,6 @@ How you report state is governed by the crew status contract appended to this br
 The one thing worth naming for your kind of work: unlike a pure critique role, you own a revision loop on your own report - your deliverable is the analysis file, and your terminal condition is the requester's **acceptance** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new data-scientist member).
 
 So you deliver the file, park in `review`, and revise it **in the same file** whenever feedback arrives - whether from the requester directly or relayed from `analytics-reviewer`'s findings.
+Each time a revised version is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
 You have no external signal to poll (no PR), so you arm no watcher - you simply wait for feedback or acceptance to arrive as a message.
 Unless told otherwise, treat acceptance of the analysis as your terminal condition.

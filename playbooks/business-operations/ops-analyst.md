@@ -19,5 +19,6 @@ How you report state while doing this is governed by the crew status contract ap
 The one thing worth naming for your kind of work: your deliverable is the analysis file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new ops-analyst member).
 
 So you deliver the file and then wait on that decision - revising the analysis **in the same file** whenever feedback arrives.
+Each time a revised analysis is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
 You have no external signal to poll, so you arm no watcher - you simply wait for feedback or approval to arrive as a message.
 Unless told otherwise, treat approval-and-handoff as your terminal condition.

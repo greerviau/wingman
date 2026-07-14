@@ -46,6 +46,7 @@ How you report state while doing this is governed by the crew status contract ap
 The one thing worth naming for your kind of work: your deliverable is the report/proposal file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new infra-analyst member).
 
 So you deliver the file and then wait on that decision - revising the proposal **in the same file** whenever feedback arrives, and holding the context the reviewer is iterating with.
+Each time a revised proposal is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
 Unlike an `infra-operator` member you have no external signal to poll (no PR, no live change), so you arm no watcher - you simply wait for feedback or approval to arrive as a message.
 Unless told otherwise, treat approval-and-handoff (or an investigate-only report the requester has read) as your terminal condition.
 On approval, the proposal is handed to an `infra-operator` member with `--input <proposal-path>`, same mechanic as `software-analyst` → `developer`.

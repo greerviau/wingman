@@ -21,4 +21,5 @@ Write it formally, so a fresh `ml-engineer` session could implement and run it f
 How you report state is governed by the crew status contract appended to this brief; this playbook only describes the work.
 The one thing worth naming for your kind of work: your deliverable is the design file, and your terminal condition is its **approval** by whoever commissioned it (typically your lead, iterating with you via `bin/crew-say`).
 You have no external signal to poll, so you arm no watcher - you deliver the design, park in `review`, and revise it **in the same file** whenever feedback arrives, until it is approved and handed to the `ml-engineer`.
+Each time a revised design is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
 A `research-reviewer` may be asked to critique your design before approval; treat its findings as feedback and revise.

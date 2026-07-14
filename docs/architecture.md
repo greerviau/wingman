@@ -46,12 +46,16 @@ A crew member is not spun down the moment its deliverable appears; one session s
 The **state model is defined once** in the shared status contract (`playbooks/_status-contract.md`), which is appended to every crew brief; playbooks describe only the work, not how to move between states.
 The status state machine (`bin/lib/wm-state.py`) encodes the same states:
 
-- `LIVE_STATES = (working, blocked, review)` - a member in any of these is still in flight and stays on the board's Active list.
+- `LIVE_STATES = (working, blocked, review, stalled)` - a member in any of these is still in flight and stays on the board's Active list.
 - `working` is active work in flight - producing, revising, or seeing through work (e.g. CI) that must conclude before the deliverable is ready.
   It is never surfaced, so summary refreshes here don't wake the pilot.
 - `review` is the parked-and-waiting state: the deliverable is produced and surfaced, and the member is now watching an external condition it does not control (a PR merge, a plan approval).
   It is both **live** and **surfaced** - `needs-attention` (`ATTENTION_STATES`) announces it to the pilot once per entry, exactly as `blocked` is announced, but the member keeps running.
-  A member moves back to `working` to act on an event (a review comment, a CI failure) and returns to `review` when it settles; each entry into `review` is a fresh `(id, updated)` and re-announces once, while idle time in `review` writes nothing, so a parked member never spams (the ack store dedups per `(id, updated)`).
+  A member moves back to `working` to act on an event (a review comment, a CI failure) and returns to `review` when it settles.
+  The dedup key `needs-attention` actually reads is `announced`, not `updated`: `announced` advances on a genuine transition into an attention state, and - for `review` specifically - also on a material change to its `artifact`/`blocker`/`delivery` pointer, but not on a same-status `review` refresh that only touches `summary`.
+  `blocked` and `done` are unscoped by this gate: `--silent` is forbidden for them, so every non-silent call announces.
+  This is why a re-delivery that answers feedback on an already-`review` deliverable must transition out of `review` and back (through `working`), not restate `--status review` directly: only the transition, or a changed pointer, re-announces.
+  Idle time in `review`, or a same-status summary-only refresh, writes nothing new to surface, so a parked member never spams.
 - `done` means the terminal condition is met and the member is ready to be reaped: a plan approved/handed off, or a PR merged/closed.
   A ready deliverable is `review`, never `done`.
 
@@ -163,8 +167,9 @@ Machine-local runtime state, created on first run, never committed:
 - `watch.pid` / `watch.beat` - wingman's (owner `""`) watcher cycle's pid and liveness beacon.
   A lead's watcher keys its own files by owner (`watch-<owner>.pid` / `watch-<owner>.beat`), so per-owner watchers coexist.
 - `wake` - the attention list wingman's watcher writes when it fires; a lead's watcher writes `wake-<owner>`.
-- `acked.json` - the last `updated` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
-  A new `updated` (a genuine state change) re-surfaces.
+- `acked.json` - the last `announced` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
+  A new `announced` (a genuine state change) re-surfaces.
+- `handled.json` - the last `announced` stamp fully HANDLED by the Stop hook for each crew id, set only when a stop is allowed to proceed - distinct from `acked.json` so a surfaced-but-unhandled event still re-blocks instead of being permanently suppressed by a premature ack.
 - `pr/<id>.json` - a developer member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
 - `projects.json` - the discovered-projects cache.
 - `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).

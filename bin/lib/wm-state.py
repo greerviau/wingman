@@ -355,6 +355,8 @@ def cmd_crew_set(args):
                   "blocked/done are always genuine and must always announce" % args.status)
     live = read_json(status_path(args.id), {"id": args.id})
     live["id"] = args.id
+    prev_status = live.get("status")
+    prev_pointer = (live.get("artifact"), live.get("blocker"), live.get("delivery"))
     for field in STATUS_FIELDS[:-2]:  # everything but 'updated' and 'announced'
         val = getattr(args, field, None)
         if val is not None:
@@ -368,14 +370,31 @@ def cmd_crew_set(args):
     # wrongly surface. So it only ever advances on a call that both (a) is not
     # silent and (b) actually sets status to one of the attention states this
     # dedup key exists for (review/blocked/done - died/stalled are set directly
-    # by reconcile/stall-check, not through here). Every other call - a
-    # `working` transition, a mid-review summary refresh, or an explicit
-    # `--silent` - leaves `announced` exactly as it was (seeded via setdefault
-    # only if this is the very first write for this id, so a record is never
-    # left without one). See playbooks/_status-contract.md, "Re-entering
-    # review without re-announcing".
+    # by reconcile/stall-check, not through here). For `review` specifically,
+    # it advances only on a genuine transition into review from a different
+    # prior status, or a material change to the artifact/blocker/delivery
+    # pointer while already in review - a same-status call that only touches
+    # `summary` (the documented anti-stall escape hatch) leaves `announced`
+    # untouched, so a member sitting unchanged in `review` across many benign
+    # refreshes is not re-surfaced on every one of them. `blocked` and `done`
+    # are unscoped by this: `--silent` is already forbidden for them, so every
+    # non-silent call is genuine and always announces, transition or not.
+    # Every other call - a `working` transition, a mid-review summary refresh,
+    # or an explicit `--silent` - leaves `announced` exactly as it was (seeded
+    # via setdefault only if this is the very first write for this id, so a
+    # record is never left without one). See playbooks/_status-contract.md,
+    # "Re-entering review without re-announcing" - a genuine re-delivery must
+    # dip through `working` first so this gate can tell it apart from churn.
     if not args.silent and args.status in ATTENTION_STATES:
-        live["announced"] = live["updated"]
+        if args.status == "review":
+            new_pointer = (live.get("artifact"), live.get("blocker"), live.get("delivery"))
+            genuinely_new = (args.status != prev_status) or (new_pointer != prev_pointer)
+        else:  # blocked/done: --silent is already forbidden, every call is genuine
+            genuinely_new = True
+        if genuinely_new:
+            live["announced"] = live["updated"]
+        else:
+            live.setdefault("announced", live["updated"])
     else:
         live.setdefault("announced", live["updated"])
     write_json(status_path(args.id), live)
@@ -822,12 +841,19 @@ def cmd_needs_attention(args):
     carries a new `updated` and surfaces again.
 
     The dedup key is `announced` (falling back to `updated` for a record written
-    before that field existed), not `updated` directly: a plain `crew-set --status
-    review` bumps both, so it surfaces normally, while `crew-set --status review
-    --silent` bumps only `updated` (see cmd_crew_set), so self-managed churn - the
-    member cycling through `working` to resolve something that was its own to fix -
-    settles back into `review` without re-firing this loop, even though `updated`
-    itself has visibly advanced for anyone who looks at the roster directly.
+    before that field existed), not `updated` directly: a genuine `crew-set
+    --status review` call - a transition into review from a different prior
+    status, or a material change to the artifact/blocker/delivery pointer while
+    already in review - bumps both `announced` and `updated`, so it surfaces
+    normally, while a same-status review call that only touches `summary`, or an
+    explicit `--silent` call, bumps only `updated` (see cmd_crew_set), so
+    self-managed churn - the member cycling through `working` to resolve
+    something that was its own to fix, or just refreshing its summary while
+    parked in review - settles back into (or stays in) `review` without
+    re-firing this loop, even though `updated` itself has visibly advanced for
+    anyone who looks at the roster directly. This same-status suppression is
+    scoped to `review` only: `blocked` and `done` always bump both fields on
+    every non-silent call, since `--silent` is forbidden for them.
 
     Output is tab-separated: id, status, updated, note. The `updated` column lets a
     deliverer ack the exact tuple it surfaced. Stays a pure read (no side effects).
