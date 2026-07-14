@@ -365,8 +365,11 @@ esac
 # second), never across the blocking loop itself, so it adds no contention for
 # the common case (one arm at a time). A stuck concurrent arm is bounded at 5s
 # rather than hanging forever; a stale lock directory left by a killed process
-# is cleared by the next arm once its 50 tries are exhausted, surfacing loudly
-# via wm_die instead of wedging silently.
+# is reclaimed automatically by this same invocation once that 5s budget is
+# exhausted - but only once the directory is confirmed both old enough and
+# provably ownerless (see below). wm_die is reserved for a holder that is
+# still genuinely live, too recent to trust as abandoned, or contended again
+# within this same invocation.
 #
 # A `mkdir` "success" is verified, not trusted outright: two near-simultaneous
 # claimants have been observed to both see their own `mkdir` report success for
@@ -385,7 +388,28 @@ esac
 # releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
 # rmdir would fail (ENOTEMPTY) and leak the lock permanently.
 release_claim() { rm -f "$CLAIMLOCK/owner" 2>/dev/null; rmdir "$CLAIMLOCK" 2>/dev/null; }
+# CLAIM_STALE_AGE must stay comfortably under the 50-try/0.1s retry budget -
+# not equal to it - to absorb whole-second mtime-vs-now truncation while still
+# requiring a directory to be many multiples of the sub-second legitimate-
+# claim window old before it is even considered for reclaim. (The budget's own
+# real floor is 4.9s, not 5.0s: the sleep sits after the increment-and-check,
+# so the 50th failed attempt's own sleep never runs before the check fires -
+# only 49 sleeps have actually elapsed by then.)
+# CLAIM_HARD_STALE_AGE is a second, independent backstop: a directory old
+# enough to cross it is reclaimed regardless of what its owner pid looks like,
+# closing the case where that pid has been reused by an unrelated process (or
+# is simply corrupt). Both are env-overridable so tests can exercise the hard
+# override without a real 60-second wait.
+CLAIM_STALE_AGE="${WM_CLAIM_STALE_AGE:-4}"
+CLAIM_HARD_STALE_AGE="${WM_CLAIM_HARD_STALE_AGE:-60}"
+# An overall wall-clock deadline, independent of _claim_reclaimed, bounds the
+# "directory vanished/unreadable" retry branches below - those reset the
+# 50-try counter on every hit, which is otherwise unbounded against a
+# (near-impossible in practice) pathological churn case.
+_claim_start="$(date +%s)"
+_claim_deadline=30
 _claim_tries=0
+_claim_reclaimed=0
 while :; do
   if mkdir "$CLAIMLOCK" 2>/dev/null; then
     # Registered the instant mkdir succeeds, before the verification below can
@@ -399,7 +423,61 @@ while :; do
     trap - EXIT   # lost the internal race; the presumed winner's own trap cleans up
   fi
   _claim_tries=$((_claim_tries+1))
-  [ "$_claim_tries" -ge 50 ] && wm_die "watcher: could not acquire the claim lock after 5s (a concurrent arm may be stuck) - see $CLAIMLOCK"
+  if [ "$_claim_tries" -ge 50 ]; then
+    # Re-stat the lock fresh, right now - never act on pid/age information read
+    # on an earlier failed attempt (that's exactly the clobber bug this fix
+    # closes: acting on stale information about a path can delete a different,
+    # live claimant that has since taken over the same path).
+    if [ ! -d "$CLAIMLOCK" ]; then
+      # Already gone - released or reclaimed by someone else since our last
+      # failed mkdir. Nothing to clean up; just retry the mkdir, unless we've
+      # been churning on this for so long that something else is clearly wrong.
+      [ $(( $(date +%s) - _claim_start )) -ge "$_claim_deadline" ] \
+        && wm_die "watcher: could not acquire the claim lock after ${_claim_deadline}s of repeated churn - see $CLAIMLOCK"
+      _claim_tries=0
+      continue
+    fi
+    _lock_mtime="$(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$CLAIMLOCK" 2>/dev/null)"
+    if [ -z "$_lock_mtime" ]; then
+      # The directory existed a moment ago (the -d check above) but vanished,
+      # or became unreadable, before the stat completed - the same benign
+      # "someone else already cleaned this up" case as the branch just above,
+      # not a reason to fall through to wm_die.
+      [ $(( $(date +%s) - _claim_start )) -ge "$_claim_deadline" ] \
+        && wm_die "watcher: could not acquire the claim lock after ${_claim_deadline}s of repeated churn - see $CLAIMLOCK"
+      _claim_tries=0
+      continue
+    fi
+    _lock_age=$(( $(date +%s) - _lock_mtime ))
+    # A directory younger than CLAIM_STALE_AGE cannot be the long-dead lock
+    # this fix targets - it is indistinguishable from a legitimate claimant
+    # that arrived only moments ago (possibly the very claimant that just
+    # replaced a directory we saw fail earlier). Never reclaim on pid liveness
+    # alone; fall through to the unchanged wm_die below instead, exactly as
+    # before this fix existed.
+    if [ "$_lock_age" -ge "$CLAIM_STALE_AGE" ]; then
+      _owner_raw="$(cat "$CLAIMLOCK/owner" 2>/dev/null)"
+      case "$_owner_raw" in
+        # Empty (owner file missing, or never written before its claimant
+        # died), or not a plain positive integer (a corrupt stamp, or a value
+        # like "-1" that `kill -0` would misread as a process-group target) -
+        # both are treated as an unreadable/dead owner, never passed to
+        # `kill -0` as-is.
+        ''|*[!0-9]*) _owner_dead=1 ;;
+        *) if kill -0 "$_owner_raw" 2>/dev/null; then _owner_dead=0; else _owner_dead=1; fi ;;
+      esac
+      if [ "$_claim_reclaimed" -eq 0 ] \
+        && { [ "$_owner_dead" -eq 1 ] || [ "$_lock_age" -ge "$CLAIM_HARD_STALE_AGE" ]; }; then
+        wm_warn "watcher: clearing a stale claim lock at $CLAIMLOCK (age ${_lock_age}s, owner pid ${_owner_raw:-unknown})"
+        rm -f "$CLAIMLOCK/owner" 2>/dev/null
+        rmdir "$CLAIMLOCK" 2>/dev/null
+        _claim_reclaimed=1
+        _claim_tries=0
+        continue
+      fi
+    fi
+    wm_die "watcher: could not acquire the claim lock after 5s (a concurrent arm may be stuck) - see $CLAIMLOCK"
+  fi
   sleep 0.1
 done
 

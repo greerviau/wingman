@@ -29,13 +29,22 @@ Scoped to wingman's own top-level session only (owner `""`, the bare
      `~/.wingman/watch-spurious.log`); fleet supervision is not being
      maintained."* Then append a remedy chosen from `<hint>`, the third field
      on this same outcome line (no separate file read needed):
-     - `stale-claim-lock`: *"A stale claim-lock directory
-       (`~/.wingman/watch.pid.lock`) is blocking every arm attempt - remove it
-       (e.g. `rmdir` that directory, after confirming no genuine
-       `watch-fleet` arm is concurrently in progress) before resuming;
-       re-arming alone will not succeed. This is a known bug - the lock is
-       supposed to self-clear after 50 failed attempts and does not (see
-       issue #74)."*
+     - `stale-claim-lock`: *"A claim-lock directory
+       (`~/.wingman/watch.pid.lock`) is blocking every arm attempt.
+       `watch-fleet` already self-clears a lock left behind by a killed
+       process once it is old enough and provably ownerless (issue #74) - so
+       a lock that is still here and still causing repeated failures was
+       deliberately left alone: either it is too young to trust as abandoned,
+       or its stamped owner pid is alive and has not yet crossed the
+       hard-stale-age threshold. Recovering means finding that live process,
+       not deleting the directory out from under it: read
+       `~/.wingman/watch.pid.lock/owner` for its pid and check whether that
+       process is a genuinely wedged `watch-fleet` arm (the lock is meant to
+       be held for well under a second) - if so, it needs attention (or
+       killing) before re-arming will succeed. Removing the lock while its
+       owner is still alive risks two watchers racing to write
+       `~/.wingman/watch.pid` at once, which is exactly what this lock exists
+       to prevent."*
      - any other hint (`sigkill-suspected` / `clean-exit-or-sigterm` /
        `hung-or-stale-pidfile`): *"Resume it by running `/watch` again or
        arming `bin/watch-fleet` directly."*
