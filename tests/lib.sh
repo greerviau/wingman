@@ -57,6 +57,19 @@ json.dump(d, open(sys.argv[1], "w"))
 EOF
 }
 
+# Back-date a path's mtime by N seconds (default 30), for testing the
+# claim-lock age gate deterministically. Uses os.utime rather than shelling
+# out to `touch -d`/`touch -v`, which differ between GNU and BSD - portable
+# to macOS, mirroring wm_age_status above.
+wm_age_path() {
+  uv run --no-project --quiet python - "$1" "${2:-30}" <<'EOF'
+import os, sys, time
+path, seconds_ago = sys.argv[1], int(sys.argv[2])
+t = time.time() - seconds_ago
+os.utime(path, (t, t))
+EOF
+}
+
 wm_state() { uv run --no-project --quiet "$TEST_REPO/bin/lib/wm-state.py" "$@"; }
 
 # Run a command under a hard wall-clock timeout. macOS ships no coreutils

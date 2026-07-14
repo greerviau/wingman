@@ -609,4 +609,139 @@ assert_contains "the unrelated blocker reason is left untouched" "$(wm_state cre
 kill "$zb2_pid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- a SIGKILL'd lock holder is reclaimed, twice in a row, each proven by its
+# own fresh event (the core regression case, issue #74) ------------------------
+test_new_home
+wm_state crew-add --id sk1 --type analyst --objective x --repo /tmp --window wm-sk1 --session-id ssk1 >/dev/null
+wm_state crew-set --id sk1 --status done --summary "finished round one" >/dev/null
+
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+( sleep 100 ) & holder=$!
+wm_track "$holder"
+echo "$holder" > "$WINGMAN_HOME/watch.pid.lock/owner"
+kill -9 "$holder"
+wait "$holder" 2>/dev/null
+
+out="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/stale.err")"
+assert_contains "round 1: arm recovers and fires its real reason, not just exits 0" "$out" "done: sk1 finished round one"
+assert_contains "round 1: watcher logs that it cleared a stale claim lock" "$(cat "$WINGMAN_HOME/stale.err")" "clearing a stale claim lock"
+assert_false "round 1: the stale claim lock directory is gone after recovery" "[ -d \"$WINGMAN_HOME/watch.pid.lock\" ]"
+
+# Round 2: mint a genuinely NEW, unacked event (bumping sk1's `updated` stamp
+# via working -> done again) and fabricate a second, independent stale lock -
+# proving recovery is repeatable, not a one-shot fluke tied to the first pid.
+wm_state crew-set --id sk1 --status working --summary "back to work" >/dev/null
+wm_state crew-set --id sk1 --status done --summary "finished round two" >/dev/null
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+( sleep 100 ) & holder2=$!
+wm_track "$holder2"
+echo "$holder2" > "$WINGMAN_HOME/watch.pid.lock/owner"
+kill -9 "$holder2"
+wait "$holder2" 2>/dev/null
+
+out2="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/stale2.err")"
+assert_contains "round 2: a second, independent stale lock also recovers" "$out2" "done: sk1 finished round two"
+assert_false "round 2: the stale claim lock directory is gone again" "[ -d \"$WINGMAN_HOME/watch.pid.lock\" ]"
+
+# --- a genuinely live (slow) claimant is left alone, not clobbered (#74) -------
+test_new_home
+wm_state crew-add --id sk2 --type analyst --objective x --repo /tmp --window wm-sk2 --session-id ssk2 >/dev/null
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+( sleep 100 ) & liveholder=$!
+wm_track "$liveholder"
+echo "$liveholder" > "$WINGMAN_HOME/watch.pid.lock/owner"
+out2="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/live.err")"; rc2=$?
+assert_eq "arm still dies loudly against a genuinely live holder" "$rc2" "1"
+assert_contains "die message names the claim lock" "$(cat "$WINGMAN_HOME/live.err")" "could not acquire the claim lock"
+assert_true "the live holder's lock directory is left in place, not clobbered" "[ -d \"$WINGMAN_HOME/watch.pid.lock\" ]"
+kill "$liveholder" 2>/dev/null
+
+# --- a lock past the hard-age override reclaims despite a live (reused/
+# unrelated) owner pid (#74) ---------------------------------------------------
+# WM_CLAIM_HARD_STALE_AGE is shrunk to a value well below its own 60s default -
+# setting it to the default would be a no-op that proves nothing - and scoped
+# to an explicit subshell so the assignment cannot leak into the rest of the
+# test file (a bare `VAR=value wm_timeout ...` prefix is safe for an external
+# command but is not a reliable scoping idiom for a shell function under
+# bash, which wm_timeout is).
+test_new_home
+wm_state crew-add --id sk3 --type analyst --objective x --repo /tmp --window wm-sk3 --session-id ssk3 >/dev/null
+wm_state crew-set --id sk3 --status done --summary "finished despite pid reuse" >/dev/null
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+( sleep 100 ) & unrelated=$!
+wm_track "$unrelated"
+echo "$unrelated" > "$WINGMAN_HOME/watch.pid.lock/owner"
+wm_age_path "$WINGMAN_HOME/watch.pid.lock" 30   # back-date well past the shrunk hard-stale-age (10s) below
+(
+  WM_CLAIM_HARD_STALE_AGE=10
+  export WM_CLAIM_HARD_STALE_AGE
+  wm_timeout 45 "$WF" >"$WINGMAN_HOME/reuse.out" 2>"$WINGMAN_HOME/reuse.err"
+)
+out3="$(cat "$WINGMAN_HOME/reuse.out")"
+assert_contains "a lock past the hard-stale-age reclaims despite a live (reused) owner pid" "$out3" "done: sk3 finished despite pid reuse"
+kill "$unrelated" 2>/dev/null
+
+# --- a corrupted owner value is never handed to kill -0 as a literal pid (#74) -
+test_new_home
+wm_state crew-add --id sk4 --type analyst --objective x --repo /tmp --window wm-sk4 --session-id ssk4 >/dev/null
+wm_state crew-set --id sk4 --status done --summary "finished despite corrupt owner stamp" >/dev/null
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+echo "-1" > "$WINGMAN_HOME/watch.pid.lock/owner"
+out4="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/corrupt.err")"
+assert_contains "a corrupt (-1) owner stamp is treated as dead, not as a live process-group target" "$out4" "done: sk4 finished despite corrupt owner stamp"
+assert_contains "corrupt-owner recovery is logged" "$(cat "$WINGMAN_HOME/corrupt.err")" "clearing a stale claim lock"
+
+# --- fidelity case: a real watch-fleet process, genuinely SIGKILL'd while
+# holding the claim lock (#74) --------------------------------------------------
+# Cases above fabricate the on-disk state directly; this proves that shape is
+# what a real SIGKILL actually leaves behind. The poll below is bounded by
+# wall-clock time (not iteration count): a freshly forked watch-fleet needs on
+# the order of 200ms of real startup latency (fork/exec, sourcing common.sh,
+# mode dispatch, then reaching the claim loop) before its owner stamp appears,
+# so a fixed iteration count with no sleep can burn its whole budget before
+# that latency has even elapsed.
+test_new_home
+wm_state crew-add --id fid1 --type analyst --objective x --repo /tmp --window wm-fid1 --session-id sfid1 >/dev/null
+wm_state crew-set --id fid1 --status working --summary "in progress" >/dev/null
+
+"$WF" >"$WINGMAN_HOME/fid-a.log" 2>&1 &
+victim=$!
+wm_track "$victim"
+
+_fid_caught=0
+for _fid_attempt in 1 2 3; do
+  _fid_deadline=$(( $(date +%s) + 3 ))
+  while [ "$(date +%s)" -lt "$_fid_deadline" ]; do
+    if [ -s "$WINGMAN_HOME/watch.pid.lock/owner" ]; then
+      kill -9 "$victim" 2>/dev/null
+      wait "$victim" 2>/dev/null
+      # Confirm the kill actually landed before the victim could release the
+      # lock on its own - if the directory is already gone, the race was lost
+      # despite catching the owner stamp; fall through to the retry below
+      # exactly as if the poll had never caught it at all.
+      [ -d "$WINGMAN_HOME/watch.pid.lock" ] && _fid_caught=1
+      break
+    fi
+    sleep 0.01
+  done
+  [ "$_fid_caught" -eq 1 ] && break
+  # Lost the race (the holder released before the poll noticed, or before the
+  # kill signal was delivered) - retry with a fresh arm rather than flaking
+  # the whole test.
+  kill "$victim" 2>/dev/null; wait "$victim" 2>/dev/null
+  rm -rf "$WINGMAN_HOME/watch.pid" "$WINGMAN_HOME/watch.pid.lock"
+  "$WF" >"$WINGMAN_HOME/fid-a.log" 2>&1 &
+  victim=$!
+  wm_track "$victim"
+done
+assert_true "caught a real watch-fleet mid-claim and killed it" "[ \"$_fid_caught\" -eq 1 ]"
+assert_true "the real SIGKILL leaves the mkdir'd lock dir behind" "[ -d \"$WINGMAN_HOME/watch.pid.lock\" ]"
+assert_true "the real SIGKILL leaves the owner stamp behind" "[ -s \"$WINGMAN_HOME/watch.pid.lock/owner\" ]"
+assert_eq "the leaked owner stamp names the real killed watcher's own pid" "$(cat "$WINGMAN_HOME/watch.pid.lock/owner")" "$victim"
+
+wm_state crew-set --id fid1 --status done --summary "finished for real" >/dev/null
+out_fid="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/fid.err")"
+assert_contains "the next real arm recovers from the real leaked lock" "$out_fid" "done: fid1 finished for real"
+assert_contains "the recovery is logged" "$(cat "$WINGMAN_HOME/fid.err")" "clearing a stale claim lock"
+
 test_summary

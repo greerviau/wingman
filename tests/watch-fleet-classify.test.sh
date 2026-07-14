@@ -160,20 +160,27 @@ out3="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "third spurious classification trips the budget regardless of elapsed time" "$out3" "spurious-repeated 3 clean-exit-or-sigterm"
 
 # --- the failure budget: the plan's own headline repro (never claims) ----------
-# A stale claim-lock kills every subsequent arm attempt before any of them ever
-# claims or writes an exit-record - this must count exactly like any other
-# spurious death, not fall through an "unknown lifetime, don't count" gap.
+# A claim-lock with a live owner refuses every arm attempt across all three
+# rounds - the failure budget must count this as three genuine failures, not
+# fall through an "unknown lifetime, don't count" gap. (Before issue #74's fix,
+# ANY leaked lock - dead owner or not - reproduced this; after the fix, only a
+# lock this design deliberately refuses to reclaim still does, so this uses a
+# live owner rather than a bare/dead one.)
 test_new_home
 mkdir "$WINGMAN_HOME/watch.pid.lock"
+( sleep 300 ) & _budget_holder=$!
+wm_track "$_budget_holder"
+echo "$_budget_holder" > "$WINGMAN_HOME/watch.pid.lock/owner"
 wm_timeout 15 "$WF" >/dev/null 2>&1
 lout1="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
-assert_eq "arm 1 (never claims) classifies as spurious 1" "$lout1" "spurious 1 stale-claim-lock"
+assert_eq "arm 1 (owner alive, refused) classifies as spurious 1" "$lout1" "spurious 1 stale-claim-lock"
 wm_timeout 15 "$WF" >/dev/null 2>&1
 lout2="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
-assert_eq "arm 2 (never claims) classifies as spurious 2" "$lout2" "spurious 2 stale-claim-lock"
+assert_eq "arm 2 (still refused) classifies as spurious 2" "$lout2" "spurious 2 stale-claim-lock"
 wm_timeout 15 "$WF" >/dev/null 2>&1
 lout3="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
-assert_eq "arm 3 (never claims) trips spurious-repeated" "$lout3" "spurious-repeated 3 stale-claim-lock"
+assert_eq "arm 3 (still refused) trips spurious-repeated" "$lout3" "spurious-repeated 3 stale-claim-lock"
+kill "$_budget_holder" 2>/dev/null
 rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null
 
 # --- the failure budget: a non-spurious outcome resets the count ---------------
