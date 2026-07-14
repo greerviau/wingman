@@ -277,8 +277,6 @@ def cmd_init(_args):
 
 def cmd_crew_add(args):
     ensure_home()
-    roster = load_roster()
-    roster = [r for r in roster if r.get("id") != args.id]
     # One stamp for the spawn: the roster `updated`, the immutable `spawned_at`, and
     # the seeded status file's `updated` all take this identical value, so at spawn
     # time status.updated == spawned_at exactly. The prompt-freeze liveness veto
@@ -335,8 +333,11 @@ def cmd_crew_add(args):
         "spawned_at": stamp,
         "updated": stamp,
     }
-    roster.append(record)
-    write_json(crew_json_path(), roster)
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        roster = [r for r in roster if r.get("id") != args.id]
+        roster.append(record)
+        write_json(crew_json_path(), roster)
     # Seed the crew member's own status file so the watcher has something to read.
     if not os.path.exists(status_path(args.id)):
         write_json(status_path(args.id), {
@@ -410,29 +411,30 @@ def cmd_crew_set(args):
 
     # Mirror the durable fields back into the roster so a stale crew.json alone
     # still tells the truth if the status file is later removed.
-    roster = load_roster()
-    for r in roster:
-        if r.get("id") == args.id:
-            for field in ("status", "artifact", "delivery"):
-                if getattr(args, field, None) is not None:
-                    r[field] = live.get(field)
-            # worktree is a roster-only field (not a live-status field): a member
-            # that creates its worktree after spawn (global scope) self-registers
-            # the path here so a later teardown can find it.
-            if getattr(args, "worktree", None) is not None:
-                r["worktree"] = args.worktree
-            # allow_merge is likewise roster-only (issue #46): a grant/revoke is
-            # never part of a member's own live-status report, so it never touches
-            # crew/<id>.json - only the roster record hooks/no-merge-guard.sh reads.
-            if getattr(args, "allow_merge", None) is not None:
-                r["allow_merge"] = args.allow_merge == "true"
-            # window_id is likewise roster-only: crew-resume re-registers the id
-            # of the replacement window it creates, so stray-window adoption
-            # (wm_tmux_adopt_strays) keeps an exact identity to match on.
-            if getattr(args, "window_id", None) is not None:
-                r["window_id"] = args.window_id
-            r["updated"] = live["updated"]
-    write_json(crew_json_path(), roster)
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        for r in roster:
+            if r.get("id") == args.id:
+                for field in ("status", "artifact", "delivery"):
+                    if getattr(args, field, None) is not None:
+                        r[field] = live.get(field)
+                # worktree is a roster-only field (not a live-status field): a member
+                # that creates its worktree after spawn (global scope) self-registers
+                # the path here so a later teardown can find it.
+                if getattr(args, "worktree", None) is not None:
+                    r["worktree"] = args.worktree
+                # allow_merge is likewise roster-only (issue #46): a grant/revoke is
+                # never part of a member's own live-status report, so it never touches
+                # crew/<id>.json - only the roster record hooks/no-merge-guard.sh reads.
+                if getattr(args, "allow_merge", None) is not None:
+                    r["allow_merge"] = args.allow_merge == "true"
+                # window_id is likewise roster-only: crew-resume re-registers the id
+                # of the replacement window it creates, so stray-window adoption
+                # (wm_tmux_adopt_strays) keeps an exact identity to match on.
+                if getattr(args, "window_id", None) is not None:
+                    r["window_id"] = args.window_id
+                r["updated"] = live["updated"]
+        write_json(crew_json_path(), roster)
     render_board()
     print(args.id)
 
@@ -492,64 +494,65 @@ def cmd_reconcile(args):
     ensure_home()
     owner = getattr(args, "owner", None)
     live_windows = set(w for w in (args.windows or "").split(",") if w)
-    roster = load_roster()
-    changed = []
-    for r in roster:
-        m = merged(r)
-        if m.get("status") in LIVE_STATES and r.get("window") not in live_windows:
-            r["status"] = "died"
-            r["updated"] = now()
-            # reflect into the status file too
-            live = read_json(status_path(r["id"]), {"id": r["id"]})
-            live["status"] = "died"
-            live["updated"] = r["updated"]
-            live["announced"] = live["updated"]  # a died event always announces
-            write_json(status_path(r["id"]), live)
-            changed.append(r["id"])
-
-    # Dead-owner re-adopt, wingman's watcher only (owner == "").
-    if owner == "":
-        by_id = dict((r.get("id"), r) for r in roster)
-        orphans_by_owner = {}
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        changed = []
         for r in roster:
-            if merged(r).get("status") not in LIVE_STATES:
-                continue
-            if r.get("window") not in live_windows:
-                continue  # its own window is gone; the death flip already handled it
-            p = parent_of(r)
-            if not p:
-                continue  # top-level: owned by wingman, which never dies
-            owner_rec = by_id.get(p)
-            if owner_rec is None:
-                continue
-            if merged(owner_rec).get("status") in ("died", "stood-down"):
-                r["orphaned_from"] = p
-                r["parent"] = parent_of(owner_rec)  # grandparent ("" = wingman)
-                orphans_by_owner.setdefault(p, []).append(r.get("id"))
-        # Enrich each dead owner's `died` event to carry the orphan surface. Bump its
-        # `updated` so the event re-fires (unacked) even if the death itself was
-        # already surfaced on an earlier cycle; it fires once, because after
-        # re-parenting the workers are no longer detected as this owner's orphans.
-        for dead_id, workers in orphans_by_owner.items():
-            owner_rec = by_id.get(dead_id)
-            if owner_rec is None:
-                continue
-            names = ", ".join("`%s`" % w for w in workers)
-            msg = ("lead `%s` died; its %d live worker(s) (%s) were re-adopted to you "
-                   "and are now visible. Choose: keep supervising them; "
-                   "`bin/crew-standdown %s` to cascade-stand-down the whole sub-crew; "
-                   "or `bin/crew-takeover <worker>` to hand one off."
-                   % (dead_id, len(workers), names, dead_id))
-            stamp = now()
-            owner_rec["summary"] = msg
-            owner_rec["updated"] = stamp
-            live = read_json(status_path(dead_id), {"id": dead_id})
-            live["summary"] = msg
-            live["updated"] = stamp
-            live["announced"] = stamp  # re-fires the died event; always genuine
-            write_json(status_path(dead_id), live)
+            m = merged(r)
+            if m.get("status") in LIVE_STATES and r.get("window") not in live_windows:
+                r["status"] = "died"
+                r["updated"] = now()
+                # reflect into the status file too
+                live = read_json(status_path(r["id"]), {"id": r["id"]})
+                live["status"] = "died"
+                live["updated"] = r["updated"]
+                live["announced"] = live["updated"]  # a died event always announces
+                write_json(status_path(r["id"]), live)
+                changed.append(r["id"])
 
-    write_json(crew_json_path(), roster)
+        # Dead-owner re-adopt, wingman's watcher only (owner == "").
+        if owner == "":
+            by_id = dict((r.get("id"), r) for r in roster)
+            orphans_by_owner = {}
+            for r in roster:
+                if merged(r).get("status") not in LIVE_STATES:
+                    continue
+                if r.get("window") not in live_windows:
+                    continue  # its own window is gone; the death flip already handled it
+                p = parent_of(r)
+                if not p:
+                    continue  # top-level: owned by wingman, which never dies
+                owner_rec = by_id.get(p)
+                if owner_rec is None:
+                    continue
+                if merged(owner_rec).get("status") in ("died", "stood-down"):
+                    r["orphaned_from"] = p
+                    r["parent"] = parent_of(owner_rec)  # grandparent ("" = wingman)
+                    orphans_by_owner.setdefault(p, []).append(r.get("id"))
+            # Enrich each dead owner's `died` event to carry the orphan surface. Bump its
+            # `updated` so the event re-fires (unacked) even if the death itself was
+            # already surfaced on an earlier cycle; it fires once, because after
+            # re-parenting the workers are no longer detected as this owner's orphans.
+            for dead_id, workers in orphans_by_owner.items():
+                owner_rec = by_id.get(dead_id)
+                if owner_rec is None:
+                    continue
+                names = ", ".join("`%s`" % w for w in workers)
+                msg = ("lead `%s` died; its %d live worker(s) (%s) were re-adopted to you "
+                       "and are now visible. Choose: keep supervising them; "
+                       "`bin/crew-standdown %s` to cascade-stand-down the whole sub-crew; "
+                       "or `bin/crew-takeover <worker>` to hand one off."
+                       % (dead_id, len(workers), names, dead_id))
+                stamp = now()
+                owner_rec["summary"] = msg
+                owner_rec["updated"] = stamp
+                live = read_json(status_path(dead_id), {"id": dead_id})
+                live["summary"] = msg
+                live["updated"] = stamp
+                live["announced"] = stamp  # re-fires the died event; always genuine
+                write_json(status_path(dead_id), live)
+
+        write_json(crew_json_path(), roster)
     render_board()
     print(" ".join(changed))
 
@@ -559,20 +562,21 @@ def cmd_standdown(args):
     whole sub-crew is reaped with it (never orphaned). Prints each affected id
     (one per line) so the caller can close the corresponding tmux windows."""
     ensure_home()
-    roster = load_roster()
-    targets = descendants_inclusive(roster, args.id)
-    affected = []
-    stamp = now()
-    for r in roster:
-        if r.get("id") in targets:
-            r["status"] = "stood-down"
-            r["updated"] = stamp
-            affected.append(r["id"])
-            live = read_json(status_path(r["id"]), {"id": r["id"]})
-            live["status"] = "stood-down"
-            live["updated"] = stamp
-            write_json(status_path(r["id"]), live)
-    write_json(crew_json_path(), roster)
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        targets = descendants_inclusive(roster, args.id)
+        affected = []
+        stamp = now()
+        for r in roster:
+            if r.get("id") in targets:
+                r["status"] = "stood-down"
+                r["updated"] = stamp
+                affected.append(r["id"])
+                live = read_json(status_path(r["id"]), {"id": r["id"]})
+                live["status"] = "stood-down"
+                live["updated"] = stamp
+                write_json(status_path(r["id"]), live)
+        write_json(crew_json_path(), roster)
     render_board()
     # Deterministic order (target first, then its reports) for a readable report.
     for cid in sorted(affected, key=lambda c: (c != args.id, c)):
@@ -613,51 +617,52 @@ def cmd_prune(args):
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.older_than_days)
 
     owner = getattr(args, "owner", None)
-    roster = load_roster()
-    remove, keep = [], []
-    for r in roster:
-        m = merged(r)
-        if owner is not None and parent_of(r) != owner:
-            keep.append(r)  # outside the requested owner scope
-            continue
-        if m.get("status") not in targets:
-            keep.append(r)
-            continue
-        if cutoff is not None:
-            ts = _parse_updated(m.get("updated"))
-            if ts is None or ts >= cutoff:
-                keep.append(r)  # too recent (or undatable) to prune
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        remove, keep = [], []
+        for r in roster:
+            m = merged(r)
+            if owner is not None and parent_of(r) != owner:
+                keep.append(r)  # outside the requested owner scope
                 continue
-        remove.append(m)
+            if m.get("status") not in targets:
+                keep.append(r)
+                continue
+            if cutoff is not None:
+                ts = _parse_updated(m.get("updated"))
+                if ts is None or ts >= cutoff:
+                    keep.append(r)  # too recent (or undatable) to prune
+                    continue
+            remove.append(m)
 
-    if args.dry_run:
+        if args.dry_run:
+            if not remove:
+                print("prune (dry-run): nothing to remove")
+            else:
+                print("prune (dry-run): would remove %d record(s):" % len(remove))
+                for m in remove:
+                    print("  %s\t%s\t%s" % (m.get("id", "?"), m.get("status", "?"), m.get("updated", "")))
+            return
+
         if not remove:
-            print("prune (dry-run): nothing to remove")
-        else:
-            print("prune (dry-run): would remove %d record(s):" % len(remove))
+            print("0")
+            return
+
+        # Archive first, so a crash mid-prune never loses a record.
+        with open(archive_path(), "a") as fh:
             for m in remove:
-                print("  %s\t%s\t%s" % (m.get("id", "?"), m.get("status", "?"), m.get("updated", "")))
-        return
+                fh.write(json.dumps(m, sort_keys=True) + "\n")
 
-    if not remove:
-        print("0")
-        return
-
-    # Archive first, so a crash mid-prune never loses a record.
-    with open(archive_path(), "a") as fh:
+        removed_ids = set()
         for m in remove:
-            fh.write(json.dumps(m, sort_keys=True) + "\n")
+            cid = m.get("id")
+            removed_ids.add(cid)
+            try:
+                os.remove(status_path(cid))
+            except FileNotFoundError:
+                pass
 
-    removed_ids = set()
-    for m in remove:
-        cid = m.get("id")
-        removed_ids.add(cid)
-        try:
-            os.remove(status_path(cid))
-        except FileNotFoundError:
-            pass
-
-    write_json(crew_json_path(), keep)
+        write_json(crew_json_path(), keep)
 
     for store_path in (acked_path(), handled_path()):
         with with_locked(store_path):
@@ -808,12 +813,13 @@ def cmd_stall_check(args):
 
     # Mirror into the roster, as crew-set does, so a later loss of the status
     # file still tells the truth.
-    roster = load_roster()
-    for r in roster:
-        if r.get("id") == args.id:
-            r["status"] = "stalled"
-            r["updated"] = live["updated"]
-    write_json(crew_json_path(), roster)
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        for r in roster:
+            if r.get("id") == args.id:
+                r["status"] = "stalled"
+                r["updated"] = live["updated"]
+        write_json(crew_json_path(), roster)
     render_board()
     print("stalled")
 
