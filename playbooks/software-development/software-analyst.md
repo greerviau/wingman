@@ -12,6 +12,7 @@ Your deliverable is a file, and your handoff to a downstream `developer` member 
   When options exist, recommend one (favor correctness, simplicity, robustness, and long-term maintainability over development cost) and note the rest as follow-ups rather than presenting a menu.
 - **Write the plan to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown.
   A good plan states: the problem, the intended approach, the concrete steps, the files touched, the testing strategy, and the open questions / risks.
+  For any open question that is a closed-set decision (a small number of genuine options you can recommend one of), structure it per `playbooks/_status-contract.md`, "Structured open questions in a deliverable," so wingman can offer it to the requester as an actual choice instead of relaying prose.
 
 ## Investigate-only (report mode)
 

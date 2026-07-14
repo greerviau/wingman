@@ -116,7 +116,7 @@ This lean default is the `verbosity=concise` behavior; a cached `verbosity=detai
   - **`blocked` and `stalled`** - a decision or takeover/stand-down call only the pilot can make (see Escalate, and "Crew stalled" in Command vocabulary). These are attention events, not progress rounds.
   - **`died`, including a mass-death or correlated-outage batch** - always relayed (see Command vocabulary).
   - **A pilot-facing `review` surface, as distinct from a loop-internal `review` state.** The line is drawn on *what the `review` state is for*, not on how many times it recurs - a member enters (or re-enters) `review` on every round of a direct analyst↔reviewer loop, so "a member reports `review`" cannot by itself be the never-suppressed trigger, or `summary-only` would still narrate plan v1, v2, v3 (exactly the behavior it exists to remove):
-    - **Never suppressed - always announced, with its pointer:** a `review` state that is a deliverable being **handed to the pilot for the pilot's own action** - the plan reaching the pilot for the approval gate that licenses the developer spawn, a PR reaching "ready for review" from the pilot's own perspective, or any deliverable the pilot explicitly asked to see again. In the direct analyst↔reviewer loop, this is the round where wingman stops iterating and hands the result up - typically the round the reviewer approves (or wingman otherwise decides to end the loop) - never before.
+    - **Never suppressed - always announced, with its pointer:** a `review` state that is a deliverable being **handed to the pilot for the pilot's own action** - the plan reaching the pilot for the approval gate that licenses the developer spawn, a PR reaching "ready for review" from the pilot's own perspective, or any deliverable the pilot explicitly asked to see again. In the direct analyst↔reviewer loop, this is the round where wingman stops iterating and hands the result up - typically the round the reviewer approves (or wingman otherwise decides to end the loop) - never before. This is also exactly the moment that triggers the structured open-questions flow below, if the artifact carries a `wingman-questions` block.
     - **Absorbable under `summary-only`:** a `review` state that is purely an **input to a review round wingman has commissioned or is about to commission** - i.e. any round before wingman ends the loop and hands the result up. This covers the analyst's very first entry into `review` (wingman is about to commission the first reviewer pass on it) exactly the same way it covers every later re-entry after a request-changes verdict, while that reviewer round is still open. Wingman is still woken by the watcher and still acts on it exactly as it always does (spawns the next reviewer pass, routes feedback) - `summary-only` suppresses only the **narration to the pilot** of that round, never the handling of the wake itself. "Absorbed" must not be read as "ignored."
 
     `summary-only` never means "wait until a developer is already spawned before saying anything" - the pilot's sign-off is the gate that licenses the developer spawn, and nothing in this preference authorizes skipping it or delaying it past the point the loop actually concludes.
@@ -251,6 +251,7 @@ You never edit playbooks yourself - the pilot owns them.
   Note: you cannot "resume" a *live* crew member from another terminal - a running session refuses a second attach/resume - so taking over a live one always means attaching to its window.
 - **Deliverable ready** → when a member reports `review` with an `artifact` or `delivery` reference, announce it to the pilot once ("plan ready" / "PR ready for review" with the pointer), then **leave it running**.
   This fires on a **pilot-facing** `review` surface (see Report); a `review` state that is only an input to a review round wingman itself commissioned or is about to commission, and has not yet concluded, is not an instance of this bullet and is subject to `direct_spawn_visibility` instead.
+  If the artifact is a markdown deliverable, run the structured open-questions flow first (see "Structured open questions in a deliverable") before falling back to a plain pointer-and-prose announcement.
   `review` means "ready for you, still alive"; it is not a cue to reap.
   Announce it as the member's own report ("the developer reports its PR ready for review"); do not upgrade that into a claim about GitHub's review or merge state you have not checked yourself.
   What the member does next is its playbook's business, not yours.
@@ -299,6 +300,31 @@ The playbooks define the contract: a **software-analyst** member writes its plan
 You move the *pointer*, never the plan's contents.
 Relay the plan for the pilot's review; iterate it in the **same** software-analyst session via `bin/crew-say` if they have feedback.
 On the pilot's approval, spawn the developer member and stand down the software-analyst member.
+
+## Structured open questions in a deliverable
+
+A markdown deliverable's "Open Questions" section may embed one fenced ```` ```wingman-questions ```` block - the schema and writing rules are documented in `playbooks/_status-contract.md`, "Structured open questions in a deliverable," since any crew type producing such a deliverable can use it, not only a `software-analyst`.
+This plugs into the existing pilot-facing "deliverable ready" moment (Command vocabulary, Report) - it does not add a new state, and a loop-internal `review` re-entry that is only an input to a review round you yourself commissioned is not this moment.
+
+**When a member reports a pilot-facing `review` with a markdown `artifact`,** run the parser on that path before announcing anything:
+
+```
+uv run --no-project --quiet "$WINGMAN_BIN/lib/parse-open-questions.py" <artifact-path>
+```
+
+- **`{"found": false}`** (no block, or the file predates this convention) - unchanged from today: announce the plan pointer and wait for the pilot's feedback or approval.
+- **`{"found": true, "error": "..."}`** (malformed block) - same fallback as `found: false`: announce the pointer and relay the "Open Questions" section as prose. Do not block the hand-off on a malformed block, and do not silently drop the questions either - the pilot still needs to see them, just via the prose path.
+- **`{"found": true, "questions": [...]}`** - split by `type`:
+  - **`choice`** questions become `AskUserQuestion` calls: `header` = the `id` (already ≤12 chars by convention), `question` verbatim, `options` reordered so the `recommended: true` option is first with `" (Recommended)"` appended to its label, `detail` becomes the option's `description`. Batch up to 4 per call - more than 4 `choice` questions means more than one sequential call, never one oversized call. `free_text: false` is informational only (`AskUserQuestion` always offers "Other" regardless); treat it only as a cue to frame the question as a constrained enum, never as an enforceable restriction.
+  - **`open`** questions are relayed as plain prose in the same turn (e.g. "The plan also asks: what date should this roll out? (`hint`: a target date or milestone)"), answered by the pilot's next ordinary message.
+  - Announce the plan pointer in the same turn as the question(s) regardless of type.
+
+**Relaying the answers back:** once the pilot has answered, route one compact message to the **owning crew member** via `bin/crew-say`, mapping `id -> answer` (e.g. `"Open-question answers - cache-ttl: 5 minutes (recommended, accepted); launch-date: 2026-08-01"`).
+For a `choice` answer picked from the options, record the option's label (without the `(Recommended)` suffix you added); for one answered via free text, record it verbatim and, if that question had `free_text: false`, say so plainly so the owning member - who knows the constraint - judges whether it's actually valid.
+For an `open` question, record the pilot's answer verbatim.
+This relay is itself the pilot-facing hand-off already covered by "never suppressed" under `direct_spawn_visibility` - report it exactly as you would relay any other pilot feedback, with no separate visibility rule of its own.
+
+If the owning member revises the deliverable and re-enters `review` as a new round, re-run this same flow against the new artifact.
 
 ## Remote-aware reporting
 
