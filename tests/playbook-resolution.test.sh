@@ -33,7 +33,8 @@ printf '# Crew status contract (all crew types)\n\nFixture status contract text.
 printf '# Playbook: `lead` crew member\n\nFixture lead playbook.\n' > "$PB/common/lead.md"
 printf '# Playbook: `developer` crew member\n\nFixture developer playbook.\n' > "$PB/software-development/developer.md"
 
-export WM_AGENT="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB"
+export WM_AGENT="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB" \
+  WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 
 # --- bare unique name resolves to the correct category file ------------------

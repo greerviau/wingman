@@ -69,13 +69,14 @@ jobs:
         run: |
           # The suite drives bin/watch-fleet and real tmux windows. A watcher
           # that fails to exit would otherwise block the job indefinitely, so
-          # wrap the whole suite in a hard timeout (SIGTERM at 900s, SIGKILL
+          # wrap the whole suite in a hard timeout (SIGTERM at 1320s, SIGKILL
           # 30s later). A genuine hang is unbounded, so any finite cap catches
-          # it; 900s sits well above the suite's real runtime (watch-fleet and
-          # stall-check alone spend minutes in deliberate sleeps) so a slow but
-          # healthy run is never cut off. run.sh exits non-zero on any failing
-          # suite; timeout exits 124/137 if it has to intervene. Either fails
-          # the job.
+          # it; 1320s sits well above the suite's real wall-clock runtime
+          # (tests/run.sh runs files concurrently, so watch-fleet and
+          # stall-check's own deliberate sleeps overlap with everything else
+          # rather than adding to it) so a slow but healthy run is never cut
+          # off. run.sh exits non-zero on any failing suite; timeout exits
+          # 124/137 if it has to intervene. Either fails the job.
           timeout --kill-after=30s 1320 bash tests/run.sh
 
   # Single aggregate gate: green only when both jobs pass. Mark this check
