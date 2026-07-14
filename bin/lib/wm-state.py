@@ -42,6 +42,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 try:
@@ -177,12 +178,20 @@ def read_json(path, default):
 
 
 def write_json(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(obj, fh, indent=2, sort_keys=True)
-        fh.write("\n")
-    os.replace(tmp, path)
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=d)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(obj, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_roster():
