@@ -135,6 +135,76 @@ Write these artifacts formally, for a reader outside wingman.
 Refer to whoever requested the work as *the requester* or *the user* - never as *the pilot*: "pilot" is wingman's own private term for the human it flies for.
 The full rule, including where the internal terms remain legitimate, is the communication register below.
 
+## Structured open questions in a deliverable
+
+A plan or report's "Open Questions" (or "Risks and Open Questions") section is ordinarily free prose, and that remains fine for anything genuinely open-ended.
+But when you have a **closed-set decision** - a small number of genuine options, one of which you can defensibly recommend with a stated reason - embed it in a machine-parseable form as well, so wingman can offer it to the requester as an actual choice (`AskUserQuestion`) instead of relaying a wall of prose it would otherwise have to re-read and guess at.
+
+Embed exactly one fenced ```` ```wingman-questions ```` block per file, anywhere under (or near) the "Open Questions" heading - wingman's parser scans the whole file for the fenced tag regardless of which heading it sits under, so heading wording is a human-readability nicety, not something the parser depends on.
+Ordinary prose may surround the block for a human reading the file directly; the block is the machine-readable version of the same content, not a replacement for a readable plan.
+
+<pre>
+## Open Questions
+
+Two decisions are open; everything else in this plan is settled.
+
+```wingman-questions
+{
+  "questions": [
+    {
+      "id": "cache-ttl",
+      "type": "choice",
+      "question": "Should the plan cache TTL be 5 minutes or 15 minutes?",
+      "options": [
+        { "label": "5 minutes", "recommended": true,
+          "detail": "Matches the existing session TTL; keeps cache behavior consistent with the rest of the codebase." },
+        { "label": "15 minutes",
+          "detail": "Fewer cache misses under bursty traffic, at the cost of staleness." }
+      ],
+      "free_text": true
+    },
+    {
+      "id": "launch-date",
+      "type": "open",
+      "question": "What date should this roll out?",
+      "hint": "a target date or milestone"
+    }
+  ]
+}
+```
+</pre>
+
+**Schema.** Top level: `{"questions": [...]}`, 1-8 entries (more than 4 `choice` entries just means wingman issues more than one `AskUserQuestion` call, not a single oversized one).
+Each question:
+
+| field | required | meaning |
+|---|---|---|
+| `id` | yes | short kebab-case slug, unique in the file. Doubles as the `AskUserQuestion` `header` chip (max 12 chars there) - pick an id that reads as a label on its own (`cache-ttl`, not `q1`). |
+| `type` | yes | `"choice"` or `"open"` - see below. |
+| `question` | yes | the question text, one self-contained sentence. |
+| `options` | required for `choice`, absent for `open` | 2-4 entries, each `{"label", "recommended", "detail"}`. Exactly one option has `"recommended": true`. `detail` is the one-line tradeoff/reason, not a repeat of the label. |
+| `free_text` | optional, `choice` only, default `true` | `false` marks the option list as the complete valid set (a hard-constrained enum, e.g. a config value the system only accepts in those forms) rather than "these are just the sensible defaults." See "Limits" below for what this can and cannot do given how `AskUserQuestion` works. |
+| `hint` | optional, `open` only | one short phrase naming the *shape* of a good answer (a date, a name, a number) - not a recommended value, since `open` questions by definition have none. |
+
+`type: "choice"` is for a decision with a real, small set of sensible answers where you can state a recommendation with a reason.
+`type: "open"` is for everything else - see "Limits" below.
+
+**Writing rules:**
+
+- Only include a question here if you would otherwise have written it as a prose "open question" needing the requester's input - this is a transcription of that same content into a structured form, not an invitation to invent extra questions.
+- Always give a `recommended` option and its `detail` for `choice` questions. Per this repo's standing guidance (technical decisions favor quality/correctness/simplicity over development cost, and options get one recommendation rather than a menu), the same discipline applies here: you did the research, so you state the recommendation, not wingman.
+- Do not force a `choice` shape onto a question that doesn't have 2-4 genuine options (a date, a name, an amount, "what should we call this," anything where the right answer is open-ended). Use `type: "open"` instead - this is the one rule most likely to be gamed by cramming an open question into fake options, and it is a schema violation, not a style preference.
+- If the block fails to parse, wingman falls back to relaying the plan pointer and prose exactly as it does today for a deliverable with no block at all - so a malformed block degrades safely, but the requester gets the old prose-relay experience instead of the structured one. Keep the JSON valid.
+
+**Limits - what this convention does not fit:**
+
+- **Genuinely open-ended asks** - a date, a name, a free-form scope call, "what should this be called." Forcing these into 2-4 fake options produces options that are either arbitrary or a false choice. These stay `type: "open"` and are relayed as prose questions, exactly as they are today; this convention adds a `hint` field for them, nothing more.
+- **A hard-enforced restriction to the listed set.** `AskUserQuestion` always offers a free-text "Other," by the tool's own design, for every question it asks. `free_text: false` in this schema is informational only - it cannot make the tool refuse an override. Treat it as "flag this if the requester goes off-script," never as a hard gate.
+- **Anything requiring more than 4 options.** The tool caps at 4; a decision that genuinely needs more choices than that does not compress into this convention and should stay prose (or be broken into a follow-up narrower question).
+
+Wingman parses this block with `bin/lib/parse-open-questions.py` (never by reading the deliverable itself) the moment your `review` report reaches the requester as a pilot-facing hand-off, maps `choice` entries onto `AskUserQuestion` calls (recommended option first, `(Recommended)` appended to its label) and `open` entries onto prose questions, then relays the requester's answers back to you via `crew-say`, mapping `id -> answer`.
+If you revise the deliverable and re-enter `review` with a new round, wingman re-runs the same parse-and-ask flow against the new artifact.
+
 ## Publishing a deliverable as a hosted Artifact (only when it helps)
 
 "Relay the pointer, not the payload" still holds - the local path is always what you report in `--artifact`.
