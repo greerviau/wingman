@@ -36,6 +36,11 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     member's pane, overwritten every poll by bin/watch-fleet
                     (see wm_pane_snapshot). Consulted by cmd_reconcile at the
                     moment a member flips to `died`, to tag death_cause.
+  orphan-candidates.json  {window_name: first_seen_iso_stamp} for a live wm-*
+                    tmux window with no matching crew.json record, tracked by
+                    cmd_reconcile's grace-period-gated orphan-adoption pass
+                    (issue #79, owner == "" only) so a window still mid-spawn
+                    is never mistaken for one whose record was truly lost.
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/artifact_url/
@@ -140,6 +145,10 @@ def outage_state_path():
     return os.path.join(home(), "api-outage-state.json")
 
 
+def orphan_candidates_path():
+    return os.path.join(home(), "orphan-candidates.json")
+
+
 def _sanitize_id(cid):
     """Filesystem-safe form of a crew id, matching bin/lib/common.sh's own
     `tr -c 'A-Za-z0-9._-' '_'` convention used for every other per-id
@@ -175,9 +184,13 @@ def with_locked(path):
     whole-dict read-modify-write from two processes is last-writer-wins - a
     concurrent watcher fire()-and-ack and a Stop-hook ack can each discard the
     other's key. Holding an exclusive flock on <path>.lock across the entire
-    read->modify->write closes that window. Best-effort: on a platform without
-    fcntl (or if the lock cannot be taken) it proceeds without the lock rather than
-    hard-fail, since the atomic replace still prevents corruption."""
+    read->modify->write closes that window. Best-effort only on a platform
+    without fcntl (fcntl is None): there is no lock to take there, so it
+    proceeds without one rather than hard-fail, since the atomic replace still
+    prevents corruption. On a POSIX system where fcntl IS available, a
+    flock() failure is never silently swallowed - it is re-raised so the
+    caller sees a loud, actionable error instead of silently losing the very
+    mutual exclusion this function exists to provide (issue #79)."""
     lock_path = path + ".lock"
     fh = None
     try:
@@ -186,8 +199,12 @@ def with_locked(path):
         if fcntl is not None:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            except OSError:
-                pass  # best-effort
+            except OSError as e:
+                raise OSError(
+                    "with_locked: failed to acquire exclusive lock on %s (%s) - if "
+                    "WINGMAN_HOME is on a network filesystem, confirm it supports "
+                    "advisory (flock) locking" % (lock_path, e)
+                ) from e
         yield
     finally:
         if fh is not None:
@@ -685,6 +702,80 @@ def cmd_reconcile(args):
                 live["updated"] = stamp
                 live["announced"] = stamp  # re-fires the died event; always genuine
                 write_json(status_path(dead_id), live)
+
+        # Orphan-window adoption, wingman's watcher only (owner == ""), issue #79.
+        # A live wm-*-prefixed tmux window with no matching roster record is
+        # tracked - not immediately adopted - across polls in orphan-candidates.json,
+        # so a window still mid-spawn (created a moment before crew-add lands, which
+        # happens in every ordinary spawn) is never mistaken for one whose record was
+        # genuinely lost (review finding MF-1). Only a window that stays unmatched
+        # past --grace-seconds is adopted, as a roster-only `blocked` record (SF-2:
+        # never a status file, so a delayed crew-add can still seed one cleanly).
+        if owner == "":
+            known_windows = set(r.get("window") for r in roster if r.get("window"))
+            candidates = read_json(orphan_candidates_path(), {})
+            if not isinstance(candidates, dict):
+                candidates = {}
+            grace = getattr(args, "grace_seconds", None)
+            if grace is None:
+                grace = 15
+            stamp = now()
+            live_unmatched = set(
+                w for w in live_windows if w.startswith("wm-") and w not in known_windows
+            )
+            # Prune every candidate that's resolved: its window is no longer live
+            # (the spawn never completed), or it now matches a roster record (the
+            # ordinary case - crew-add landed before the grace period elapsed).
+            for w in list(candidates.keys()):
+                if w not in live_unmatched:
+                    del candidates[w]
+            for w in live_unmatched:
+                first_seen = candidates.get(w)
+                if first_seen is None:
+                    candidates[w] = stamp
+                    continue
+                seen_dt = _parse_updated(first_seen)
+                if seen_dt is None:
+                    candidates[w] = stamp  # unparseable stamp; restart the clock
+                    continue
+                age = (datetime.datetime.now(datetime.timezone.utc) - seen_dt).total_seconds()
+                if age < grace:
+                    continue
+                cid = w[len("wm-"):]  # strip only the leading prefix - ids contain hyphens
+                blocker = (
+                    "auto-adopted: this window was live with no matching crew.json "
+                    "record for over %ss (issue #79) - verify its real state with "
+                    "bin/crew-takeover %s before trusting it, or bin/crew-standdown %s "
+                    "if it's stale" % (grace, cid, cid)
+                )
+                roster.append({
+                    "id": cid,
+                    "type": "unknown",
+                    "objective": "",
+                    "repo": "",
+                    "scope": "repo",
+                    "parent": "",
+                    "window": w,
+                    "window_id": "",
+                    "session_id": "",
+                    "status": "blocked",
+                    "summary": "",
+                    "blocker": blocker,
+                    "artifact": None,
+                    "artifact_url": None,
+                    "delivery": None,
+                    "worktree": "",
+                    "allow_merge": False,
+                    "is_git": None,
+                    "has_remote": None,
+                    "orphaned_from": None,
+                    "death_cause": None,
+                    "orphan_adopted": True,
+                    "spawned_at": stamp,
+                    "updated": stamp,
+                })
+                del candidates[w]
+            write_json(orphan_candidates_path(), candidates)
 
         write_json(crew_json_path(), roster)
     render_board()
@@ -1766,6 +1857,12 @@ def build_parser():
     # its own $WM_APIERR_RE explicitly; the argparse default here (matching
     # that same regex) only covers a direct/test invocation that omits it.
     a.add_argument("--apierr-re", default=DEFAULT_APIERR_RE, dest="apierr_re")
+    # Orphan-window adoption grace period in seconds (issue #79): a wm-*
+    # window unmatched to any roster record for longer than this is adopted as
+    # a blocked orphan (owner == "" only). Default 15s = 3x watch-fleet's own
+    # 5s default poll interval, comfortably clearing crew-add's typical
+    # sub-second latency and spawn-crew's WM_SPAWN_DELAY default of 2s.
+    a.add_argument("--grace-seconds", type=int, default=15, dest="grace_seconds")
     a.set_defaults(fn=cmd_reconcile)
 
     a = sub.add_parser("standdown")

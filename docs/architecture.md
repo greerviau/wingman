@@ -181,6 +181,7 @@ Machine-local runtime state, created on first run, never committed:
 - `projects.json` - the discovered-projects cache.
 - `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
   Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.
+- `orphan-candidates.json` - `{window_name: first_seen_iso_stamp}` for a live `wm-*` tmux window with no matching `crew.json` record, tracked by `wm_state reconcile`'s grace-period-gated orphan-window adoption (owner `""` only) - see "Survival & reconciliation" below.
 
 All *user-editable* customization lives in the repo as gitignored `*.local.md` / `config.local.*`, not here.
 `~/.wingman/` is pure runtime state you never hand-edit.
@@ -192,6 +193,8 @@ Every session and window target is exact-match (`-t "=name"`; tmux otherwise res
 On any startup wingman reads `~/.wingman/crew.json`, reconciles against the live windows (`bin/crew-list` does this automatically), re-arms the watcher if crew are in flight, and reports the current roster.
 Before judging liveness, reconcile callers adopt strays: a roster member's window found in another tmux session is moved back into the crew session (`tmux move-window`, process intact), so a live member is never reported `died` merely for sitting in an unexpected session (issue #44).
 A crew member whose window died shows as `died` and is recoverable either by hand (`bin/crew-takeover <id>` prints the exact resume command) or in bulk via `bin/crew-resume <id>...` / `bin/crew-resume --all-died`, which relaunches it (or every died member) with `claude --resume <session-id>` and verifies the relaunch actually took before flipping it back to `working`.
+`bin/spawn-crew` itself only ever reports success once the `crew-add` write is confirmed readable back (a captured exit-status check plus a `crew-get` read-back; either failure tears the just-created window down and dies loudly) - a live, untracked session with no roster record is the failure mode this closes (issue #79).
+As a backstop for the remaining ways a record can still go missing (a crash between window creation and `crew-add`, or a window created outside `bin/spawn-crew` entirely), wingman's own reconcile pass (`--owner ""` only) also tracks any live `wm-*`-prefixed window with no matching roster record in `orphan-candidates.json`, and adopts it as a `blocked` roster-only record once it has stayed unmatched past `--grace-seconds` (default 15s) - long enough that an ordinary in-flight spawn, whose window always exists a moment before its `crew-add` lands, is never mistaken for a genuine orphan.
 
 ## Tests
 
@@ -205,6 +208,7 @@ They cover:
 - roster views and cleanup (`crew-list` hides `stood-down` by default, `--all` reveals it; `crew-prune` archives + removes terminal records),
 - silent-stall detection (the staleness gates, the execution probe, and the API-error reason flavor + nudge-then-escalate flow),
 - correlated-event grouping (`group-attention` collapsing a mass-death or API-outage batch into one bullet) and bulk recovery (`crew-resume`, including its idempotency guards and tree preservation),
-- PR-event evaluation including `checks-passed` (fires once on green / no-CI, re-arms after a new failing/pending rollup).
+- PR-event evaluation including `checks-passed` (fires once on green / no-CI, re-arms after a new failing/pending rollup),
+- confirmed-write spawning and orphan recovery (issue #79): `bin/spawn-crew` tears down its window and fails loudly on a `crew-add` failure or a failed verify-after-write read-back; `with_locked` propagates a real `flock()` failure instead of swallowing it; `wm_state reconcile` adopts an orphaned `wm-*` window as `blocked` only once it has genuinely outlasted the grace period, never a healthy in-flight spawn.
 
 Requires `bash`, `git`, `tmux`, and `uv`.
