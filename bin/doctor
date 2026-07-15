@@ -272,6 +272,42 @@ EOF
   fi
 fi
 
+# --- Watcher-protection guard (any session, any repo), user scope -----------
+# hooks/no-watcher-kill-guard.sh (PreToolUse) denies a kill/pkill/tmux
+# kill-window/tmux kill-session command whose target resolves to a currently
+# live bin/watch-fleet cycle (issue #64 / #12: a live watcher's liveness is
+# the only channel that lets a wake reach an idle orchestrator, and it has
+# been killed by mistake before). Unlike the merge-authorization pair (crew
+# sessions only) or the delegation guard (a lead or the wingman repo), there
+# is no session type for which killing the watcher is ever legitimate - not
+# the pilot's own top-level session, not a lead, not any other crew member -
+# so this is registered unconditionally, with no crew-type gating at all.
+WATCHER_KILL_HOOK="$WM_REPO/hooks/no-watcher-kill-guard.sh"
+if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse --check >/dev/null 2>&1; then
+  wm_ok "watcher-protection guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "watcher-protection guard hook (issue #64) not registered in $GUARD_SETTINGS"
+  printf '    denies killing a live watch-fleet cycle from any session, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $WATCHER_KILL_HOOK"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse; then
+      wm_ok "registered watcher-protection guard hook"
+    else
+      wm_err "failed to register watcher-protection guard hook"
+    fi
+  fi
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"

@@ -215,8 +215,20 @@ print('yes' if '$TEST_REPO/hooks/artifact-link-guard.sh' in cmds else 'no')
 " 2>/dev/null)"
 assert_eq "doctor registers the link guard under PreToolUse" "$link_found" "yes"
 
+# doctor also registers the watcher-protection guard (issue #64), unconditionally
+# and under PreToolUse, alongside the other user-scope hooks above.
+assert_contains "doctor reports the watcher-protection guard registered" "$out" "registered watcher-protection guard hook"
+watcher_found="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/no-watcher-kill-guard.sh' in cmds else 'no')
+" 2>/dev/null)"
+assert_eq "doctor registers the watcher-protection guard under PreToolUse" "$watcher_found" "yes"
+
 # Re-running doctor is a no-op for the already-registered set.
 out2="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a second doctor run reports the artifact hooks already registered" "$out2" "Artifact-publish contract hooks registered"
+assert_contains "a second doctor run reports the watcher-protection guard already registered" "$out2" "watcher-protection guard hook registered"
 
 test_summary
