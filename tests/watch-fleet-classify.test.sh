@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E: bin/watch-fleet --classify - the exit-record writes at each of watch-fleet's
 # own exit points, the classifier that turns a just-completed cycle's exit into
-# one of five outcomes (healthy/fire/remote-control-dropped/spurious/
+# one of six outcomes (healthy/fire/remote-control-dropped/stopped/spurious/
 # spurious-repeated), the write-priority order between racing writers, the loud
 # claim-time drop log, and the pure consecutive-count failure budget with its
 # three-rule writer invariant and reset-on-trip. See docs/plans/2026-07-13-
@@ -241,5 +241,65 @@ out1="$(wm_timeout 10 env WM_SPURIOUS_BUDGET_COUNT=2 "$WF" --classify 2>/dev/nul
 assert_eq "with a budget of 2, the first is plain spurious" "$out1" "spurious 1 clean-exit-or-sigterm"
 out2="$(wm_timeout 10 env WM_SPURIOUS_BUDGET_COUNT=2 "$WF" --classify 2>/dev/null)"
 assert_eq "with a budget of 2, the second trips spurious-repeated" "$out2" "spurious-repeated 2 clean-exit-or-sigterm"
+
+# --- issue #107: a deliberate --stop is distinct from an accidental death ------
+
+# Regression proof: an accidental death (kill -9, standing in for a kill the
+# syntactic guard missed, or an OOM kill) still classifies as spurious,
+# unchanged by this fix - this is the "unexpectedly dead" half of the
+# required distinction.
+test_new_home
+"$WF" >"$WINGMAN_HOME/kill9.log" 2>&1 &
+killpid=$!
+wm_track "$killpid"
+sleep 2
+assert_true "the cycle is live before the kill" "kill -0 $killpid"
+kill -9 "$killpid" 2>/dev/null
+_w=0
+while kill -0 "$killpid" 2>/dev/null && [ "$_w" -lt 30 ]; do sleep 0.2; _w=$((_w+1)); done
+out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "an accidental kill -9 still classifies as spurious sigkill-suspected" "$out" "spurious 1 sigkill-suspected"
+
+# The new behavior: a deliberate --stop classifies as stopped, never spurious.
+test_new_home
+"$WF" >"$WINGMAN_HOME/stop.log" 2>&1 &
+stoppid=$!
+wm_track "$stoppid"
+sleep 2
+assert_true "the cycle is live before --stop" "kill -0 $stoppid"
+"$WF" --stop >/dev/null 2>&1
+out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "a deliberate --stop classifies as stopped, not spurious" "$out" "stopped"
+count="$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)"
+[ -n "$count" ] || count=0
+assert_eq "a deliberate stop never contributes to the failure budget" "$count" "0"
+_w=0
+while kill -0 "$stoppid" 2>/dev/null && [ "$_w" -lt 30 ]; do sleep 0.2; _w=$((_w+1)); done
+assert_false "the process is no longer running after --stop" "kill -0 $stoppid 2>/dev/null"
+
+# --stop with nothing running still records stopped cleanly (the marker write
+# on the "nothing to stop" branch doesn't regress and isn't misread).
+test_new_home
+"$WF" --stop >/dev/null 2>&1
+out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "--stop with nothing running still records stopped cleanly" "$out" "stopped"
+
+# The distinction holds for an owner-scoped (lead) cycle too, not just the bare
+# wingman one - the regression proof for gap 2's fix.
+test_new_home
+"$WF" --owner leadx >"$WINGMAN_HOME/stop-owner.log" 2>&1 &
+ownerpid=$!
+wm_track "$ownerpid"
+sleep 2
+assert_true "the owner-scoped cycle is live before --stop" "kill -0 $ownerpid"
+"$WF" --owner leadx --stop >/dev/null 2>&1
+oout="$(wm_timeout 10 "$WF" --classify --owner leadx 2>/dev/null)"
+assert_eq "an owner-scoped --stop classifies as stopped too" "$oout" "stopped"
+ocount="$(cat "$WINGMAN_HOME/watch-spurious-count-leadx" 2>/dev/null)"
+[ -n "$ocount" ] || ocount=0
+assert_eq "the owner-scoped failure budget is untouched by a deliberate stop" "$ocount" "0"
+_w=0
+while kill -0 "$ownerpid" 2>/dev/null && [ "$_w" -lt 30 ]; do sleep 0.2; _w=$((_w+1)); done
+assert_false "the owner-scoped process is no longer running after --stop" "kill -0 $ownerpid 2>/dev/null"
 
 test_summary
