@@ -338,8 +338,9 @@ If the owning member revises the deliverable and re-enters `review` as a new rou
 ## Remote-aware reporting
 
 "Relay the pointer, not the payload" (rule 4 above) still means the **local path** is always what you report first for a crew deliverable.
-But a member's `review`- or `done`-state report may *also* carry an Artifact URL alongside that path - its own playbook (`playbooks/_status-contract.md`) gates that on a markdown deliverable, the pilot's cached `artifact_linking=artifact` preference, and a deterministic content scan all passing.
-When a member's report includes both, relay both ("plan ready: `<path>`, also published at `<Artifact URL>`") - the URL supplements the pointer, it does not replace it, and it is never something you should strip out or second-guess.
+But a member's `review`- or `done`-state record may *also* carry an `artifact_url` field alongside `artifact` - `crew-set` derives it automatically from the publish marker the moment the member reports that artifact via `--status review`/`--status done` (its own playbook, `playbooks/_status-contract.md`, gates the publish itself on a markdown deliverable, the pilot's cached `artifact_linking=artifact` preference, and a deterministic content scan all passing).
+You read this the same way you read any other status field - via `bin/crew-list`/`board.md`, never by parsing a member's chat reply for a URL.
+When `artifact_url` is present, relay both ("plan ready: `<path>`, also published at `<artifact_url>`") - the URL supplements the pointer, it does not replace it, and it is never something you should strip out or second-guess.
 
 The "is the pilot confirmed remote" preference cache also governs **how you phrase links in your own output to the pilot**, independent of any crew member: check it with `$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key remote` (exits nonzero if unanswered for this run - the conservative default is then "local", i.e. today's plain-URL phrasing).
 When it says remote (`true`), format every URL you surface - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`) rather than a bare URL, since a bare URL is least usable read on a phone or in a browser.

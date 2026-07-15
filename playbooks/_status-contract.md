@@ -19,6 +19,7 @@ $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
   --summary "<=10 lines, plain text, what you're doing / did" \
   [--blocker "the specific decision or input you need to proceed"] \
   [--artifact "path to the file you produced (plan, report, analysis)"] \
+  [--artifact-url "override the auto-derived hosted Artifact URL, rarely needed"] \
   [--delivery "branch or PR URL when ready for review"] \
   [--silent]
 ```
@@ -250,8 +251,12 @@ It prints one verdict line and exits accordingly:
 - `pass-soft:<reason>` (exit 0) - publish is still allowed, but call the reason out in your report alongside the Artifact link (it flags a code-heavy document that looks more like a dump than an illustrative excerpt).
 - `fail:<reason>` (exit 1) - do not publish; report the local path only, and say plainly why ("skipped publishing as an Artifact: `<reason>`").
 
-**Only if A holds, B prints `artifact`, and C exits 0:** publish via the `Artifact` tool and report the resulting URL *alongside* (not instead of) the local path, so the local file is always the ground truth regardless of which channel is read.
+**Only if A holds, B prints `artifact`, and C exits 0:** publish via the `Artifact` tool as usual.
+No separate step is needed to report the resulting URL: the moment you next call `crew-set --status review` or `--status done` with that same `--artifact` path, `crew-set` derives `artifact_url` automatically from the publish marker `hooks/artifact-publish-tracker.sh` already recorded, and surfaces it everywhere `bin/crew-list`/`board.md` render your other pointer fields.
+The local file remains the ground truth regardless of which channel is read.
 In every other case, today's behavior is unchanged - report the path only.
+
+If auto-detection can't find a marker for some reason (a publish done outside this session, or a value that needs correcting), pass `--artifact-url <url>` explicitly on that `crew-set` call - an explicit value always wins over auto-detection, and `--artifact-url ""` clears a stale one.
 
 This contract is also mechanically enforced at report time: a `PreToolUse` hook (`hooks/artifact-link-guard.sh`, registered user-level by `bin/doctor`) denies a `crew-set --status review|done` naming a markdown artifact while `artifact_linking=artifact` is cached and the file has not been published (or a publish/scan attempt recorded) - its denial reason names every legitimate next step, and the publish, a failed attempt, or a `fail:` scan verdict each unblock it automatically.
 

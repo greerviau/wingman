@@ -36,9 +36,15 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     member's pane, overwritten every poll by bin/watch-fleet
                     (see wm_pane_snapshot). Consulted by cmd_reconcile at the
                     moment a member flips to `died`, to tag death_cause.
+  orphan-candidates.json  {window_name: first_seen_iso_stamp} for a live wm-*
+                    tmux window with no matching crew.json record, tracked by
+                    cmd_reconcile's grace-period-gated orphan-adoption pass
+                    (issue #79, owner == "" only) so a window still mid-spawn
+                    is never mistaken for one whose record was truly lost.
 
 The merged view of a crew member = its crew.json base record with the live
-crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
+crew/<id>.json overlaid on top (status/summary/blocker/artifact/artifact_url/
+delivery/updated).
 crew.json is the roster of record; crew/<id>.json is the live signal. Wingman
 reads the merge; it never ingests panes or transcripts.
 
@@ -48,6 +54,7 @@ tool works whether or not jq is installed.
 import argparse
 import contextlib
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -61,7 +68,7 @@ try:
 except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
     fcntl = None
 
-STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "delivery", "updated", "announced")
+STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "delivery", "updated", "announced")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -138,6 +145,10 @@ def outage_state_path():
     return os.path.join(home(), "api-outage-state.json")
 
 
+def orphan_candidates_path():
+    return os.path.join(home(), "orphan-candidates.json")
+
+
 def _sanitize_id(cid):
     """Filesystem-safe form of a crew id, matching bin/lib/common.sh's own
     `tr -c 'A-Za-z0-9._-' '_'` convention used for every other per-id
@@ -173,9 +184,13 @@ def with_locked(path):
     whole-dict read-modify-write from two processes is last-writer-wins - a
     concurrent watcher fire()-and-ack and a Stop-hook ack can each discard the
     other's key. Holding an exclusive flock on <path>.lock across the entire
-    read->modify->write closes that window. Best-effort: on a platform without
-    fcntl (or if the lock cannot be taken) it proceeds without the lock rather than
-    hard-fail, since the atomic replace still prevents corruption."""
+    read->modify->write closes that window. Best-effort only on a platform
+    without fcntl (fcntl is None): there is no lock to take there, so it
+    proceeds without one rather than hard-fail, since the atomic replace still
+    prevents corruption. On a POSIX system where fcntl IS available, a
+    flock() failure is never silently swallowed - it is re-raised so the
+    caller sees a loud, actionable error instead of silently losing the very
+    mutual exclusion this function exists to provide (issue #79)."""
     lock_path = path + ".lock"
     fh = None
     try:
@@ -184,8 +199,12 @@ def with_locked(path):
         if fcntl is not None:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            except OSError:
-                pass  # best-effort
+            except OSError as e:
+                raise OSError(
+                    "with_locked: failed to acquire exclusive lock on %s (%s) - if "
+                    "WINGMAN_HOME is on a network filesystem, confirm it supports "
+                    "advisory (flock) locking" % (lock_path, e)
+                ) from e
         yield
     finally:
         if fh is not None:
@@ -359,6 +378,7 @@ def cmd_crew_add(args):
         "summary": "",
         "blocker": None,
         "artifact": None,
+        "artifact_url": None,
         "delivery": None,
         # The git worktree this member works in, recorded at spawn (repo scope) so a
         # non-graceful exit (dead/orphaned member) can still be torn down by
@@ -411,11 +431,53 @@ def cmd_crew_add(args):
             "summary": "",
             "blocker": None,
             "artifact": None,
+            "artifact_url": None,
             "delivery": None,
             "updated": stamp,
         })
     render_board()
     print(args.id)
+
+
+def _artifact_marker_url(member_id, artifact_path, cwd=None):
+    """Look up the durable publish marker hooks/artifact-publish-tracker.sh
+    wrote for this crew member's own Claude session id, and return the
+    published URL only if its recorded sha256 still matches the artifact's
+    current contents - mirroring the exact check
+    hooks/artifact-link-guard.sh already performs to gate the crew-set call
+    that triggers this lookup, so a stale marker (edited-but-not-republished
+    file) yields no URL here either."""
+    if not artifact_path:
+        return None
+    session_id = None
+    for r in load_roster():
+        if r.get("id") == member_id:
+            session_id = r.get("session_id")
+            break
+    sid = _sanitize_id(session_id)
+    if not sid:
+        return None
+    resolved = artifact_path
+    if not os.path.isabs(resolved):
+        resolved = os.path.join(cwd or os.getcwd(), resolved)
+    resolved = os.path.realpath(resolved)
+    store = read_json(os.path.join(home(), "artifact-markers", sid + ".json"), None)
+    if not isinstance(store, dict):
+        return None
+    entry = store.get(resolved)
+    if not isinstance(entry, dict) or entry.get("status") != "published":
+        return None
+    sha = entry.get("sha256")
+    if not sha:
+        return None
+    try:
+        with open(resolved, "rb") as fh:
+            current_sha = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+    if sha != current_sha:
+        return None
+    return entry.get("url") or None
 
 
 def cmd_crew_set(args):
@@ -435,7 +497,15 @@ def cmd_crew_set(args):
     for field in STATUS_FIELDS[:-2]:  # everything but 'updated' and 'announced'
         val = getattr(args, field, None)
         if val is not None:
-            live[field] = None if val == "" and field in ("blocker", "artifact", "delivery") else val
+            live[field] = None if val == "" and field in ("blocker", "artifact", "artifact_url", "delivery") else val
+    # Auto-derive artifact_url from the publish marker unless the caller passed an
+    # explicit value (including an explicit clear, already applied above) - see
+    # _artifact_marker_url. This removes the free-text "remember to report the URL"
+    # step entirely (issue #110): the member never has to type the URL anywhere.
+    if getattr(args, "artifact_url", None) is None:
+        detected = _artifact_marker_url(args.id, live.get("artifact"))
+        if detected:
+            live["artifact_url"] = detected
     live["updated"] = now()
     # `announced` is the dedup key needs-attention actually watches (see its
     # docstring), and it must survive an intervening `working` dip untouched: a
@@ -483,6 +553,12 @@ def cmd_crew_set(args):
                 for field in ("status", "artifact", "delivery"):
                     if getattr(args, field, None) is not None:
                         r[field] = live.get(field)
+                # artifact_url mirrors unconditionally, unlike status/artifact/delivery
+                # above: it can change from auto-detection alone with no corresponding
+                # CLI arg on this call, so gating the mirror on an explicit --artifact-url
+                # would silently drop it from the roster (and the stale-status-file
+                # fallback read) - exactly the gap this field exists to close.
+                r["artifact_url"] = live.get("artifact_url")
                 # worktree is a roster-only field (not a live-status field): a member
                 # that creates its worktree after spawn (global scope) self-registers
                 # the path here so a later teardown can find it.
@@ -626,6 +702,80 @@ def cmd_reconcile(args):
                 live["updated"] = stamp
                 live["announced"] = stamp  # re-fires the died event; always genuine
                 write_json(status_path(dead_id), live)
+
+        # Orphan-window adoption, wingman's watcher only (owner == ""), issue #79.
+        # A live wm-*-prefixed tmux window with no matching roster record is
+        # tracked - not immediately adopted - across polls in orphan-candidates.json,
+        # so a window still mid-spawn (created a moment before crew-add lands, which
+        # happens in every ordinary spawn) is never mistaken for one whose record was
+        # genuinely lost (review finding MF-1). Only a window that stays unmatched
+        # past --grace-seconds is adopted, as a roster-only `blocked` record (SF-2:
+        # never a status file, so a delayed crew-add can still seed one cleanly).
+        if owner == "":
+            known_windows = set(r.get("window") for r in roster if r.get("window"))
+            candidates = read_json(orphan_candidates_path(), {})
+            if not isinstance(candidates, dict):
+                candidates = {}
+            grace = getattr(args, "grace_seconds", None)
+            if grace is None:
+                grace = 15
+            stamp = now()
+            live_unmatched = set(
+                w for w in live_windows if w.startswith("wm-") and w not in known_windows
+            )
+            # Prune every candidate that's resolved: its window is no longer live
+            # (the spawn never completed), or it now matches a roster record (the
+            # ordinary case - crew-add landed before the grace period elapsed).
+            for w in list(candidates.keys()):
+                if w not in live_unmatched:
+                    del candidates[w]
+            for w in live_unmatched:
+                first_seen = candidates.get(w)
+                if first_seen is None:
+                    candidates[w] = stamp
+                    continue
+                seen_dt = _parse_updated(first_seen)
+                if seen_dt is None:
+                    candidates[w] = stamp  # unparseable stamp; restart the clock
+                    continue
+                age = (datetime.datetime.now(datetime.timezone.utc) - seen_dt).total_seconds()
+                if age < grace:
+                    continue
+                cid = w[len("wm-"):]  # strip only the leading prefix - ids contain hyphens
+                blocker = (
+                    "auto-adopted: this window was live with no matching crew.json "
+                    "record for over %ss (issue #79) - verify its real state with "
+                    "bin/crew-takeover %s before trusting it, or bin/crew-standdown %s "
+                    "if it's stale" % (grace, cid, cid)
+                )
+                roster.append({
+                    "id": cid,
+                    "type": "unknown",
+                    "objective": "",
+                    "repo": "",
+                    "scope": "repo",
+                    "parent": "",
+                    "window": w,
+                    "window_id": "",
+                    "session_id": "",
+                    "status": "blocked",
+                    "summary": "",
+                    "blocker": blocker,
+                    "artifact": None,
+                    "artifact_url": None,
+                    "delivery": None,
+                    "worktree": "",
+                    "allow_merge": False,
+                    "is_git": None,
+                    "has_remote": None,
+                    "orphaned_from": None,
+                    "death_cause": None,
+                    "orphan_adopted": True,
+                    "spawned_at": stamp,
+                    "updated": stamp,
+                })
+                del candidates[w]
+            write_json(orphan_candidates_path(), candidates)
 
         write_json(crew_json_path(), roster)
     render_board()
@@ -997,10 +1147,12 @@ def cmd_needs_attention(args):
             if _attention_suppressed(rid, upd, suppress_on, only_acked, acked, handled):
                 continue
             # The note is a short hint for wingman to relay; prefer the pointer the
-            # pilot needs (the blocker to answer, the PR/branch delivered, or the
-            # artifact produced) over the free-text summary.
+            # pilot needs (the blocker to answer, the PR/branch delivered, the
+            # hosted Artifact URL, or the local artifact path) over the free-text
+            # summary. A hosted URL is a strictly more useful single-line pointer
+            # than the local path when both are present.
             note = (r.get("blocker") or r.get("delivery")
-                    or r.get("artifact") or r.get("summary") or "")
+                    or r.get("artifact_url") or r.get("artifact") or r.get("summary") or "")
             print("%s\t%s\t%s\t%s" % (
                 rid, r["status"], upd or "", note))
 
@@ -1519,6 +1671,8 @@ def render_roster_text(rows):
             lines.append("      blocker: %s" % r["blocker"])
         if r.get("delivery"):
             lines.append("      delivery: %s" % r["delivery"])
+        if r.get("artifact_url"):
+            lines.append("      artifact-url: %s" % r["artifact_url"])
         if r.get("allow_merge"):
             lines.append("      merge: AUTHORIZED for this effort (issue #46)")
     return "\n".join(lines)
@@ -1541,6 +1695,8 @@ def render_tree_text(rows):
             lines.append("%s    blocker: %s" % (indent, r["blocker"]))
         if r.get("delivery"):
             lines.append("%s    delivery: %s" % (indent, r["delivery"]))
+        if r.get("artifact_url"):
+            lines.append("%s    artifact-url: %s" % (indent, r["artifact_url"]))
         if r.get("allow_merge"):
             lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
     return "\n".join(lines)
@@ -1554,8 +1710,8 @@ def render_board():
     out.append("## Active (%d)" % len(active))
     out.append("")
     if active:
-        out.append("| type | id | status | window | repo | summary | blocker | delivery |")
-        out.append("|---|---|---|---|---|---|---|---|")
+        out.append("| type | id | status | window | repo | summary | blocker | delivery | artifact-url |")
+        out.append("|---|---|---|---|---|---|---|---|---|")
         # Depth-first so each report sits under its owner, its id indented by depth,
         # letting a human read the org rather than a flat list.
         for r, depth in order_tree(active):
@@ -1566,10 +1722,11 @@ def render_board():
                 + (" (global)" if r.get("scope") == "global" else "")
                 + _git_suffix(r)
             )
-            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s |" % (
+            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), marker, id_cell, r.get("status", ""),
                 r.get("window", ""), repo_cell,
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
+                _cell(r.get("artifact_url")),
             ))
     else:
         out.append("_(none)_")
@@ -1577,11 +1734,12 @@ def render_board():
     out.append("## Closed (%d)" % len(done))
     out.append("")
     if done:
-        out.append("| type | id | status | delivery |")
-        out.append("|---|---|---|---|")
+        out.append("| type | id | status | delivery | artifact-url |")
+        out.append("|---|---|---|---|---|")
         for r in done:
-            out.append("| %s | %s | %s | %s |" % (
+            out.append("| %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), r.get("id", ""), r.get("status", ""), _cell(r.get("delivery")),
+                _cell(r.get("artifact_url")),
             ))
     else:
         out.append("_(none)_")
@@ -1650,6 +1808,10 @@ def build_parser():
     a.add_argument("--summary")
     a.add_argument("--blocker")
     a.add_argument("--artifact")
+    # Explicit override for the auto-derived artifact_url (see _artifact_marker_url):
+    # if passed, it wins outright over auto-detection, including "" to clear a stale
+    # value. Left unset (None, not passed at all) is what lets auto-detection run.
+    a.add_argument("--artifact-url", dest="artifact_url")
     a.add_argument("--delivery")
     # Self-register the worktree path after spawn (global scope, whose repo/path is
     # not knowable at spawn time). Roster-only field, not a live-status field.
@@ -1695,6 +1857,12 @@ def build_parser():
     # its own $WM_APIERR_RE explicitly; the argparse default here (matching
     # that same regex) only covers a direct/test invocation that omits it.
     a.add_argument("--apierr-re", default=DEFAULT_APIERR_RE, dest="apierr_re")
+    # Orphan-window adoption grace period in seconds (issue #79): a wm-*
+    # window unmatched to any roster record for longer than this is adopted as
+    # a blocked orphan (owner == "" only). Default 15s = 3x watch-fleet's own
+    # 5s default poll interval, comfortably clearing crew-add's typical
+    # sub-second latency and spawn-crew's WM_SPAWN_DELAY default of 2s.
+    a.add_argument("--grace-seconds", type=int, default=15, dest="grace_seconds")
     a.set_defaults(fn=cmd_reconcile)
 
     a = sub.add_parser("standdown")

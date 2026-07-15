@@ -333,7 +333,18 @@ if [ "$SCOPE" = repo ]; then
   ADD_ARGS+=(--is-git "$([ "$IS_GIT" -eq 1 ] && echo true || echo false)")
   [ "$IS_GIT" -eq 1 ] && ADD_ARGS+=(--has-remote "$([ "$HAS_REMOTE" -eq 1 ] && echo true || echo false)")
 fi
-wm_state crew-add "${ADD_ARGS[@]}" >/dev/null
+if ! ADD_ERR="$(wm_state crew-add "${ADD_ARGS[@]}" 2>&1 >/dev/null)"; then
+  wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
+  wm_die "crew-add failed for '$ID' - window $WINDOW was torn down, nothing to attach to: $ADD_ERR"
+fi
+# Verify-after-write: confirm the record is actually retrievable, not just that
+# crew-add claimed exit 0 (issue #79) - redundant with #93's locking fix by
+# design, since a caller here can't tell a genuinely lost write from one that
+# merely raced and lost.
+if ! wm_state crew-get --id "$ID" >/dev/null 2>&1; then
+  wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
+  wm_die "crew-add reported success for '$ID' but the record is not readable back - window $WINDOW was torn down"
+fi
 
 # --- deliver the opening objective as the first user message -----------------
 # A small head start off the window launch; wm_tmux_send_message then waits for the
