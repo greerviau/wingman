@@ -73,13 +73,14 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
    means producing no message, not producing a message that says there is
    nothing to report. Never say things like "Watcher armed.", "Watcher
    re-armed (transient blip, nothing to report).", or "Re-arming, all
-   quiet." on either of these two outcomes specifically - silently arm the
-   next cycle (step 2) and end the turn with no text output at all. This is
-   a hard rule, not a style preference: `healthy` and `spurious` carry no
-   new information for the pilot, so any acknowledgment - however short -
-   is itself the mechanics leak CLAUDE.md's Report-altitude rule forbids.
-   This does not extend to `fire`, `stopped`, `remote-control-dropped`, or
-   `spurious-repeated`, which already report by design per the bullets
+   quiet." on either of these two outcomes specifically - just do what that
+   outcome's bullet above says (arm the next cycle for `spurious`; end the
+   turn with no re-arm for `healthy`) and produce no text output at all.
+   This is a hard rule, not a style preference: `healthy` and `spurious`
+   carry no new information for the pilot, so any acknowledgment - however
+   short - is itself the mechanics leak CLAUDE.md's Report-altitude rule
+   forbids. This does not extend to `fire`, `stopped`, `remote-control-dropped`,
+   or `spurious-repeated`, which already report by design per the bullets
    above.
 2. **Arm one fresh cycle, but only if none is already live and the failure
    budget was not just exceeded.** The `healthy` branch above already
