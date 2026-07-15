@@ -8,18 +8,44 @@ It orchestrates; it does not do the heavy lifting.
 
 Each crew member is an **independent `claude` session in its own tmux window**, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman itself is killed.
 
+## Why not just subagents?
+
+A subagent call is a function call: it runs in your context and disappears when it returns.
+That works for a single bounded task, but not for anything that outlives one turn - a PR sitting through CI and review, a plan awaiting your sign-off, a multi-step effort.
+Wingman is built for that gap:
+
+- State lives on disk (`~/.wingman/`), not in a transcript, so it survives compaction and restarts.
+- The wake loop is event-driven, not polled - nothing burns tokens asking "done yet?".
+- Every crew type reports through one shared status contract instead of free-form transcript scraping.
+- Spawning is cost-disciplined and the org is depth-capped, never an unbounded swarm.
+- These rules are backed by mechanical hooks, not prompt discipline alone.
+
+This doesn't retire subagents - a crew member can still spin one off for a bounded, single-shot lookup inside its own session; wingman's crew is the coordination layer above that.
+See [`docs/architecture.md`](docs/architecture.md) for how each of these actually works.
+
 ## Quick start
 
 ```
 git clone https://github.com/greerviau/wingman.git
 cd wingman
-claude          # or: bin/wingman   (adds your project roots via --add-dir)
+claude          # or: bin/wingman   (see "Why bin/wingman instead of plain claude?" below)
 ```
 
 On first launch wingman runs `bin/doctor` (installs any missing dependencies with your consent), discovers your sibling repos with zero config, and starts the supervisor.
 Then give it a directive.
 
 The only things you must have before the first run are **`claude`** and **`git`**; `doctor` handles the rest.
+
+## Why `bin/wingman` instead of plain `claude`?
+
+`bin/wingman` is a thin launcher: it wires up a few things plain `claude` started in this repo won't have, then execs the real CLI.
+
+- Pre-adds every sibling project (`--add-dir`), so a global-scope spawn never hits a permission prompt.
+- Mints a fresh run id, so onboarding preferences are asked once per run instead of once per crew member.
+- Registers wingman's own pane for Remote Control disconnect detection.
+- Refreshes `~/.wingman/` state and the project cache on every launch.
+
+None of this is required to use wingman - see [`docs/architecture.md`](docs/architecture.md#the-wingman-launcher) for what you lose by skipping it.
 
 ## Driving wingman
 
@@ -54,8 +80,13 @@ The same lifecycle applies to software-analyst and other crew types; how each st
 - "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
   Detach (`Ctrl-b d`) to hand back.
 - Killing wingman leaves the crew running; relaunching it rebuilds the roster.
-- Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app - each launches Remote-Control-visible by default (`WM_REMOTE_CONTROL=1`, on unless set empty) - so `tmux attach` is one option, not the only one.
-- If a member's connection drops, wingman's watcher notices the disconnect banner and retypes `/remote-control` for it automatically; no action needed.
+- Every crew member is also reachable straight from `claude.ai/code` or the Claude desktop/mobile apps, with connection drops recovered automatically in both directions - see [Remote Control](#remote-control) below.
+
+## Remote Control
+
+Claude Code's Remote Control lets you reach a running session from `claude.ai/code` or the Claude desktop/mobile apps, not only by attaching to its tmux window.
+Every crew member is reachable this way by default, and a dropped connection - a crew member's or wingman's own - is either auto-recovered or surfaced to you with a one-line fix.
+See [`docs/architecture.md`](docs/architecture.md#remote-control) for how each direction works.
 
 ## Autonomous by default
 
