@@ -248,9 +248,9 @@ assert_true "the watcher is still alive after every bypass attempt above" "wait_
 # --- round 3 re-review: tmux resolves ANY unambiguous PREFIX of a full
 # command name too, not just the exact name/alias - `tmux kill-win` and
 # `tmux kill-ses` bypassed the round-1/2 exact-match set entirely (live
-# repro'"'"'d against a real cycle: hook output empty, then the real command
+# repro'd against a real cycle: hook output empty, then the real command
 # genuinely killed the watcher). Detection now introspects the CONNECTED
-# tmux binary'"'"'s own `list-commands` and replicates its real resolution
+# tmux binary's own `list-commands` and replicates its real resolution
 # grammar, so any abbreviation this tmux accepts is covered without needing
 # a fourth hand-maintained spelling list.
 out="$(run_hook "tmux kill-win -t $WM_TMUX_SESSION:watcherwin")"
@@ -275,13 +275,65 @@ out="$(run_hook "tmux -T 256,clipboard kill-ses -t $WM_TMUX_SESSION")"
 assert_contains "a global -T flag followed by an abbreviated subcommand does not bypass detection" "$out" '"permissionDecision": "deny"'
 
 # An abbreviation on an UNRELATED, real target is still allowed - proves this
-# isn'"'"'t a blanket deny of every abbreviated tmux kill command, only ones that
+# isn't a blanket deny of every abbreviated tmux kill command, only ones that
 # actually resolve to a protected pid.
 out="$(run_hook "tmux kill-win -t $WM_TMUX_SESSION:typedwin")"
 assert_eq "kill-win on an unrelated (real) window is allowed (no output)" "$out" ""
 
 assert_true "the watcher is still alive after every round-3 bypass attempt" "wait_for_cycle_live"
 
+"$WF" --stop >/dev/null 2>&1
+tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
+
+# ============================================================================
+# round 4 re-review: a kill/pkill/tmux -t target built via command
+# substitution or shell-variable indirection must FAIL CLOSED, not be
+# silently treated as "does not match" - live-repro'd during review to
+# actually kill a real watcher: `kill $(cat watch.pid)`, `WATCHPID=<pid>;
+# kill $WATCHPID`, and `pkill -f "$(echo watch-fleet)"` all reached
+# cmd_match.py's inert substitution placeholder or an unexpanded $VAR token,
+# which matched nothing, so the real target was never compared against the
+# protected set at all.
+# ============================================================================
+test_new_home
+"$WF" >"$WINGMAN_HOME/out.log" 2>&1 &
+wpid=$!
+wm_track "$wpid"
+assert_true "round-4: a real watch-fleet cycle comes up live" "wait_for_cycle_live"
+pid="$(cat "$WINGMAN_HOME/watch.pid")"
+
+out="$(run_hook "kill \$(cat $WINGMAN_HOME/watch.pid)")"
+assert_contains "kill \$(cat watch.pid) - the exact round-4 repro - fails closed" "$out" '"permissionDecision": "deny"'
+assert_contains "the round-4 denial cites issue #64 round 4" "$out" "round 4"
+
+out="$(run_hook "WATCHPID=$pid; kill \$WATCHPID")"
+assert_contains "a variable-indirected kill target fails closed" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'pkill -f "$(echo watch-fleet)"')"
+assert_contains "a pkill pattern built via command substitution fails closed" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'kill $(cat /tmp/definitely-not-a-real-pidfile-xyz)')"
+assert_contains "an UNRELATED dynamic kill target also fails closed while any cycle is live (accepted conservative tradeoff - cannot be proven safe either)" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'kill -0 $(cat /tmp/definitely-not-a-real-pidfile-xyz)')"
+assert_eq "kill -0 on a dynamic target is still allowed (the null-signal check runs before target resolution)" "$out" ""
+
+out="$(run_hook "kill 999999")"
+assert_eq "a literal, unrelated pid is still allowed (no output) - this is not a blanket deny of every kill" "$out" ""
+
+assert_true "the watcher is still alive after every round-4 bypass attempt" "wait_for_cycle_live"
+"$WF" --stop >/dev/null 2>&1
+
+# tmux -t built via command substitution must fail closed the same way.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n watcherwin \
+  "WINGMAN_HOME='$WINGMAN_HOME' WM_WATCH_INTERVAL='$WM_WATCH_INTERVAL' '$WF'"
+assert_true "round-4 tmux: the tmux-hosted cycle comes up live" "wait_for_cycle_live"
+
+out="$(run_hook "tmux kill-window -t \"\$(tmux display-message -t $WM_TMUX_SESSION:watcherwin -p '#S:#I')\"")"
+assert_contains "a tmux -t value built via command substitution fails closed" "$out" '"permissionDecision": "deny"'
+
+assert_true "the tmux-hosted watcher is still alive after the -t substitution attempt" "wait_for_cycle_live"
 "$WF" --stop >/dev/null 2>&1
 tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
 

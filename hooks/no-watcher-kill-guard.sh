@@ -81,6 +81,25 @@
 #     file's siblings). Any protected pid anywhere in that tree denies -
 #     conflating "this pid is merely a descendant of the target" with "this
 #     pid IS the target" is deliberately conservative.
+#   - kill/pkill targets, pkill patterns, and tmux -t values that are not
+#     statically-resolvable literals (built via command substitution -
+#     $(...)/`...`/<(...)/>(...) - or an unexpanded $VAR/${VAR} shell
+#     variable) are DENIED, not silently treated as "does not match," while
+#     any watch-fleet cycle is currently live (round-4 review finding: `kill
+#     $(cat watch.pid)`, `X=<pid>; kill $X`, and `pkill -f "$(echo
+#     watch-fleet)"` all resolved, at this hook's text layer, to inert
+#     placeholder/variable text that matched nothing, so the real pid was
+#     never compared against the protected set at all - the same missed-deny
+#     shape as the tmux subcommand-abbreviation bypass, just reached through
+#     an argument's VALUE instead of a subcommand's NAME). This hook cannot
+#     evaluate what a substitution or variable actually resolves to without
+#     running untrusted shell content, which is not something a PreToolUse
+#     hook should ever do merely to decide whether to allow a command - so
+#     "cannot prove this ISN'T the watcher" is treated the same as "IS the
+#     watcher." A `$` can never appear in a real pid or tmux target, so its
+#     presence anywhere in the token (not just as the whole token) is the
+#     dynamic signal; see the DYNAMIC_TARGET_REASON comment in the python
+#     block below for the one accepted false-positive this admits.
 #
 # cmd_match.py's command_segments()/resolve_command() are used exactly as the
 # other guards use them, including its fail-CLOSED contract on an unlexable
@@ -171,6 +190,64 @@ def watcher_kill_reason(pid):
     )
 
 
+# --- fail-closed on a kill/pkill/tmux-`-t` argument this hook cannot
+# statically resolve to a literal value (round-4 review finding). Every
+# checker below only ever compares an argument TOKEN'"'"'s text against a known-
+# protected pid/pattern/pane - `kill $(cat watch.pid)`, `X=<pid>; kill $X`,
+# and `pkill -f "$(echo watch-fleet)"` all resolve, at the TEXT level this
+# hook actually sees, to cmd_match.py'"'"'s inert substitution placeholder
+# (`$(...)`, `` `...` ``, `<(...)`, `>(...)`) or an unexpanded `$VAR`/`${VAR}`
+# token (resolve_command() only ever expands a LEADING $VAR in COMMAND
+# position - tokens[0] - never an argument, by cmd_match.py'"'"'s own design; see
+# its module docstring). Silently treating that unresolved text as "does not
+# match" - what every checker did before this - is the exact missed-deny
+# class the header above says must never happen, just reached through
+# argument-VALUE resolution instead of subcommand-NAME resolution. This hook
+# cannot evaluate what the substitution/variable actually resolves to
+# (that would mean running untrusted, possibly side-effecting shell content
+# merely to decide whether to allow it - unsafe and outside what a
+# PreToolUse hook should ever do), so the only safe posture, matching this
+# file'"'"'s own already-stated false-deny-only invariant, is to fail closed:
+# deny whenever a target/pattern cannot be proven to be something OTHER than
+# the live cycle, rather than only when it is proven to BE it.
+#
+# A literal `$` can never appear in a real decimal/process-group pid or a
+# real tmux target name, so its presence anywhere in the token - not only as
+# the WHOLE token - is treated as the dynamic signal: a token built by
+# concatenating literal text around a substitution (`"$(cat watch.pid)x"`)
+# would otherwise slip past a whole-token-only check while still being just
+# as unresolvable. The one accepted false-positive this admits (deliberately,
+# same tradeoff as the pkill comm-vs-args and tmux process-tree-walk
+# conservatism already documented above): a pkill regex pattern that
+# legitimately uses a trailing $ as its own end-of-string regex anchor
+# (pkill -f, pattern quoted so the shell never touches it) reads identically,
+# at this hook'"'"'s text layer, to an unresolved variable -
+# cmd_match.py'"'"'s plain token list does not preserve whether a `$` came from
+# inside single quotes (syntactically inert) or not. Denied only while a
+# cycle is actually live, so this never fires when there is nothing to
+# protect.
+DYNAMIC_TARGET_REASON = (
+    "This command'"'"'s kill/pkill/tmux target is not a literal value - it is "
+    "built via command substitution ($(...)/`...`) or a shell variable "
+    "($VAR/${VAR}), so this hook cannot statically verify it will not "
+    "resolve to the live watch-fleet cycle (pid %d) once bash actually "
+    "expands it (issue #64 round 4). Denied conservatively rather than risk "
+    "a missed deny: resolve it to a literal pid or pattern first and retry - "
+    "a literal value that genuinely targets something unrelated to the "
+    "watcher passes through untouched."
+)
+
+
+def is_dynamic_token(tok):
+    if tok in ("$(...)", "`...`", "<(...)", ">(...)"):
+        return True
+    return "$" in tok
+
+
+def deny_dynamic(protected):
+    deny(DYNAMIC_TARGET_REASON % sorted(protected)[0])
+
+
 # --- protected-pid discovery: the cycle_live() definition from
 # bin/watch-fleet, replicated exactly (pid alive via kill -0 AND beat file
 # fresher than the grace window),
@@ -256,6 +333,8 @@ def check_kill(argv, protected):
         try:
             val = int(t)
         except ValueError:
+            if is_dynamic_token(t):
+                deny_dynamic(protected)
             continue
         if abs(val) in protected:
             deny(watcher_kill_reason(abs(val)))
@@ -311,6 +390,13 @@ def check_pkill(argv, protected):
     pattern = extract_pkill_pattern(argv)
     if pattern is None:
         return
+    if is_dynamic_token(pattern):
+        # Checked BEFORE the regex-compile attempt below: cmd_match.py'"'"'s
+        # substitution placeholder ($(...) etc.) is itself a syntactically
+        # valid regex, so compiling it would "succeed" and then simply fail
+        # to match any real process'"'"'s comm/args text - silently allowing the
+        # exact bypass this fail-closed check exists to catch.
+        deny_dynamic(protected)
     try:
         rx = re.compile(pattern)
     except re.error:
@@ -497,6 +583,14 @@ def check_tmux_kill(argv, protected):
         return
     kind = argv[1]
     target = tmux_target_value(argv[2:])
+    if target is not None and is_dynamic_token(target):
+        # An unresolvable -t value (e.g. built via a nested command
+        # substitution) would otherwise reach resolve_pane_pids() as literal
+        # garbage text, fail the tmux target lookup, return no pane pids, and
+        # be silently ALLOWED by the "if not root_pids: return" below - the
+        # same missed-deny shape as check_kill/check_pkill, just reached
+        # through tmux -t resolution instead.
+        deny_dynamic(protected)
     root_pids = resolve_pane_pids(kind, target)
     if not root_pids:
         return
