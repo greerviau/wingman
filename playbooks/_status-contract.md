@@ -62,7 +62,10 @@ This working-dip is not just a lifecycle nicety - it is *how* a genuine re-deliv
 ## A state you never set yourself: `stalled`
 
 The supervisor watching you may externally flip your line to `stalled` when you show no sign of life on any channel - no pane output, no status update, no running child process, no CPU activity - for an extended period (default 180s) while your status claims `working`.
-That combination means your agent has likely errored or gone idle without reporting; the flip preserves your last summary inside the stall reason, and the remedy it surfaces to your owner is a takeover or stand-down.
+That combination means your agent has likely errored or gone idle without reporting - but the flip is not immediate: the supervisor first sends you one check-in nudge (the same primitive `bin/crew-say` uses) and waits a full stall-idle window for activity.
+Only if that nudge produces nothing - or your session is confirmed dead, in which case no nudge is possible at all - does a takeover/stand-down choice reach your owner.
+If you resume on your own, or in response to the nudge, before that window elapses, you never flip at all; your next self-report overwrites `stalled` regardless.
+The flip, when it does happen, preserves your last summary inside the stall reason.
 Parking on an armed harness-tracked watcher is recognized (the armed watcher is a live descendant process in your pane) and is never flagged, so the wake-loop pattern below needs no defensive status refreshes.
 Refresh your `summary` on meaningful progress regardless (see "When to update") - on a harness that neither repaints its pane nor runs child processes during quiet work, that refresh is the remaining escape hatch.
 

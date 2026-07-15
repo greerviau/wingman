@@ -11,13 +11,17 @@
 # therefore never tries to inject keystrokes into wingman's terminal.
 #
 # The pane backstop covers the failure shapes the status files cannot see: a
-# member frozen on an interactive permission/trust prompt (flipped to blocked); a
-# member silently stalled - no pane output, no status update, and an execution
-# probe finding nothing running in its pane's process tree (flipped to stalled via
-# wm-state stall-check); and a member whose pane shows an API/connectivity-error
-# signature (rate limit, 5xx, network error) followed by the same silence - nudged
-# once per cooldown window, then flagged stalled with an api-error: reason if the
-# nudge doesn't clear it.
+# member frozen on an interactive permission/trust prompt (flipped to blocked);
+# and a member silently stalled - no pane output, no status update, and an
+# execution probe finding nothing running in its pane's process tree. A stall
+# candidate always gets one check-in nudge first (a plain message into its pane -
+# the API/connectivity-error-specific wording if the pane tail matches that
+# signature, a generic "checking in" message otherwise), then a full cooldown
+# window of continued silence before wm-state stall-check actually flips it to
+# stalled; a member that resumes on its own or in response to the nudge never
+# flips at all. This keeps a transient spend-limit episode, network blip, or
+# brief Anthropic-side outage from escalating straight to the pilot before the
+# member has had a chance to recover unassisted.
 #
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
@@ -155,14 +159,21 @@ MASS_MIN_COUNT="${WM_MASS_MIN_COUNT:-2}"
 MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
 # API/connectivity-error pane signature (#23): a member showing one of these and
 # then going quiet is a likely local network blip or Anthropic-side outage, not a
-# broken agent, so it gets a one-shot nudge (a plain message into its pane) before
-# stall-check's own unmodified gates get a chance to confirm and flip it stalled.
+# broken agent, so its check-in nudge (see #61 below) uses this wording instead of
+# the generic one. Purely cosmetic - it changes which nudge message is sent and
+# which reason template stall-check uses if the nudge doesn't clear it, never the
+# gates or the wait itself.
 WM_APIERR_RE="${WM_APIERR_RE:-rate.limit|rate_limit|\\b429\\b|\\b5[0-9]{2}\\b [Ee]rror|overloaded_error|Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|[Cc]onnection error|Connection refused|fetch failed|socket hang up|Service Unavailable|Bad Gateway|Gateway Timeout}"
 WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
-# At most one nudge per this many seconds per member, so a persistent error is
-# nudged once and then left to stall-check's own escalation rather than re-sent
-# every poll.
-APIERR_NUDGE_COOLDOWN="${WM_APIERR_NUDGE_COOLDOWN:-180}"
+# Stall self-heal nudge (#61): every stall-idle, pane-stable candidate - not only
+# an api-error match - gets exactly one check-in nudge per stall episode (gated
+# on the marker file's existence, never re-sent once it exists), and wm-state
+# stall-check will not flip a member to 'stalled' until that marker is at least
+# STALL_IDLE seconds old (i.e. the nudge has had a full window to work) - see
+# the nudge block below and cmd_stall_check's --nudge-age gate. There is
+# deliberately no separate cooldown constant here: a second knob governing only
+# the resend decision let the shell's resend gate and stall-check's flip gate
+# drift apart (#101), so the wait-after-nudge is driven by STALL_IDLE alone.
 
 # Remote Control disconnect signature (design: docs/plans/2026-07-12-remote-
 # control-visibility-and-auto-reconnect-design.md, ask 2): the CLI's own
@@ -760,33 +771,54 @@ for r in data:
       _idle="$(wm_tmux_window_activity_age "$_win")"
       _pid="$(wm_tmux_pane_pid "$_win")"
 
-      # API/connectivity-error nudge (#23): a stall-idle pane whose tail matches an
-      # error signature gets one nudge per cooldown window before stall-check gets
-      # to confirm+flip it. Only acted on once stability is confirmed (PANE_STABLE),
-      # the same "one more poll before acting" rule prompt_freeze_check uses above -
-      # otherwise a pane still scrolling past a logged error mid-turn would be
-      # nudged for no reason.
+      # Stall self-heal nudge (#61): every stall-idle candidate gets exactly one
+      # check-in nudge before stall-check is even allowed to confirm+flip it -
+      # not only an api-error match. Only acted on once stability is confirmed
+      # (PANE_STABLE), the same "one more poll before acting" rule
+      # prompt_freeze_check uses above - otherwise a pane still scrolling mid-turn
+      # would be nudged for no reason. --nudge-age (-1 if no marker exists yet) is
+      # passed straight through to stall-check, which flips only once that age
+      # reaches --threshold (STALL_IDLE) - the same wait window used for the
+      # staleness gates themselves, not a separate constant. The nudge is sent
+      # if and only if no marker exists yet (this is the first confirmed-idle
+      # poll of this stall episode) and is NEVER re-sent afterward: a resend
+      # gated on its own separate cooldown previously let that cooldown and
+      # stall-check's --threshold gate drift apart (#101) - tuned equal by
+      # default they raced (a duplicate nudge landed on the same poll as the
+      # flip), and tuned apart the marker could keep resetting itself and the
+      # member would never escalate at all. Marker-existence-only sending makes
+      # that impossible: once sent, the marker's age can only grow.
       _api=0
-      if [ "$_idle" -ge "$STALL_IDLE" ] && api_error_check; then
-        _api=1
-        if [ "$PANE_STABLE" = 1 ]; then
-          _nudgefile="$WM_HOME/apierr-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').nudged"
-          _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || echo 0) ))
-          if [ ! -f "$_nudgefile" ] || [ "$_nudge_age" -ge "$APIERR_NUDGE_COOLDOWN" ]; then
-            # As above: only mark the cooldown when the nudge actually sent, not
-            # when wm_tmux_send_message refused because the pane looks
-            # dialog-shaped rather than the chat input.
-            if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" \
-              "An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."; then
-              : > "$_nudgefile"
-            fi
-          fi
-        else
+      _nudge_age=-1
+      if [ "$_idle" -ge "$STALL_IDLE" ]; then
+        if [ "$PANE_STABLE" != 1 ]; then
           continue   # first sighting or still changing; one more poll before acting
+        fi
+        # Computed every poll, not only the one that sends the nudge: --api-error
+        # feeds stall-check's reason-text choice on whichever poll eventually
+        # flips it, which is almost never the same poll as the send.
+        if api_error_check; then
+          _api=1
+          _nudge_msg="An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."
+        else
+          _nudge_msg="Checking in: if you're mid-task, keep going. If you're stuck, unstick yourself and continue."
+        fi
+        _nudgefile="$WM_HOME/stall-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').nudged"
+        if [ -f "$_nudgefile" ]; then
+          _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || date +%s) ))
+        else
+          # Only mark the episode nudged when the nudge actually sent, not when
+          # wm_tmux_send_message refused because the pane looks dialog-shaped
+          # rather than the chat input - a refusal must be retried, not treated
+          # as delivered.
+          if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"; then
+            : > "$_nudgefile"
+          fi
         fi
       fi
 
       [ -n "$_pid" ] && wm_state stall-check --id "$_id" \
+        --nudge-age "$_nudge_age" \
         --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
         --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
