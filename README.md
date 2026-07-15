@@ -60,6 +60,7 @@ Talk to it in plain language, or use the slash commands:
 | `/status` | compact roster: who's on what (with each member's status), what's blocked, what's stalled, what's ready. Closed history is hidden by default |
 | `/blocked` | each blocked member + the decision it needs |
 | (a batch of crew died together, or hit a correlated API outage) | wingman relays the one collapsed event plus the fix: `bin/crew-resume --all-died` for an ordinary mass death (e.g. a host/tmux crash); for a detected Anthropic-side outage, new spawns are paused automatically until it clears, already-running crew are left alone, and any outage-tagged deaths are auto-resumed the moment the outage-cleared signal fires - no confirmation needed |
+| (a usage-quota window is approaching its cap) | new spawns are paused automatically; wingman asks you to wait for the reset or continue anyway (already-running crew are never touched either way) and unpauses on your answer or the moment the window resets on its own |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 | `/prune` | clean the roster: drop fully-closed records (archived first) |
