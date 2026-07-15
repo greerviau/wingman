@@ -172,4 +172,58 @@ assert_false "the vanished window is not left behind" \
   "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-r5"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- outage-timing guard (issue #23, item 3): refuses while the fleet
+# outage-state reads active, unless --force is passed ------------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id o1 --type developer --objective x --repo /tmp --window wm-o1 --session-id sess-o1 >/dev/null
+wm_state crew-set --id o1 --status died >/dev/null
+printf '{"state": "active", "since": "2026-07-15T00:00:00.000000Z", "last_signal": null, "signal_count": 2}\n' \
+  > "$WINGMAN_HOME/api-outage-state.json"
+out_o1="$(WM_AGENT="$ALIVE_STUB" "$CR" o1 2>&1)"; rc_o1=$?
+assert_eq "crew-resume refuses while the outage is active" "$rc_o1" "1"
+assert_contains "the refusal names the outage" "$out_o1" "API outage is currently active"
+assert_contains "the refusal names the --force escape hatch" "$out_o1" "--force"
+assert_eq "the member stays died, nothing was relaunched" "$(field_of o1 status)" "died"
+assert_false "no window was created for the refused resume" \
+  "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-o1"
+
+out_o2="$(WM_AGENT="$ALIVE_STUB" "$CR" o1 --force 2>&1)"
+assert_contains "--force proceeds despite the active outage" "$out_o2" "1 resumed"
+assert_eq "the member resumes (status flips to working) with --force" "$(field_of o1 status)" "working"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A --all-died batch is refused the identical way.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id o3 --type developer --objective x --repo /tmp --window wm-o3 --session-id sess-o3 >/dev/null
+wm_state crew-set --id o3 --status died >/dev/null
+printf '{"state": "active", "since": "2026-07-15T00:00:00.000000Z", "last_signal": null, "signal_count": 2}\n' \
+  > "$WINGMAN_HOME/api-outage-state.json"
+out_o3="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"; rc_o3=$?
+assert_eq "--all-died also refuses while the outage is active" "$rc_o3" "1"
+assert_eq "the member stays died" "$(field_of o3 status)" "died"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A clear (or absent) outage state never gates a resume at all.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id o4 --type developer --objective x --repo /tmp --window wm-o4 --session-id sess-o4 >/dev/null
+wm_state crew-set --id o4 --status died >/dev/null
+printf '{"state": "clear", "since": "2026-07-15T00:00:00.000000Z", "last_signal": null, "signal_count": 0}\n' \
+  > "$WINGMAN_HOME/api-outage-state.json"
+out_o4="$(WM_AGENT="$ALIVE_STUB" "$CR" o4 2>&1)"
+assert_contains "state clear: resume proceeds without --force" "$out_o4" "1 resumed"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# No state file at all (fresh install) fails open, matching the spawn guard's
+# own posture.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id o5 --type developer --objective x --repo /tmp --window wm-o5 --session-id sess-o5 >/dev/null
+wm_state crew-set --id o5 --status died >/dev/null
+out_o5="$(WM_AGENT="$ALIVE_STUB" "$CR" o5 2>&1)"
+assert_contains "no state file: resume proceeds without --force" "$out_o5" "1 resumed"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary

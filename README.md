@@ -33,7 +33,7 @@ Talk to it in plain language, or use the slash commands:
 | `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `software-analyst`, `architect`, `developer`, `reviewer`, `lead`, `research`, or one you added; `bin/spawn-crew --list-types` shows every category's roles, and a bare name still works when it's unique across categories; pass `global` instead of a repo for cross-repo work |
 | `/status` | compact roster: who's on what (with each member's status), what's blocked, what's stalled, what's ready. Closed history is hidden by default |
 | `/blocked` | each blocked member + the decision it needs |
-| (a batch of crew died together, or hit a correlated API outage) | wingman relays the one collapsed event plus the fix - `bin/crew-resume --all-died` for a mass death, or nothing (an auto-nudge already tried) for an outage |
+| (a batch of crew died together, or hit a correlated API outage) | wingman relays the one collapsed event plus the fix: `bin/crew-resume --all-died` for an ordinary mass death (e.g. a host/tmux crash); for a detected Anthropic-side outage, new spawns are paused automatically until it clears, already-running crew are left alone, and any outage-tagged deaths are auto-resumed the moment the outage-cleared signal fires - no confirmation needed |
 | "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
 | `/standdown <id>` | wraps up a crew member, closes its window |
 | `/prune` | clean the roster: drop fully-closed records (archived first) |
@@ -66,7 +66,7 @@ Wingman detects a crew frozen on either and wakes you to approve once via `bin/c
 After that, crew in that repo run unattended.
 
 A resumed session (`bin/crew-resume`, or `claude --resume` by hand) can also hit the CLI's own "resume from summary?" prompt on a large or old transcript.
-There is nothing to approve there, so wingman defeats it outright on every relaunch and, as a backstop, auto-dismisses it if it still appears.
+`bin/crew-resume` defeats it outright on every relaunch; if it appears anyway, wingman recognizes it and wakes you with a specific one-keypress fix via `bin/crew-takeover`.
 
 ## Customizing crew behavior (playbooks)
 

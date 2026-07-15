@@ -794,4 +794,116 @@ out_fid="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/fid.err")"
 assert_contains "the next real arm recovers from the real leaked lock" "$out_fid" "done: fid1 finished for real"
 assert_contains "the recovery is logged" "$(cat "$WINGMAN_HOME/fid.err")" "clearing a stale claim lock"
 
+# --- pane-tail cache is written for a live working member (#23, item 1) ------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id pt1 --type developer --objective pt --repo /tmp --window wm-pt1 --session-id spt1 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-pt1 'echo "Error: overloaded_error (529)"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+ptpid=$!
+wm_track "$ptpid"
+sleep 3
+assert_true "the pane-tail cache file appears" "[ -f '$WINGMAN_HOME/pane-tail-pt1.txt' ]"
+assert_contains "the pane-tail cache holds the pane's own tail text" \
+  "$(cat "$WINGMAN_HOME/pane-tail-pt1.txt")" "overloaded_error"
+kill "$ptpid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- the resume-from-summary prompt (#23/#30) is recognized as a distinct
+# dialog shape, blocked with its own wording, never the generic permission
+# wording ---------------------------------------------------------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rp1 --type developer --objective rp --repo /tmp --window wm-rp1 --session-id srp1 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rp1 'printf "We recommend resuming from a summary of the conversation.\n\n1. Resume from summary (recommended)\n2. Resume full session as-is\n3. Dont ask me again\n"; sleep 600'
+wm_age_status rp1
+out_rp="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
+assert_contains "resume-prompt freeze fires as blocked" "$out_rp" "blocked: rp1"
+assert_contains "the blocker names issue #30 and the resume-from-summary prompt" \
+  "$(wm_state crew-get --id rp1)" "resume-from-summary prompt (issue #30)"
+assert_false "the blocker does NOT use the generic permission/trust wording" \
+  "wm_state crew-get --id rp1 | grep -q 'permission/trust prompt'"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- an ordinary permission dialog still gets the generic wording, not the
+# resume-from-summary wording (no cross-talk between the two phrase sets) -----
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rp2 --type developer --objective rq --repo /tmp --window wm-rp2 --session-id srp2 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rp2 'printf "Do you want to proceed?\n❯ 1. Yes\n  2. No\n"; sleep 600'
+wm_age_status rp2
+out_rp2="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
+assert_contains "ordinary permission freeze still fires as blocked" "$out_rp2" "blocked: rp2"
+assert_contains "the blocker keeps the generic permission/trust wording" \
+  "$(wm_state crew-get --id rp2)" "permission/trust prompt"
+assert_false "the blocker does NOT use the resume-from-summary wording" \
+  "wm_state crew-get --id rp2 | grep -q 'resume-from-summary'"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- fleet-wide outage-detected/outage-cleared (#23, item 0) ------------------
+# Owner "" is wingman's own top-level scope, exactly like every other test in
+# this file (test_new_home already unsets WINGMAN_CREW_ID).
+
+# Two of two live members showing the API-error signature crosses the default
+# mass threshold (count>=2, ratio>=0.5) - the same collapse condition
+# group-attention.test.sh exercises directly, here proven wired into the
+# watcher's own blocking loop and fired as an ordinary `fire` (never a sixth
+# --classify outcome).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id od1 --type developer --objective o --repo /tmp --window wm-od1 --session-id sod1 >/dev/null
+wm_state crew-add --id od2 --type developer --objective p --repo /tmp --window wm-od2 --session-id sod2 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-od1 'echo "Error: overloaded_error (529)"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-od2 'echo "Error: overloaded_error (529)"; sleep 600'
+out_od="$(wm_timeout 60 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 WM_OUTAGE_QUIET=3 "$WF" 2>/dev/null)"
+assert_contains "outage-detected fires" "$out_od" "outage-detected:"
+assert_contains "the fire note explains the pause" "$out_od" "new spawns paused"
+assert_contains "outage state file flips to active" \
+  "$(cat "$WINGMAN_HOME/api-outage-state.json")" '"state": "active"'
+assert_contains "the wake file explains the outage" "$(cat "$WINGMAN_HOME/wake")" "API outage detected"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# active -> clear after WM_OUTAGE_QUIET seconds of zero signal, naming any
+# outage-tagged died member(s) for the pre-authorized auto-resume.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id oc1 --type developer --objective q --repo /tmp --window wm-oc1 --session-id soc1 >/dev/null
+# A live population is needed for the pre-seed's denominator (current_live +
+# died-this-poll) to be nonzero - oc1 alone (already died, so out of
+# LIVE_STATES) would otherwise divide by zero and never collapse regardless
+# of --signal-working, exactly as cmd_outage_update's own `denom > 0` guard
+# intends.
+wm_state crew-add --id oc0 --type developer --objective r --repo /tmp --window wm-oc0 --session-id soc0 >/dev/null
+wm_state crew-set --id oc1 --status died >/dev/null
+uv run --no-project --quiet python -c '
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+for r in d:
+    if r["id"] == "oc1":
+        r["death_cause"] = "api-outage"
+json.dump(d, open(p, "w"))
+' "$WINGMAN_HOME/crew.json"
+# Ack the pre-existing died event so the ordinary needs-attention/fire() path
+# (which would otherwise re-surface oc1's own died status on iteration 1,
+# racing ahead of the outage-cleared transition below - a real fleet would
+# already have surfaced and acked this death long before the quiet window
+# elapses) does not fire before the fleet-scoped outage-cleared check gets a
+# chance to.
+oc1_upd="$(wm_state crew-get --id oc1 | uv run --no-project --quiet python -c 'import json,sys; print(json.load(sys.stdin)["updated"])')"
+wm_state ack --id oc1 --updated "$oc1_upd" >/dev/null
+wm_state outage-update --owner "" --signal-working 5 --died "" \
+  --mass-min-count 2 --mass-min-ratio 0.5 --quiet-seconds 3 >/dev/null
+# oc0's own window must actually be live in tmux, or reconcile flips it to
+# died too on the very first poll (defeating its purpose as the live
+# population that keeps the denominator nonzero).
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-oc0 'sleep 600'
+out_oc="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 WM_OUTAGE_QUIET=3 "$WF" 2>/dev/null)"
+assert_contains "outage-cleared fires" "$out_oc" "outage-cleared:"
+assert_contains "the fire note names the outage-tagged died member" "$out_oc" "oc1"
+assert_contains "the fire note points at the pre-authorized resume" "$out_oc" "bin/crew-resume --all-died"
+assert_contains "outage state file flips back to clear" \
+  "$(cat "$WINGMAN_HOME/api-outage-state.json")" '"state": "clear"'
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary

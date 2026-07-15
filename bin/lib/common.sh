@@ -369,153 +369,88 @@ WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
 # before it and stop matching.
 WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
 
-# Shared engine behind prompt_shape_in (below) and resume_prompt_shape_in
-# (issue #30): true iff `text` contains `lead_re`+`phrase_re` - the question
-# phrase, rendered as its own line - anchoring a full contiguous option block
-# of at least `min_opts` rows (matching `option_re`) bearing at most one
-# selection marker (`mark_re`): the one-block shape a real dialog renders,
-# which transcript prose about prompts almost never reproduces. Extracted as
-# its own function (rather than duplicated per detector) so every caller gets
-# the identical, already-hardened precision instead of a fresh, unaudited
-# copy - see issue #30's PR review, which showed a bare two-string
-# content-only check (no shape/adjacency requirement at all) is trivially
-# defeated by a pane merely displaying this shape as static text. For each
-# phrase hit the option block is found by scanning both directions from the
-# anchor:
-#   - if the anchor line itself is an option row (the trust/Bypass case, where
-#     the matched phrase IS an option), the block starts at the anchor;
-#   - otherwise (the per-tool case, where the phrase is a header) the block
-#     starts at the first option row within `adj` lines below the anchor.
-# From there it walks downward through consecutive option rows, tolerating
-# blank lines between them (the live trust capture has a blank line before its
-# footer), stopping at the first non-blank non-option line. The block is then
-# accepted iff it holds >=min_opts option rows AND <=1 marker rows. The
-# outward walk is capped at `tail` lines so a pathological pane cannot make it
-# walk far. `text` must already be pre-trimmed to the caller's own tail window
-# (callers do this themselves, since the trim source - PANE_TEXT vs. a
-# one-off capture - varies per caller).
-_dialog_shape_in() {
-  _ds_text="$1" _ds_phrase_re="$2" _ds_option_re="$3" _ds_mark_re="$4"
-  _ds_min_opts="$5" _ds_tail="$6" _ds_adj="$7" _ds_lead_re="$8"
-  _ds_hits="$(printf '%s\n' "$_ds_text" \
-    | grep -nE "${_ds_lead_re}(${_ds_phrase_re})" | cut -d: -f1)"
-  [ -n "$_ds_hits" ] || return 1
-  _ds_total="$(printf '%s\n' "$_ds_text" | grep -c '')"
-  for _ds_n in $_ds_hits; do
-    # Locate the first option row of the block (its start line).
-    if printf '%s\n' "$_ds_text" | sed -n "${_ds_n}p" | grep -qE "$_ds_option_re"; then
-      _ds_start="$_ds_n"                       # anchor is itself an option row
-    else
-      _ds_start=""
-      _ds_j="$((_ds_n+1))"; _ds_jmax="$((_ds_n+_ds_adj))"
-      while [ "$_ds_j" -le "$_ds_jmax" ] && [ "$_ds_j" -le "$_ds_total" ]; do
-        if printf '%s\n' "$_ds_text" | sed -n "${_ds_j}p" | grep -qE "$_ds_option_re"; then
-          _ds_start="$_ds_j"; break
-        fi
-        _ds_j="$((_ds_j+1))"
-      done
-      [ -n "$_ds_start" ] || continue
-    fi
-    # Walk downward to the last contiguous option row (blank lines tolerated),
-    # capped at `tail` lines from the block start.
-    _ds_end="$_ds_start"
-    _ds_k="$((_ds_start+1))"; _ds_kmax="$((_ds_start+_ds_tail))"
-    while [ "$_ds_k" -le "$_ds_kmax" ] && [ "$_ds_k" -le "$_ds_total" ]; do
-      _ds_line="$(printf '%s\n' "$_ds_text" | sed -n "${_ds_k}p")"
-      if printf '%s\n' "$_ds_line" | grep -qE "$_ds_option_re"; then
-        _ds_end="$_ds_k"
-      elif printf '%s\n' "$_ds_line" | grep -qE '^[[:space:]]*$'; then
-        :                                      # blank line: tolerate, do not extend
-      else
-        break                                  # first non-blank non-option ends it
-      fi
-      _ds_k="$((_ds_k+1))"
-    done
-    _ds_block="$(printf '%s\n' "$_ds_text" | sed -n "${_ds_start},${_ds_end}p")"
-    _ds_opts="$(printf '%s\n' "$_ds_block" | grep -cE "$_ds_option_re")"
-    _ds_marks="$(printf '%s\n' "$_ds_block" | grep -cE "$_ds_mark_re")"
-    if [ "$_ds_opts" -ge "$_ds_min_opts" ] && [ "$_ds_marks" -le 1 ]; then
-      DIALOG_SHAPE_BLOCK="$_ds_block"
-      return 0
-    fi
-  done
-  return 1
-}
+# Signature of the CLI's "resume from summary?" menu (issue #30): shown by
+# `claude --resume` once a transcript's last message is both old enough and
+# token-heavy enough to trip an internal size/age gate - exactly the shape a
+# long-transcript session (a lead, worst case per issue #23's own comment) is
+# most likely to hit on an auto-recovery resume. A distinct, separately-named
+# regex from WM_PERM_PROMPT_RE (never folded permanently into that default)
+# so the caller can tell which dialog actually froze the pane and choose
+# different --blocker wording accordingly - see prompt_freeze_check below and
+# bin/watch-fleet's use of it. Matches either of the menu's own option-row
+# phrasings; prompt_shape_in's existing generic UI-shape detector (a phrase
+# anchoring a numbered-options block) recognizes this exactly like the
+# trust/Bypass acceptance rows, where the matched phrase IS itself an option
+# row rather than a header above one.
+WM_RESUME_PROMPT_RE="${WM_RESUME_PROMPT_RE:-[Rr]esuming from a summary|Resume from summary|Resume full session as-is}"
 
 # True if the given text contains the question phrase - rendered as its own line
 # per WM_PERM_LEAD_RE - anchoring a full contiguous option block of at least
 # WM_PERM_MIN_OPTS rows bearing at most one selection marker: the one-block shape a
 # real dialog renders, which transcript prose about prompts almost never
-# reproduces. See _dialog_shape_in above for the walking algorithm this wraps.
+# reproduces. For each phrase hit the option block is found by scanning both
+# directions from the anchor:
+#   - if the anchor line itself is an option row (the trust/Bypass case, where the
+#     matched phrase IS an option), the block starts at the anchor;
+#   - otherwise (the per-tool case, where the phrase is a header) the block starts
+#     at the first option row within WM_PERM_ADJ lines below the anchor.
+# From there it walks downward through consecutive option rows, tolerating blank
+# lines between them (the live trust capture has a blank line before its footer),
+# stopping at the first non-blank non-option line. The block is then accepted iff
+# it holds >=WM_PERM_MIN_OPTS option rows AND <=1 marker rows. The outward walk is
+# capped at WM_PERM_TAIL lines so a pathological pane cannot make it walk far.
+#
+# Optional 2nd arg overrides the phrase alternation to scan for (defaults to
+# $WM_PERM_PROMPT_RE, every existing caller's behavior unchanged) - used by
+# bin/watch-fleet's prompt_freeze_check to also recognize WM_RESUME_PROMPT_RE
+# in the same scan, so a session frozen on the resume-from-summary menu is
+# caught by the identical, already-generic shape detector rather than a
+# second bespoke one.
 prompt_shape_in() {
-  _dialog_shape_in "$1" "$WM_PERM_PROMPT_RE" "$WM_PERM_OPTION_RE" "$WM_PERM_MARK_RE" \
-    "$WM_PERM_MIN_OPTS" "$WM_PERM_TAIL" "$WM_PERM_ADJ" "$WM_PERM_LEAD_RE"
-}
-
-# Signature of the CLI's "resume from summary?" dialog (issue #30): shown by
-# `claude --resume` once a transcript's last message is both old enough and
-# token-heavy enough to trip an internal size/age gate. Deliberately its own,
-# separate detector from WM_PERM_PROMPT_RE/prompt_shape_in above, never folded
-# into it: that detector's freeze is answered by flipping the member to
-# `blocked` for a human to decide, which is right for a genuine
-# permission/trust gate but wrong here - there is nothing to decide, "resume
-# full session" is always the correct, safe answer for an unattended agent
-# (see bin/watch-fleet's resume_prompt_freeze_check, which auto-dismisses
-# rather than blocking).
-#
-# Shares _dialog_shape_in's UI-shape/adjacency walk with prompt_shape_in
-# above, rather than a bare co-occurrence-anywhere-in-the-tail check: an
-# earlier version of this detector required only that both option-row
-# strings appear somewhere within the tail, with no adjacency or shape
-# requirement at all, and issue #30's PR review demonstrated that is
-# trivially false-positived by a pane merely displaying (e.g. `cat`-ing) text
-# that reproduces the pair - including this very file's own test fixture,
-# once it existed in the repo. WM_RESUME_PROMPT_RE anchors the phrase (also
-# option row 1's own label, so it doubles as an option row like the
-# trust/Bypass case); WM_RESUME_ROW_RE is the generic numbered-row shape
-# (marker glyph unconfirmed - see WM_RESUME_MARK_RE below - so it tolerates
-# any single leading symbol, not just a specific one); WM_RESUME_TEXT_RE is
-# an additional content check requiring the block to also contain option row
-# 2's exact label, so a coincidental unrelated numbered list sitting near an
-# unrelated "resume from summary" mention still cannot match - shape alone
-# proves "a numbered list is here," not "this specific dialog is here."
-#
-# Accepted residual, same class already accepted for WM_PERM_PROMPT_RE (see
-# its own docs/analysis findings): a pane displaying a *verbatim, adjacent*
-# reproduction of the real dialog's three lines - not a paraphrase or a
-# mid-sentence mention, which the shape/adjacency requirement above already
-# rejects - still matches, because the pane-capture pipeline
-# (`tmux capture-pane -p`, no `-e`) carries no styling/liveness signal that
-# could tell a live-rendered menu apart from static text faithfully
-# reproducing the same shape. This is more likely to occur for this
-# detector than for the permission dialog, precisely because this issue's
-# own plan/PR/tests legitimately quote the real text verbatim - it is not
-# hypothetical (docs/plans/2026-07-15-issue-30-resume-hang-recovery-plan.md
-# itself contains this exact three-line block). Mitigated, not eliminated:
-# this repo's own test fixtures for this detector (tests/resume-prompt-detector.test.sh)
-# deliberately never reproduce the three lines as literal adjacent text in
-# the checked-in source (see that file's own comment).
-WM_RESUME_PROMPT_RE="${WM_RESUME_PROMPT_RE:-Resume from summary \\(recommended\\)}"
-WM_RESUME_ROW_RE="${WM_RESUME_ROW_RE:-^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[0-9]+\\.[[:space:]]}"
-WM_RESUME_MARK_RE="${WM_RESUME_MARK_RE:-^[[:space:]]*[>❯][[:space:]]*[0-9]+\\.}"
-WM_RESUME_TEXT_RE="${WM_RESUME_TEXT_RE:-Resume full session as-is}"
-WM_RESUME_MIN_OPTS="${WM_RESUME_MIN_OPTS:-2}"
-WM_RESUME_TAIL="${WM_RESUME_TAIL:-25}"
-WM_RESUME_ADJ="${WM_RESUME_ADJ:-3}"
-# Same "own line" requirement as WM_PERM_LEAD_RE, so a phrase embedded
-# mid-sentence ("the test fixture echoes: Resume from summary...") never
-# anchors a block the way a genuinely rendered dialog's own line does.
-WM_RESUME_LEAD_RE="${WM_RESUME_LEAD_RE:-^[^[:alnum:]]*([0-9]+\\.[[:space:]])?}"
-
-# True iff the resume-summary dialog's UI shape is present: WM_RESUME_PROMPT_RE
-# anchoring a contiguous >=WM_RESUME_MIN_OPTS-row option block (via
-# _dialog_shape_in, shared with prompt_shape_in) that also contains option row
-# 2's exact text. See the WM_RESUME_PROMPT_RE comment above for the full
-# rationale and accepted residual.
-resume_prompt_shape_in() {
-  _dialog_shape_in "$1" "$WM_RESUME_PROMPT_RE" "$WM_RESUME_ROW_RE" "$WM_RESUME_MARK_RE" \
-    "$WM_RESUME_MIN_OPTS" "$WM_RESUME_TAIL" "$WM_RESUME_ADJ" "$WM_RESUME_LEAD_RE" || return 1
-  printf '%s\n' "$DIALOG_SHAPE_BLOCK" | grep -qE "$WM_RESUME_TEXT_RE"
+  _ps_text="$1"
+  _ps_phrase_re="${2:-$WM_PERM_PROMPT_RE}"
+  _ps_hits="$(printf '%s\n' "$_ps_text" \
+    | grep -nE "${WM_PERM_LEAD_RE}(${_ps_phrase_re})" | cut -d: -f1)"
+  [ -n "$_ps_hits" ] || return 1
+  _ps_total="$(printf '%s\n' "$_ps_text" | grep -c '')"
+  for _ps_n in $_ps_hits; do
+    # Locate the first option row of the block (its start line).
+    if printf '%s\n' "$_ps_text" | sed -n "${_ps_n}p" | grep -qE "$WM_PERM_OPTION_RE"; then
+      _ps_start="$_ps_n"                       # anchor is itself an option row
+    else
+      _ps_start=""
+      _ps_j="$((_ps_n+1))"; _ps_jmax="$((_ps_n+WM_PERM_ADJ))"
+      while [ "$_ps_j" -le "$_ps_jmax" ] && [ "$_ps_j" -le "$_ps_total" ]; do
+        if printf '%s\n' "$_ps_text" | sed -n "${_ps_j}p" | grep -qE "$WM_PERM_OPTION_RE"; then
+          _ps_start="$_ps_j"; break
+        fi
+        _ps_j="$((_ps_j+1))"
+      done
+      [ -n "$_ps_start" ] || continue
+    fi
+    # Walk downward to the last contiguous option row (blank lines tolerated),
+    # capped at WM_PERM_TAIL lines from the block start.
+    _ps_end="$_ps_start"
+    _ps_k="$((_ps_start+1))"; _ps_kmax="$((_ps_start+WM_PERM_TAIL))"
+    while [ "$_ps_k" -le "$_ps_kmax" ] && [ "$_ps_k" -le "$_ps_total" ]; do
+      _ps_line="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_k}p")"
+      if printf '%s\n' "$_ps_line" | grep -qE "$WM_PERM_OPTION_RE"; then
+        _ps_end="$_ps_k"
+      elif printf '%s\n' "$_ps_line" | grep -qE '^[[:space:]]*$'; then
+        :                                      # blank line: tolerate, do not extend
+      else
+        break                                  # first non-blank non-option ends it
+      fi
+      _ps_k="$((_ps_k+1))"
+    done
+    _ps_block="$(printf '%s\n' "$_ps_text" | sed -n "${_ps_start},${_ps_end}p")"
+    _ps_opts="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_OPTION_RE")"
+    _ps_marks="$(printf '%s\n' "$_ps_block" | grep -cE "$WM_PERM_MARK_RE")"
+    if [ "$_ps_opts" -ge "$WM_PERM_MIN_OPTS" ] && [ "$_ps_marks" -le 1 ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Wait until a target pane's interactive TUI has finished starting and is ready to
@@ -615,46 +550,6 @@ wm_tmux_send_message() {
     _sm_i=$((_sm_i+1))
   done
   return 0
-}
-
-# Auto-dismiss the resume-from-summary dialog (issue #30) by selecting
-# "Resume full session as-is" - option 2 of 3, never option 3 ("Don't ask me
-# again"), which persists resumeReturnDismissed: true into the shared
-# ~/.claude.json and would silently change behavior for the pilot's own
-# interactive sessions too. Option 2 has no persisted side effect and is
-# correct on every occurrence.
-#
-# The keystroke sequence (round 2, PR #106 review) is sending the digit "2"
-# followed by Enter - not an arrow-key sequence. This is not a live screen
-# capture (still not obtained - see the plan's own residual note), but it is
-# verified against the shipped CLI's actual key-handling logic, traced via
-# `strings` against the installed binary the same way the plan's own
-# Investigation section located the gating function: the dialog is rendered
-# by the CLI's shared numbered-option-list component, which ships as TWO
-# alternate implementations selected by a runtime capability check.
-#   - The arrow-navigable variant's key handler (minified as `Nhs` in
-#     2.1.210) calls `r.onChange?.(x.value)` the instant a digit 1-9 is
-#     pressed (`if (t!=="numeric" && /^[0-9]$/.test(v)) { ... r.onChange
-#     ?.(x.value); return }`) - selection is immediate, no Enter required.
-#   - The plain numeric-entry variant (`Tpo`) has no arrow-key handling at
-#     all; it accumulates typed digits and only submits them
-#     (`Number.parseInt(...)`) on a `return`/Enter keypress.
-# Sending "2" then Enter is therefore correct under EITHER implementation:
-# the arrow variant selects on the digit alone (the trailing Enter lands on
-# whatever replaces the dialog, which - like every other Enter this file
-# sends into a chat pane - is inert against an idle/empty input); the numeric
-# variant needs the Enter to submit. An arrow-key sequence (the originally
-# shipped `Down`+`Enter`) is correct only under the first variant and is a
-# silent no-op under the second (that handler has no case for a bare arrow
-# key when no digits have been typed, so neither key does anything and the
-# dialog is left exactly as frozen as before - not correctness-destroying,
-# but ineffective). Confirm against a live captured dialog if one becomes
-# available; this remains inference from source, not a screen capture.
-wm_tmux_dismiss_resume_prompt() {
-  _target="$1"
-  wm_tmux send-keys -t "$_target" -l "2"
-  sleep "${WM_SUBMIT_DELAY:-1}"
-  wm_tmux send-keys -t "$_target" Enter
 }
 
 # Ensure the shared tmux server + crew session exist (detached). The check is
