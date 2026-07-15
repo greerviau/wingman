@@ -389,6 +389,22 @@ def cmd_crew_add(args):
         # itself requested it (bin/spawn-crew --allow-merge); a mid-session grant
         # goes through crew-set --allow-merge instead, never through here again.
         "allow_merge": bool(getattr(args, "allow_merge", False)),
+        # Remote Control visibility (issue #96): whether this member launched
+        # Remote-Control-visible (bin/spawn-crew --remote-control), and
+        # wingman's own best-known estimate of whether that connection is
+        # still live. Launching with --remote-control starts a session
+        # actively connected, so there is no ambiguity at spawn time; a
+        # member that never had Remote Control enabled records `None` for
+        # "not applicable/never tracked" rather than a misleading False.
+        # bin/watch-fleet's regular poll is the only writer of
+        # remote_control_connected afterward (via crew-set); a legacy record
+        # predating this field reads both as absent, and every read site in
+        # this codebase treats that absence as True (see bin/crew-standdown
+        # and cmd_needs_attention/cmd_group_attention below) - WM_REMOTE_CONTROL
+        # already defaults on, so absence is far more likely to mean "predates
+        # this fix" than "deliberately off".
+        "remote_control": bool(getattr(args, "remote_control", False)),
+        "remote_control_connected": True if getattr(args, "remote_control", False) else None,
         # Git/PR-workflow determinant, a real tri-state (True/False/None), never a
         # string: None means "unknown at spawn time - detect it yourself" (global
         # scope, or a pre-change record), and must never be read as False. Only
@@ -569,6 +585,13 @@ def cmd_crew_set(args):
                 # crew/<id>.json - only the roster record hooks/no-merge-guard.sh reads.
                 if getattr(args, "allow_merge", None) is not None:
                     r["allow_merge"] = args.allow_merge == "true"
+                # remote_control_connected is likewise roster-only (issue #96):
+                # bin/watch-fleet's regular, stability-gated poll is the only
+                # writer, so bin/crew-standdown can read a previously-vetted
+                # value instead of taking its own single-shot, unguardable
+                # pane read at standdown time.
+                if getattr(args, "remote_control_connected", None) is not None:
+                    r["remote_control_connected"] = args.remote_control_connected == "true"
                 # window_id is likewise roster-only: crew-resume re-registers the id
                 # of the replacement window it creates, so stray-window adoption
                 # (wm_tmux_adopt_strays) keeps an exact identity to match on.
@@ -1153,6 +1176,15 @@ def cmd_needs_attention(args):
             # than the local path when both are present.
             note = (r.get("blocker") or r.get("delivery")
                     or r.get("artifact_url") or r.get("artifact") or r.get("summary") or "")
+            # Stale Remote Control caveat (issue #96): nothing can deregister a
+            # died member's Remote Control entry after the fact (no mechanism
+            # exists - see the plan), so make the staleness visible in the one
+            # note every died relay already flows through, rather than relying
+            # on prose discipline elsewhere. `remote_control` absent reads as
+            # True - see cmd_crew_add's comment for why.
+            if r.get("status") == "died" and r.get("remote_control", True):
+                note = note + (" (Remote Control may still show 'wm-%s' as connected "
+                                "- this is stale; disregard it.)" % rid)
             print("%s\t%s\t%s\t%s" % (
                 rid, r["status"], upd or "", note))
 
@@ -1209,8 +1241,15 @@ def cmd_group_attention(args):
         rows.append(tuple(parts))  # (id, status, updated, note)
 
     death_cause_by_id = {}
+    # Same lookup pattern as death_cause_by_id, for the same reason (issue
+    # #96): a mass-death batch is exactly the scenario (a host/tmux crash)
+    # issue #96 was originally reported from, so the synthetic note needs the
+    # same stale-Remote-Control caveat cmd_needs_attention already adds to a
+    # single died row. Absent reads as True (see cmd_crew_add's comment).
+    remote_control_by_id = {}
     for r in load_roster():
         death_cause_by_id[r.get("id")] = merged(r).get("death_cause")
+        remote_control_by_id[r.get("id")] = merged(r).get("remote_control", True)
 
     died_rows = [r for r in rows if r[1] == "died"]
     outage_death_rows = [r for r in died_rows if death_cause_by_id.get(r[0]) == "api-outage"]
@@ -1253,6 +1292,9 @@ def cmd_group_attention(args):
             names = ", ".join("`%s`" % i for i in (r[0] for r in crash_death_rows))
             synth_note = ("%d crew members died together (likely a tmux/host crash): %s. "
                           "Default remedy: `%s`." % (len(crash_death_rows), names, resume_cmd))
+            if any(remote_control_by_id.get(i, True) for i in crash_ids):
+                synth_note += (" Some of these may also still show as connected in "
+                                "Remote Control; disregard any such entry.")
             print("%s\t%s\t%s\t%s" % ("correlated:mass-death", "died", now(), synth_note))
             continue
         if outage_death_collapse and rid in outage_death_ids:
@@ -1266,6 +1308,9 @@ def cmd_group_attention(args):
                           "now risks immediate re-death. Once the outage clears, `%s` runs "
                           "automatically for these (pre-authorized auto-recovery, issue #23)."
                           % (len(outage_death_rows), names, resume_cmd))
+            if any(remote_control_by_id.get(i, True) for i in outage_death_ids):
+                synth_note += (" Some of these may also still show as connected in "
+                                "Remote Control; disregard any such entry.")
             print("%s\t%s\t%s\t%s" % ("correlated:api-outage-death", "died", now(), synth_note))
             continue
         if outage_collapse and rid in outage_ids:
@@ -1806,6 +1851,11 @@ def build_parser():
     # roster record on every merge attempt, so a mid-session grant takes effect
     # without needing to respawn the member.
     a.add_argument("--allow-merge", action="store_true", dest="allow_merge")
+    # Remote-Control-visible at spawn (issue #96): mirrors bin/spawn-crew's own
+    # --remote-control "wm-<id>" launch flag, gated on the same $REMOTE_CONTROL
+    # variable. Drives both this record's own remote_control field and the
+    # initial remote_control_connected value (see cmd_crew_add below).
+    a.add_argument("--remote-control", action="store_true", dest="remote_control")
     # The tmux window id (@N) of the member's window, recorded at spawn so
     # stray-window adoption can match the exact window rather than a name.
     # Empty when the spawner could not capture it. Note: window ids restart
@@ -1839,6 +1889,12 @@ def build_parser():
     # field, see crew-add's --allow-merge above. Never provided by the member on
     # its own --id; hooks/no-merge-guard.sh enforces that boundary.
     a.add_argument("--allow-merge", default=None, choices=("true", "false"), dest="allow_merge")
+    # Roster-only, single-field write (issue #96): bin/watch-fleet's own
+    # regular, stability-gated poll is the only writer of this field - never a
+    # crew member itself, and never bin/crew-standdown, which only reads it.
+    # Mirrors --worktree's narrow self-registration shape exactly: touches only
+    # this field plus `updated`, untouched by status/announced/dedup logic.
+    a.add_argument("--remote-control-connected", default=None, choices=("true", "false"), dest="remote_control_connected")
     # Re-register the window id after crew-resume replaces the window. Roster-only.
     a.add_argument("--window-id", default=None, dest="window_id")
     # Update status/summary/artifact/delivery without re-firing the watcher/Stop-

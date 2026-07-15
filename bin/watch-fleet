@@ -763,6 +763,11 @@ while :; do
     # member that claims to be "working", since a "blocked" member sitting idle
     # is already exactly where it is supposed to be. Both then flow through the
     # normal needs-attention/fire path below.
+    #
+    # review and stalled are also pulled into this same pane-capture loop
+    # (issue #96), but only for Remote Control connection-state tracking - see
+    # the review|stalled continue below, which skips them past every
+    # freeze/stall diagnostic in this paragraph unchanged.
     for _row in $(wm_state crew-list --owner "$OWNER" --json 2>/dev/null | wm_py -c '
 import sys, json
 try:
@@ -771,31 +776,58 @@ except Exception:
     data = []
 for r in data:
     st = r.get("status", "")
-    if st in ("working", "blocked"):
-        print(r.get("id", "") + ":" + st)
+    # review/stalled (issue #96): widened so bin/watch-fleet observes a
+    # Remote Control connection drop for the actual population
+    # bin/crew-standdown hits, not only the working/blocked pair the
+    # freeze/stall diagnostics below were originally scoped to. remote_control
+    # absent reads as True (see cmd_crew_add in bin/lib/wm-state.py).
+    if st in ("working", "blocked", "review", "stalled"):
+        rc = "1" if r.get("remote_control", True) else "0"
+        print(r.get("id", "") + ":" + st + ":" + rc)
 ' 2>/dev/null); do
-      _id="${_row%%:*}"; _orig_status="${_row##*:}"
+      _id="${_row%%:*}"; _rest="${_row#*:}"; _orig_status="${_rest%%:*}"; _rc_enabled="${_rest#*:}"
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
       wm_pane_snapshot "$_id" "$_win"
 
       # Pane-tail cache (#23, item 1): the last WM_APIERR_TAIL lines of this
-      # poll's capture, overwritten in place every poll for every live
-      # working/blocked member - never a growing log. Once a window dies,
-      # this is the last thing we know its pane showed; wm-state reconcile
-      # reads it at the moment of the death flip to attribute death_cause.
+      # poll's capture, overwritten in place every poll for every member in
+      # this loop's widened population - never a growing log. Once a window
+      # dies, this is the last thing we know its pane showed; wm-state
+      # reconcile reads it at the moment of the death flip to attribute
+      # death_cause.
       printf '%s\n' "$PANE_TEXT" | tail -n "$WM_APIERR_TAIL" \
         > "$WM_HOME/pane-tail-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').txt"
 
+      # Stability-gated drop detection, computed once and shared by the
+      # connection-state persistence below and the working-only reconnect
+      # attempt beneath it - the same "one more poll before acting" rule
+      # prompt_freeze_check and the API-error nudge both use, so a banner
+      # merely scrolling transiently through a member's own transcript is
+      # never mistaken for a live drop.
+      _rc_dropped=0
+      [ "$PANE_STABLE" = 1 ] && remote_control_dropped_check && _rc_dropped=1
+
+      # Remote Control connection-state tracking (issue #96): persist this
+      # poll's stability-gated observation onto the roster record for every
+      # status in the widened population above, so bin/crew-standdown can
+      # later read a value already vetted by this same rigor instead of
+      # taking its own single-shot, unguardable pane read at standdown time.
+      # Deliberately not reset back to true here when no drop is observed -
+      # the only writer of "true" after spawn is a successful reconnect send
+      # just below, matching the plan's own scope exactly.
+      if [ "$_rc_enabled" = 1 ] && [ "$_rc_dropped" = 1 ]; then
+        wm_state crew-set --id "$_id" --remote-control-connected false >/dev/null 2>&1
+      fi
+
       # Remote Control auto-recovery (ask 2, crew-side): a settled disconnect
-      # banner (stable across two polls, same rule as the checks below) gets one
-      # `/remote-control` retry per cooldown window - the existing
-      # message-delivery primitive, aimed at a pane it already has a target for.
-      # Purely self-healing: it never changes crew status, so it stays quiet the
-      # overwhelming majority of the time. Working members only: an already-
-      # blocked member's pane is not expected to be showing a live agent to
-      # reconnect.
-      if [ "$_orig_status" = working ] && [ "$PANE_STABLE" = 1 ] && remote_control_dropped_check; then
+      # banner gets one `/remote-control` retry per cooldown window - the
+      # existing message-delivery primitive, aimed at a pane it already has a
+      # target for. Purely self-healing: it never changes crew status, so it
+      # stays quiet the overwhelming majority of the time. Working members
+      # only: an already-blocked member's pane is not expected to be showing a
+      # live agent to reconnect.
+      if [ "$_orig_status" = working ] && [ "$_rc_dropped" = 1 ]; then
         _rcfile="$WM_HOME/rcdrop-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').sent"
         _rc_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_rcfile" 2>/dev/null || echo 0) ))
         if [ ! -f "$_rcfile" ] || [ "$_rc_age" -ge "$RC_DROPPED_COOLDOWN" ]; then
@@ -805,9 +837,22 @@ for r in data:
           # a retry that never happened.
           if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"; then
             : > "$_rcfile"
+            # Reflect the self-heal back into the persisted field the same way
+            # a detected drop is (issue #96).
+            wm_state crew-set --id "$_id" --remote-control-connected true >/dev/null 2>&1
           fi
         fi
       fi
+
+      # review/stalled were widened into this loop above solely for the
+      # Remote Control connection-state tracking just above; none of the
+      # freeze/stall diagnostics below apply to them (a review member sitting
+      # idle is exactly where it's supposed to be, and prompt_freeze_check's
+      # blocked-flip is scoped to the working/blocked population this loop
+      # originally covered).
+      case "$_orig_status" in
+        review|stalled) continue ;;
+      esac
 
       if prompt_freeze_check && ! liveness_veto "$_id"; then
         # Which of the two dialog shapes prompt_freeze_check actually matched
