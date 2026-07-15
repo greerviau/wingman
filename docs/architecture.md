@@ -3,6 +3,44 @@
 In-depth reference for how wingman works internally.
 For day-to-day use, see the [README](../README.md).
 
+## The wingman launcher
+
+`bin/wingman` is a thin wrapper around the real `claude` binary: it wires up a few things, then execs `claude` so the rest of the session is an ordinary Claude Code session.
+
+- It mints and exports a fresh `WINGMAN_RUN_ID`, inherited by every crew member spawned during that run.
+  This is the cache key the onboarding-preference questions (remote vs. local, whether markdown deliverables also get published as Artifact links, verbosity, direct-spawn visibility) are asked and cached against exactly once per run rather than once per crew member.
+  Every consumer of a missing run id treats it as "unanswered, apply the conservative default" rather than asking - skipping the launcher does not error, it just means the whole session runs on defaults with nothing cached.
+- It resolves every discovered sibling project root (`bin/discover-projects`) and passes `--add-dir` for each, so a global-scope spawn, or wingman's own occasional cross-project read, never blocks on a first-time directory-permission prompt.
+- It registers this session's own tmux pane path at `$WM_HOME/self-pane` (only when running inside tmux) - the read-only signal `bin/watch-fleet`'s `self_pane_check` uses to detect wingman's own dropped Remote Control connection (see "Remote Control" below).
+- It refreshes `~/.wingman/` state and the project-discovery cache unconditionally on every launch, so the roster and project list are never stale from a previous run.
+
+None of this is required - the underlying scripts work without the launcher - but skipping it means hand-approving `--add-dir` prompts, no onboarding-preference caching for the run, and no disconnect detection for wingman's own session.
+
+## Remote Control
+
+Claude Code's Remote Control lets a session be reached from `claude.ai/code` or the Claude mobile app, not only via `tmux attach`.
+Wingman wires this up in both directions:
+
+- Every crew member launches with `--remote-control "wm-<id>"` (`bin/spawn-crew`, gated by `WM_REMOTE_CONTROL`, on by default) - the `wm-` prefix matches its tmux window name, so it reads identically in both places.
+  This fails soft: on an account that can't use Remote Control, the session just starts normally with it quietly unavailable.
+- A crew member's own dropped connection self-heals: `bin/watch-fleet`'s `remote_control_dropped_check` recognizes the disconnect banner in that member's pane and automatically retypes `/remote-control` to restore it.
+- Wingman's own connection is watched differently, on purpose: `self_pane_check` can see wingman's own disconnect banner but deliberately never types into wingman's own pane - doing so from outside would race the very tool call meant to send the reconnect command.
+  Instead it wakes wingman with an explicit `remote-control-dropped` event, and wingman tells the pilot to run `/remote-control` themselves.
+- There is no reliable way to detect programmatically whether a given session is being watched locally or over Remote Control at any moment - see [`docs/analysis/2026-07-13-remote-control-transport-detectability.md`](analysis/2026-07-13-remote-control-transport-detectability.md) - which is why wingman asks once, up front, rather than guessing.
+
+## Mechanical guards
+
+The rules stated in prose throughout this document and `CLAUDE.md` are also enforced mechanically, via Claude Code `PreToolUse`/`PostToolUse` hooks in `hooks/`, not left to prompt discipline alone:
+
+- `hooks/no-direct-edit-guard.sh` blocks wingman's own top-level session (and any lead) from editing code or running long investigations directly - heavy work always goes to a crew member.
+- `hooks/no-merge-guard.sh` denies `gh pr merge` and equivalents from every crew session unless that specific effort was granted `--allow-merge`; `hooks/merge-attribution-tracker.sh` posts a PR comment attributing an authorized merge to the crew member that made it.
+- `hooks/no-watcher-kill-guard.sh` denies a `kill`/`pkill`/`tmux kill-window`/`tmux kill-session` whose target resolves to a live `watch-fleet` cycle, so the wake loop's own process can't be killed by accident.
+- `hooks/api-outage-spawn-guard.sh` denies new crew spawns while a fleet-wide API outage is detected as active.
+- `hooks/artifact-link-guard.sh` and `hooks/artifact-publish-tracker.sh` enforce the Artifact-publish contract - a markdown deliverable is published as a hosted link only when the pilot asked for that and a content scan passes.
+- `hooks/pilot-preferences-guard.sh` denies every other tool call in a fresh run until the onboarding-preference questions are answered.
+
+Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
+
 ## Harness-agnostic by design
 
 The **crew** coordination layer - tmux windows, the JSON status files, the watcher loop, and the board - does not depend on any one agent harness.
