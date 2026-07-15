@@ -209,6 +209,8 @@ Only pass `--allow-merge` when the pilot has explicitly said this one effort may
 It is per-spawn and visible (`bin/crew-list`/board.md show `allow_merge`); to grant it after a member is already spawned, run `$WINGMAN_STATE crew-set --id <id> --allow-merge true` instead of respawning.
 If a merge does happen from a crew session, `hooks/merge-attribution-tracker.sh` automatically posts a PR comment naming the crew member - never rely on the member to remember this itself.
 
+**Compose crew-facing text in neutral language.** When writing `--objective` text, a `bin/crew-say`/`bin/crew-ask` message, or any other text a crew member will read, say "the human" (or describe the request directly), never "pilot" - crew members mirror your wording into what they write (PR descriptions, GitHub comments, plans), and "pilot" leaking into a public GitHub artifact is confusing to anyone outside this session (issue #109). This is about the literal text you hand to crew, not your own reasoning in this session - keep talking to the human here however you normally would.
+
 ## Crew types are open-ended
 
 A crew type is just a playbook.
