@@ -31,18 +31,33 @@
 #   crew-resume --all-died [--owner <id>]    resume every currently-died member
 #                                             (optionally scoped to one owner's
 #                                             team)
+#   --force    proceed even while the fleet outage-state reads "active" (see
+#              below) - never inferred, mirrors --force-during-outage on
+#              bin/spawn-crew.
+#
+# Outage-timing guard (issue #23, item 3): refuses (with --force required to
+# override) while $WM_HOME/api-outage-state.json reads "active" - resuming
+# while 529s are still bursting risks the freshly-relaunched session dying
+# again immediately, the exact risk issue #23's own comment names. This is
+# defense in depth for a HUMAN running this by hand; the automated path
+# (wingman itself, on an outage-cleared fire) only ever runs this once the
+# state has already flipped back to "clear", so the guard is a no-op there.
+# A missing/unreadable state file reads as "clear" (fail open), matching
+# wm_state outage-update's own default for a fresh install.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
 ALL_DIED=0
 OWNER_ARG=""
+FORCE=0
 IDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --all-died) ALL_DIED=1; shift ;;
     --owner)    OWNER_ARG="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,29p' "$0"; exit 0 ;;
+    --force)    FORCE=1; shift ;;
+    -h|--help)  sed -n '2,46p' "$0"; exit 0 ;;
     -*)         wm_die "unknown arg: $1" ;;
     *)          IDS="$IDS $1"; shift ;;
   esac
@@ -53,6 +68,21 @@ if [ "$ALL_DIED" = 1 ]; then
 else
   [ -z "$OWNER_ARG" ] || wm_die "--owner only applies to --all-died"
   [ -n "$IDS" ] || wm_die "usage: crew-resume <id> [<id2> ...]  |  crew-resume --all-died [--owner <id>]"
+fi
+
+if [ "$FORCE" != 1 ]; then
+  _outage_state="$(wm_py -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        state = json.load(fh)
+except Exception:
+    state = {}
+print(state.get("state", "clear") if isinstance(state, dict) else "clear")
+' "$WM_HOME/api-outage-state.json" 2>/dev/null)"
+  if [ "$_outage_state" = active ]; then
+    wm_die "a fleet-wide API outage is currently active ($WM_HOME/api-outage-state.json) - resuming now risks the relaunched session dying again immediately into the same burst. Wait for it to clear (the watcher's own outage-cleared fire is the normal trigger for this), or pass --force to proceed anyway."
+  fi
 fi
 
 # Same model/effort/permission-mode resolution convention as bin/spawn-crew: no
