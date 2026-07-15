@@ -284,7 +284,7 @@ fi
 # so this is registered unconditionally, with no crew-type gating at all.
 WATCHER_KILL_HOOK="$WM_REPO/hooks/no-watcher-kill-guard.sh"
 if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
-    --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse --check >/dev/null 2>&1; then
+    --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
   wm_ok "watcher-protection guard hook registered ($GUARD_SETTINGS)"
 else
   wm_warn "watcher-protection guard hook (issue #64) not registered in $GUARD_SETTINGS"
@@ -297,10 +297,10 @@ else
     read ans
     case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
   else
-    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $WATCHER_KILL_HOOK"
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $WATCHER_KILL_HOOK --matcher Bash"
   fi
   if [ "$do_it" = 1 ]; then
-    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse --matcher Bash; then
       wm_ok "registered watcher-protection guard hook"
     else
       wm_err "failed to register watcher-protection guard hook"

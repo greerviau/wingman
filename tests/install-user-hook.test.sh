@@ -226,6 +226,20 @@ print('yes' if '$TEST_REPO/hooks/no-watcher-kill-guard.sh' in cmds else 'no')
 " 2>/dev/null)"
 assert_eq "doctor registers the watcher-protection guard under PreToolUse" "$watcher_found" "yes"
 
+# Scoped to Bash alone (not the broader Edit|Write|NotebookEdit|Bash default) -
+# this hook only ever inspects Bash tool calls, and a broader matcher would
+# needlessly run its cheap "kill" substring pre-gate against every Edit/Write/
+# NotebookEdit payload too.
+watcher_matcher="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+for g in d['hooks']['PreToolUse']:
+    if any(h['command'] == '$TEST_REPO/hooks/no-watcher-kill-guard.sh' for h in g['hooks']):
+        print(g.get('matcher'))
+        break
+" 2>/dev/null)"
+assert_eq "doctor scopes the watcher-protection guard to the Bash matcher" "$watcher_matcher" "Bash"
+
 # Re-running doctor is a no-op for the already-registered set.
 out2="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a second doctor run reports the artifact hooks already registered" "$out2" "Artifact-publish contract hooks registered"

@@ -24,6 +24,36 @@ print(json.dumps(data))
 ' "$1" "$TEST_REPO" | bash "$HOOK"
 }
 
+# run_hook, but executed FROM WITHIN a real tmux pane via send-keys, so the
+# guard's own tmux queries (list-panes with no -t, display-message) resolve
+# "current session"/"current window" against that pane's REAL $TMUX context -
+# needed to test the omitted-target default correctly, which plain run_hook
+# (invoked from this test process's own, unrelated tmux context) cannot
+# exercise faithfully. Writes the hook's stdout to $1, waited for below via
+# wait_for_file_nonempty. A wrapper script file sidesteps send-keys quoting.
+run_hook_in_pane() {
+  # run_hook_in_pane <target-pane> <command> <outfile>
+  _rhp_script="$(wm_mktemp_file)"
+  cat > "$_rhp_script" <<SCRIPT
+#!/usr/bin/env bash
+export WINGMAN_HOME="$WINGMAN_HOME"
+uv run --no-project --quiet python -c 'import json, sys
+data = {"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}, "cwd": sys.argv[2]}
+print(json.dumps(data))' "$2" "$TEST_REPO" | bash "$HOOK" > "$3" 2>&1
+SCRIPT
+  chmod +x "$_rhp_script"
+  tmux send-keys -t "$1" "bash '$_rhp_script'" Enter
+}
+
+wait_for_file_nonempty() {
+  _i=0
+  while [ ! -s "$1" ] && [ "$_i" -lt 50 ]; do
+    sleep 0.2
+    _i=$((_i + 1))
+  done
+  [ -s "$1" ]
+}
+
 # Poll `bin/watch-fleet --status` (documented: exit 0 iff a cycle is live)
 # rather than a fixed sleep, so this is not flaky under load.
 wait_for_cycle_live() {
@@ -145,6 +175,46 @@ assert_eq "tmux kill-session on an unrelated session is allowed (no output)" "$o
 tmux kill-session -t "=$WM_TMUX_SESSION-other" 2>/dev/null
 
 # --- clean up this cycle + session before moving on --------------------------
+"$WF" --stop >/dev/null 2>&1
+tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
+
+# ============================================================================
+# PR #105 review round 1 (must-fix regressions):
+#
+# (a) `tmux kill-session` with -t OMITTED must protect a watcher living in a
+#     SIBLING window of the same session, not just the pane the command was
+#     typed into - `tmux kill-session` with no -t destroys the WHOLE current
+#     session. Exercised from a REAL tmux pane (via send-keys) so the guard's
+#     own `tmux list-panes -s` (no -t) resolves "current session" against
+#     that pane's actual $TMUX context, not this test process's own.
+#
+# (b) a leading tmux global flag (-L/-S/...) before the subcommand must not
+#     bypass detection - `tmux -S <sock> kill-window ...` must be denied
+#     exactly like the bare form.
+# ============================================================================
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n typedwin
+tmux new-window -d -t "=$WM_TMUX_SESSION" -n watcherwin \
+  "WINGMAN_HOME='$WINGMAN_HOME' WM_WATCH_INTERVAL='$WM_WATCH_INTERVAL' '$WF'"
+assert_true "the sibling-window cycle comes up live" "wait_for_cycle_live"
+
+OMITTED_OUT="$(wm_mktemp_file)"
+run_hook_in_pane "=$WM_TMUX_SESSION:typedwin" "tmux kill-session" "$OMITTED_OUT"
+assert_true "the hook call typed into the sibling pane completes" "wait_for_file_nonempty '$OMITTED_OUT'"
+assert_contains "bare tmux kill-session (no -t), typed in a SIBLING window, is denied" \
+  "$(cat "$OMITTED_OUT" 2>/dev/null)" '"permissionDecision": "deny"'
+assert_true "the watcher is still alive - only the hook ran, never a real kill-session" "wait_for_cycle_live"
+
+SOCK="$(tmux display-message -p '#{socket_path}')"
+out="$(run_hook "tmux -S $SOCK kill-window -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "a global -S <socket> flag before kill-window does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux -L somesockname kill-session -t $WM_TMUX_SESSION")"
+assert_contains "a global -L <name> flag before kill-session does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux -2 -q kill-window -t $WM_TMUX_SESSION:typedwin")"
+assert_eq "boolean global flags before kill-window on an unrelated (real) target are allowed (no output)" "$out" ""
+
 "$WF" --stop >/dev/null 2>&1
 tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
 

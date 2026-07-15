@@ -55,16 +55,22 @@
 #     missed deny, which is the one outcome this hook must never produce. A
 #     pattern that fails to compile as a regex is treated as a match (fail
 #     closed on the specific pid it's checked against), not silently skipped.
-#   - tmux kill-window/kill-session: the target (or, if -t is omitted, the
-#     calling session's own current pane, via `tmux display-message -p
-#     '#{pane_pid}'`) is resolved to its pane pid(s), then the WHOLE process
-#     tree rooted there is walked with one `ps -ax -o pid=,ppid=` scan (the
-#     same approach bin/lib/wm-state.py's _ps_tree() uses for stall
-#     detection, reimplemented here as a small self-contained walk rather
-#     than a cross-module import, matching this file's siblings). Any
-#     protected pid anywhere in that tree denies - conflating "this pid is
-#     merely a descendant of the target" with "this pid IS the target" is
-#     deliberately conservative.
+#   - tmux kill-window/kill-session: the target's pane pid(s) are resolved via
+#     `tmux list-panes` scoped to what the command would actually destroy -
+#     every pane in the whole session for kill-session (`-s`), every pane in
+#     the window for kill-window (a split window has more than one pane) -
+#     never a single pane pid, since `-t` omitted defaults to the CURRENT
+#     session/window as a whole, not the one pane the command was typed
+#     into. tmux's own leading global options (-L/-S/-f/-c/...) are skipped
+#     before the subcommand is even identified, so `tmux -L sock
+#     kill-session ...` is recognized exactly like the bare form. The WHOLE
+#     process tree rooted at every resolved pane pid is then walked with one
+#     `ps -ax -o pid=,ppid=` scan (the same approach bin/lib/wm-state.py's
+#     _ps_tree() uses for stall detection, reimplemented here as a small
+#     self-contained walk rather than a cross-module import, matching this
+#     file's siblings). Any protected pid anywhere in that tree denies -
+#     conflating "this pid is merely a descendant of the target" with "this
+#     pid IS the target" is deliberately conservative.
 #
 # cmd_match.py's command_segments()/resolve_command() are used exactly as the
 # other guards use them, including its fail-CLOSED contract on an unlexable
@@ -320,21 +326,52 @@ def tmux_target_value(rest):
     return None
 
 
-def current_pane_pid():
-    try:
-        out = subprocess.check_output(
-            ["tmux", "display-message", "-p", "#{pane_pid}"],
-            stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-    except Exception:
-        return None
-    return int(out) if out.isdigit() else None
+# tmux own global options, which may precede the subcommand
+# (`tmux -L sock kill-session ...`): value-taking (-L/-S/-f/-c <value>, plus
+# their fused forms e.g. -Lsockname) and boolean (-2/-8/-u/-v/-V/-q/-l/-C/-CC).
+# Skipped exactly like extract_pkill_pattern skips pkills own option flags,
+# so a leading global flag can never hide the subcommand from detection.
+_TMUX_GLOBAL_VALUE_FLAGS = ("-L", "-S", "-f", "-c")
+_TMUX_GLOBAL_BOOL_FLAGS = ("-2", "-8", "-u", "-v", "-V", "-q", "-l", "-C", "-CC")
+
+
+def tmux_subcommand_index(args):
+    """args = argv[1:] (everything after the resolved `tmux`). Returns the
+    index of the first token that is not one of tmux'"'"'s own global options -
+    the subcommand position."""
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _TMUX_GLOBAL_VALUE_FLAGS:
+            i += 2
+            continue
+        if any(tok.startswith(f) and len(tok) > 2 for f in _TMUX_GLOBAL_VALUE_FLAGS):
+            i += 1  # fused form, e.g. -Lsockname
+            continue
+        if tok in _TMUX_GLOBAL_BOOL_FLAGS:
+            i += 1
+            continue
+        break
+    return i
 
 
 def resolve_pane_pids(kind, target):
+    # `-t` omitted: fall back to tmux'"'"'s own default target resolution (via
+    # $TMUX, the same context `tmux display-message` would use) rather than
+    # a single pane - `kill-session` with no `-t` destroys the WHOLE current
+    # session (every window, every pane), not just the pane the command was
+    # typed into, and `kill-window` with no `-t` destroys the whole current
+    # window (which may itself hold more than one pane, if split). `-s` (no
+    # `-t`) lists every pane in the current session; plain `list-panes` (no
+    # `-s`, no `-t`) lists every pane in the current window - so, in both
+    # cases, "list panes scoped to the right level" rather than "resolve one
+    # pid" is what must happen when the target is left implicit.
     cmd = ["tmux", "list-panes"]
     if kind == "kill-session":
-        cmd.append("-s")  # list every pane across the whole session, not one window
-    cmd += ["-t", target, "-F", "#{pane_pid}"]
+        cmd.append("-s")  # every pane across the whole session, not one window
+    if target:
+        cmd += ["-t", target]
+    cmd += ["-F", "#{pane_pid}"]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=5).decode()
     except Exception:
@@ -381,16 +418,26 @@ def check_tmux_kill(argv, protected):
         return
     kind = argv[1]
     target = tmux_target_value(argv[2:])
-    if target:
-        root_pids = resolve_pane_pids(kind, target)
-    else:
-        cpp = current_pane_pid()
-        root_pids = [cpp] if cpp is not None else []
+    root_pids = resolve_pane_pids(kind, target)
     if not root_pids:
         return
     hit = protected & ps_tree_descendants(root_pids)
     if hit:
         deny(watcher_kill_reason(sorted(hit)[0]))
+
+
+def check_tmux(argv, protected):
+    # argv[1] is not always the subcommand: tmux accepts its own global
+    # options before it (`tmux -L sock kill-session ...`) - skip past those
+    # first so a leading global flag can never bypass detection.
+    args = argv[1:]
+    idx = tmux_subcommand_index(args)
+    if idx >= len(args):
+        return
+    kind = args[idx]
+    if kind not in ("kill-window", "kill-session"):
+        return
+    check_tmux_kill(["tmux", kind] + args[idx + 1:], protected)
 
 
 # cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
@@ -413,8 +460,8 @@ if protected:
             check_kill(argv, protected)
         elif b == "pkill":
             check_pkill(argv, protected)
-        elif b == "tmux" and len(argv) > 1 and argv[1] in ("kill-window", "kill-session"):
-            check_tmux_kill(argv, protected)
+        elif b == "tmux":
+            check_tmux(argv, protected)
 
 sys.exit(0)
 ' 2>/dev/null
