@@ -308,6 +308,62 @@ else
   fi
 fi
 
+# --- Outage-detection guard hook (crew sessions, any repo), user scope ------
+# hooks/api-outage-spawn-guard.sh (PreToolUse) denies bin/spawn-crew while the
+# fleet outage-state ($WM_HOME/api-outage-state.json) reads "active" (issue
+# #23), so wingman and every lead stop adding load into a live Anthropic API
+# outage; already-running crew are never touched. Must fire inside crew
+# sessions whose project root is some other repo entirely, so like the other
+# crew-facing hooks it needs user-level registration - a project-level entry
+# in this repo's settings never loads there.
+outage_hook_specs() {
+  cat <<EOF
+$WM_REPO/hooks/api-outage-spawn-guard.sh PreToolUse Bash
+EOF
+}
+outage_hooks_missing=0
+while read -r _h _e _m; do
+  [ -n "$_h" ] || continue
+  uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+      --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --check >/dev/null 2>&1 \
+    || outage_hooks_missing=1
+done <<EOF
+$(outage_hook_specs)
+EOF
+if [ "$outage_hooks_missing" = 0 ]; then
+  wm_ok "outage-detection guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "outage-detection guard hook (issue #23) not registered in $GUARD_SETTINGS"
+  printf '    pauses new bin/spawn-crew calls while a fleet-wide API outage is active,\n'
+  printf '    for crew sessions in any repo, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; re-run bin/doctor -y to register it"
+  fi
+  if [ "$do_it" = 1 ]; then
+    outage_install_failed=0
+    while read -r _h _e _m; do
+      [ -n "$_h" ] || continue
+      uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+          --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --matcher "$_m" >/dev/null \
+        || outage_install_failed=1
+    done <<EOF
+$(outage_hook_specs)
+EOF
+    if [ "$outage_install_failed" = 0 ]; then
+      wm_ok "registered outage-detection guard hook"
+    else
+      wm_err "failed to register outage-detection guard hook"
+    fi
+  fi
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"

@@ -7,7 +7,7 @@
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] \
-#              [--allow-merge]
+#              [--allow-merge] [--force-during-outage]
 #
 # --repo grounds the member in one git checkout (the default). --scope global
 # grounds it at the workspace root with every discovered repo added, so it can work
@@ -31,11 +31,20 @@
 # Remote Control: every crew member launches Remote-Control-visible by default
 # (reachable from claude.ai/code, not only via tmux attach), as name "wm-<id>".
 # Set WM_REMOTE_CONTROL= (empty) to disable.
+#
+# --force-during-outage (issue #23, item 2): the escape hatch for
+# hooks/api-outage-spawn-guard.sh, which otherwise denies every spawn-crew
+# call while the fleet outage-state ($WM_HOME/api-outage-state.json) reads
+# "active". Mirrors --allow-merge's convention exactly: explicit, per-call,
+# never inferred. This script itself does nothing with the flag beyond
+# accepting it (and noting it in its own success output) - all of the actual
+# gating logic lives in the hook, which inspects the raw command line for
+# this exact token before this script ever runs.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
-TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0
+TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0; FORCE_DURING_OUTAGE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --type)      TYPE="$2"; shift 2 ;;
@@ -47,6 +56,7 @@ while [ $# -gt 0 ]; do
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift 1 ;;
+    --force-during-outage) FORCE_DURING_OUTAGE=1; shift 1 ;;
     --list-types) wm_crew_types; exit 0 ;;
     -h|--help)   sed -n '2,22p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
@@ -350,5 +360,6 @@ else
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 fi
 [ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort (issue #46)"
+[ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage (issue #23)"
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
 echo "$ID"
