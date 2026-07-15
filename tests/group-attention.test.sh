@@ -109,4 +109,86 @@ parsed="$(printf '%s\n' "$out" | while IFS=$'\t' read -r id st upd note; do
 done)"
 assert_contains "the grouped row parses as id/status/updated/note" "$parsed" "ok:correlated:mass-death:died"
 
+# --- a died batch tagged death_cause=api-outage collapses into
+# correlated:api-outage-death, never correlated:mass-death (issue #23) -------
+# g1, g2 die with death_cause=api-outage; g3 (working) is the only other live
+# member. Denominator = 1 (g3) + 2 (died) = 3; ratio = 2/3 >= 0.5, count 2 >= 2.
+tag_death_cause() {
+  # tag_death_cause <crew.json path> <id> [<id2> ...]
+  _tdc_path="$1"; shift
+  uv run --no-project --quiet python -c '
+import json, sys
+path, ids = sys.argv[1], sys.argv[2:]
+d = json.load(open(path))
+for r in d:
+    if r.get("id") in ids:
+        r["death_cause"] = "api-outage"
+json.dump(d, open(path, "w"))
+' "$_tdc_path" "$@"
+}
+
+test_new_home
+wm_state crew-add --id g1 --type developer --objective a --repo /tmp --window wm-g1 --session-id sg1 >/dev/null
+wm_state crew-add --id g2 --type developer --objective b --repo /tmp --window wm-g2 --session-id sg2 >/dev/null
+wm_state crew-add --id g3 --type developer --objective c --repo /tmp --window wm-g3 --session-id sg3 >/dev/null
+wm_state crew-set --id g1 --status died >/dev/null
+wm_state crew-set --id g2 --status died >/dev/null
+tag_death_cause "$WINGMAN_HOME/crew.json" g1 g2
+input="$(printf 'g1\tdied\tX\t\ng2\tdied\tX\t')"
+out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
+assert_contains "an outage-tagged death batch collapses into api-outage-death" "$out" "correlated:api-outage-death"
+assert_false "it never collapses into plain mass-death" "printf '%s\n' \"$out\" | grep -q correlated:mass-death"
+assert_contains "the synthetic note says do NOT resume yet" "$out" "Do NOT resume yet"
+assert_contains "the synthetic note points at the pre-authorized auto-recovery" "$out" "issue #23"
+assert_contains "the collapsed row names g1" "$out" "g1"
+assert_contains "the collapsed row names g2" "$out" "g2"
+
+# --- a mixed-cause batch partitions and evaluates each subgroup independently
+# h1, h2 die with death_cause=api-outage (2 of them); h3, h4 die with no
+# cause tag (a plain crash, 2 of them); h5 stays working (the only other live
+# member). Denominator = 1 (h5) + 4 (died) = 5 for BOTH subsets.
+# outage subset: 2/5 = 0.4, BELOW the 0.5 default ratio - stays ungrouped.
+# crash subset:  2/5 = 0.4, BELOW the 0.5 default ratio - stays ungrouped too.
+# (Proves partitioning happens before the threshold check: neither subset is
+# padded by the other's count to cross the ratio it could not clear alone.)
+test_new_home
+wm_state crew-add --id h1 --type developer --objective a --repo /tmp --window wm-h1 --session-id sh1 >/dev/null
+wm_state crew-add --id h2 --type developer --objective b --repo /tmp --window wm-h2 --session-id sh2 >/dev/null
+wm_state crew-add --id h3 --type developer --objective c --repo /tmp --window wm-h3 --session-id sh3 >/dev/null
+wm_state crew-add --id h4 --type developer --objective d --repo /tmp --window wm-h4 --session-id sh4 >/dev/null
+wm_state crew-add --id h5 --type developer --objective e --repo /tmp --window wm-h5 --session-id sh5 >/dev/null
+for i in h1 h2 h3 h4; do wm_state crew-set --id "$i" --status died >/dev/null; done
+tag_death_cause "$WINGMAN_HOME/crew.json" h1 h2
+input="$(printf 'h1\tdied\tX\t\nh2\tdied\tX\t\nh3\tdied\tX\t\nh4\tdied\tX\t')"
+out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
+assert_false "the outage subset alone is below ratio, stays ungrouped" "printf '%s\n' \"$out\" | grep -q correlated:api-outage-death"
+assert_false "the crash subset alone is below ratio, stays ungrouped" "printf '%s\n' \"$out\" | grep -q correlated:mass-death"
+assert_contains "h1 stays an individual row" "$out" "h1"
+assert_contains "h2 stays an individual row" "$out" "h2"
+assert_contains "h3 stays an individual row" "$out" "h3"
+assert_contains "h4 stays an individual row" "$out" "h4"
+
+# A mixed batch where ONLY the outage subset clears threshold: i1..i4 die
+# tagged api-outage (4 of them); i5 dies untagged (1, alone, never collapses on
+# its own); i6 stays working. Denominator = 1 (i6) + 5 (died) = 6.
+# outage subset: 4/6 = 0.667 >= 0.5, count 4 >= 2 - COLLAPSES.
+# crash subset:  1/6 = 0.167, count 1 < 2 - never collapses regardless of ratio.
+test_new_home
+for n in 1 2 3 4; do
+  wm_state crew-add --id "i$n" --type developer --objective "o$n" --repo /tmp --window "wm-i$n" --session-id "si$n" >/dev/null
+done
+wm_state crew-add --id i5 --type developer --objective o5 --repo /tmp --window wm-i5 --session-id si5 >/dev/null
+wm_state crew-add --id i6 --type developer --objective o6 --repo /tmp --window wm-i6 --session-id si6 >/dev/null
+for n in 1 2 3 4 5; do wm_state crew-set --id "i$n" --status died >/dev/null; done
+tag_death_cause "$WINGMAN_HOME/crew.json" i1 i2 i3 i4
+input="$(printf 'i1\tdied\tX\t\ni2\tdied\tX\t\ni3\tdied\tX\t\ni4\tdied\tX\t\ni5\tdied\tX\t')"
+out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
+assert_contains "the outage subset (4 of 4 outage-tagged) collapses on its own" "$out" "correlated:api-outage-death"
+assert_contains "the collapsed row names all four outage-tagged ids" "$out" "i1"
+assert_false "the untagged minority (i5) is never absorbed into the outage-death bucket" \
+  "printf '%s\n' \"$out\" | grep -A0 correlated:api-outage-death | grep -q i5"
+assert_contains "the untagged minority (i5) still passes through as its own row" "$out" "i5	died	X	"
+assert_false "the untagged minority never collapses into mass-death either (count < min-count)" \
+  "printf '%s\n' \"$out\" | grep -q correlated:mass-death"
+
 test_summary

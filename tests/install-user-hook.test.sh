@@ -215,8 +215,22 @@ print('yes' if '$TEST_REPO/hooks/artifact-link-guard.sh' in cmds else 'no')
 " 2>/dev/null)"
 assert_eq "doctor registers the link guard under PreToolUse" "$link_found" "yes"
 
+# doctor also registers the outage-detection guard (issue #23): PAUSE only
+# actually takes effect in production if this registration step runs -
+# proving the hook script itself works in isolation (its own
+# api-outage-spawn-guard.test.sh) is not enough on its own.
+assert_contains "doctor reports the outage-detection guard hook registered" "$out" "registered outage-detection guard hook"
+outage_found="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/api-outage-spawn-guard.sh' in cmds else 'no')
+" 2>/dev/null)"
+assert_eq "doctor registers the outage-detection guard under PreToolUse" "$outage_found" "yes"
+
 # Re-running doctor is a no-op for the already-registered set.
 out2="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a second doctor run reports the artifact hooks already registered" "$out2" "Artifact-publish contract hooks registered"
+assert_contains "a second doctor run reports the outage-detection guard hook already registered" "$out2" "outage-detection guard hook registered"
 
 test_summary

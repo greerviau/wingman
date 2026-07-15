@@ -26,6 +26,16 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     other. Each answer is asked once via AskUserQuestion and
                     reused for the rest of its run - see
                     cmd_pref_get/cmd_pref_set/cmd_prefs_list
+  api-outage-state.json  the persisted fleet-wide outage-state machine (issue
+                    #23), written only by wingman's own top-level watch cycle
+                    every poll: {"state": "clear"|"active", "since": <ts>,
+                    "last_signal": <ts-or-null>, "signal_count": <int>}. See
+                    cmd_outage_update. Read directly (not through this tool)
+                    by hooks/api-outage-spawn-guard.sh and bin/crew-resume.
+  pane-tail-<id>.txt  the last WM_APIERR_TAIL lines of a live working/blocked
+                    member's pane, overwritten every poll by bin/watch-fleet
+                    (see wm_pane_snapshot). Consulted by cmd_reconcile at the
+                    moment a member flips to `died`, to tag death_cause.
 
 The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/artifact/delivery/updated).
@@ -40,6 +50,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -70,6 +81,21 @@ TERMINAL_STATES = ("done", "died", "stood-down")
 # surfaced: the pilot is pinged once, but the member stays in flight until
 # someone disposes of it.
 ATTENTION_STATES = ("blocked", "review", "done", "died", "stalled")
+
+# The API/connectivity-error pane signature (issue #23), duplicated here from
+# bin/watch-fleet's own WM_APIERR_RE default (never imported - the shell and
+# this file have no shared config loader; kept in sync with the portable-ERE
+# form from #52) so a caller that omits --apierr-re (a direct `wm_state
+# reconcile` call in a test, say) still gets sane matching. Production always
+# passes the value explicitly from bin/watch-fleet's own $WM_APIERR_RE, so the
+# two copies cannot silently drift apart in the path that matters.
+DEFAULT_APIERR_RE = (
+    r"rate.limit|rate_limit|(^|[^0-9A-Za-z_])429([^0-9A-Za-z_]|$)|"
+    r"(^|[^0-9A-Za-z_])5[0-9][0-9] [Ee]rror|overloaded_error|"
+    r"Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|"
+    r"[Cc]onnection error|Connection refused|fetch failed|socket hang up|"
+    r"Service Unavailable|Bad Gateway|Gateway Timeout"
+)
 
 
 def home():
@@ -106,6 +132,37 @@ def acked_path():
 
 def handled_path():
     return os.path.join(home(), "handled.json")
+
+
+def outage_state_path():
+    return os.path.join(home(), "api-outage-state.json")
+
+
+def _sanitize_id(cid):
+    """Filesystem-safe form of a crew id, matching bin/lib/common.sh's own
+    `tr -c 'A-Za-z0-9._-' '_'` convention used for every other per-id
+    sidecar file (pane-<id>.hash, stall-<id>.nudged, ...)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", cid or "")
+
+
+def pane_tail_path(cid):
+    return os.path.join(home(), "pane-tail-%s.txt" % _sanitize_id(cid))
+
+
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def _apierr_match(text, pattern):
+    """True iff `pattern` (grep -qE semantics: ^/$ anchor to each LINE, not
+    the whole capture) matches somewhere in `text`. re.MULTILINE reproduces
+    that per-line anchoring for a Python re.search over a multi-line pane
+    capture."""
+    return bool(text) and re.search(pattern, text, re.MULTILINE) is not None
 
 
 @contextlib.contextmanager
@@ -328,6 +385,14 @@ def cmd_crew_add(args):
         # orphaned_from names it, even though its live parent was moved to the
         # grandparent. None until the member is orphaned.
         "orphaned_from": None,
+        # Cause attribution for a `died` flip (issue #23), set only by
+        # cmd_reconcile at the moment it flips this record - "api-outage" if
+        # the member's cached pane tail (pane_tail_path) matched the
+        # API-error signature just before its window disappeared, otherwise
+        # left None (today's behavior: an ordinary death with no cause on
+        # record, e.g. a tmux/host crash). Roster-only, like orphaned_from -
+        # never mirrored into the live status file.
+        "death_cause": None,
         # Immutable spawn stamp; never rewritten by crew-set (see the stamp comment
         # above). Consumed by the prompt-freeze liveness veto.
         "spawned_at": stamp,
@@ -482,6 +547,13 @@ def cmd_reconcile(args):
     """Mark live-but-windowless crew as 'died'. Given the current tmux windows,
     any crew member still in a live state whose window is gone is flagged.
 
+    Cause attribution (issue #23): each flip also checks the member's cached
+    pane-tail file (pane_tail_path, written every poll by bin/watch-fleet for
+    a live working/blocked member) against --apierr-re; a match tags
+    death_cause="api-outage" on the roster record, otherwise death_cause stays
+    unset - see cmd_group_attention for how this feeds the correlated-batch
+    split and cmd_outage_update for the fleet-wide signal it feeds.
+
     Dead-owner re-adopt (Fix B / #11), run ONLY under wingman's watcher
     (--owner ""): after the death flip, any still-live worker whose window is alive
     but whose owner is now terminal (died/stood-down) is re-parented to the dead
@@ -493,6 +565,7 @@ def cmd_reconcile(args):
     read-modify-write of crew.json stays single-writer (N4)."""
     ensure_home()
     owner = getattr(args, "owner", None)
+    apierr_re = getattr(args, "apierr_re", None) or DEFAULT_APIERR_RE
     live_windows = set(w for w in (args.windows or "").split(",") if w)
     with with_locked(crew_json_path()):
         roster = load_roster()
@@ -502,6 +575,8 @@ def cmd_reconcile(args):
             if m.get("status") in LIVE_STATES and r.get("window") not in live_windows:
                 r["status"] = "died"
                 r["updated"] = now()
+                if _apierr_match(read_text(pane_tail_path(r["id"])), apierr_re):
+                    r["death_cause"] = "api-outage"
                 # reflect into the status file too
                 live = read_json(status_path(r["id"]), {"id": r["id"]})
                 live["status"] = "died"
@@ -933,28 +1008,40 @@ def cmd_needs_attention(args):
 def cmd_group_attention(args):
     """Read needs-attention's TSV from stdin (id, status, updated, note) and
     collapse fleet-wide correlated batches into one synthetic row each, passing
-    every other row through unchanged. Two recognized patterns, both meaning
+    every other row through unchanged. Three recognized patterns, all meaning
     "many crew show the same abnormal signal in one pass":
-      - status == "died"                                     -> key "mass-death"
-      - status == "stalled" and note startswith "api-error:"  -> key "api-outage"
+      - status == "died", death_cause != "api-outage"          -> key "mass-death"
+      - status == "died", death_cause == "api-outage"           -> key "api-outage-death"
+      - status == "stalled" and note startswith "api-error:"    -> key "api-outage"
     A group collapses only at or above --mass-min-count AND --mass-min-ratio (of
     the relevant live population - see below); below threshold its rows pass
     through individually, so one routine died/stalled member is untouched.
 
-    Pure filter: recomputes the roster snapshot fresh on every call and writes
-    nothing. The synthetic row's id ("correlated:mass-death"/"correlated:api-
-    outage") is not a real crew id - callers must ack/mark-handled from the
-    ORIGINAL ungrouped needs-attention output, never from this filtered one.
-    --owner scopes the ratio's denominator to the same cohort needs-attention
-    was called with ("" = top level, matching a lead's own scope), so a lead's
-    cycle judges "N of M" against its own team, not the whole fleet.
+    The `died` batch is partitioned by death_cause (issue #23, item 1) BEFORE
+    the threshold is applied, and each partition is evaluated independently: a
+    minority of outage-tagged deaths inside a larger crash-caused batch is
+    never silently absorbed into "likely a tmux/host crash" (which would wrongly
+    invite an immediate resume into a still-live burst), and vice versa - a
+    minority of ordinary crash deaths alongside a larger outage-tagged batch is
+    never absorbed into the "wait for outage-cleared" message. death_cause is
+    read fresh from the roster (merged view), not from the TSV note.
 
-    Ratio denominators: a `died` member has just left LIVE_STATES, so
-    mass-death's denominator is (current live count for this owner) + (number
-    of died rows in this batch) - "how many were live a moment before this
-    pass," not the post-death count, which would undercount and inflate the
-    ratio. `stalled` is still a LIVE_STATES member, so api-outage's denominator
-    is simply the current live count - no adjustment needed."""
+    Pure filter: recomputes the roster snapshot fresh on every call and writes
+    nothing. A synthetic row's id ("correlated:mass-death"/"correlated:api-
+    outage-death"/"correlated:api-outage") is not a real crew id - callers must
+    ack/mark-handled from the ORIGINAL ungrouped needs-attention output, never
+    from this filtered one. --owner scopes the ratio's denominator to the same
+    cohort needs-attention was called with ("" = top level, matching a lead's
+    own scope), so a lead's cycle judges "N of M" against its own team, not the
+    whole fleet.
+
+    Ratio denominators: a `died` member (either cause) has just left
+    LIVE_STATES, so both death partitions share one denominator - (current live
+    count for this owner) + (total died rows in this batch, both causes) -
+    "how many were live a moment before this pass," not the post-death count,
+    which would undercount and inflate the ratio. `stalled` is still a
+    LIVE_STATES member, so api-outage's denominator is simply the current live
+    count - no adjustment needed."""
     owner = getattr(args, "owner", None)
     min_count = args.mass_min_count
     min_ratio = args.mass_min_ratio
@@ -969,7 +1056,13 @@ def cmd_group_attention(args):
             parts.append("")
         rows.append(tuple(parts))  # (id, status, updated, note)
 
+    death_cause_by_id = {}
+    for r in load_roster():
+        death_cause_by_id[r.get("id")] = merged(r).get("death_cause")
+
     died_rows = [r for r in rows if r[1] == "died"]
+    outage_death_rows = [r for r in died_rows if death_cause_by_id.get(r[0]) == "api-outage"]
+    crash_death_rows = [r for r in died_rows if death_cause_by_id.get(r[0]) != "api-outage"]
     outage_rows = [r for r in rows if r[1] == "stalled" and r[3].startswith("api-error:")]
 
     current_live = 0
@@ -986,9 +1079,11 @@ def cmd_group_attention(args):
     def collapses(n, denom):
         return n >= min_count and denom > 0 and (n / float(denom)) >= min_ratio
 
-    mass_collapse = bool(died_rows) and collapses(len(died_rows), mass_denominator)
+    crash_collapse = bool(crash_death_rows) and collapses(len(crash_death_rows), mass_denominator)
+    outage_death_collapse = bool(outage_death_rows) and collapses(len(outage_death_rows), mass_denominator)
     outage_collapse = bool(outage_rows) and collapses(len(outage_rows), outage_denominator)
-    died_ids = set(r[0] for r in died_rows)
+    crash_ids = set(r[0] for r in crash_death_rows)
+    outage_death_ids = set(r[0] for r in outage_death_rows)
     outage_ids = set(r[0] for r in outage_rows)
 
     resume_cmd = "bin/crew-resume --all-died"
@@ -996,16 +1091,30 @@ def cmd_group_attention(args):
         resume_cmd += " --owner %s" % owner
 
     emitted_mass = False
+    emitted_outage_death = False
     emitted_outage = False
     for rid, status, upd, note in rows:
-        if mass_collapse and rid in died_ids:
+        if crash_collapse and rid in crash_ids:
             if emitted_mass:
                 continue
             emitted_mass = True
-            names = ", ".join("`%s`" % i for i in (r[0] for r in died_rows))
+            names = ", ".join("`%s`" % i for i in (r[0] for r in crash_death_rows))
             synth_note = ("%d crew members died together (likely a tmux/host crash): %s. "
-                          "Default remedy: `%s`." % (len(died_rows), names, resume_cmd))
+                          "Default remedy: `%s`." % (len(crash_death_rows), names, resume_cmd))
             print("%s\t%s\t%s\t%s" % ("correlated:mass-death", "died", now(), synth_note))
+            continue
+        if outage_death_collapse and rid in outage_death_ids:
+            if emitted_outage_death:
+                continue
+            emitted_outage_death = True
+            names = ", ".join("`%s`" % i for i in (r[0] for r in outage_death_rows))
+            synth_note = ("%d crew members died together during a detected API outage: %s. "
+                          "Do NOT resume yet - the same root cause as a correlated api-outage "
+                          "stall (an Anthropic-side burst, not a tmux/host crash), so resuming "
+                          "now risks immediate re-death. Once the outage clears, `%s` runs "
+                          "automatically for these (pre-authorized auto-recovery, issue #23)."
+                          % (len(outage_death_rows), names, resume_cmd))
+            print("%s\t%s\t%s\t%s" % ("correlated:api-outage-death", "died", now(), synth_note))
             continue
         if outage_collapse and rid in outage_ids:
             if emitted_outage:
@@ -1019,6 +1128,92 @@ def cmd_group_attention(args):
             print("%s\t%s\t%s\t%s" % ("correlated:api-outage", "stalled", now(), synth_note))
             continue
         print("%s\t%s\t%s\t%s" % (rid, status, upd, note))
+
+
+def _default_outage_state():
+    return {"state": "clear", "since": now(), "last_signal": None, "signal_count": 0}
+
+
+def cmd_outage_update(args):
+    """Advance the persisted fleet-wide outage-state machine by one poll
+    (issue #23, item 0). Called every bin/watch-fleet iteration, but only from
+    wingman's own top-level cycle (--owner "") - outage detection is
+    fleet-wide, never per-lead-team.
+
+    This poll's own signal count = --signal-working (members currently
+    `working` whose pane tail matched the API-error signature THIS poll,
+    counted by the caller) + however many of --died (a comma-separated list of
+    ids wm-state reconcile just flipped to `died` THIS poll) carry
+    death_cause == "api-outage" on the roster (looked up fresh here).
+
+    clear -> active the moment that signal count is >= --mass-min-count AND
+    >= --mass-min-ratio of the population that was live a moment before this
+    poll (current live count for this owner + this poll's own died count,
+    both causes) - the identical collapse condition cmd_group_attention
+    applies to a batch, evaluated continuously here instead of only at fire
+    time.
+
+    active -> clear once --quiet-seconds elapse with a zero signal count on
+    every intervening poll (tracked via `last_signal`, the timestamp of the
+    most recent poll with a nonzero count).
+
+    Every transition (never a same-state refresh) prints its own distinct
+    token: "outage-detected", "outage-cleared", or "none". The caller
+    (bin/watch-fleet) fires its own wake only on the two transition tokens,
+    mirroring self_pane_check's fleet-scoped, non-per-id fire pattern."""
+    ensure_home()
+    owner = getattr(args, "owner", None) or ""
+    died_ids = [d for d in (args.died or "").split(",") if d]
+
+    roster = load_roster()
+    death_cause_by_id = dict((r.get("id"), merged(r).get("death_cause")) for r in roster)
+    outage_died = sum(1 for d in died_ids if death_cause_by_id.get(d) == "api-outage")
+
+    current_live = 0
+    for r in roster:
+        if merged(r).get("status") not in LIVE_STATES:
+            continue
+        if parent_of(r) != owner:
+            continue
+        current_live += 1
+
+    signal_count = args.signal_working + outage_died
+    denominator = current_live + len(died_ids)
+
+    state = read_json(outage_state_path(), None)
+    if not isinstance(state, dict) or state.get("state") not in ("clear", "active"):
+        state = _default_outage_state()
+
+    stamp = now()
+    transition = "none"
+    if state["state"] == "clear":
+        collapses = (signal_count >= args.mass_min_count and denominator > 0
+                     and (signal_count / float(denominator)) >= args.mass_min_ratio)
+        if collapses:
+            state = {"state": "active", "since": stamp, "last_signal": stamp, "signal_count": signal_count}
+            transition = "outage-detected"
+        else:
+            state["signal_count"] = signal_count
+            if signal_count > 0:
+                state["last_signal"] = stamp
+    else:  # active
+        if signal_count > 0:
+            state["last_signal"] = stamp
+            state["signal_count"] = signal_count
+        else:
+            last = _parse_updated(state.get("last_signal"))
+            quiet_for = (
+                (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds()
+                if last is not None else args.quiet_seconds + 1
+            )
+            if quiet_for >= args.quiet_seconds:
+                state = {"state": "clear", "since": stamp, "last_signal": state.get("last_signal"), "signal_count": 0}
+                transition = "outage-cleared"
+            else:
+                state["signal_count"] = 0
+
+    write_json(outage_state_path(), state)
+    print(transition)
 
 
 def cmd_ack(args):
@@ -1495,6 +1690,11 @@ def build_parser():
     # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
     # omit or pass a lead id to keep reconcile to the global death-flip only.
     a.add_argument("--owner", default=None)
+    # API-error pane signature (issue #23) checked against a dying member's
+    # cached pane tail to attribute death_cause. bin/watch-fleet always passes
+    # its own $WM_APIERR_RE explicitly; the argparse default here (matching
+    # that same regex) only covers a direct/test invocation that omits it.
+    a.add_argument("--apierr-re", default=DEFAULT_APIERR_RE, dest="apierr_re")
     a.set_defaults(fn=cmd_reconcile)
 
     a = sub.add_parser("standdown")
@@ -1549,6 +1749,18 @@ def build_parser():
     a.add_argument("--mass-min-count", type=int, default=2, dest="mass_min_count")
     a.add_argument("--mass-min-ratio", type=float, default=0.5, dest="mass_min_ratio")
     a.set_defaults(fn=cmd_group_attention)
+
+    # The persisted fleet-wide outage-state machine (issue #23, item 0).
+    # Called every bin/watch-fleet iteration from wingman's own top-level
+    # cycle only (--owner "").
+    a = sub.add_parser("outage-update")
+    a.add_argument("--owner", default="")
+    a.add_argument("--signal-working", type=int, default=0, dest="signal_working")
+    a.add_argument("--died", default="")
+    a.add_argument("--mass-min-count", type=int, default=2, dest="mass_min_count")
+    a.add_argument("--mass-min-ratio", type=float, default=0.5, dest="mass_min_ratio")
+    a.add_argument("--quiet-seconds", type=int, default=15, dest="quiet_seconds")
+    a.set_defaults(fn=cmd_outage_update)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)
