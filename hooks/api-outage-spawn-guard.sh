@@ -32,6 +32,12 @@
 # Registered user-level by bin/doctor, alongside no-merge-guard.sh (crew
 # sessions have their project root in other repos, where this repo's project
 # settings never load).
+#
+# A thin wrapper over the shared implementation (hooks/lib/spawn_pause_guard.py,
+# issue #24) - the cmd_match-based segment resolution, parse-fail-closed
+# handling, and fail-open-on-missing-state-file posture live there once,
+# shared with hooks/usage-limit-spawn-guard.sh, so the two guards cannot
+# silently drift apart over time.
 # bash-3.2-safe.
 set -u
 
@@ -50,108 +56,47 @@ esac
 printf '%s' "$INPUT" | \
   WINGMAN_HOME="${WINGMAN_HOME:-$HOME/.wingman}" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
-import json, os, sys
+import json, os
 
-from cmd_match import command_segments, resolve_command
+from spawn_pause_guard import run
 
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    data = {}
-
-if data.get("tool_name") != "Bash":
-    sys.exit(0)
-
-tool_input = data.get("tool_input", {}) or {}
-command = tool_input.get("command", "") or ""
 home = os.path.expanduser(os.environ.get("WINGMAN_HOME") or "~/.wingman")
-
-
-def deny(reason):
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }))
-    sys.exit(0)
-
-
-PARSE_FAIL_REASON = (
-    "This command could not be fully parsed - an unterminated quote, an "
-    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
-    "terminator line was never found - so it is denied rather than "
-    "partially checked (issue #56, the same posture hooks/no-merge-guard.sh "
-    "takes on this shape). Reformat it into well-formed shell syntax and "
-    "retry."
-)
-
-# cmd_match.py fails CLOSED on a command it cannot fully lex: command_segments()
-# returns None rather than a partial, truncated segment list.
-segments = command_segments(command)
-
-
-def spawn_calls_and_force():
-    calls = []
-    force = False
-    for seg in segments or []:
-        b, argv = resolve_command(seg)
-        if not argv or b != "spawn-crew":
-            continue
-        calls.append(seg)
-        if any(t == "--force-during-outage" for t in argv):
-            force = True
-    return calls, force
-
-
-calls, forced = spawn_calls_and_force()
-if not calls:
-    # Only fail closed on an unresolvable command if it actually mentions
-    # spawn-crew (the pre-gate already guarantees that for this whole script,
-    # but re-stated here so the None-segments branch is scoped identically to
-    # every other check in this hook).
-    if segments is None:
-        deny(PARSE_FAIL_REASON)
-    sys.exit(0)
-
-if forced:
-    sys.exit(0)
-
 state_path = os.path.join(home, "api-outage-state.json")
-try:
-    with open(state_path) as fh:
-        state = json.load(fh)
-except (OSError, ValueError):
-    state = {}
-if not isinstance(state, dict) or state.get("state") != "active":
-    sys.exit(0)
 
-since = state.get("since") or "an unknown time"
 
-# Affected count: every crew member currently live (working/blocked/review/
-# stalled) - roughly "how big is the exposed fleet right now". Cheap and
-# roster-only, no pane access needed here.
-count = 0
-try:
-    with open(os.path.join(home, "crew.json")) as fh:
-        roster = json.load(fh)
-    if isinstance(roster, list):
-        count = sum(1 for r in roster
-                    if r.get("status") in ("working", "blocked", "review", "stalled"))
-except (OSError, ValueError):
-    pass
+def is_blocking(state):
+    return state.get("state") == "active"
 
-deny(
-    "A fleet-wide Anthropic API outage has been detected (active since %s, "
-    "issue #23) - new spawns are paused while it is ongoing so this session "
-    "does not add more load into a live burst (roughly %d crew member(s) "
-    "currently live). Already-running crew are NOT affected by this pause - "
-    "only new spawns are held. Wait: your own watcher already wakes on the "
-    "outage-cleared fire, nothing needs to be polled. Or, if this particular "
-    "spawn is genuinely needed regardless, override with "
-    "--force-during-outage on this one spawn-crew call." % (since, count)
-)
+
+def build_message(state):
+    since = state.get("since") or "an unknown time"
+
+    # Affected count: every crew member currently live (working/blocked/
+    # review/stalled) - roughly "how big is the exposed fleet right now".
+    # Cheap and roster-only, no pane access needed here.
+    count = 0
+    try:
+        with open(os.path.join(home, "crew.json")) as fh:
+            roster = json.load(fh)
+        if isinstance(roster, list):
+            count = sum(1 for r in roster
+                        if r.get("status") in ("working", "blocked", "review", "stalled"))
+    except (OSError, ValueError):
+        pass
+
+    return (
+        "A fleet-wide Anthropic API outage has been detected (active since %s, "
+        "issue #23) - new spawns are paused while it is ongoing so this session "
+        "does not add more load into a live burst (roughly %d crew member(s) "
+        "currently live). Already-running crew are NOT affected by this pause - "
+        "only new spawns are held. Wait: your own watcher already wakes on the "
+        "outage-cleared fire, nothing needs to be polled. Or, if this particular "
+        "spawn is genuinely needed regardless, override with "
+        "--force-during-outage on this one spawn-crew call." % (since, count)
+    )
+
+
+run(state_path, is_blocking, "--force-during-outage", build_message)
 ' 2>/dev/null
 
 exit 0

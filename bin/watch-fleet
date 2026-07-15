@@ -34,6 +34,22 @@
 # pause new bin/spawn-crew calls while active - already-running crew are
 # never touched.
 #
+# Proactive usage-limit-quota detection (#24): the SAME owner-"" cycle also
+# aggregates every $WM_HOME/usage/<session-id>.json (written by the
+# installed statusLine command, bin/lib/usage-statusline.py, from the
+# Claude Code CLI's own rate_limits statusline signal) into a persisted
+# usage-quota-approach state machine ($WM_HOME/usage-limit-state.json, see
+# wm_state usage-update). Crossing the warn threshold fires
+# usage-limit-approaching; the window resetting fires usage-limit-reset.
+# hooks/usage-limit-spawn-guard.sh reads this state to pause new
+# bin/spawn-crew calls while unresolved (approaching) or while the pilot
+# chose to wait (paused) - already-running crew are never touched, and this
+# does not checkpoint or park in-flight work (see docs/architecture.md's
+# "Fleet-wide usage-limit-quota detection" section for the rationale). Unlike
+# #23, this decision needs the pilot's explicit wait-vs-continue answer
+# (wm_state usage-decide), so wingman's own
+# CLAUDE.md tells it what to do on this fire.
+#
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
 # snapshot to report from.
@@ -188,7 +204,16 @@ MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
 # `abc429def` or `sess_429` spuriously match on every platform, not just BSD)
 # using only grouping and anchors (both plain ERE, portable), and `5[0-9][0-9]`
 # avoids the `{2}` interval entirely.
-WM_APIERR_RE="${WM_APIERR_RE:-rate.limit|rate_limit|(^|[^0-9A-Za-z_])429([^0-9A-Za-z_]|$)|(^|[^0-9A-Za-z_])5[0-9][0-9] [Ee]rror|overloaded_error|Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|[Cc]onnection error|Connection refused|fetch failed|socket hang up|Service Unavailable|Bad Gateway|Gateway Timeout}"
+# "usage limit reached"/"credit balance too low" (issue #24) are two of the
+# CLI's own recognized Anthropic-API-error shapes (confirmed in its embedded
+# source string list) that this regex did not previously match verbatim -
+# `rate.limit` matches "rate limited" but neither of these two phrases. A
+# one-line strengthening of the existing reactive fallback: closing this gap
+# means a genuine quota exhaustion, once it trips the mass-correlation path,
+# surfaces labeled as a likely "API outage" rather than being missed
+# entirely - an accepted, known mislabel (the remedy - pause and wait - is
+# correct either way), not a distinct quota-exhaustion classification.
+WM_APIERR_RE="${WM_APIERR_RE:-rate.limit|rate_limit|(^|[^0-9A-Za-z_])429([^0-9A-Za-z_]|$)|(^|[^0-9A-Za-z_])5[0-9][0-9] [Ee]rror|overloaded_error|Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|[Cc]onnection error|Connection refused|fetch failed|socket hang up|Service Unavailable|Bad Gateway|Gateway Timeout|usage limit reached|credit balance too low}"
 WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
 # Stall self-heal nudge (#61): every stall-idle, pane-stable candidate - not only
 # an api-error match - gets exactly one check-in nudge per stall episode (gated
@@ -207,6 +232,18 @@ WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
 # magnitude. See wm_state outage-update for the full state machine; this
 # value is passed straight through to it as --quiet-seconds.
 WM_OUTAGE_QUIET="${WM_OUTAGE_QUIET:-$(( INTERVAL * 3 ))}"
+
+# Proactive usage-limit-quota detection (#24). A window's used_percentage
+# crossing this threshold (default 80%) is "approaching" and triggers the
+# pause-and-ask flow - see wm_state usage-update. A $WM_HOME/usage/*.json
+# reading older than this many seconds is no longer treated as a live
+# source (the session that wrote it hasn't produced a fresh statusline tick
+# in the last few polls); this is deliberately independent of, and stricter
+# than, the resets_at-in-the-future check applied in the same aggregation
+# pass - see wm_state usage-update's own docstring for why a single
+# staleness bound cannot substitute for both.
+WM_USAGE_WARN_THRESHOLD="${WM_USAGE_WARN_THRESHOLD:-80}"
+WM_USAGE_STALE_SECS="${WM_USAGE_STALE_SECS:-900}"
 
 # Remote Control disconnect signature (design: docs/plans/2026-07-12-remote-
 # control-visibility-and-auto-reconnect-design.md, ask 2): the CLI's own
@@ -1012,6 +1049,137 @@ print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-out
           fi
         } > "$WAKEFILE"
         echo "outage-cleared: fleet-wide API-error signal has quieted for ${WM_OUTAGE_QUIET}s - new spawns unpaused.${_outage_died_ids:+ Outage-tagged died member(s) ($_outage_died_ids): pre-authorized auto-recovery, run bin/crew-resume --all-died now.}"
+        printf 'fire\n' > "$EXITFILE"
+        rm -f "$PIDFILE"
+        exit 0
+        ;;
+    esac
+  fi
+
+  # Proactive usage-limit-quota state machine (#24): advanced every
+  # iteration, wingman's own top-level cycle only (owner "" - the account's
+  # usage quota is shared fleet-wide, never per-lead-team). Aggregates every
+  # $WM_HOME/usage/<session-id>.json (written by bin/lib/usage-statusline.py,
+  # the installed statusLine command) into the max used_percentage/resets_at
+  # per window among readings that are both fresh (captured_at within
+  # WM_USAGE_STALE_SECS) and live (resets_at still in the future - see
+  # wm_state usage-update's own docstring for why a frozen high reading
+  # cannot be trusted on captured_at freshness alone). Dispatched as an
+  # ordinary `fire` reason line within the existing five-outcome --classify
+  # contract, exactly like outage-detected/outage-cleared above - no new
+  # --classify outcome is introduced.
+  if [ -z "$OWNER" ]; then
+    _usage_agg="$(wm_py -c '
+import datetime, glob, json, os, sys, time
+
+home = os.environ.get("WINGMAN_HOME") or os.path.expanduser("~/.wingman")
+stale_secs = float(sys.argv[1])
+now = time.time()
+
+
+def parse_iso(stamp):
+    if not stamp:
+        return None
+    s = stamp[:-1] if stamp.endswith("Z") else stamp
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.datetime.strptime(s, fmt).replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+best = {}
+for path in glob.glob(os.path.join(home, "usage", "*.json")):
+    try:
+        with open(path) as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        continue
+    if not isinstance(rec, dict):
+        continue
+    captured = parse_iso(rec.get("captured_at"))
+    if captured is None or (now - captured) > stale_secs:
+        continue
+    for window in ("five_hour", "seven_day"):
+        w = rec.get(window)
+        if not isinstance(w, dict):
+            continue
+        pct = w.get("used_percentage")
+        resets_at = w.get("resets_at")
+        if not isinstance(pct, (int, float)) or not isinstance(resets_at, (int, float)):
+            continue
+        if resets_at <= now:
+            continue
+        cur = best.get(window)
+        if cur is None or pct > cur[0]:
+            best[window] = (pct, resets_at)
+
+five = best.get("five_hour", ("", ""))
+seven = best.get("seven_day", ("", ""))
+print("%s\t%s\t%s\t%s" % (five[0], five[1], seven[0], seven[1]))
+' "$WM_USAGE_STALE_SECS" 2>/dev/null)"
+    IFS=$'\t' read -r _usage_five_pct _usage_five_reset _usage_seven_pct _usage_seven_reset <<EOF_USAGE
+$_usage_agg
+EOF_USAGE
+
+    _usage_transition="$(wm_state usage-update --owner "" \
+      ${_usage_five_pct:+--five-hour-pct "$_usage_five_pct" --five-hour-resets-at "$_usage_five_reset"} \
+      ${_usage_seven_pct:+--seven-day-pct "$_usage_seven_pct" --seven-day-resets-at "$_usage_seven_reset"} \
+      --warn-threshold "$WM_USAGE_WARN_THRESHOLD" 2>/dev/null)"
+    case "$_usage_transition" in
+      usage-limit-approaching)
+        _usage_info="$(wm_py -c '
+import json, os
+
+home = os.environ.get("WINGMAN_HOME") or os.path.expanduser("~/.wingman")
+try:
+    with open(os.path.join(home, "usage-limit-state.json")) as fh:
+        d = json.load(fh)
+except (OSError, ValueError):
+    d = {}
+window_label = {"five_hour": "5-hour", "seven_day": "7-day"}.get(d.get("window"), d.get("window") or "usage")
+pct = d.get("used_percentage")
+pct_text = ("%.0f%%" % pct) if isinstance(pct, (int, float)) else "an unknown amount"
+resets_at = d.get("resets_at")
+print("%s\t%s\t%s" % (window_label, pct_text, resets_at if resets_at is not None else "an unknown time"))
+' 2>/dev/null)"
+        IFS=$'\t' read -r _usage_window_label _usage_pct_text _usage_resets_at <<EOF_USAGE
+$_usage_info
+EOF_USAGE
+        {
+          echo "# Usage-limit quota approaching (issue #24)"
+          echo
+          echo "The $_usage_window_label usage window is at $_usage_pct_text, resets at"
+          echo "epoch $_usage_resets_at."
+          echo
+          echo "New spawns are now PAUSED: hooks/usage-limit-spawn-guard.sh denies"
+          echo "bin/spawn-crew while this state is approaching/paused (override per-spawn"
+          echo "with --force-during-usage-limit if one is genuinely needed regardless)."
+          echo
+          echo "Already-running crew are NOT affected by this pause - only new spawns are"
+          echo "held. This does NOT park or checkpoint in-flight crew: a member already"
+          echo "running keeps consuming quota and can still hit the hard limit mid-turn on"
+          echo "its own, whichever way the pilot answers below."
+          echo
+          echo "Ask the pilot (wait for the reset, or continue anyway and accept the risk),"
+          echo "then record the answer immediately with \`\$WINGMAN_STATE usage-decide"
+          echo "--decision wait|continue\`."
+        } > "$WAKEFILE"
+        echo "usage-limit-approaching: $_usage_window_label usage window at $_usage_pct_text (resets at epoch $_usage_resets_at) - new spawns paused (bin/spawn-crew denied by hooks/usage-limit-spawn-guard.sh; override with --force-during-usage-limit if truly needed). Already-running crew are untouched and can still hit the hard limit on their own. Ask the pilot wait-vs-continue and record the answer with usage-decide."
+        printf 'fire\n' > "$EXITFILE"
+        rm -f "$PIDFILE"
+        exit 0
+        ;;
+      usage-limit-reset)
+        {
+          echo "# Usage-limit window reset (issue #24)"
+          echo
+          echo "The usage window has reset on its own. New spawns are unpaused again -"
+          echo "nothing further to do."
+        } > "$WAKEFILE"
+        echo "usage-limit-reset: the usage window reset - new spawns unpaused again."
         printf 'fire\n' > "$EXITFILE"
         rm -f "$PIDFILE"
         exit 0

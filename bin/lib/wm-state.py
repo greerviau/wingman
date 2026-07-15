@@ -32,6 +32,23 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     "last_signal": <ts-or-null>, "signal_count": <int>}. See
                     cmd_outage_update. Read directly (not through this tool)
                     by hooks/api-outage-spawn-guard.sh and bin/crew-resume.
+  usage-limit-state.json  the persisted fleet-wide usage-quota-approach
+                    state machine (issue #24), written only by wingman's own
+                    top-level watch cycle every poll from the CLI's own
+                    statusline-derived rate_limits signal: {"state":
+                    "clear"|"approaching"|"paused"|"acknowledged", "window":
+                    "five_hour"|"seven_day"|null, "used_percentage":
+                    <float-or-null>, "resets_at": <epoch-or-null>, "since":
+                    <ts>, "decided_at": <ts-or-null>}. See cmd_usage_update
+                    and cmd_usage_decide. Read directly (not through this
+                    tool) by hooks/usage-limit-spawn-guard.sh.
+  usage/<session-id>.json  one file per live session (wingman's own
+                    top-level session and every crew member alike), written
+                    by bin/lib/usage-statusline.py (the installed
+                    statusLine command) every time Claude Code invokes it:
+                    {"five_hour": {...}, "seven_day": {...}, "captured_at":
+                    <ts>}. bin/watch-fleet aggregates these every poll
+                    (owner "" only) into the usage-update call above.
   pane-tail-<id>.txt  the last WM_APIERR_TAIL lines of a live working/blocked
                     member's pane, overwritten every poll by bin/watch-fleet
                     (see wm_pane_snapshot). Consulted by cmd_reconcile at the
@@ -101,7 +118,8 @@ DEFAULT_APIERR_RE = (
     r"(^|[^0-9A-Za-z_])5[0-9][0-9] [Ee]rror|overloaded_error|"
     r"Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|"
     r"[Cc]onnection error|Connection refused|fetch failed|socket hang up|"
-    r"Service Unavailable|Bad Gateway|Gateway Timeout"
+    r"Service Unavailable|Bad Gateway|Gateway Timeout|"
+    r"usage limit reached|credit balance too low"
 )
 
 
@@ -143,6 +161,10 @@ def handled_path():
 
 def outage_state_path():
     return os.path.join(home(), "api-outage-state.json")
+
+
+def usage_state_path():
+    return os.path.join(home(), "usage-limit-state.json")
 
 
 def orphan_candidates_path():
@@ -1417,6 +1439,141 @@ def cmd_outage_update(args):
     print(transition)
 
 
+def _default_usage_state():
+    return {
+        "state": "clear",
+        "window": None,
+        "used_percentage": None,
+        "resets_at": None,
+        "since": now(),
+        "decided_at": None,
+    }
+
+
+def cmd_usage_update(args):
+    """Advance the persisted fleet-wide usage-quota-approach state machine by
+    one poll (issue #24). Called every bin/watch-fleet iteration, but only
+    from wingman's own top-level cycle (--owner "") - the account's usage
+    quota is fleet-wide, shared by every session under the same login, never
+    per-lead-team.
+
+    The caller (bin/watch-fleet) scans $WM_HOME/usage/<session-id>.json for
+    each of the five_hour/seven_day windows, discards any reading whose
+    captured_at is stale, and passes the max used_percentage (and its paired
+    resets_at) per window still standing. Either window's pair of flags may
+    be entirely absent this poll (no fresh file at all for it).
+
+    States: clear -> approaching -> paused (wait) or acknowledged (continue)
+    -> clear.
+
+    clear -> approaching: the moment either window's used_percentage crosses
+    --warn-threshold AND that window's resets_at is still in the future - a
+    reading whose window has already reset describes a condition that no
+    longer exists, no matter how fresh its captured_at looked to the caller.
+    This state alone is what hooks/usage-limit-spawn-guard.sh reads to pause
+    new spawns immediately - detection and pause are the same instant,
+    before any pilot answer exists yet.
+
+    approaching -> paused / approaching -> acknowledged: set by
+    cmd_usage_decide, never by this function.
+
+    approaching -> clear, paused -> clear, and acknowledged -> clear: all
+    three are automatic, uniformly, the moment now() >= the resets_at of
+    whichever window triggered the original crossing - checked FIRST, on
+    EVERY call, regardless of which of the three non-clear states currently
+    holds (this is more precise than the outage machine's quiet-seconds
+    heuristic: there is an exact epoch to wait for). This is the fix for a
+    slow pilot: if the reset epoch passes before the pilot ever answers the
+    wait-vs-continue ask, the state clears on its own, spawns unpause, and
+    the still-pending ask is moot (cmd_usage_decide reports as much if it is
+    called anyway). Prints "usage-limit-reset" for the approaching->clear
+    and paused->clear cases (a pause is being lifted, worth telling the
+    pilot); the acknowledged->clear case resets the state silently (prints
+    "none" - the fleet was never paused under "continue anyway", so there is
+    nothing to announce) but still writes the state file.
+
+    Every transition prints its own distinct token: "usage-limit-approaching",
+    "usage-limit-reset", or "none". The caller fires its own wake only on the
+    two transition tokens, mirroring cmd_outage_update's own pattern."""
+    ensure_home()
+    stamp = now()
+    now_epoch = time.time()
+
+    state = read_json(usage_state_path(), None)
+    if not isinstance(state, dict) or state.get("state") not in (
+        "clear", "approaching", "paused", "acknowledged",
+    ):
+        state = _default_usage_state()
+
+    transition = "none"
+
+    if state["state"] != "clear":
+        resets_at = state.get("resets_at")
+        if resets_at is not None and now_epoch >= resets_at:
+            prev_state = state["state"]
+            state = _default_usage_state()
+            state["since"] = stamp
+            if prev_state in ("approaching", "paused"):
+                transition = "usage-limit-reset"
+            write_json(usage_state_path(), state)
+            print(transition)
+            return
+
+    if state["state"] == "clear":
+        candidates = []
+        if args.five_hour_pct is not None and args.five_hour_resets_at is not None:
+            candidates.append(("five_hour", args.five_hour_pct, args.five_hour_resets_at))
+        if args.seven_day_pct is not None and args.seven_day_resets_at is not None:
+            candidates.append(("seven_day", args.seven_day_pct, args.seven_day_resets_at))
+        crossing = [
+            c for c in candidates
+            if c[1] >= args.warn_threshold and c[2] > now_epoch
+        ]
+        if crossing:
+            window, pct, resets_at = max(crossing, key=lambda c: c[1])
+            state = {
+                "state": "approaching",
+                "window": window,
+                "used_percentage": pct,
+                "resets_at": resets_at,
+                "since": stamp,
+                "decided_at": None,
+            }
+            transition = "usage-limit-approaching"
+
+    write_json(usage_state_path(), state)
+    print(transition)
+
+
+def cmd_usage_decide(args):
+    """Record the pilot's wait-vs-continue decision on an approaching usage
+    limit (issue #24), transitioning approaching -> paused (wait) or
+    approaching -> acknowledged (continue), stamping decided_at.
+
+    A decision recorded against any state OTHER than approaching - including
+    clear (e.g. because the window auto-reset out from under a slow pilot
+    answer, per cmd_usage_update's own uniform auto-clear) - is a no-op,
+    defensively: the persisted state is left untouched and "no-op:<state>"
+    is printed so the caller can tell the pilot the ask no longer applies."""
+    ensure_home()
+    state = read_json(usage_state_path(), None)
+    if not isinstance(state, dict) or state.get("state") not in (
+        "clear", "approaching", "paused", "acknowledged",
+    ):
+        state = _default_usage_state()
+
+    if state["state"] != "approaching":
+        print("no-op:%s" % state["state"])
+        return
+
+    new_state = "paused" if args.decision == "wait" else "acknowledged"
+    state = dict(state)
+    state["state"] = new_state
+    state["decided_at"] = now()
+    write_json(usage_state_path(), state)
+    print(new_state)
+
+
 def cmd_ack(args):
     """Record that the (id, announced) event has been surfaced to wingman, so
     needs-attention suppresses it until the crew's status changes (a new announced).
@@ -2008,6 +2165,24 @@ def build_parser():
     a.add_argument("--mass-min-ratio", type=float, default=0.5, dest="mass_min_ratio")
     a.add_argument("--quiet-seconds", type=int, default=15, dest="quiet_seconds")
     a.set_defaults(fn=cmd_outage_update)
+
+    # The persisted fleet-wide usage-quota-approach state machine (issue #24).
+    # Called every bin/watch-fleet iteration from wingman's own top-level
+    # cycle only (--owner "" - the account's usage quota is shared fleet-
+    # wide, never per-lead-team). --owner is accepted for shape-parity with
+    # outage-update's own call signature but is not otherwise used here.
+    a = sub.add_parser("usage-update")
+    a.add_argument("--owner", default="")
+    a.add_argument("--five-hour-pct", type=float, default=None, dest="five_hour_pct")
+    a.add_argument("--five-hour-resets-at", type=float, default=None, dest="five_hour_resets_at")
+    a.add_argument("--seven-day-pct", type=float, default=None, dest="seven_day_pct")
+    a.add_argument("--seven-day-resets-at", type=float, default=None, dest="seven_day_resets_at")
+    a.add_argument("--warn-threshold", type=float, default=80.0, dest="warn_threshold")
+    a.set_defaults(fn=cmd_usage_update)
+
+    a = sub.add_parser("usage-decide")
+    a.add_argument("--decision", required=True, choices=("wait", "continue"))
+    a.set_defaults(fn=cmd_usage_decide)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)

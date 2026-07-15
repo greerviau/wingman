@@ -1,0 +1,44 @@
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "transcript_path": "/home/agents/.claude/projects/-home-agents-github-wingman/550e8400-e29b-41d4-a716-446655440000.jsonl",
+  "cwd": "/home/agents/github/wingman",
+  "model": {
+    "id": "claude-sonnet-5",
+    "display_name": "Claude Sonnet 5"
+  },
+  "workspace": {
+    "current_dir": "/home/agents/github/wingman",
+    "project_dir": "/home/agents/github/wingman",
+    "added_dirs": ["/home/agents/.wingman"]
+  },
+  "version": "2.1.210",
+  "output_style": {
+    "name": "default"
+  },
+  "context_window": {
+    "total_input_tokens": 48213,
+    "total_output_tokens": 921,
+    "context_window_size": 200000,
+    "current_usage": {
+      "input_tokens": 4021,
+      "output_tokens": 312,
+      "cache_creation_input_tokens": 1024,
+      "cache_read_input_tokens": 41192
+    },
+    "used_percentage": 24.1,
+    "remaining_percentage": 75.9
+  },
+  "thinking": {
+    "enabled": false
+  },
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 62.5,
+      "resets_at": 1784160000
+    },
+    "seven_day": {
+      "used_percentage": 18.3,
+      "resets_at": 1784500000
+    }
+  }
+}

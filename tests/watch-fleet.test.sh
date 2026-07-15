@@ -998,4 +998,66 @@ assert_contains "outage state file flips back to clear" \
   "$(cat "$WINGMAN_HOME/api-outage-state.json")" '"state": "clear"'
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- proactive usage-limit-quota detection (#24) ------------------------------
+# Owner "" is wingman's own top-level scope, exactly like the outage tests
+# above. Unlike outage detection, the signal here comes from
+# $WM_HOME/usage/<session-id>.json files (written by the installed
+# statusLine command), not pane text, so no tmux window content needs to
+# match anything - only that a tmux session exists at all for the rest of
+# the loop's own liveness checks to proceed normally.
+
+# A fresh usage/*.json reading above the default 80% threshold, with a
+# resets_at still in the future, fires usage-limit-approaching.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+mkdir -p "$WINGMAN_HOME/usage"
+_ul_future=$(( $(date +%s) + 3600 ))
+_ul_now_iso="$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
+cat > "$WINGMAN_HOME/usage/ul-sess1.json" <<EOF
+{"five_hour": {"used_percentage": 85, "resets_at": $_ul_future}, "captured_at": "$_ul_now_iso"}
+EOF
+out_ua="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "usage-limit-approaching fires" "$out_ua" "usage-limit-approaching:"
+assert_contains "the fire note names the 5-hour window" "$out_ua" "5-hour"
+assert_contains "the fire note explains the pause" "$out_ua" "new spawns paused"
+assert_contains "usage state file flips to approaching" \
+  "$(cat "$WINGMAN_HOME/usage-limit-state.json")" '"state": "approaching"'
+assert_contains "the wake file explains the approach" "$(cat "$WINGMAN_HOME/wake")" "Usage-limit quota approaching"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# approaching -> clear the moment resets_at passes, firing usage-limit-reset -
+# advanced here by seeding the state file directly with an already-past
+# resets_at (the same technique the auto-clear unit tests use), rather than
+# waiting out a real wall-clock window inside the watcher loop.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+_ul_past=$(( $(date +%s) - 5 ))
+cat > "$WINGMAN_HOME/usage-limit-state.json" <<EOF
+{"state": "paused", "window": "five_hour", "used_percentage": 90, "resets_at": $_ul_past, "since": "2026-07-15T00:00:00.000000Z", "decided_at": "2026-07-15T00:05:00.000000Z"}
+EOF
+out_ur="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "usage-limit-reset fires" "$out_ur" "usage-limit-reset:"
+assert_contains "usage state file flips back to clear" \
+  "$(cat "$WINGMAN_HOME/usage-limit-state.json")" '"state": "clear"'
+assert_contains "the wake file explains the reset" "$(cat "$WINGMAN_HOME/wake")" "Usage-limit window reset"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A reading whose resets_at is ALREADY in the past at write time never fires
+# usage-limit-approaching, even though used_percentage is well above
+# threshold and the file itself is freshly written this instant.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+mkdir -p "$WINGMAN_HOME/usage"
+_ul_past2=$(( $(date +%s) - 5 ))
+_ul_now_iso2="$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
+cat > "$WINGMAN_HOME/usage/ul-sess2.json" <<EOF
+{"five_hour": {"used_percentage": 99, "resets_at": $_ul_past2}, "captured_at": "$_ul_now_iso2"}
+EOF
+out_stale="$(wm_timeout 6 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_not_contains "an already-reset reading never fires usage-limit-approaching" "$out_stale" "usage-limit-approaching"
+assert_contains "usage state file stays clear" \
+  "$(cat "$WINGMAN_HOME/usage-limit-state.json")" '"state": "clear"'
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+rm -f "$WINGMAN_HOME"/watch.pid "$WINGMAN_HOME"/watch.beat
+
 test_summary
