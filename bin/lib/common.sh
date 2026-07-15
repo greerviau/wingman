@@ -430,6 +430,38 @@ prompt_shape_in() {
   return 1
 }
 
+# Signature of the CLI's "resume from summary?" dialog (issue #30): shown by
+# `claude --resume` once a transcript's last message is both old enough and
+# token-heavy enough to trip an internal size/age gate. Deliberately its own,
+# separate detector from WM_PERM_PROMPT_RE/prompt_shape_in above, never folded
+# into it: that detector's freeze is answered by flipping the member to
+# `blocked` for a human to decide, which is right for a genuine
+# permission/trust gate but wrong here - there is nothing to decide, "resume
+# full session" is always the correct, safe answer for an unattended agent
+# (see bin/watch-fleet's resume_prompt_freeze_check, which auto-dismisses
+# rather than blocking). Requires BOTH option-row strings together, not
+# either alone: each string in isolation is generic enough that a pane
+# merely discussing this very dialog (this file, a diff, a test fixture, a
+# transcript quoting the incident) could false-positive on one of them, but
+# the pair only co-occurs in the real rendered menu. Matched against the
+# pane tail only (WM_RESUME_TAIL lines), same rationale as WM_PERM_TAIL - a
+# real dialog renders at the bottom of the screen.
+WM_RESUME_PROMPT_RE="${WM_RESUME_PROMPT_RE:-Resume from summary \\(recommended\\)}"
+WM_RESUME_OPTION_RE="${WM_RESUME_OPTION_RE:-Resume full session as-is}"
+WM_RESUME_TAIL="${WM_RESUME_TAIL:-25}"
+
+# True iff both signature strings of the resume-summary dialog appear
+# together within the pane tail. Content-only (no UI-shape/adjacency walk
+# like prompt_shape_in - this dialog has only ever been observed as a fixed
+# three-line menu, so the two-string co-occurrence is precision enough; see
+# the WM_RESUME_PROMPT_RE comment above for why either string alone is not).
+resume_prompt_shape_in() {
+  _rp_text="$(printf '%s\n' "$1" | tail -n "$WM_RESUME_TAIL")"
+  printf '%s\n' "$_rp_text" | grep -qE "$WM_RESUME_PROMPT_RE" || return 1
+  printf '%s\n' "$_rp_text" | grep -qE "$WM_RESUME_OPTION_RE" || return 1
+  return 0
+}
+
 # Wait until a target pane's interactive TUI has finished starting and is ready to
 # accept input, rather than guessing with a fixed delay. A freshly launched agent
 # paints a splash/prompt and connects MCP servers before it will honour keystrokes;
@@ -527,6 +559,28 @@ wm_tmux_send_message() {
     _sm_i=$((_sm_i+1))
   done
   return 0
+}
+
+# Auto-dismiss the resume-from-summary dialog (issue #30) by selecting
+# "Resume full session as-is" - option 2 of 3, never option 3 ("Don't ask me
+# again"), which persists resumeReturnDismissed: true into the shared
+# ~/.claude.json and would silently change behavior for the pilot's own
+# interactive sessions too. Option 2 has no persisted side effect and is
+# correct on every occurrence.
+#
+# The keystroke binding is inferred, not captured live: this is an
+# Ink-rendered numbered list matching the same rendering convention as the
+# workspace-trust/Bypass dialogs (WM_PERM_MARK_RE's "❯" cursor-glyph marker),
+# which are arrow-navigated rather than digit-selected, and "(recommended)" on
+# option 1 implies it is the default highlighted row - so one Down moves the
+# cursor to option 2, and Enter selects it. Confirm this against a real
+# captured dialog before relying on it in production (the same caveat the
+# existing permission-dialog matcher's comment carries).
+wm_tmux_dismiss_resume_prompt() {
+  _target="$1"
+  wm_tmux send-keys -t "$_target" Down
+  sleep "${WM_SUBMIT_DELAY:-1}"
+  wm_tmux send-keys -t "$_target" Enter
 }
 
 # Ensure the shared tmux server + crew session exist (detached). The check is

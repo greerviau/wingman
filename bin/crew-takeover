@@ -37,4 +37,8 @@ else
   wm_info "If you want to resume it yourself, from its repo:"
   printf '\n    cd %s && <your-agent-cli> --resume %s\n\n' "$(quote "$REPO")" "$SID"
   echo "(e.g. with Claude Code: 'claude --resume $SID' - resume is refused if the session is still live.)"
+  echo "On a large/old transcript, Claude Code may show a 'resume from summary?' menu that"
+  echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
+  echo "safe choice. To skip that prompt outright, export these first:"
+  printf '\n    export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999 CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999\n\n'
 fi

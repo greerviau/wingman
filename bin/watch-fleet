@@ -620,6 +620,20 @@ prompt_freeze_check() {
   [ "$PANE_STABLE" = 1 ]
 }
 
+# True iff a member's pane is frozen on the CLI's own resume-from-summary
+# dialog (issue #30) - a relaunched `--resume` can land here instead of an
+# idle chat prompt on a large/old transcript. Same two-condition shape as
+# prompt_freeze_check (a content match plus pane stability, reading the same
+# $PANE_TEXT/$PANE_STABLE this poll's wm_pane_snapshot already set), but its
+# own distinct detector (resume_prompt_shape_in/WM_RESUME_PROMPT_RE) so it
+# can never mask, or be masked by, the permission-freeze check above. Unlike
+# that check this is auto-dismissed by the caller, not escalated to
+# `blocked` - there is nothing here for a human to decide.
+resume_prompt_freeze_check() {
+  resume_prompt_shape_in "$PANE_TEXT" || return 1
+  [ "$PANE_STABLE" = 1 ]
+}
+
 # Fire the wake: the two channels carry distinct roles. Stdout is the terse
 # trigger - the machine reason lines (one per member, "<status>: <id> <note>")
 # plus an explicit directive to report the full roster. The wake file is the
@@ -756,6 +770,26 @@ for r in data:
             : > "$_rcfile"
           fi
         fi
+      fi
+
+      # Resume-from-summary dialog auto-dismiss fallback (issue #30). This
+      # backstops bin/crew-resume's own primary fix (the
+      # CLAUDE_CODE_RESUME_TOKEN_THRESHOLD/_MINUTES env-var override, which
+      # rests on CLI internals confirmed only by static analysis - see
+      # docs/plans/2026-07-15-issue-30-resume-hang-recovery-plan.md) and also
+      # covers a resume path outside bin/crew-resume entirely (a human
+      # running `claude --resume` by hand per bin/crew-takeover's printed
+      # command). Working members only, same rationale as the Remote Control
+      # auto-recovery above: a blocked member's pane is not expected to be
+      # showing this dialog. Checked before the permission-freeze check below
+      # since a member frozen here needs auto-dismissal, never escalation -
+      # its own distinct detector means the two can never cross-fire anyway.
+      if [ "$_orig_status" = working ] && resume_prompt_freeze_check; then
+        wm_tmux_dismiss_resume_prompt "$(wm_tmux_win_target "$_win")"
+        wm_state crew-set --id "$_id" \
+          --summary "auto-dismissed the resume-from-summary dialog (issue #30): selected 'Resume full session as-is'" \
+          >/dev/null 2>&1
+        continue   # give the dismissal a cycle to settle before any further diagnosis
       fi
 
       if prompt_freeze_check && ! liveness_veto "$_id"; then

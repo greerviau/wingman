@@ -40,6 +40,13 @@ assert_contains "the resume script exports the resuming session's run id" \
   "$launch" "export WINGMAN_RUN_ID='run-resume-test'"
 assert_contains "the resume script exports the record's crew type" \
   "$launch" "export WINGMAN_CREW_TYPE='developer'"
+# Issue #30: defeat the CLI's own "resume from summary?" prompt on every
+# unattended relaunch by overriding both gating env vars to an absurdly high
+# value, so its size/age check can never be satisfied.
+assert_contains "the resume script exports a high CLAUDE_CODE_RESUME_TOKEN_THRESHOLD" \
+  "$launch" "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999"
+assert_contains "the resume script exports a high CLAUDE_CODE_RESUME_THRESHOLD_MINUTES" \
+  "$launch" "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- a resume outside any wingman run exports an empty run id ------------------

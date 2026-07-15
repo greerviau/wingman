@@ -153,6 +153,19 @@ EOF
     echo '#!/usr/bin/env bash'
     echo "cd $(quote "$_cwd") || exit 1"
     echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
+    # Defeat the CLI's own "resume from summary?" interactive prompt (issue
+    # #30): past a token/age threshold, `claude --resume` shows an Ink menu
+    # ("Resume from summary (recommended)" / "Resume full session as-is" /
+    # "Don't ask me again") that nothing answers in an unattended relaunch,
+    # hanging the session forever. Both env vars gate that prompt's size/age
+    # check unconditionally (confirmed in the shipped CLI binary - see
+    # docs/plans/2026-07-15-issue-30-resume-hang-recovery-plan.md); set
+    # absurdly high here, the gate can never be satisfied regardless of
+    # transcript size or session age. Scoped to this one resumed process only
+    # (never written to the shared ~/.claude.json), so it has no effect on the
+    # pilot's own everyday interactive sessions.
+    echo "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=${WM_RESUME_TOKEN_THRESHOLD:-999999999}"
+    echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
     # The resuming session's own run id, exactly as spawn-crew captures it at
     # spawn time: a resume is an action of the CURRENT wingman sit-down, so the
     # preferences answered for that sit-down govern the resumed member (the
