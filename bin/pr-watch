@@ -21,9 +21,14 @@
 #                                 moves to review
 #
 # A cursor at $WINGMAN_HOME/pr/<crew-id>.json records what has already been
-# surfaced, so a persistently-red build or an already-seen comment does not re-fire,
-# and the crew's OWN replies never wake it. Firing advances only the fired
-# dimension, so a co-occurring lower-priority event still surfaces next cycle.
+# surfaced, so a persistently-red build or an already-seen comment does not
+# re-fire, and THIS session's own replies never wake it - identified by an
+# anchored `<!-- wingman-crew:<id> -->` marker matching its own
+# $WINGMAN_CREW_ID, not by login alone (every crew session shares one forge
+# login, issue #50; login alone would also drop the operator's own genuine
+# comments, issue #118, and a different crew member's own genuine review,
+# issue #59). Firing advances only the fired dimension, so a co-occurring
+# lower-priority event still surfaces next cycle.
 #
 # Forge boundary: everything forge-specific is the `gh` calls below, isolated here
 # exactly as the agent launch line is isolated in spawn-crew. Point WM_GH at another
@@ -60,8 +65,10 @@ mkdir -p "$CURDIR"
 CURSOR="$CURDIR/$WINGMAN_CREW_ID.json"
 PR_EVAL="$WM_LIB/pr-eval.py"
 
-# The authenticated login, so the crew's own comments/reviews never wake it. Best
-# effort: an empty login just means no self-filtering.
+# The authenticated login. Combined with $WINGMAN_CREW_ID (below) and each
+# comment/review's `<!-- wingman-crew:<id> -->` marker, identifies THIS
+# session's own replies so they never wake it - see pr-eval.py's --my-crew-id
+# doc. Best effort: an empty login just means no self-filtering.
 ME="$($GH api user --jq .login 2>/dev/null || true)"
 
 # One poll: fetch PR state + inline review comments, ask pr-eval for an event.
@@ -90,7 +97,7 @@ poll_once() {
   printf '%s' "$_pr_json" > "$_pr_file"
   _reason="$(wm_py "$PR_EVAL" --pr-json "$_pr_file" \
     ${_rc_file:+--review-comments "$_rc_file"} \
-    --cursor "$CURSOR" --me "$ME" 2>/dev/null)"
+    --cursor "$CURSOR" --me "$ME" --my-crew-id "$WINGMAN_CREW_ID" 2>/dev/null)"
   [ -n "$_reason" ] || return 1
   printf '%s\n' "$_reason"
   return 0

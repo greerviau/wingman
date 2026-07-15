@@ -9,7 +9,7 @@ set -u
 EVAL="$TEST_REPO/bin/lib/pr-eval.py"
 D="$(wm_mktemp_dir)"
 PRJ="$D/pr.json"; CUR="$D/cur.json"
-ev() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me 2>/dev/null; }
+ev() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me --my-crew-id dev-1 2>/dev/null; }
 
 # All fixtures below carry an explicit mergeable=MERGEABLE/mergeStateStatus=CLEAN
 # pair, matching what a real `gh pr view --json ...,mergeable,mergeStateStatus`
@@ -83,5 +83,43 @@ rm -f "$CUR"
 echo '{"number":7,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"FAILURE"}],"reviews":[],"comments":[],"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' > "$PRJ"
 assert_contains "ci-failed takes priority over a co-occurring conflict" "$(ev)" "ci-failed: #7"
 assert_contains "the co-occurring conflict still surfaces on the next poll" "$(ev)" "conflict: #7"
+
+# --- self-filter: login alone is never sufficient (issues #118, #59) --------
+# ev() defaults to --my-crew-id dev-1; only a marker naming THAT crew id,
+# anchored at the body's start, should ever be treated as this session's own
+# reply and dropped. Every other same-login shape must surface as a real event.
+
+rm -f "$CUR"
+echo '{"number":8,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev >/dev/null  # seed: baseline, nothing fires yet
+echo '{"number":8,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"please rename this variable"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "a same-login comment with no marker at all surfaces (issue #118)" "$(ev)" "comment: #8"
+
+rm -f "$CUR"
+echo '{"number":9,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev >/dev/null  # seed: baseline, nothing fires yet
+echo '{"number":9,"state":"OPEN","statusCheckRollup":[],"reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"<!-- wingman-crew:reviewer-1 --> needs work"}],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "a same-login review marked by a DIFFERENT crew id surfaces (issue #59)" "$(ev)" "changes-requested: #9"
+
+rm -f "$CUR"
+echo '{"number":10,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev >/dev/null  # seed: baseline, nothing fires yet
+echo '{"number":10,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"<!-- wingman-crew:dev-1 --> fixed, PTAL"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_eq "a same-login comment marked with THIS session's own crew id, anchored at body start, stays filtered (reply-loop guard)" "$(ev)" ""
+
+rm -f "$CUR"
+echo '{"number":11,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev >/dev/null  # seed: baseline, nothing fires yet
+echo '{"number":11,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"> <!-- wingman-crew:dev-1 --> fixed, PTAL\n\nActually, one more thing before this merges."}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "a same-login comment whose own marker is only quoted (not at body start) surfaces (round-1 must-fix, quote-reply)" "$(ev)" "comment: #11"
+
+# --- omitting --my-crew-id is a hard argument error, not a silent fallback ---
+rm -f "$CUR"
+echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+if uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me >/dev/null 2>&1; then
+  fail "omitting --my-crew-id must be a hard argparse error, not a silent login-only fallback"
+else
+  ok "omitting --my-crew-id exits non-zero (no silent fallback to the always-wrong login-only rule)"
+fi
 
 test_summary
