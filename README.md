@@ -65,6 +65,9 @@ Two one-time interactive gates remain: Claude Code's Bypass-Permissions acceptan
 Wingman detects a crew frozen on either and wakes you to approve once via `bin/crew-takeover`.
 After that, crew in that repo run unattended.
 
+A resumed session (`bin/crew-resume`, or `claude --resume` by hand) can also hit the CLI's own "resume from summary?" prompt on a large or old transcript.
+`bin/crew-resume` defeats it outright on every relaunch; if it appears anyway, wingman recognizes it and wakes you with a specific one-keypress fix via `bin/crew-takeover`.
+
 ## Customizing crew behavior (playbooks)
 
 A crew type is just a playbook - plain prose in `playbooks/`, grouped by category (`playbooks/<category>/<role>.md`).
