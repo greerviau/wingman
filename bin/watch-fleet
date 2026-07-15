@@ -544,11 +544,13 @@ while :; do
       _owner_raw="$(cat "$CLAIMLOCK/owner" 2>/dev/null)"
       case "$_owner_raw" in
         # Empty (owner file missing, or never written before its claimant
-        # died), or not a plain positive integer (a corrupt stamp, or a value
-        # like "-1" that `kill -0` would misread as a process-group target) -
-        # both are treated as an unreadable/dead owner, never passed to
+        # died), not a plain positive integer (a corrupt stamp, or a value
+        # like "-1" that `kill -0` would misread as a process-group target),
+        # or leading-zero (e.g. "0", which `kill -0` would misread as the
+        # caller's own process group and which `echo "$$"` never produces) -
+        # all are treated as an unreadable/dead owner, never passed to
         # `kill -0` as-is.
-        ''|*[!0-9]*) _owner_dead=1 ;;
+        ''|*[!0-9]*|0*) _owner_dead=1 ;;
         *) if kill -0 "$_owner_raw" 2>/dev/null; then _owner_dead=0; else _owner_dead=1; fi ;;
       esac
       if [ "$_claim_reclaimed" -eq 0 ] \

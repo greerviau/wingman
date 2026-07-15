@@ -171,6 +171,16 @@ mkdir "$WINGMAN_HOME/watch.pid.lock"
 ( sleep 300 ) & _budget_holder=$!
 wm_track "$_budget_holder"
 echo "$_budget_holder" > "$WINGMAN_HOME/watch.pid.lock/owner"
+# WM_CLAIM_HARD_STALE_AGE is pinned well above this block's own worst-case
+# wall-clock budget (three rounds of a 15s arm + 10s classify each) so the
+# live-owner refusal this block asserts three times over can never
+# incidentally cross the hard-age threshold on a loaded CI runner. Exported
+# directly (not inside a subshell): assert_eq's pass/fail bookkeeping writes
+# to the shell-global _TESTS_FAIL (tests/lib.sh:235,244), which a subshell
+# would fork away and silently discard, masking a real regression as a
+# passing suite. Unset immediately after so the pin does not leak into the
+# rest of the file.
+export WM_CLAIM_HARD_STALE_AGE=3600
 wm_timeout 15 "$WF" >/dev/null 2>&1
 lout1="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "arm 1 (owner alive, refused) classifies as spurious 1" "$lout1" "spurious 1 stale-claim-lock"
@@ -180,6 +190,7 @@ assert_eq "arm 2 (still refused) classifies as spurious 2" "$lout2" "spurious 2 
 wm_timeout 15 "$WF" >/dev/null 2>&1
 lout3="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "arm 3 (still refused) trips spurious-repeated" "$lout3" "spurious-repeated 3 stale-claim-lock"
+unset WM_CLAIM_HARD_STALE_AGE
 kill "$_budget_holder" 2>/dev/null
 rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null
 

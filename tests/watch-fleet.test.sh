@@ -833,6 +833,17 @@ out4="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/corrupt.err")"
 assert_contains "a corrupt (-1) owner stamp is treated as dead, not as a live process-group target" "$out4" "done: sk4 finished despite corrupt owner stamp"
 assert_contains "corrupt-owner recovery is logged" "$(cat "$WINGMAN_HOME/corrupt.err")" "clearing a stale claim lock"
 
+# --- an owner stamp of "0" is never handed to kill -0 as a process-group
+# target (issue #87) ------------------------------------------------------------
+test_new_home
+wm_state crew-add --id sk4b --type analyst --objective x --repo /tmp --window wm-sk4b --session-id ssk4b >/dev/null
+wm_state crew-set --id sk4b --status done --summary "finished despite owner-0 stamp" >/dev/null
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+echo "0" > "$WINGMAN_HOME/watch.pid.lock/owner"
+out4b="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/owner0.err")"
+assert_contains "an owner-0 stamp is treated as dead, not as the caller's own process group" "$out4b" "done: sk4b finished despite owner-0 stamp"
+assert_contains "owner-0 recovery is logged" "$(cat "$WINGMAN_HOME/owner0.err")" "clearing a stale claim lock"
+
 # --- fidelity case: a real watch-fleet process, genuinely SIGKILL'd while
 # holding the claim lock (#74) --------------------------------------------------
 # Cases above fabricate the on-disk state directly; this proves that shape is
