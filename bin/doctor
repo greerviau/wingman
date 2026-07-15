@@ -125,6 +125,40 @@ fi
 # Overridable so tests never touch a real developer machine's dotfile.
 GUARD_HOOK="$WM_REPO/hooks/no-direct-edit-guard.sh"
 GUARD_SETTINGS="${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"
+
+# --- Bypass-Permissions mode acceptance (issue #16), user scope -------------
+# Every crew session launches with --permission-mode bypassPermissions by
+# default (bin/spawn-crew), so the very first crew spawn anywhere freezes on
+# Claude Code's one-time Bypass-Permissions acceptance dialog unless it has
+# already been accepted once, machine-wide. skipDangerousModePermissionPrompt
+# in this same user settings file (GUARD_SETTINGS) is the persisted signal;
+# bin/spawn-crew also re-checks it immediately before every spawn, as a
+# safety net for a spawn that runs before this doctor check ever did.
+if uv run --no-project --quiet "$WM_LIB/claude-gate-check.py" bypass-status --settings "$GUARD_SETTINGS"; then
+  wm_ok "Bypass-Permissions mode already accepted ($GUARD_SETTINGS)"
+else
+  wm_warn "Bypass-Permissions mode not yet accepted ($GUARD_SETTINGS)"
+  printf '    every crew session launches with --permission-mode bypassPermissions;\n'
+  printf '    the very first crew spawn anywhere will otherwise freeze on this dialog\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Accept it now (write skipDangerousModePermissionPrompt: true)? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/claude-gate-check.py bypass-set --settings $GUARD_SETTINGS"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/claude-gate-check.py" bypass-set --settings "$GUARD_SETTINGS"; then
+      wm_ok "accepted Bypass-Permissions mode"
+    else
+      wm_err "failed to accept Bypass-Permissions mode"
+    fi
+  fi
+fi
+
 if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$GUARD_HOOK" --check >/dev/null 2>&1; then
   wm_ok "delegation guard hook registered ($GUARD_SETTINGS)"

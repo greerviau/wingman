@@ -84,6 +84,11 @@ if [ "$SCOPE" = global ]; then
   # Ground at the primary workspace root (wingman's parent in the common case).
   REPO="$("$WM_BIN/discover-projects" --roots 2>/dev/null | head -n1)"
   [ -n "$REPO" ] && [ -d "$REPO" ] || wm_die "could not resolve a workspace root for global scope (check bin/discover-projects)"
+  # Physically normalize (-P), matching repo scope below, so the trust-gate
+  # preflight queries the identical string Claude Code itself will key its
+  # trust lookup against once the launch script's `cd "$REPO"` runs - a
+  # symlinked workspace-root component would otherwise mismatch.
+  REPO="$(cd -P "$REPO" && pwd -P)"
   # Refresh the cache, then collect every discovered repo path to add-dir.
   "$WM_BIN/discover-projects" --quiet >/dev/null 2>&1 || true
   GLOBAL_REPO_DIRS="$(wm_state projects-get 2>/dev/null | wm_py -c '
@@ -151,12 +156,45 @@ if [ "$SCOPE" = repo ] && [ "$CATEGORY" = software-development ] && [ "$IS_GIT" 
   wm_die "'$TYPE' is a software-development crew type and requires a git checkout; '$REPO' is not one (or is not the repo's root - see the subdirectory rule in docs/plans/2026-07-13-conditional-git-branch-pr-workflow.md)"
 fi
 
+# --- preflight: workspace-trust gate (issue #16) -----------------------------
+# The one-time-per-directory workspace-trust dialog survives
+# --permission-mode bypassPermissions and would otherwise freeze the crew
+# window the instant it opens, only to be caught later by watch-fleet's
+# reactive stall detection. Detect it non-interactively before opening any
+# window at all: $REPO is now fully resolved and physically normalized for
+# both scopes (global scope's $REPO is the workspace root - exactly the
+# directory the launch script `cd`s into - so one check covers both). A git
+# worktree carved out of an already-trusted repo needs no separate check (see
+# the plan's z15 finding), and this check is mode-independent - the trust
+# dialog appears regardless of --permission-mode - so it runs unconditionally,
+# not gated on PERM_MODE below. Hard failure: no tmux window, no crew record,
+# no worktree path reservation - exactly like the software-development check
+# above.
+if ! uv run --no-project --quiet "$WM_LIB/claude-gate-check.py" trust-status \
+    --config "${WM_CLAUDE_USER_CONFIG:-$HOME/.claude.json}" --repo "$REPO"; then
+  wm_die "workspace trust for '$REPO' has not been accepted yet. Run 'claude' there once, interactively, and accept the trust dialog, then retry this spawn."
+fi
+
 # Permission posture for the (unattended) crew session. Default bypassPermissions;
 # explicit empty (WM_PERMISSION_MODE=) disables it and falls back to prompting.
 # Follow-up (out of scope here): rather than blanket bypass, route each individual
 # permission decision up to the pilot as a real blocker via a permission-prompt
 # hook / MCP tool, so the pilot approves specific actions instead of all-or-nothing.
 PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
+
+# --- preflight: Bypass-Permissions mode acceptance (issue #16) ---------------
+# A safety net for a spawn that happens to run before bin/doctor ever did:
+# doctor is meant to have already cleared this once, machine-wide (the
+# common case). Only fires when bypass mode is actually in effect - an
+# explicit WM_PERMISSION_MODE= (empty) disables --permission-mode
+# bypassPermissions entirely and falls back to interactive per-tool
+# prompting, in which case this dialog never appears and
+# skipDangerousModePermissionPrompt is irrelevant.
+if [ "$PERM_MODE" = bypassPermissions ] && \
+   ! uv run --no-project --quiet "$WM_LIB/claude-gate-check.py" bypass-status \
+     --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"; then
+  wm_die "Bypass-Permissions mode has not been accepted yet. Run 'bin/doctor -y', or accept it manually (see bin/doctor's own message), then retry this spawn."
+fi
 
 # Model for the crew session, alongside the other harness-specific knobs
 # (WM_AGENT, WM_PERMISSION_MODE). An explicit --model wins; else $WM_MODEL if

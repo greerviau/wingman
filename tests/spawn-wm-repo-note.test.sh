@@ -42,6 +42,9 @@ export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 wm_on_exit "rm -f '$CFG'"
+wm_trust_repo "$TEST_REPO"
+wm_trust_repo "$WS/repoA"
+wm_trust_repo "$WS"
 
 # --- positive case: repo scope, target is the wingman repo's own root ---------
 wid="$("$SPAWN" --type software-analyst --repo "$TEST_REPO" --objective "edit a playbook" 2>/dev/null | tail -1)"

@@ -48,7 +48,38 @@ test_new_home() {
   # inside a crew session, the inherited crew id would silently re-scope
   # watch-fleet and the Stop hook to that crew's (empty) reports.
   unset WINGMAN_CREW_ID
+  # Isolated Claude Code gate fixtures (issue #16), so bin/spawn-crew's
+  # preflight trust/bypass checks never read (or write) a real developer
+  # machine's ~/.claude.json / ~/.claude/settings.json, and never block a
+  # test spawn by default. Bypass-Permissions starts pre-accepted (mirrors
+  # the common real-machine state - only the dedicated preflight test
+  # exercises the "not yet accepted" path); the trust config starts with no
+  # repos trusted - see wm_trust_repo below for granting it per repo, the
+  # test-fixture equivalent of "run claude here once and accept the dialog".
+  WM_CLAUDE_USER_SETTINGS="$_wm_home_parent/claude-settings.json"
+  export WM_CLAUDE_USER_SETTINGS
+  printf '{"skipDangerousModePermissionPrompt": true}\n' > "$WM_CLAUDE_USER_SETTINGS"
+  WM_CLAUDE_USER_CONFIG="$_wm_home_parent/claude-config.json"
+  export WM_CLAUDE_USER_CONFIG
+  printf '{"projects": {}}\n' > "$WM_CLAUDE_USER_CONFIG"
   wm_state init >/dev/null
+}
+
+# Grant workspace trust for one repo path in the current test's isolated
+# WM_CLAUDE_USER_CONFIG fixture (see test_new_home above) - the test-fixture
+# equivalent of "run claude here once, interactively, and accept the trust
+# dialog." Physically normalizes the path first so it matches exactly what
+# bin/spawn-crew itself queries against (a symlinked route would otherwise
+# mismatch the real, resolved path).
+wm_trust_repo() {
+  _tr_path="$(cd -P "$1" && pwd -P)"
+  uv run --no-project --quiet python - "$WM_CLAUDE_USER_CONFIG" "$_tr_path" <<'EOF'
+import json, sys
+path, repo = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d.setdefault("projects", {})[repo] = {"hasTrustDialogAccepted": True}
+json.dump(d, open(path, "w"))
+EOF
 }
 
 # Rewrite a member's live-status `updated` stamp to N minutes ago (default 10) so

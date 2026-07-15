@@ -88,6 +88,12 @@ export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 wm_on_exit "rm -f '$CFG'"
+wm_trust_repo "$WS"
+wm_trust_repo "$WS/repoA"
+wm_trust_repo "$WS/repoC"
+wm_trust_repo "$WS/repoA/subdir"
+wm_trust_repo "$REALPARENT/repoSym"
+wm_trust_repo "$WS2/repoSymName"
 
 # --- global scope --------------------------------------------------------------
 id="$("$SPAWN" --type software-analyst --scope global --objective "cross repo cleanup" 2>/dev/null | tail -1)"
@@ -190,6 +196,7 @@ assert_eq "a name-lookup through a symlinked root still records is_git=true" "$(
 COLLIDE_DIR="$(wm_mktemp_dir)/collide"
 mkdir -p "$COLLIDE_DIR/repoA"   # plain, non-git - collides by name with the
                                 # discovered (git) repoA under $WS.
+wm_trust_repo "$COLLIDE_DIR/repoA"
 colid="$(cd "$COLLIDE_DIR" && "$SPAWN" --type market-analyst --repo repoA --objective "name collision" 2>/dev/null | tail -1)"
 assert_true "a spawn against a colliding bare name succeeds" "[ -n '$colid' ]"
 col_repo="$(field_of "$colid" repo)"

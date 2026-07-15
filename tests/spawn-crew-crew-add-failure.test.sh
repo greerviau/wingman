@@ -24,6 +24,7 @@ mkdir -p "$REPO"
 git -C "$REPO" init -q
 
 test_new_home
+wm_trust_repo "$REPO"
 
 WRAP_DIR="$(wm_mktemp_dir)"
 

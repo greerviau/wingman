@@ -28,6 +28,7 @@ printf 'WM_ROOTS=%q\n' "$WS" > "$CFG"
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 wm_on_exit "rm -f '$CFG'"
+wm_trust_repo "$WS/repoA"
 
 # The decoy: a session whose name has the crew session's name as a PREFIX,
 # standing in for wingman-main / a user's own session. The real crew session
