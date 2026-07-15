@@ -330,6 +330,14 @@ wm_tmux_window_activity_age() {
 # content that merely *mentions* a prompt (a diff, a plan, a test fixture) is
 # carried by the UI-shape adjacency and stability conditions in each caller, not
 # by the phrase list. Overridable (e.g. for another harness).
+# No path parameter is needed here, and none was added when issue #60 raised a
+# worktree-specific freeze: this detector is purely content-based already, and
+# a live repro (a developer crew member driven through `git worktree add` into
+# a sibling directory, then a Write-tool touch inside that new worktree, both
+# against a fresh, never-before-trusted scratch repo) rendered no dialog of any
+# kind for either step - the sibling worktree path falls inside the session's
+# already-granted access boundary. There is no distinct worktree dialog
+# variant to add a phrase for (see tests/watch-fleet.test.sh's z15 case).
 WM_PERM_PROMPT_RE="${WM_PERM_PROMPT_RE:-Do you want to |Yes, I trust this folder|Bypass Permissions mode|Yes, I accept|Yes, and don.t ask}"
 # A real dialog pairs the question with a numbered options list rendered with it.
 WM_PERM_OPTION_RE="${WM_PERM_OPTION_RE:-^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]}"

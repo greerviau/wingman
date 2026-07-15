@@ -257,6 +257,31 @@ out10="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "trust dialog fires as blocked via its option row" "$out10" "blocked: z10"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- a worktree-add + in-worktree file touch renders no dialog at all (#60) ---
+# Issue #60 hypothesized a path-based gap: a dialog freezing a pane during
+# git-worktree setup goes undetected because the detector only covers the
+# primary repo path. Reproduced end-to-end (a real developer crew member
+# spawned against a fresh, never-before-trusted scratch repo, driven through
+# `git worktree add` into a sibling directory and a Write-tool touch inside
+# it): neither step rendered any workspace-trust, Bypass Permissions, or
+# "outside your workspace" dialog - the sibling worktree path falls inside the
+# session's already-granted access boundary, so there is no second dialog
+# variant to add here. This fixture reproduces that exact captured pane text
+# (no option rows at all) and locks in that it is never misclassified as a
+# frozen prompt.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z15 --type developer --objective s --repo /tmp --window wm-z15 --session-id s23 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z15 'printf "Worktree created without any interactive dialog. Now writing the test file.\n\n  Write(~/scratch-repo-z15/touch-test.txt)\n  ⎿  Wrote 1 line to ../scratch-repo-z15/touch-test.txt\n      1 touched\n"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+z15pid=$!
+wm_track "$z15pid"
+sleep 6
+assert_true "watcher keeps blocking after a worktree-add + file-touch sequence" "kill -0 $z15pid"
+assert_contains "worktree-touch member is never flagged" "$(wm_state crew-get --id z15)" '"status": "working"'
+kill "$z15pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- a single stray numbered item is not a gate (>=2-rows rejects it) ---------
 # The PR-#6 residual variant: a parked, byte-static pane whose tail quotes a
 # single numbered item whose text begins with a question phrase. Its option block
