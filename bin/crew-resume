@@ -163,7 +163,7 @@ EOF
     # absurdly high here, the gate can never be satisfied regardless of
     # transcript size or session age. Scoped to this one resumed process only
     # (never written to the shared ~/.claude.json), so it has no effect on the
-    # pilot's own everyday interactive sessions.
+    # human's own everyday interactive sessions.
     echo "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=${WM_RESUME_TOKEN_THRESHOLD:-999999999}"
     echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
     # The resuming session's own run id, exactly as spawn-crew captures it at

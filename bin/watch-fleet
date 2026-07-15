@@ -630,7 +630,7 @@ prompt_freeze_check() {
 # that check this is auto-dismissed by the caller, not escalated to
 # `blocked` - there is nothing here for a human to decide.
 resume_prompt_freeze_check() {
-  resume_prompt_shape_in "$PANE_TEXT" || return 1
+  resume_prompt_shape_in "$(printf '%s\n' "$PANE_TEXT" | tail -n "$WM_RESUME_TAIL")" || return 1
   [ "$PANE_STABLE" = 1 ]
 }
 
