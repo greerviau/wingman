@@ -245,6 +245,43 @@ assert_contains "the killw alias is recognized the same as kill-window" "$out" '
 
 assert_true "the watcher is still alive after every bypass attempt above" "wait_for_cycle_live"
 
+# --- round 3 re-review: tmux resolves ANY unambiguous PREFIX of a full
+# command name too, not just the exact name/alias - `tmux kill-win` and
+# `tmux kill-ses` bypassed the round-1/2 exact-match set entirely (live
+# repro'"'"'d against a real cycle: hook output empty, then the real command
+# genuinely killed the watcher). Detection now introspects the CONNECTED
+# tmux binary'"'"'s own `list-commands` and replicates its real resolution
+# grammar, so any abbreviation this tmux accepts is covered without needing
+# a fourth hand-maintained spelling list.
+out="$(run_hook "tmux kill-win -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "the kill-win abbreviation (round 3 finding) is recognized as kill-window" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux kill-ses -t $WM_TMUX_SESSION")"
+assert_contains "the kill-ses abbreviation (round 3 finding) is recognized as kill-session" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux kill-s -t $WM_TMUX_SESSION")"
+assert_eq "an AMBIGUOUS abbreviation (kill-s: kill-server or kill-session) is allowed - real tmux itself refuses to run it, so there is nothing to guard against" "$out" ""
+
+out="$(run_hook "tmux kill-w -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "the shortest unambiguous kill-window abbreviation (kill-w) is recognized" "$out" '"permissionDecision": "deny"'
+
+# Global flag + abbreviation combined - the exact shape a future round would
+# need if abbreviation resolution and global-flag skipping were not both
+# anchored on the live tmux grammar.
+out="$(run_hook "tmux -S $SOCK kill-win -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "a global -S flag followed by an abbreviated subcommand does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux -T 256,clipboard kill-ses -t $WM_TMUX_SESSION")"
+assert_contains "a global -T flag followed by an abbreviated subcommand does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+# An abbreviation on an UNRELATED, real target is still allowed - proves this
+# isn'"'"'t a blanket deny of every abbreviated tmux kill command, only ones that
+# actually resolve to a protected pid.
+out="$(run_hook "tmux kill-win -t $WM_TMUX_SESSION:typedwin")"
+assert_eq "kill-win on an unrelated (real) window is allowed (no output)" "$out" ""
+
+assert_true "the watcher is still alive after every round-3 bypass attempt" "wait_for_cycle_live"
+
 "$WF" --stop >/dev/null 2>&1
 tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
 

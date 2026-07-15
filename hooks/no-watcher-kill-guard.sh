@@ -64,11 +64,17 @@
 #     into. The subcommand may be preceded by any number of tmux's own
 #     global options (-L/-S/-f/-c/-T/-D/...); rather than enumerating that
 #     flag grammar (which drifts out of sync with tmux's own - a real gap
-#     found across two review rounds), detection is anchored on the
-#     subcommand name itself (kill-window/killw/kill-session), and every
-#     token before it is skipped as noise regardless of how many flags it
-#     represents or which tmux version defines them. The WHOLE
-#     process tree rooted at every resolved pane pid is then walked with one
+#     found across two review rounds), detection scans for the subcommand
+#     TOKEN itself and skips every token before it as noise, regardless of
+#     how many flags that represents or which tmux version defines them. The
+#     subcommand token itself is resolved against the CONNECTED tmux
+#     binary's own `tmux list-commands` output (never a hardcoded literal
+#     set), replicating tmux's real exact-match-then-unambiguous-prefix
+#     grammar - so an abbreviation tmux itself would accept (`kill-win`,
+#     `kill-ses`, a third review round's finding) is recognized exactly like
+#     the full name or the `killw` alias, without needing to enumerate every
+#     spelling tmux allows. The WHOLE process tree rooted at every resolved
+#     pane pid is then walked with one
 #     `ps -ax -o pid=,ppid=` scan (the same approach bin/lib/wm-state.py's
 #     _ps_tree() uses for stall detection, reimplemented here as a small
 #     self-contained walk rather than a cross-module import, matching this
@@ -339,23 +345,93 @@ def tmux_target_value(rest):
 # simply misread the first unrecognized flag as the subcommand. Scanning for
 # the subcommand ITSELF, and treating every token before it as global-option
 # noise regardless of how many flags that represents or what tmux version
-# defines them, closes this permanently rather than needing to track tmux'"'"'s
-# grammar release to release.
-_TMUX_KILL_SUBCOMMANDS = {
-    "kill-window": "kill-window",
-    "killw": "kill-window",
-    "kill-session": "kill-session",
-}
+# defines them, closes the global-flag bypass permanently rather than needing
+# to track tmux'"'"'s grammar release to release.
+#
+# Round 3 found the next layer of the same root cause: tmux resolves ANY
+# unambiguous PREFIX of a full command name too (`tmux kill-win`, `tmux
+# kill-ses`), not just the exact name/alias - so a hand-maintained exact-match
+# set (`{"kill-window", "killw", "kill-session"}`) still missed every
+# abbreviation tmux itself accepts. A literal set can only ever enumerate
+# spellings someone thought to test; it can'"'"'t enumerate a grammar rule.
+# Fixed by asking the CONNECTED tmux BINARY what it would itself resolve a
+# token to (`tmux list-commands`, introspected fresh every call - never
+# cached, never hardcoded) and replicating tmux'"'"'s own two-step resolution
+# exactly: an exact match against a full command name or alias wins outright;
+# otherwise an UNAMBIGUOUS prefix match against the full command names only
+# (never against aliases - confirmed empirically against a live tmux: `tmux
+# men` for the `menu` alias of `display-menu` is "unknown command", while
+# `tmux menu` resolves, so tmux does not prefix-expand aliases). A token that
+# resolves to nothing, or is itself ambiguous (`tmux kill-s` - could be
+# kill-server or kill-session), is left unresolved and skipped as noise: real
+# tmux refuses to run an unknown/ambiguous command (exit 1, no side effect),
+# so there is nothing for this hook to guard against in that case either.
+# This is grammar-derived rather than enumerated, so it closes the
+# abbreviation bypass for whatever tmux version is actually installed,
+# permanently, rather than needing a fourth round the next time tmux adds a
+# new command whose prefix happens to collide.
+_TMUX_KILL_FULL_NAMES = {"kill-window", "kill-session"}
+# Fallback used only if `tmux list-commands` itself cannot be run (tmux
+# missing, or the introspection call errors) - the exact/alias forms already
+# covered by rounds 1-2 stay caught rather than the guard going fully blind,
+# though a bare abbreviation would not be recognized in that narrow case.
+_TMUX_KILL_FALLBACK_NAMES = {"kill-window", "kill-session"}
+_TMUX_KILL_FALLBACK_ALIASES = {"killw": "kill-window"}
 
 
-def tmux_kill_subcommand_index(args):
-    """args = argv[1:] (everything after the resolved `tmux`). Returns the
-    index of the first token that is a known kill-window/kill-session
-    subcommand name (or alias), or len(args) if none is found."""
+def tmux_command_catalog():
+    """(full_names, alias_to_name) introspected live from the CONNECTED tmux
+    binary'"'"'s own `list-commands` output - the authoritative source for
+    exactly what command names/aliases this installed tmux version accepts,
+    so resolution never drifts out of sync with the running tmux the way a
+    hand-maintained literal set inevitably does."""
+    try:
+        out = subprocess.check_output(
+            ["tmux", "list-commands", "-F",
+             "#{command_list_name}|#{command_list_alias}"],
+            stderr=subprocess.DEVNULL, timeout=5).decode()
+    except Exception:
+        return set(), {}
+    names = set()
+    aliases = {}
+    for line in out.splitlines():
+        parts = line.split("|", 1)
+        name = parts[0] if parts else ""
+        if not name:
+            continue
+        names.add(name)
+        alias = parts[1] if len(parts) > 1 else ""
+        if alias:
+            aliases[alias] = name
+    return names, aliases
+
+
+def resolve_tmux_subcommand(token, names, aliases):
+    """Replicate tmux'"'"'s own subcommand resolution for a single argv token:
+    exact name/alias match first, then an unambiguous prefix match against
+    full command names only. Returns the resolved full command name, or None
+    if the token matches nothing (unknown) or matches more than one full name
+    (ambiguous) - both of which real tmux itself refuses to run."""
+    if token in names:
+        return token
+    if token in aliases:
+        return aliases[token]
+    candidates = [n for n in names if n.startswith(token)]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def tmux_kill_subcommand_index(args, names, aliases):
+    """args = argv[1:] (everything after the resolved `tmux`). Returns
+    (index, resolved_name) for the first token that RESOLVES - via exact
+    match, alias, or unambiguous prefix - to kill-window or kill-session, or
+    (len(args), None) if none is found."""
     for i, tok in enumerate(args):
-        if tok in _TMUX_KILL_SUBCOMMANDS:
-            return i
-    return len(args)
+        resolved = resolve_tmux_subcommand(tok, names, aliases)
+        if resolved in _TMUX_KILL_FULL_NAMES:
+            return i, resolved
+    return len(args), None
 
 
 def resolve_pane_pids(kind, target):
@@ -436,10 +512,12 @@ def check_tmux(argv, protected):
     # tmux_kill_subcommand_index) rather than enumerating those flags, so no
     # global option this hook doesn'"'"'t happen to list can ever bypass detection.
     args = argv[1:]
-    idx = tmux_kill_subcommand_index(args)
+    names, aliases = tmux_command_catalog()
+    if not names:
+        names, aliases = _TMUX_KILL_FALLBACK_NAMES, _TMUX_KILL_FALLBACK_ALIASES
+    idx, kind = tmux_kill_subcommand_index(args, names, aliases)
     if idx >= len(args):
         return
-    kind = _TMUX_KILL_SUBCOMMANDS[args[idx]]
     check_tmux_kill(["tmux", kind] + args[idx + 1:], protected)
 
 
