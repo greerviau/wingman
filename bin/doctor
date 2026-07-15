@@ -280,7 +280,7 @@ fi
 # been killed by mistake before). Unlike the merge-authorization pair (crew
 # sessions only) or the delegation guard (a lead or the wingman repo), there
 # is no session type for which killing the watcher is ever legitimate - not
-# the pilot's own top-level session, not a lead, not any other crew member -
+# the human's own top-level session, not a lead, not any other crew member -
 # so this is registered unconditionally, with no crew-type gating at all.
 WATCHER_KILL_HOOK="$WM_REPO/hooks/no-watcher-kill-guard.sh"
 if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \

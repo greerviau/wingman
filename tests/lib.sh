@@ -32,10 +32,16 @@ wm_mktemp_file() { mktemp    "$(_wm_tmpl)XXXXXXXX"; }
 # Each test gets its own throwaway state home and a tmux session name that does
 # not exist (so the watcher's reconcile step is skipped - no live windows to check
 # against - and a test never disturbs the real fleet).
+#
+# Also records $WINGMAN_HOME onto WM_TRACKED_HOMES (every home this file ever
+# creates, not just the current one - a file may call test_new_home several
+# times) so wm_cleanup_all's wait-for-death step below can find any watch.pid
+# this file's tests might have left running.
 test_new_home() {
   _wm_home_parent="$(wm_mktemp_dir)"
   WINGMAN_HOME="$_wm_home_parent/wm"
   export WINGMAN_HOME
+  WM_TRACKED_HOMES="$WM_TRACKED_HOMES $WINGMAN_HOME"
   export WM_TMUX_SESSION="wm-test-${WM_TEST_RUN_ID:-x}-$$-$RANDOM"
   wm_track_tmux "$WM_TMUX_SESSION"
   # The tests model wingman's own top-level scope (owner ""). When the suite runs
@@ -117,6 +123,30 @@ wm_track() { WM_TRACKED_PIDS="$WM_TRACKED_PIDS $1"; }
 WM_TRACKED_TMUX=""
 wm_track_tmux() { WM_TRACKED_TMUX="$WM_TRACKED_TMUX $1"; }
 
+# Every $WINGMAN_HOME test_new_home has ever pointed at in this file (see
+# test_new_home above) - not pids, paths. wm_cleanup_all reads each one's
+# watch.pid/watch-*.pid to learn which watch-fleet cycles might still be
+# alive, regardless of whether they were backgrounded directly (WM_TRACKED_PIDS)
+# or hosted in a tracked tmux pane (WM_TRACKED_TMUX, which only records the
+# session name, not the process inside it).
+WM_TRACKED_HOMES=""
+
+# pids of every watch-fleet cycle that might still be alive across every home
+# this file used, read from each home's watch.pid/watch-*.pid BEFORE anything
+# is signaled (kill/tmux kill-session do not erase the pidfile - only the
+# watcher's own INT/TERM trap does, as part of exiting - so reading first just
+# avoids a benign miss if that trap already ran independently).
+_wm_live_watch_pids() {
+  for _h in $WM_TRACKED_HOMES; do
+    for _pf in "$_h"/watch.pid "$_h"/watch-*.pid; do
+      [ -f "$_pf" ] || continue
+      _p="$(cat "$_pf" 2>/dev/null)"
+      case "$_p" in ''|*[!0-9]*) continue ;; esac
+      printf '%s ' "$_p"
+    done
+  done
+}
+
 # Register teardown logic beyond "kill this pid / this session / remove this
 # glob-cleaned temp path" (e.g. an explicit `rm -f "$CFG"` for a config file
 # wm_mktemp_dir/wm_mktemp_file didn't create). Appends to a list the shared
@@ -135,9 +165,24 @@ $1"; }
 # removal is inherently idempotent - a second rm -rf over an already-empty
 # match is a no-op), so a second invocation (INT/TERM firing after EXIT
 # already ran once, or vice versa) is always safe. Order matters: on-exit
-# commands and pid kills first, then sessions, then the temp-path glob, since
-# a still-running pane can otherwise recreate output into a directory
+# commands and pid kills first, then sessions, then a bounded wait for those
+# same watch-fleet cycles to actually be gone, then finally the temp-path
+# glob - a still-running pane can otherwise recreate output into a directory
 # mid-removal.
+#
+# The wait step closes a real, empirically-confirmed race (issue #99): kill(1)
+# and `tmux kill-session` only request termination, they do not block until
+# the target has actually exited - 27/30 direct trials of `tmux kill-session`
+# against a live bin/watch-fleet cycle found it still answering `kill -0`
+# immediately afterward (never past ~2s, but never instantly gone either). If
+# the surviving cycle completes one more poll-loop iteration before it
+# actually dies, that iteration's `wm_state ...` call recreates $WINGMAN_HOME's
+# whole directory tree (wm-state.py's ensure_home() runs `os.makedirs(...,
+# exist_ok=True)` on every invocation) - including the top-level
+# wm-test.<run>.<pid>.* directory the rm -rf below is about to remove, if that
+# removal already ran first. Waiting here for the cycle to be provably dead
+# before removing anything closes the race outright, rather than merely
+# narrowing its window via ordering alone.
 wm_cleanup_all() {
   _rc=$?
   if [ -n "$WM_ON_EXIT_CMDS" ]; then
@@ -150,6 +195,7 @@ wm_cleanup_all() {
 $_cmds
 EOF
   fi
+  _wait_pids="$(_wm_live_watch_pids)"
   [ -n "$WM_TRACKED_PIDS" ] && kill $WM_TRACKED_PIDS 2>/dev/null
   WM_TRACKED_PIDS=""
   if [ -n "$WM_TRACKED_TMUX" ]; then
@@ -158,6 +204,18 @@ EOF
     done
     WM_TRACKED_TMUX=""
   fi
+  if [ -n "$_wait_pids" ]; then
+    _wait_deadline=$(($(date +%s) + 5))
+    while [ "$(date +%s)" -lt "$_wait_deadline" ]; do
+      _still_alive=0
+      for _p in $_wait_pids; do
+        kill -0 "$_p" 2>/dev/null && _still_alive=1
+      done
+      [ "$_still_alive" -eq 0 ] && break
+      sleep 0.05
+    done
+  fi
+  WM_TRACKED_HOMES=""
   rm -rf "$(_wm_tmpl)"* 2>/dev/null
   return "$_rc"
 }

@@ -29,7 +29,7 @@
 #
 # What is denied, from EVERY session (no WINGMAN_CREW_ID/WINGMAN_CREW_TYPE
 # gating at all - killing the watcher is never legitimate from any session,
-# not the pilot's own top-level session, not a lead, not any other crew
+# not the human's own top-level session, not a lead, not any other crew
 # member):
 #   - `kill`/`pkill <target>` whose target resolves to a pid that is
 #     CURRENTLY a live watch-fleet cycle.
