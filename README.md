@@ -20,6 +20,7 @@ Wingman is built for that gap:
 - Spawning is cost-disciplined and the org is depth-capped, never an unbounded swarm.
 - These rules are backed by mechanical hooks, not prompt discipline alone.
 
+This doesn't retire subagents - a crew member can still spin one off for a bounded, single-shot lookup inside its own session; wingman's crew is the coordination layer above that.
 See [`docs/architecture.md`](docs/architecture.md) for how each of these actually works.
 
 ## Quick start
@@ -27,7 +28,7 @@ See [`docs/architecture.md`](docs/architecture.md) for how each of these actuall
 ```
 git clone https://github.com/greerviau/wingman.git
 cd wingman
-claude          # or: bin/wingman   (adds your project roots via --add-dir)
+claude          # or: bin/wingman   (see "Why bin/wingman instead of plain claude?" below)
 ```
 
 On first launch wingman runs `bin/doctor` (installs any missing dependencies with your consent), discovers your sibling repos with zero config, and starts the supervisor.
@@ -79,11 +80,11 @@ The same lifecycle applies to software-analyst and other crew types; how each st
 - "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
   Detach (`Ctrl-b d`) to hand back.
 - Killing wingman leaves the crew running; relaunching it rebuilds the roster.
-- Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app, with connection drops recovered automatically in both directions - see [Remote Control](#remote-control) below.
+- Every crew member is also reachable straight from `claude.ai/code` or the Claude desktop/mobile apps, with connection drops recovered automatically in both directions - see [Remote Control](#remote-control) below.
 
 ## Remote Control
 
-Claude Code's Remote Control lets you reach a running session from `claude.ai/code` or the Claude mobile app, not only by attaching to its tmux window.
+Claude Code's Remote Control lets you reach a running session from `claude.ai/code` or the Claude desktop/mobile apps, not only by attaching to its tmux window.
 Every crew member is reachable this way by default, and a dropped connection - a crew member's or wingman's own - is either auto-recovered or surfaced to you with a one-line fix.
 See [`docs/architecture.md`](docs/architecture.md#remote-control) for how each direction works.
 

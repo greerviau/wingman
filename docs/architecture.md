@@ -18,7 +18,7 @@ None of this is required - the underlying scripts work without the launcher - bu
 
 ## Remote Control
 
-Claude Code's Remote Control lets a session be reached from `claude.ai/code` or the Claude mobile app, not only via `tmux attach`.
+Claude Code's Remote Control lets a session be reached from `claude.ai/code` or the Claude desktop/mobile apps, not only via `tmux attach`.
 Wingman wires this up in both directions:
 
 - Every crew member launches with `--remote-control "wm-<id>"` (`bin/spawn-crew`, gated by `WM_REMOTE_CONTROL`, on by default) - the `wm-` prefix matches its tmux window name, so it reads identically in both places.
