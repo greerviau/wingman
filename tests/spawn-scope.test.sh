@@ -203,6 +203,21 @@ assert_true "a nonexistent path still fails to spawn" "[ $rc -ne 0 ]"
 if "$SPAWN" --type market-analyst --repo no-such-project-xyz --objective nope >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "an unresolvable bare name still fails to spawn" "[ $rc -ne 0 ]"
 
+# --- Remote Control visibility recorded on the roster (issue #96) ------------
+# On by default (mirrors the launch flag's own on-by-default/empty-to-disable
+# convention): remote_control=true and remote_control_connected=true (no
+# ambiguity at spawn - launching with --remote-control starts a session
+# actively connected).
+rcid="$("$SPAWN" --type software-analyst --repo repoA --objective "rc default on" 2>/dev/null | tail -1)"
+assert_true "Remote Control default-on spawn succeeds" "[ -n '$rcid' ]"
+assert_eq "default spawn records remote_control=true" "$(git_field_of "$rcid" remote_control)" "true"
+assert_eq "default spawn records remote_control_connected=true" "$(git_field_of "$rcid" remote_control_connected)" "true"
+
+norcid="$(WM_REMOTE_CONTROL= "$SPAWN" --type software-analyst --repo repoA --objective "rc disabled" 2>/dev/null | tail -1)"
+assert_true "WM_REMOTE_CONTROL= spawn succeeds" "[ -n '$norcid' ]"
+assert_eq "disabled spawn records remote_control=false" "$(git_field_of "$norcid" remote_control)" "false"
+assert_eq "disabled spawn records remote_control_connected absent (None, not false)" "$(git_field_of "$norcid" remote_control_connected)" ""
+
 # --- model default: --model > $WM_MODEL > agent CLI default -------------------
 unset WM_MODEL
 nid="$("$SPAWN" --type software-analyst --repo repoA --objective "no model set" 2>/dev/null | tail -1)"

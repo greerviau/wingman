@@ -28,15 +28,11 @@ closed=0
 removed=0
 for cid in $AFFECTED; do
   WINDOW="wm-$cid"
-  if wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
-    wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
-    closed=$((closed+1))
-  fi
 
-  # Worktree-removal fallback (only fires when a non-graceful exit left the tree
-  # behind; the recorded path is empty for a member with no worktree, e.g. an
-  # analyst, so the guard below skips it).
-  { read -r WT; read -r RP; } <<EOF
+  # One roster read per id, extended (issue #96) to also pull the Remote
+  # Control fields alongside the existing worktree/repo read for the fallback
+  # below - no separate lookup for either purpose.
+  { read -r WT; read -r RP; read -r RC; read -r RCC; } <<EOF
 $(wm_state crew-get --id "$cid" 2>/dev/null | wm_py -c '
 import sys, json
 try:
@@ -44,8 +40,43 @@ try:
 except Exception:
     d = {}
 print(d.get("worktree") or "")
-print(d.get("repo") or "")')
+print(d.get("repo") or "")
+print("true" if d.get("remote_control", True) else "false")
+print("true" if d.get("remote_control_connected", True) else "false")')
 EOF
+
+  if wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
+    _target="$(wm_tmux_win_target "$WINDOW")"
+    # Deregister from Remote Control before the window disappears (issue #96):
+    # `/remote-control` is a blind stateful toggle, not an idempotent
+    # disconnect, so it is only safe to send when the roster's own
+    # already-vetted field says the session is (or is assumed to still be)
+    # connected. No pane inspection happens in this file at all - the decision
+    # is a pure read of a field bin/watch-fleet's stability-gated poll already
+    # computed. Both fields read true/absent by default (a pre-fix legacy
+    # record); skip the send only on positive, previously-observed evidence
+    # the session is already disconnected (remote_control_connected is
+    # explicitly false).
+    if [ "$RC" = true ] && [ "$RCC" = true ]; then
+      # A dialog-shaped refusal (rc 2) or any other non-success is best-effort
+      # and non-fatal - standing a member down must never hang or fail because
+      # Remote Control cleanup didn't go through, so kill-window below runs
+      # unconditionally regardless of this outcome.
+      if wm_tmux_send_message "$_target" "/remote-control"; then
+        # A successful send only confirms the keystroke registered (the input
+        # box cleared), not that the CLI's outbound disconnect call to Remote
+        # Control's relay has completed - a short, bounded settle avoids
+        # killing the process the instant the UI updates and racing that call.
+        sleep "${WM_RC_DISCONNECT_SETTLE:-2}"
+      fi
+    fi
+    wm_tmux kill-window -t "$_target" 2>/dev/null || true
+    closed=$((closed+1))
+  fi
+
+  # Worktree-removal fallback (only fires when a non-graceful exit left the tree
+  # behind; the recorded path is empty for a member with no worktree, e.g. an
+  # analyst, so the guard below skips it).
   if [ -n "$WT" ] && [ -d "$WT" ]; then
     # The repo for `git -C`: the roster repo (repo scope) or the worktree's own git
     # dir (global scope, or a moved repo). --force cleans git's worktree metadata

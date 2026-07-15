@@ -376,6 +376,8 @@ The tmux **server** owns the crew windows, so killing you does not kill the crew
 On any startup: read `~/.wingman/crew.json`, reconcile against the live windows (`bin/crew-list` does this automatically), re-arm the watcher if crew are in flight (arm `bin/watch-fleet` as a tracked background task; see "The wake loop"), and report the current roster.
 A crew member whose window died shows as `died` and is recoverable by resuming its agent CLI in its repo (`bin/crew-takeover <id>` prints the exact command).
 
+**A `died` member's Remote Control entry, if it had one, is stale (issue #96).** An abrupt kill (a tmux/host crash, an OOM) gives the CLI process no chance to signal a disconnect, and there is no mechanism - no CLI subcommand, no API, no file-based signal - that can deregister a Remote-Control-visible session from outside it once its process is gone. A `needs-attention` note for a `died` member that had Remote Control enabled carries a caveat naming this explicitly, but the underlying limitation is permanent: `bin/crew-list`'s own status is always the source of truth for whether a member is alive, never Remote Control's displayed state.
+
 ## Harness-agnostic by design
 
 The **crew** coordination layer - tmux windows, the JSON status files, the watcher loop, and the board - does not depend on any one agent harness.

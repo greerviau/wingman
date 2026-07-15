@@ -577,6 +577,98 @@ assert_eq "exactly one retry lands in the pane within the cooldown" "$count" "1"
 kill "$rc3pid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- Remote Control connection-state tracking, widened to review/stalled -----
+# (issue #96). The pane-capture loop above was previously scoped to
+# working/blocked only; bin/crew-standdown needs an already-vetted read for the
+# actual population it hits (blocked/review/stalled), so the same
+# stability-gated observation (PANE_STABLE, i.e. byte-identical across two
+# consecutive polls) must also persist onto a `review` or `stalled` member's
+# own roster record, not just working's auto-reconnect path.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rv1 --type developer --objective rv --repo /tmp --window wm-rv1 --session-id srv1 --remote-control >/dev/null
+wm_state crew-set --id rv1 --status review --summary "plan ready" --artifact /tmp/plan.md >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rv1 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+# First cycle: the pilot-facing review delivery itself is the attention event
+# and fires/exits immediately, before this poll's own capture can be confirmed
+# stable (no prior hash exists yet) - remote_control_connected must be
+# untouched (still true from spawn) after only one poll.
+out_rv1="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "first cycle still fires on the pilot-facing review delivery" "$out_rv1" "review: rv1"
+assert_contains "after only one poll, remote_control_connected is untouched (not yet flipped)" \
+  "$(wm_state crew-get --id rv1)" '"remote_control_connected": true'
+# Second cycle: the review event is now acked (see fire()'s own ack step), so
+# this run does not fire on it again and instead keeps blocking/looping - its
+# very first internal iteration reuses the hash persisted by the first cycle
+# above, confirming stability (PANE_STABLE=1) and persisting the drop.
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+rv1pid=$!
+wm_track "$rv1pid"
+sleep 4
+assert_contains "a stable second sighting flips remote_control_connected to false for a review member" \
+  "$(wm_state crew-get --id rv1)" '"remote_control_connected": false'
+kill "$rv1pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# Same widened coverage for `stalled` (the other status crew-standdown might
+# hit whose window is still alive).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id sl1 --type developer --objective sl --repo /tmp --window wm-sl1 --session-id ssl1 --remote-control >/dev/null
+wm_state crew-set --id sl1 --status stalled --summary "no pane output, status update, running child process, or CPU activity" >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-sl1 'printf "Transport recovery exhausted (code 1006)\n"; sleep 600'
+out_sl1="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "first cycle still fires on the stalled event" "$out_sl1" "stalled: sl1"
+assert_contains "after only one poll, remote_control_connected is untouched for a stalled member too" \
+  "$(wm_state crew-get --id sl1)" '"remote_control_connected": true'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+sl1pid=$!
+wm_track "$sl1pid"
+sleep 4
+assert_contains "a stable second sighting flips remote_control_connected to false for a stalled member" \
+  "$(wm_state crew-get --id sl1)" '"remote_control_connected": false'
+kill "$sl1pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A member with remote_control=false (the crew-add default without
+# --remote-control) is never touched, even with the identical banner and
+# stable pane - the widened scan only writes the field when remote_control is
+# actually true.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rv2 --type developer --objective rv --repo /tmp --window wm-rv2 --session-id srv2 >/dev/null
+wm_state crew-set --id rv2 --status review --summary "plan ready" --artifact /tmp/plan2.md >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rv2 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+rv2pid=$!
+wm_track "$rv2pid"
+sleep 4
+assert_contains "remote_control=false is never touched by the widened scan" \
+  "$(wm_state crew-get --id rv2)" '"remote_control_connected": null'
+kill "$rv2pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A `working` member's own successful auto-reconnect reflects back into the
+# persisted field the same way a detected drop does - flipping it back to
+# true, not just leaving the send itself as a quiet self-heal.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rc4 --type developer --objective rc --repo /tmp --window wm-rc4 --session-id src4 --remote-control >/dev/null
+wm_state crew-set --id rc4 --status working --summary "building" >/dev/null
+wm_state crew-set --id rc4 --remote-control-connected false >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc4 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
+rc4pid=$!
+wm_track "$rc4pid"
+_wait=0
+while [ ! -f "$WINGMAN_HOME/rcdrop-rc4.sent" ] && [ "$_wait" -lt 20 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_true "the reconnect attempt is sent and marked" "[ -f '$WINGMAN_HOME/rcdrop-rc4.sent' ]"
+assert_contains "a successful self-heal flips remote_control_connected back to true" \
+  "$(wm_state crew-get --id rc4)" '"remote_control_connected": true'
+kill "$rc4pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- Remote Control disconnect, wingman-side (ask 2): detect-only, never inject --
 # bin/wingman registers $TMUX_PANE into $WM_HOME/self-pane at startup; here the
 # registration is simulated directly (the unit under test is watch-fleet's own

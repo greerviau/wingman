@@ -191,4 +191,88 @@ assert_contains "the untagged minority (i5) still passes through as its own row"
 assert_false "the untagged minority never collapses into mass-death either (count < min-count)" \
   "printf '%s\n' \"$out\" | grep -q correlated:mass-death"
 
+# --- stale Remote Control caveat on a single died row (issue #96) -------------
+# cmd_needs_attention (not group-attention) appends the caveat, so these cases
+# drive `wm_state needs-attention` directly rather than feeding a synthetic TSV.
+test_new_home
+wm_state crew-add --id j1 --type developer --objective a --repo /tmp --window wm-j1 --session-id sj1 --remote-control >/dev/null
+wm_state crew-set --id j1 --status died >/dev/null
+na_out="$(wm_state needs-attention --owner "")"
+assert_contains "a died member with remote_control=true carries the stale-RC caveat" "$na_out" "Remote Control may still show 'wm-j1' as connected"
+assert_contains "the caveat tells the reader to disregard it" "$na_out" "disregard it"
+
+test_new_home
+wm_state crew-add --id j2 --type developer --objective a --repo /tmp --window wm-j2 --session-id sj2 >/dev/null
+wm_state crew-set --id j2 --status died >/dev/null
+na_out2="$(wm_state needs-attention --owner "")"
+assert_false "a died member with remote_control=false (the crew-add default) carries no caveat" \
+  "printf '%s\n' \"$na_out2\" | grep -q 'Remote Control may still show'"
+
+# A legacy record predating this field entirely (both keys absent, not merely
+# false) reads as true by default - the caveat still appears.
+strip_remote_control() {
+  # strip_remote_control <crew.json path> <id>
+  uv run --no-project --quiet python -c '
+import json, sys
+path, rid = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+for r in d:
+    if r.get("id") == rid:
+        r.pop("remote_control", None)
+        r.pop("remote_control_connected", None)
+json.dump(d, open(path, "w"))
+' "$1" "$2"
+}
+test_new_home
+wm_state crew-add --id j3 --type developer --objective a --repo /tmp --window wm-j3 --session-id sj3 >/dev/null
+strip_remote_control "$WINGMAN_HOME/crew.json" j3
+wm_state crew-set --id j3 --status died >/dev/null
+na_out3="$(wm_state needs-attention --owner "")"
+assert_contains "a legacy record with both RC fields entirely absent still gets the caveat (absent reads as true)" \
+  "$na_out3" "Remote Control may still show 'wm-j3' as connected"
+
+# --- stale Remote Control caveat on a mass-death synthetic note (issue #96) ---
+# Reruns the g1/g2 outage-death batch above with remote_control=true tagged on
+# one member, confirming cmd_group_attention's own synthetic note also carries
+# a caveat (a mass-death batch is exactly the host/tmux-crash scenario issue
+# #96 was originally reported from).
+tag_remote_control() {
+  # tag_remote_control <crew.json path> <id> [<id2> ...]
+  _trc_path="$1"; shift
+  uv run --no-project --quiet python -c '
+import json, sys
+path, ids = sys.argv[1], sys.argv[2:]
+d = json.load(open(path))
+for r in d:
+    if r.get("id") in ids:
+        r["remote_control"] = True
+json.dump(d, open(path, "w"))
+' "$_trc_path" "$@"
+}
+
+test_new_home
+wm_state crew-add --id k1 --type developer --objective a --repo /tmp --window wm-k1 --session-id sk1 >/dev/null
+wm_state crew-add --id k2 --type developer --objective b --repo /tmp --window wm-k2 --session-id sk2 >/dev/null
+wm_state crew-add --id k3 --type developer --objective c --repo /tmp --window wm-k3 --session-id sk3 >/dev/null
+wm_state crew-set --id k1 --status died >/dev/null
+wm_state crew-set --id k2 --status died >/dev/null
+tag_remote_control "$WINGMAN_HOME/crew.json" k1
+input="$(printf 'k1\tdied\tX\t\nk2\tdied\tX\t')"
+out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
+assert_contains "the mass-death batch collapses" "$out" "correlated:mass-death"
+assert_contains "the synthetic note carries the stale-RC batch caveat when any member had remote_control=true" \
+  "$out" "may also still show as connected in Remote Control"
+
+test_new_home
+wm_state crew-add --id l1 --type developer --objective a --repo /tmp --window wm-l1 --session-id sl1 >/dev/null
+wm_state crew-add --id l2 --type developer --objective b --repo /tmp --window wm-l2 --session-id sl2 >/dev/null
+wm_state crew-add --id l3 --type developer --objective c --repo /tmp --window wm-l3 --session-id sl3 >/dev/null
+wm_state crew-set --id l1 --status died >/dev/null
+wm_state crew-set --id l2 --status died >/dev/null
+input="$(printf 'l1\tdied\tX\t\nl2\tdied\tX\t')"
+out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
+assert_contains "the mass-death batch collapses" "$out" "correlated:mass-death"
+assert_false "no batch caveat when no member in the batch had remote_control=true (the crew-add default)" \
+  "printf '%s\n' \"$out\" | grep -q 'may also still show as connected'"
+
 test_summary

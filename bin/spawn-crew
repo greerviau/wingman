@@ -333,6 +333,11 @@ if [ "$SCOPE" = repo ]; then
   ADD_ARGS+=(--is-git "$([ "$IS_GIT" -eq 1 ] && echo true || echo false)")
   [ "$IS_GIT" -eq 1 ] && ADD_ARGS+=(--has-remote "$([ "$HAS_REMOTE" -eq 1 ] && echo true || echo false)")
 fi
+# Mirrors the launch-flag conditional above ("$REMOTE_CONTROL" non-empty),
+# reading the same variable, so the roster record and the actual launch flag
+# can never disagree about whether this member started Remote-Control-visible
+# (issue #96).
+[ -n "$REMOTE_CONTROL" ] && ADD_ARGS+=(--remote-control)
 if ! ADD_ERR="$(wm_state crew-add "${ADD_ARGS[@]}" 2>&1 >/dev/null)"; then
   wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
   wm_die "crew-add failed for '$ID' - window $WINDOW was torn down, nothing to attach to: $ADD_ERR"
