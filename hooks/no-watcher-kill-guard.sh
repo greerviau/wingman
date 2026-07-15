@@ -12,6 +12,21 @@
 # used for issue #46's merge restriction and the onboarding-preferences gate,
 # rather than relying on prose alone.
 #
+# SCOPE (stated explicitly, not left to be discovered as a gap): this is
+# best-effort defense-in-depth against REALISTIC, ACCIDENTAL self-kills - the
+# failure shape issue #64 actually reports - not an airtight sandbox. It
+# reliably recognizes kill/pkill/tmux kill-window/kill-session however they
+# are ordinarily spelled (including tmux subcommand abbreviations, leading
+# global flags, and a target built via command substitution or a shell
+# variable). It does NOT recognize a determined attempt reached through an
+# unrecognized command WRAPPER - `xargs kill`, `timeout N kill`, `nice kill`,
+# `bash -c 'kill $PID'`, and similar launcher/supervision shapes bypass this
+# hook's dispatch entirely, since static command matching has no finite
+# grammar to anchor on the way tmux's own subcommand set does. Closing that
+# class completely means protecting the watcher at the PROCESS level
+# (auto-respawn on death, regardless of cause) - tracked separately as issue
+# #107, which this hook complements rather than duplicates.
+#
 # What is denied, from EVERY session (no WINGMAN_CREW_ID/WINGMAN_CREW_TYPE
 # gating at all - killing the watcher is never legitimate from any session,
 # not the pilot's own top-level session, not a lead, not any other crew
