@@ -158,6 +158,7 @@ The watcher is built for exactly this:
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
 - **Never `kill` a watch-fleet process for any reason during normal operation** - the pid shown in a `healthy`/`armed` line is informational, never an instruction.
   The only legitimate way to stop a cycle is `bin/watch-fleet --stop`, and that is a manual/testing action, not part of the normal arm-supervise-fire loop.
+  This is mechanically enforced by `hooks/no-watcher-kill-guard.sh` (registered by `bin/doctor`, issue #64): a `kill`/`pkill`/`tmux kill-window`/`tmux kill-session` command whose target resolves to a live watch-fleet cycle is denied outright.
 - **A `remote-control-dropped` outcome means this session's own Remote Control connection dropped**, not a crew event.
   `bin/wingman` registers this session's own tmux pane at startup (best-effort, only if running inside tmux); your own watch cycle then read-only watches that pane for the CLI's disconnect banner and wakes you the moment it appears - it never types into your pane (the same restraint the watcher has always applied to itself: the only way to act is `/remote-control`, and issuing that from outside would race the very tool call sending it).
   On this wake, tell the pilot immediately and explicitly - e.g. "Remote Control disconnected on this session; run `/remote-control` to restore it" - then re-arm as usual.

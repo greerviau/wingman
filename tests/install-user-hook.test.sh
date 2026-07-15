@@ -215,6 +215,31 @@ print('yes' if '$TEST_REPO/hooks/artifact-link-guard.sh' in cmds else 'no')
 " 2>/dev/null)"
 assert_eq "doctor registers the link guard under PreToolUse" "$link_found" "yes"
 
+# doctor also registers the watcher-protection guard (issue #64), unconditionally
+# and under PreToolUse, alongside the other user-scope hooks above.
+assert_contains "doctor reports the watcher-protection guard registered" "$out" "registered watcher-protection guard hook"
+watcher_found="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/no-watcher-kill-guard.sh' in cmds else 'no')
+" 2>/dev/null)"
+assert_eq "doctor registers the watcher-protection guard under PreToolUse" "$watcher_found" "yes"
+
+# Scoped to Bash alone (not the broader Edit|Write|NotebookEdit|Bash default) -
+# this hook only ever inspects Bash tool calls, and a broader matcher would
+# needlessly run its cheap "kill" substring pre-gate against every Edit/Write/
+# NotebookEdit payload too.
+watcher_matcher="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS4'))
+for g in d['hooks']['PreToolUse']:
+    if any(h['command'] == '$TEST_REPO/hooks/no-watcher-kill-guard.sh' for h in g['hooks']):
+        print(g.get('matcher'))
+        break
+" 2>/dev/null)"
+assert_eq "doctor scopes the watcher-protection guard to the Bash matcher" "$watcher_matcher" "Bash"
+
 # doctor also registers the outage-detection guard (issue #23): PAUSE only
 # actually takes effect in production if this registration step runs -
 # proving the hook script itself works in isolation (its own
@@ -231,6 +256,7 @@ assert_eq "doctor registers the outage-detection guard under PreToolUse" "$outag
 # Re-running doctor is a no-op for the already-registered set.
 out2="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a second doctor run reports the artifact hooks already registered" "$out2" "Artifact-publish contract hooks registered"
+assert_contains "a second doctor run reports the watcher-protection guard already registered" "$out2" "watcher-protection guard hook registered"
 assert_contains "a second doctor run reports the outage-detection guard hook already registered" "$out2" "outage-detection guard hook registered"
 
 test_summary
