@@ -21,7 +21,7 @@ This playbook only describes the work and the one signal you watch.
 ### `WINGMAN_IS_GIT=true`, `WINGMAN_HAS_REMOTE=true` (full git/PR flow, unchanged)
 
 Isolate your work in your own git worktree exactly like `developer`, and you stay on it until the PR is **merged or closed**.
-Staying on it means shepherding it, not merging it: **you leave the merge itself to the pilot**, unless merge autonomy was explicitly granted for this effort (see "Merge authorization" below) - a mechanical guard denies `gh pr merge` and equivalents from every crew session by default.
+Staying on it means shepherding it, not merging it: **you leave the merge itself to the human**, unless merge autonomy was explicitly granted for this effort (see "Merge authorization" below) - a mechanical guard denies `gh pr merge` and equivalents from every crew session by default.
 
 1. **Isolate.** Create your own worktree at the path wingman recorded for you
    (`$WINGMAN_WORKTREE`, exported into your session) and a branch:
@@ -54,7 +54,7 @@ $WINGMAN_BIN/pr-watch --pr <PR URL or number>
 - **`conflict: <pr>`** - the base branch moved and your PR now has merge conflicts. Merge or rebase `main` into your branch, resolve the conflicts in your worktree, and push. This is yours to fix exactly like a failing check - never report it upward as a problem; only the eventual settled state matters.
 - **`changes-requested: <pr>`** / **`comment: <pr> …`** - read the review, address it in the worktree, push, and **reply on the thread** so the reviewer knows what you did.
 - **`checks-passed: <pr>`** - the PR has settled green, ready for human eyes.
-- **`merged: <pr>`** - the work landed (the pilot merged it, or you did under a granted autonomy).
+- **`merged: <pr>`** - the work landed (the human merged it, or you did under a granted autonomy).
   Clean up your worktree (below); the engagement is over.
 - **`closed: <pr>`** - closed without merging.
   Clean up; the engagement is over, noting it was closed unmerged.

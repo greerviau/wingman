@@ -274,12 +274,19 @@ This is one cached answer reused - never a second question - and is presentation
 
 ## Communication register
 
-The session-role vocabulary this repo defines - *pilot*, *crew*, *wingman*, *stand down*, and the like - is orchestration-internal.
+The session-role vocabulary this repo defines - *pilot*, *crew*, *wingman*, *stand down*, and the like - is orchestration-internal: it exists only for the wingman↔human channel and for wingman's own operating docs (this repo's `CLAUDE.md` and playbooks).
+It never belongs in anything a crew member authors that a human outside that relationship might read.
 
-- **All outward artifacts** - code, comments, commit messages, PR titles and descriptions, plans, analysis docs - are written in neutral, professional engineering language, as in any engineering organization ("the user", "the operator", "approved change request").
+- **Use "human" for the person who requested the work** (interchangeably with "the requester"/"the user", already used elsewhere in this contract for the same referent) - never "pilot" - in code, code comments, commit messages, PR titles and descriptions, GitHub comments, plans, and analysis docs.
+  "Pilot" is wingman's own private term for its operator; a human reading a PR you opened has no reason to know it and every reason to find it confusing.
+  - Bad: "Finalized per pilot decision: switched to approach B."
+  - Good: "Finalized per human decision: switched to approach B."
+  - Bad: "This would silently change the pilot's own interactive sessions."
+  - Good: "This would silently change the human's own interactive sessions."
 - **Inter-agent messages** (`bin/crew-say`) use the same neutral register.
-- **Status-file fields keep their contract vocabulary** as-is: `working`/`blocked`/`review`/`done` are protocol, not prose.
-- Exception: work on wingman itself may reference these terms where the existing code and operating docs already do - the norm is about not injecting the vocabulary as a style, not about renaming wingman's real concepts.
+- **Status-file fields keep their contract vocabulary** as-is: `working`/`blocked`/`review`/`done` are protocol, not prose; a `summary`/`blocker` you write for `crew-set` is read by wingman only and never published anywhere, so it is not an "outward artifact" and may use the contract's own terms freely.
+- **Exception - internal orchestration reference is not the thing this rule targets.** A playbook's own instructional prose may use "pilot" (or the rest of the session-role vocabulary) when the sentence describes the crew↔wingman/lead relationship itself: routing an escalation, what a status-file field means, whose sign-off gates a phase transition, how a rollup reaches wingman. None of that is ever restated in an artifact you author, so repeated exposure to it doesn't condition a leak. `playbooks/common/lead.md` (its escalation-chain and phase-gate prose) and this file's own protocol description above are worked examples of this - both use "pilot" and are correct as written; this section does not ask you to reword them.
+- **What *is* a defect to flag: "pilot" used to describe a real-world fact you might independently restate in something you author** - who may merge a PR, whose authorization a change needs, whose GitHub credentials are in play. That is the pattern that leaked into real PRs (issue #109): a playbook saying "the pilot merges it" primes you to write the same fact the same way in your own PR text. If a playbook's prose describes this kind of fact using "pilot" instead of "human", that is a playbook defect worth flagging (or fixing, if you're the one editing it) - not the orchestration-relationship prose the exception above already covers.
 
 ## You may be watched or taken over
 
