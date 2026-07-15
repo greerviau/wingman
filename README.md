@@ -8,6 +8,35 @@ It orchestrates; it does not do the heavy lifting.
 
 Each crew member is an **independent `claude` session in its own tmux window**, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman itself is killed.
 
+## Why not just subagents?
+
+A subagent call is a function call: it runs inside your context, returns a result, and disappears.
+That's fine for a bounded, single-shot task.
+It breaks down for anything that outlives one turn - a PR that has to sit through CI and review, a plan that needs your sign-off before code gets written, an effort with more than one moving part.
+Wingman is built for that gap specifically, not as a thinner wrapper around the same idea.
+
+- **State lives on disk, not in a transcript.**
+  Every crew member's status, artifact, and blocker live in `~/.wingman/crew.json` / `board.md`, not in wingman's own context window.
+  Killing wingman, clearing it, or letting it compact does not lose the roster - the next session reads the same files and picks up exactly where it left off.
+  A subagent's state is the parent conversation; when that conversation ends or compacts, its work is gone with it.
+- **Event-driven, not polled.**
+  `bin/watch-fleet` blocks on a harness-tracked background task and exits with one reason line the instant a crew member needs attention (`blocked`, `review`, `done`, `died`, `stalled`) - that exit is what wakes wingman.
+  Nothing spends tokens asking "is it done yet?"; wingman does no work at all between a spawn and the moment something actually needs it.
+- **Distilled status, not transcript scraping.**
+  Wingman never reads a crew member's pane or output directly.
+  Every playbook reports through the same status contract, so `bin/crew-list` gives a compact, structured answer - this one is blocked on X, this one is ready for review - instead of a wall of text to re-parse and guess at.
+- **Cost-disciplined by design.**
+  Spawning a crew member is the expensive act, so the default is the smallest crew that does the job, sequential work, and an explicit announcement before fanning out more than a couple of members at once - never an unbounded swarm just because the framework allows it.
+- **A depth-capped org, not a flat swarm.**
+  A `lead` runs its own crew (software-analyst -> architect -> developer(s) -> reviewer), sequences the phases, and rolls up a single status line, so wingman's own context stays as light for a ten-member effort as for a two-member one.
+  Depth is capped at two layers on purpose, and peers talk to each other directly instead of routing everything through a manager.
+- **Guards, not just prompts.**
+  The rules above are mechanically enforced, not only written down and hoped for: a hook blocks wingman from editing code directly, another blocks a crew member from merging its own PR unless explicitly authorized (and attributes it when it does), another refuses to let anything kill the watcher process the wake loop depends on.
+  These exist because relying on prompt discipline alone for exactly these rules has already failed in this project's own history.
+
+Ad-hoc multi-agent scripts, and a bare "spawn N subagents" pattern, don't have any of this: state is scoped to a single run, there's no wake mechanism so something has to poll or babysit, there's no shared contract for what "done" means across agent types, and there's no cost or depth discipline.
+Wingman's answer isn't "more agents" - it's a persistent, event-driven crew coordination layer with an accountable status contract underneath the agents.
+
 ## Quick start
 
 ```
@@ -20,6 +49,20 @@ On first launch wingman runs `bin/doctor` (installs any missing dependencies wit
 Then give it a directive.
 
 The only things you must have before the first run are **`claude`** and **`git`**; `doctor` handles the rest.
+
+## Why `bin/wingman` instead of plain `claude`?
+
+`bin/wingman` is a thin launcher, not a separate program: it wires up a few things that plain `claude` started in this repo will not have, then execs the real `claude` CLI.
+
+- **Every sibling project is pre-added.** It resolves your discovered project roots (`bin/discover-projects`) and passes `--add-dir` for each one, so a crew spawn at global scope, or wingman's own occasional cross-project read, doesn't hit a permission prompt for a directory it has never touched before.
+- **A fresh run id is minted and exported.** `WINGMAN_RUN_ID` is stamped once per launch and inherited by every crew member spawned during that run.
+  It's what lets the onboarding-preference cache (local vs. Remote Control, whether markdown deliverables also get published as links, how verbose to be, how much of a direct review loop to narrate) answer once per run instead of once per crew member.
+  Skip the launcher and there is no run id at all - every consumer in the codebase is written to treat a missing run id as "unanswered, apply the conservative default" rather than ask, so those preference questions are simply never asked and the whole session runs on conservative defaults.
+- **Wingman's own pane is registered for Remote Control disconnect detection.** It records the session's tmux pane (when running inside tmux) so `bin/watch-fleet` can notice if *this* session's own Remote Control connection drops and wake you to reconnect it (see [Remote Control](#remote-control) below).
+  Skip the launcher and that detection never engages for the top-level session - crew members still get it individually, since that's wired up separately per crew member.
+- **State home and project cache are refreshed unconditionally.** The `~/.wingman/` state directory and the discovered-project cache are initialized/refreshed on every launch, so the crew roster and project list are never stale from a previous session.
+
+None of this is required to use wingman - the underlying scripts work with or without the launcher - but skipping it means re-approving `--add-dir` prompts by hand, no onboarding-preference caching for the run, and no disconnect detection for wingman's own session.
 
 ## Driving wingman
 
@@ -54,8 +97,19 @@ The same lifecycle applies to software-analyst and other crew types; how each st
 - "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
   Detach (`Ctrl-b d`) to hand back.
 - Killing wingman leaves the crew running; relaunching it rebuilds the roster.
-- Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app - each launches Remote-Control-visible by default (`WM_REMOTE_CONTROL=1`, on unless set empty) - so `tmux attach` is one option, not the only one.
-- If a member's connection drops, wingman's watcher notices the disconnect banner and retypes `/remote-control` for it automatically; no action needed.
+- Every crew member is also reachable straight from `claude.ai/code` or the Claude mobile app, with connection drops recovered automatically in both directions - see [Remote Control](#remote-control) below.
+
+## Remote Control
+
+Claude Code's Remote Control lets you reach a running session from `claude.ai/code` or the Claude mobile app, not only by attaching to its tmux window.
+Wingman wires this up in both directions.
+
+- **Every crew member is reachable by default.** `bin/spawn-crew` launches each one with `--remote-control "wm-<id>"` (the `wm-` prefix matches its tmux window name, so it reads the same in both places) - gated by `WM_REMOTE_CONTROL`, on unless you set it empty.
+  This fails soft: on an account that can't use Remote Control, the session just starts normally with it quietly unavailable, so it's safe to leave on unconditionally.
+- **A crew member's own dropped connection self-heals.** `bin/watch-fleet` recognizes the disconnect banner in that member's pane and automatically retypes `/remote-control` to restore it - no action needed on your end unless the automatic retry itself keeps failing.
+- **Wingman's own connection is watched differently, on purpose.** `bin/wingman` registers this session's own pane at startup for read-only detection only; the watcher can see wingman's own disconnect banner but deliberately never types into wingman's own pane - doing so from outside would race the very tool call that's supposed to send the reconnect command.
+  Instead, the watcher wakes wingman with an explicit event, and wingman tells you directly to run `/remote-control` yourself to restore it.
+- There's no reliable way to detect programmatically whether you're watching a given session locally or over Remote Control at any moment (see [`docs/analysis/2026-07-13-remote-control-transport-detectability.md`](docs/analysis/2026-07-13-remote-control-transport-detectability.md)) - that's why wingman asks once, up front, rather than guessing.
 
 ## Autonomous by default
 
