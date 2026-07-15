@@ -195,7 +195,9 @@ A single repo is still the default for repo-scoped work.
 
 Because no human sits at a crew member's terminal, `bin/spawn-crew` launches it with `--permission-mode bypassPermissions` by default (`WM_PERMISSION_MODE`) so a gated tool call auto-approves instead of hanging on a prompt forever.
 Two interactive gates remain that no flag can bypass: Claude Code's one-time Bypass-Permissions acceptance, and the one-time-per-repo workspace-trust dialog.
-The watcher catches both, so the first crew pauses until the pilot approves once via `bin/crew-takeover`; after that, crew in that repo run fully unattended.
+`bin/spawn-crew` checks both non-interactively before ever opening a window: `bin/doctor` is meant to have already cleared the (global, once-per-machine) Bypass-Permissions gate, and `spawn-crew` re-checks it as a safety net; the (per-repo) workspace-trust gate is checked fresh on every spawn.
+Either one failing refuses the spawn outright - no window, no crew record - with a message naming the exact remedy (`bin/doctor -y`, or running `claude` in the target repo once interactively to accept its trust dialog), so you never have to diagnose a frozen window to learn one of these was still open.
+The watcher's reactive dialog-freeze detection remains as a backstop for anything this preflight can't cover (e.g. a never-before-touched `--add-dir` target in a global-scope spawn) - if that still fires, the first crew pauses until the pilot approves once via `bin/crew-takeover`; after that, crew in that repo run fully unattended.
 
 Every crew member is also **Remote-Control-visible by default** (`--remote-control "wm-<id>"`, gated on `WM_REMOTE_CONTROL`, on by default - set it empty to disable): the pilot can reach it directly from `claude.ai/code`, not only via `tmux attach`/`bin/crew-takeover`.
 This fails soft on auth that cannot use it (verified empirically: a non-subscription session starts normally, with Remote Control just quietly unavailable), so it is safe to leave on unconditionally.

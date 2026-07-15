@@ -94,8 +94,8 @@ See [`docs/architecture.md`](docs/architecture.md#remote-control) for how each d
 Crew launch with `--permission-mode bypassPermissions` so gated tool calls auto-approve instead of hanging forever with no human at the terminal.
 
 Two one-time interactive gates remain: Claude Code's Bypass-Permissions acceptance, and each repo's first-time workspace-trust dialog.
-Wingman detects a crew frozen on either and wakes you to approve once via `bin/crew-takeover`.
-After that, crew in that repo run unattended.
+`bin/spawn-crew` detects both non-interactively before opening a crew window, refusing the spawn with the exact remedy rather than letting it freeze; a reactive check still catches anything that preflight can't cover.
+Once cleared, crew in that repo run unattended.
 
 A resumed session (`bin/crew-resume`, or `claude --resume` by hand) can also hit the CLI's own "resume from summary?" prompt on a large or old transcript.
 `bin/crew-resume` defeats it outright on every relaunch; if it appears anyway, wingman recognizes it and wakes you with a specific one-keypress fix via `bin/crew-takeover`.

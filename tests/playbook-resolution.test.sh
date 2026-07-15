@@ -36,6 +36,7 @@ printf '# Playbook: `developer` crew member\n\nFixture developer playbook.\n' > 
 export WM_AGENT="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB" \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
+wm_trust_repo "$REPO_DIR"
 
 # --- bare unique name resolves to the correct category file ------------------
 id1="$("$SPAWN" --type developer --repo "$REPO_DIR" --objective "bare name" 2>/dev/null | tail -1)"
