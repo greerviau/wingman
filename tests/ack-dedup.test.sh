@@ -127,6 +127,39 @@ assert_contains "the blocked refusal names the reason" "$err_blocked" "silent"
 err_done="$(wm_state crew-set --id g1 --status done --silent --summary "shipped" 2>&1)"; rc_done=$?
 assert_false "--silent with --status done exits non-zero" "[ $rc_done -eq 0 ]"
 
+# Baseline: ack the still-lingering announced from the previous block's plain
+# re-entry (upd_g1b, already in scope from line 120) before asserting silence.
+wm_state ack --id g1 --updated "$upd_g1b" >/dev/null
+assert_eq "baseline: g1 is suppressed after the ack" "$(wm_state needs-attention)" ""
+
+# --silent wins over materiality: a changed artifact pointer under --silent must
+# NOT announce, even though the same pointer change without --silent would.
+wm_state crew-set --id g1 --status working --summary "revising silently" >/dev/null
+wm_state crew-set --id g1 --status review --delivery "https://gh/pr/1-revised" --silent \
+  --summary "silently swapped the delivery pointer" >/dev/null
+assert_eq "a --silent call with a changed pointer still emits nothing" "$(wm_state needs-attention)" ""
+assert_contains "crew-list still shows the new pointer despite --silent" \
+  "$(wm_state crew-list)" "pr/1-revised"
+
+# A same-status blocked refresh (unchanged blocker) still announces on every
+# non-silent call, unlike review's same-status suppression - --silent is already
+# forbidden for blocked, so every call is by definition genuine (see cmd_crew_set).
+wm_state crew-add --id h1 --type developer --objective u --repo /tmp --window wm-h1 --session-id s7 >/dev/null
+wm_state crew-set --id h1 --status blocked --blocker "need a decision" --summary "waiting" >/dev/null
+na_h1="$(wm_state needs-attention)"
+assert_contains "the first blocked entry emits a row" "$na_h1" "h1"
+upd_h1="$(printf '%s\n' "$na_h1" | grep '^h1' | cut -f3)"
+wm_state ack --id h1 --updated "$upd_h1" >/dev/null
+assert_eq "acking it suppresses a repeat with the same announced" "$(wm_state needs-attention)" ""
+
+# Same blocker, same status, no --silent: must still announce (a fresh row with a
+# new announced stamp), unlike an equivalent review refresh which is suppressed.
+wm_state crew-set --id h1 --status blocked --blocker "need a decision" --summary "still waiting" >/dev/null
+na_h1b="$(wm_state needs-attention)"
+assert_contains "a same-status blocked refresh still surfaces" "$na_h1b" "h1"
+upd_h1b="$(printf '%s\n' "$na_h1b" | grep '^h1' | cut -f3)"
+assert_false "the refreshed blocked row carries a new announced stamp" "[ \"$upd_h1b\" = \"$upd_h1\" ]"
+
 # A record written before `announced` existed (only `updated` present) still
 # dedups correctly via the r.get("announced") or r.get("updated") fallback.
 wm_state crew-add --id g2 --type developer --objective v --repo /tmp --window wm-g2 --session-id s6 >/dev/null

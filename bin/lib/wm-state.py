@@ -10,10 +10,10 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
   crew/<id>.json    the distilled status each crew member keeps current itself
   board.md          the human-readable render of the merged roster
   projects.json     the discovered-projects cache: {"name": "path"}
-  acked.json        the last (id -> updated) event SURFACED to wingman (by a
+  acked.json        the last (id -> announced) event SURFACED to wingman (by a
                     watcher fire or a Stop-hook block), so it does not re-fire on
                     every needs-attention poll while it is being handled
-  handled.json      the last (id -> updated) event fully HANDLED (surfaced AND the
+  handled.json      the last (id -> announced) event fully HANDLED (surfaced AND the
                     roster reported), set only by the Stop hook when it lets a stop
                     proceed. Distinct from acked so a surfaced-but-unhandled event
                     can still re-block instead of being permanently suppressed
@@ -556,6 +556,10 @@ def cmd_crew_set(args):
             live["announced"] = live["updated"]
         else:
             live.setdefault("announced", live["updated"])
+            print("wm-state: suppressed as a same-status review refresh (artifact/blocker/delivery "
+                  "unchanged) - if this was meant as a re-delivery, dip through --status working "
+                  "first; if it's routine self-managed churn (a summary refresh while parked), "
+                  "this is expected and no action is needed", file=sys.stderr)
     else:
         live.setdefault("announced", live["updated"])
     write_json(status_path(args.id), live)
@@ -1121,7 +1125,7 @@ def cmd_needs_attention(args):
     enters it once at delivery, so the pilot is pinged once; the member then does
     its steady watch/revision work under `working` (not surfaced), so refreshes
     never re-announce. A genuine new event (a later `blocked`, or terminal `done`)
-    carries a new `updated` and surfaces again.
+    carries a new `announced` and surfaces again.
 
     The dedup key is `announced` (falling back to `updated` for a record written
     before that field existed), not `updated` directly: a genuine `crew-set
@@ -1414,12 +1418,12 @@ def cmd_outage_update(args):
 
 
 def cmd_ack(args):
-    """Record that the (id, updated) event has been surfaced to wingman, so
-    needs-attention suppresses it until the crew's status changes (a new updated).
+    """Record that the (id, announced) event has been surfaced to wingman, so
+    needs-attention suppresses it until the crew's status changes (a new announced).
 
     Explicit and idempotent: the deliverer passes the exact tuple it surfaced, so
     the ack never races a state change between the read and the ack - a transition
-    in that window produces a new `updated` that this ack does not cover, and it
+    in that window produces a new `announced` that this ack does not cover, and it
     correctly re-surfaces. The read-modify-write is serialized (with_locked) so a
     concurrent watcher-fire ack and Stop-hook ack cannot lose each other's key."""
     ensure_home()
