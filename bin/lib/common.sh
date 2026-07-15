@@ -12,6 +12,11 @@ WM_BIN="$(dirname "$WM_LIB")"
 WM_REPO="$(dirname "$WM_BIN")"
 export WM_REPO WM_BIN WM_LIB
 
+# Optional machine-local overrides (gitignored). See config.example.sh for the
+# knobs it can set (WM_MODEL, WM_ROOTS, WM_IGNORE, WM_PINS). Sourced here so
+# every bin/ script picks up these overrides, not just discover-projects.
+[ -f "$WM_REPO/config.local.sh" ] && . "$WM_REPO/config.local.sh"
+
 # Machine-local state home. Overridable for tests.
 WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 export WINGMAN_HOME="$WM_HOME"

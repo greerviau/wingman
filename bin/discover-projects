@@ -22,8 +22,9 @@ COMMON_ROOTS="$HOME/dev $HOME/src $HOME/code $HOME/projects $HOME/git $HOME/work
 PRUNE_NAMES="node_modules .venv venv vendor dist build target .next .cache Pods"
 
 # Optional user hints: config.local.sh may set WM_ROOTS / WM_IGNORE / WM_PINS.
-WM_ROOTS=""; WM_IGNORE=""; WM_PINS=""
-[ -f "$WM_REPO/config.local.sh" ] && . "$WM_REPO/config.local.sh"
+# (already sourced by lib/common.sh above; default here only for `set -u`
+# safety when config.local.sh doesn't exist or doesn't set them.)
+WM_ROOTS="${WM_ROOTS:-}"; WM_IGNORE="${WM_IGNORE:-}"; WM_PINS="${WM_PINS:-}"
 
 QUIET=0
 MODE=refresh
