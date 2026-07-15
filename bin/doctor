@@ -364,6 +364,62 @@ EOF
   fi
 fi
 
+# --- Usage-limit-quota detection (statusline + spawn guard), user scope ----
+# bin/lib/usage-statusline.py is registered as the user-level `statusLine`
+# command: it captures the Claude Code CLI's own proactive rate_limits
+# signal (issue #24) from every session under this login, chaining to any
+# statusline the pilot already configured so nothing visible changes.
+# hooks/usage-limit-spawn-guard.sh (PreToolUse) denies bin/spawn-crew while
+# the aggregated fleet-wide usage-quota state reads "approaching"/"paused" -
+# the same shape as the outage-detection guard above, sharing its machinery
+# (hooks/lib/spawn_pause_guard.py). Both need user-level registration for
+# the same reason as every other crew-facing hook: a crew session's project
+# root is some other repo entirely, where this repo's own project settings
+# never load.
+USAGE_STATUSLINE_SCRIPT="$WM_LIB/usage-statusline.py"
+USAGE_GUARD_HOOK="$WM_REPO/hooks/usage-limit-spawn-guard.sh"
+
+usage_statusline_registered() {
+  uv run --no-project --quiet "$WM_LIB/install-user-statusline.py" \
+      --settings "$GUARD_SETTINGS" --script "$USAGE_STATUSLINE_SCRIPT" --check >/dev/null 2>&1
+}
+usage_guard_registered() {
+  uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+      --settings "$GUARD_SETTINGS" --hook "$USAGE_GUARD_HOOK" --event PreToolUse --check >/dev/null 2>&1
+}
+
+if usage_statusline_registered && usage_guard_registered; then
+  wm_ok "usage-limit detection (statusline + spawn guard) registered ($GUARD_SETTINGS)"
+else
+  wm_warn "usage-limit detection (issue #24) not fully registered in $GUARD_SETTINGS"
+  printf '    captures the CLI'"'"'s own proactive usage-quota signal and pauses new\n'
+  printf '    bin/spawn-crew calls while a usage-limit window is approaching, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; re-run bin/doctor -y to register it"
+  fi
+  if [ "$do_it" = 1 ]; then
+    usage_install_failed=0
+    uv run --no-project --quiet "$WM_LIB/install-user-statusline.py" \
+        --settings "$GUARD_SETTINGS" --script "$USAGE_STATUSLINE_SCRIPT" >/dev/null \
+      || usage_install_failed=1
+    uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+        --settings "$GUARD_SETTINGS" --hook "$USAGE_GUARD_HOOK" --event PreToolUse --matcher Bash >/dev/null \
+      || usage_install_failed=1
+    if [ "$usage_install_failed" = 0 ]; then
+      wm_ok "registered usage-limit detection (statusline + spawn guard)"
+    else
+      wm_err "failed to register usage-limit detection"
+    fi
+  fi
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"
