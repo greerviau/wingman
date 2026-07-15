@@ -168,10 +168,14 @@ MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
 # with a {n} interval is rejected outright by BSD grep -E ("invalid repetition
 # count(s)"), which makes grep -qE exit 2 (error) rather than 1 (no-match) -
 # silently disabling this whole detector on macOS while spamming stderr every
-# cycle. `(^|[^0-9])...([^0-9]|$)` gives the same word-boundary behavior using
-# only grouping and anchors (both plain ERE, portable), and `5[0-9][0-9]`
+# cycle. `(^|[^0-9A-Za-z_])...([^0-9A-Za-z_]|$)` emulates \b's actual word/
+# non-word transition (word chars are `[A-Za-z0-9_]`, so the neighbor must be
+# excluded from that whole class, not just digits - excluding only digits, as
+# an earlier version of this fix did, lets identifier-shaped text like
+# `abc429def` or `sess_429` spuriously match on every platform, not just BSD)
+# using only grouping and anchors (both plain ERE, portable), and `5[0-9][0-9]`
 # avoids the `{2}` interval entirely.
-WM_APIERR_RE="${WM_APIERR_RE:-rate.limit|rate_limit|(^|[^0-9])429([^0-9]|$)|(^|[^0-9])5[0-9][0-9] [Ee]rror|overloaded_error|Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|[Cc]onnection error|Connection refused|fetch failed|socket hang up|Service Unavailable|Bad Gateway|Gateway Timeout}"
+WM_APIERR_RE="${WM_APIERR_RE:-rate.limit|rate_limit|(^|[^0-9A-Za-z_])429([^0-9A-Za-z_]|$)|(^|[^0-9A-Za-z_])5[0-9][0-9] [Ee]rror|overloaded_error|Internal Server Error|ECONNRESET|ETIMEDOUT|ENOTFOUND|[Nn]etwork error|[Cc]onnection error|Connection refused|fetch failed|socket hang up|Service Unavailable|Bad Gateway|Gateway Timeout}"
 WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
 # Stall self-heal nudge (#61): every stall-idle, pane-stable candidate - not only
 # an api-error match - gets exactly one check-in nudge per stall episode (gated

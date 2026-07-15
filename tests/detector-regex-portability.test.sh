@@ -90,7 +90,7 @@ check_regex_exit_codes "WM_RC_DROPPED_RE" "$RC_DROPPED_RE" \
   "" \
   "an ordinary line with no signature at all"
 
-# --- correctness smoke test: the boundary-free rewrite must still actually
+# --- correctness smoke test: the word-boundary emulation must still actually
 #     match the API-error signatures it is meant to catch, and still leave
 #     ordinary/adjacent-digit text alone (the two failure modes the issue's
 #     "false negatives at line start/end" caution calls out) ------------------
@@ -102,5 +102,28 @@ assert_true "WM_APIERR_RE matches a 5xx ' Error' line" \
   "printf '%s\n' '502 Error' | grep -qE \"\$APIERR_RE\""
 assert_false "WM_APIERR_RE does not match an unrelated 4-digit number" \
   "printf '%s\n' 'the number 4299 is not a status code' | grep -qE \"\$APIERR_RE\""
+
+# --- regression coverage (PR #104 review round 1): [^0-9] alone is not an
+#     equivalent substitute for \b - \b's word-character class is
+#     [A-Za-z0-9_], so a letter or underscore neighbor must be excluded too,
+#     not just a digit neighbor. An earlier version of this fix excluded only
+#     digits, which let ordinary identifier-shaped pane text (a session id, a
+#     PR/issue reference, a truncated hash) spuriously trip the API-error
+#     detector on every platform, GNU included - not a portability edge case,
+#     a same-platform correctness regression. Every case below must NOT match,
+#     the same as the original \b429\b / \b5[0-9]{2}\b [Ee]rror did not. -------
+for _fp_line in \
+  "abc429def" \
+  "PR429 merged" \
+  "issue429" \
+  "sess_429" \
+  "id_429_retry" \
+  "x502 Error" \
+  "1502 Error" \
+  "429at end nodigit"
+do
+  assert_false "WM_APIERR_RE does not match identifier-adjacent text: $_fp_line" \
+    "printf '%s\n' \"\$_fp_line\" | grep -qE \"\$APIERR_RE\""
+done
 
 test_summary
