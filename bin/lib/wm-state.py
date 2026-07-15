@@ -1447,12 +1447,18 @@ def cmd_projects_lookup(args):
 # is agnostic to what any given preference means.
 def _load_prefs(run_id):
     """The prefs dict for run_id, or None if unanswered (missing entry, or the
-    file/entry is malformed)."""
+    file/entry is malformed). Falls back to the pre-#85 legacy shape
+    ({"wingman_run_id": ..., "prefs": {...}}) so a file not yet migrated by a
+    pref-set call still answers correctly for the run id it names."""
     data = read_json(preferences_path(), None)
-    if not isinstance(data, dict) or run_id not in data:
+    if not isinstance(data, dict):
         return None
-    prefs = data.get(run_id)
-    return prefs if isinstance(prefs, dict) else {}
+    if run_id in data:
+        prefs = data.get(run_id)
+        return prefs if isinstance(prefs, dict) else {}
+    if data.get("wingman_run_id") == run_id and isinstance(data.get("prefs"), dict):
+        return data["prefs"]
+    return None
 
 
 def cmd_pref_get(args):
@@ -1462,15 +1468,28 @@ def cmd_pref_get(args):
     print(prefs[args.key])
 
 
+def _coerced_slot(data, run_id):
+    """The dict slot for run_id in data, replacing a corrupt (non-dict) entry
+    with {} in place. Shared by the per-run set path and the legacy-migration
+    path so both self-heal identically."""
+    slot = data.get(run_id)
+    if not isinstance(slot, dict):
+        slot = {}
+        data[run_id] = slot
+    return slot
+
+
 def cmd_pref_set(args):
     ensure_home()
     with with_locked(preferences_path()):
         data = read_json(preferences_path(), None)
         if not isinstance(data, dict):
             data = {}
-        if not isinstance(data.get(args.run_id), dict):
-            data[args.run_id] = {}
-        data[args.run_id][args.key] = args.value
+        legacy_id = data.pop("wingman_run_id", None)
+        legacy_prefs = data.pop("prefs", None)
+        if isinstance(legacy_id, str) and isinstance(legacy_prefs, dict):
+            _coerced_slot(data, legacy_id).update(legacy_prefs)
+        _coerced_slot(data, args.run_id)[args.key] = args.value
         write_json(preferences_path(), data)
 
 

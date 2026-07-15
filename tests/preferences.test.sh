@@ -73,4 +73,58 @@ assert_contains "it nests run-b's values under its own run id" "$(cat "$WINGMAN_
 assert_contains "run-a's value is recorded" "$(cat "$WINGMAN_HOME/preferences.json")" '"remote": "false"'
 assert_contains "run-b's value is recorded" "$(cat "$WINGMAN_HOME/preferences.json")" '"remote": "true"'
 
+# --- issue #92: legacy pre-#85 shape ({"wingman_run_id": ..., "prefs": {...}}) --
+test_new_home
+
+# Legacy-only file, matching run id reads successfully.
+cat > "$WINGMAN_HOME/preferences.json" <<'EOF'
+{"wingman_run_id": "run-x", "prefs": {"remote": "true"}}
+EOF
+out="$(wm_state pref-get --run-id run-x --key remote)"; rc=$?
+assert_eq "a legacy-shape file answers for the run id it names" "$rc" "0"
+assert_eq "the legacy value is exactly 'true'" "$out" "true"
+
+# Legacy-only file, non-matching run id still reads as unanswered.
+assert_false "a legacy-shape file does not answer for a different run id" \
+  "wm_state pref-get --run-id run-y --key remote >/dev/null 2>&1"
+out="$(wm_state prefs-list --run-id run-y)"
+assert_eq "prefs-list is empty for a run id the legacy file doesn't name" "$out" ""
+
+# A pref-set for a different run id fully migrates the legacy pair.
+wm_state pref-set --run-id run-y --key verbosity --value concise >/dev/null
+out="$(wm_state pref-get --run-id run-x --key remote)"; rc=$?
+assert_eq "the legacy answer survives migration triggered by a different run" "$rc" "0"
+assert_eq "the legacy value is unchanged after migration" "$out" "true"
+out="$(wm_state pref-get --run-id run-y --key verbosity)"
+assert_eq "the triggering run's own key reads back" "$out" "concise"
+raw="$(cat "$WINGMAN_HOME/preferences.json")"
+assert_contains "the migrated file nests run-x under its own run id" "$raw" '"run-x"'
+assert_contains "the migrated file nests run-y under its own run id" "$raw" '"run-y"'
+assert_not_contains "the migrated file no longer carries the legacy wingman_run_id key" "$raw" '"wingman_run_id"'
+assert_not_contains "the migrated file no longer carries the legacy prefs key" "$raw" '"prefs"'
+
+# Hybrid legacy + corrupt-entry file, string-variant corruption, does not crash.
+test_new_home
+cat > "$WINGMAN_HOME/preferences.json" <<'EOF'
+{"wingman_run_id": "run-x", "prefs": {"remote": "true"}, "run-x": "garbage"}
+EOF
+assert_true "pref-set does not crash on a legacy pair plus a string-corrupt slot" \
+  "wm_state pref-set --run-id run-x --key artifact_linking --value artifact >/dev/null 2>&1"
+out="$(wm_state pref-get --run-id run-x --key remote)"
+assert_eq "the migrated legacy answer survives string-corrupt-slot coercion" "$out" "true"
+out="$(wm_state pref-get --run-id run-x --key artifact_linking)"
+assert_eq "the newly-set key lands in the same healed slot" "$out" "artifact"
+
+# Hybrid legacy + corrupt-entry file, list-variant corruption, does not crash.
+test_new_home
+cat > "$WINGMAN_HOME/preferences.json" <<'EOF'
+{"wingman_run_id": "run-x", "prefs": {"remote": "true"}, "run-x": []}
+EOF
+assert_true "pref-set does not crash on a legacy pair plus a list-corrupt slot" \
+  "wm_state pref-set --run-id run-x --key artifact_linking --value artifact >/dev/null 2>&1"
+out="$(wm_state pref-get --run-id run-x --key remote)"
+assert_eq "the migrated legacy answer survives list-corrupt-slot coercion" "$out" "true"
+out="$(wm_state pref-get --run-id run-x --key artifact_linking)"
+assert_eq "the newly-set key lands in the same healed slot (list-variant)" "$out" "artifact"
+
 test_summary
