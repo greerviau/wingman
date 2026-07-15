@@ -215,6 +215,36 @@ assert_contains "a global -L <name> flag before kill-session does not bypass det
 out="$(run_hook "tmux -2 -q kill-window -t $WM_TMUX_SESSION:typedwin")"
 assert_eq "boolean global flags before kill-window on an unrelated (real) target are allowed (no output)" "$out" ""
 
+# --- round 2 re-review: the flag-enumeration approach missed -T/-D/-h/-N -
+# detection is now anchored on the subcommand name itself (see
+# tmux_kill_subcommand_index), so ANY unenumerated global flag - not just
+# the specific ones a prior round happened to test - stays covered. These
+# cases prove that: -T and -D are the exact flags the round-2 review used to
+# reproduce a real bypass; -h/-N round out tmux's remaining global options.
+out="$(run_hook "tmux -T 256,clipboard kill-window -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "a global -T <features> flag before kill-window does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux -D kill-window -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "a global -D flag before kill-window does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux -h kill-window -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "a global -h flag before kill-window does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "tmux -N kill-window -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "a global -N flag before kill-window does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+# A genuinely unknown/future flag this hook has never heard of must ALSO stay
+# covered - the whole point of anchoring on the subcommand name rather than
+# an enumerated flag list.
+out="$(run_hook "tmux -Z kill-window -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "an unrecognized future global flag before kill-window does not bypass detection" "$out" '"permissionDecision": "deny"'
+
+# killw (kill-window's documented alias) must be recognized too.
+out="$(run_hook "tmux killw -t $WM_TMUX_SESSION:watcherwin")"
+assert_contains "the killw alias is recognized the same as kill-window" "$out" '"permissionDecision": "deny"'
+
+assert_true "the watcher is still alive after every bypass attempt above" "wait_for_cycle_live"
+
 "$WF" --stop >/dev/null 2>&1
 tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
 

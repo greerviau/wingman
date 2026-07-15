@@ -61,9 +61,13 @@
 #     the window for kill-window (a split window has more than one pane) -
 #     never a single pane pid, since `-t` omitted defaults to the CURRENT
 #     session/window as a whole, not the one pane the command was typed
-#     into. tmux's own leading global options (-L/-S/-f/-c/...) are skipped
-#     before the subcommand is even identified, so `tmux -L sock
-#     kill-session ...` is recognized exactly like the bare form. The WHOLE
+#     into. The subcommand may be preceded by any number of tmux's own
+#     global options (-L/-S/-f/-c/-T/-D/...); rather than enumerating that
+#     flag grammar (which drifts out of sync with tmux's own - a real gap
+#     found across two review rounds), detection is anchored on the
+#     subcommand name itself (kill-window/killw/kill-session), and every
+#     token before it is skipped as noise regardless of how many flags it
+#     represents or which tmux version defines them. The WHOLE
 #     process tree rooted at every resolved pane pid is then walked with one
 #     `ps -ax -o pid=,ppid=` scan (the same approach bin/lib/wm-state.py's
 #     _ps_tree() uses for stall detection, reimplemented here as a small
@@ -326,33 +330,32 @@ def tmux_target_value(rest):
     return None
 
 
-# tmux own global options, which may precede the subcommand
-# (`tmux -L sock kill-session ...`): value-taking (-L/-S/-f/-c <value>, plus
-# their fused forms e.g. -Lsockname) and boolean (-2/-8/-u/-v/-V/-q/-l/-C/-CC).
-# Skipped exactly like extract_pkill_pattern skips pkills own option flags,
-# so a leading global flag can never hide the subcommand from detection.
-_TMUX_GLOBAL_VALUE_FLAGS = ("-L", "-S", "-f", "-c")
-_TMUX_GLOBAL_BOOL_FLAGS = ("-2", "-8", "-u", "-v", "-V", "-q", "-l", "-C", "-CC")
+# Anchored on tmux'"'"'s own known kill-window/kill-session subcommand names
+# (including killw, kill-window'"'"'s documented alias) rather than enumerating
+# tmux'"'"'s global option flags: a leading-global-flag bypass (`tmux -L sock
+# kill-session ...`) was fixed once by skipping a specific flag list
+# (-L/-S/-f/-c/-2/-8/...), and a later tmux version'"'"'s -T/-D/-h/-N flags -
+# absent from that list - reopened the exact same bypass, since the loop
+# simply misread the first unrecognized flag as the subcommand. Scanning for
+# the subcommand ITSELF, and treating every token before it as global-option
+# noise regardless of how many flags that represents or what tmux version
+# defines them, closes this permanently rather than needing to track tmux'"'"'s
+# grammar release to release.
+_TMUX_KILL_SUBCOMMANDS = {
+    "kill-window": "kill-window",
+    "killw": "kill-window",
+    "kill-session": "kill-session",
+}
 
 
-def tmux_subcommand_index(args):
+def tmux_kill_subcommand_index(args):
     """args = argv[1:] (everything after the resolved `tmux`). Returns the
-    index of the first token that is not one of tmux'"'"'s own global options -
-    the subcommand position."""
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        if tok in _TMUX_GLOBAL_VALUE_FLAGS:
-            i += 2
-            continue
-        if any(tok.startswith(f) and len(tok) > 2 for f in _TMUX_GLOBAL_VALUE_FLAGS):
-            i += 1  # fused form, e.g. -Lsockname
-            continue
-        if tok in _TMUX_GLOBAL_BOOL_FLAGS:
-            i += 1
-            continue
-        break
-    return i
+    index of the first token that is a known kill-window/kill-session
+    subcommand name (or alias), or len(args) if none is found."""
+    for i, tok in enumerate(args):
+        if tok in _TMUX_KILL_SUBCOMMANDS:
+            return i
+    return len(args)
 
 
 def resolve_pane_pids(kind, target):
@@ -428,15 +431,15 @@ def check_tmux_kill(argv, protected):
 
 def check_tmux(argv, protected):
     # argv[1] is not always the subcommand: tmux accepts its own global
-    # options before it (`tmux -L sock kill-session ...`) - skip past those
-    # first so a leading global flag can never bypass detection.
+    # options before it (`tmux -L sock kill-session ...`, `tmux -T 256,clipboard
+    # kill-window ...`) - anchor on the subcommand name itself (see
+    # tmux_kill_subcommand_index) rather than enumerating those flags, so no
+    # global option this hook doesn'"'"'t happen to list can ever bypass detection.
     args = argv[1:]
-    idx = tmux_subcommand_index(args)
+    idx = tmux_kill_subcommand_index(args)
     if idx >= len(args):
         return
-    kind = args[idx]
-    if kind not in ("kill-window", "kill-session"):
-        return
+    kind = _TMUX_KILL_SUBCOMMANDS[args[idx]]
     check_tmux_kill(["tmux", kind] + args[idx + 1:], protected)
 
 
