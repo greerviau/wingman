@@ -23,6 +23,17 @@
 # brief Anthropic-side outage from escalating straight to the pilot before the
 # member has had a chance to recover unassisted.
 #
+# Fleet-wide outage detection (#23): wingman's own top-level cycle (owner "")
+# also tracks a persisted outage-state machine ($WM_HOME/api-outage-state.json,
+# see wm_state outage-update) from the SAME per-member API-error signal plus
+# how many members die each poll with an API-error pane tail on record
+# (wm_state reconcile's death_cause tagging). Crossing the fleet-wide mass
+# threshold (the same thresholds group-attention already applies to a single
+# poll's batch) fires an outage-detected event; a quiet period after that
+# fires outage-cleared. hooks/api-outage-spawn-guard.sh reads this state to
+# pause new bin/spawn-crew calls while active - already-running crew are
+# never touched.
+#
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
 # snapshot to report from.
@@ -186,6 +197,14 @@ WM_APIERR_TAIL="${WM_APIERR_TAIL:-15}"
 # deliberately no separate cooldown constant here: a second knob governing only
 # the resend decision let the shell's resend gate and stall-check's flip gate
 # drift apart (#101), so the wait-after-nudge is driven by STALL_IDLE alone.
+
+# Persisted fleet-wide outage-state machine (#23, item 0): active -> clear
+# requires this many quiet seconds (zero fresh signal) after the last poll
+# that saw one. Defaults to 3 poll intervals - comfortably past one flaky
+# poll, matching the API-error nudge cooldown's own "several polls" order of
+# magnitude. See wm_state outage-update for the full state machine; this
+# value is passed straight through to it as --quiet-seconds.
+WM_OUTAGE_QUIET="${WM_OUTAGE_QUIET:-$(( INTERVAL * 3 ))}"
 
 # Remote Control disconnect signature (design: docs/plans/2026-07-12-remote-
 # control-visibility-and-auto-reconnect-design.md, ask 2): the CLI's own
@@ -615,7 +634,13 @@ print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()))
 # per poll, not twice).
 prompt_freeze_check() {
   PFC_SHAPE=0
-  prompt_shape_in "$(printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL")" || return 1
+  # Scans for either dialog shape in one pass (#23/#30): the ordinary
+  # permission/trust/Bypass set, or the resume-from-summary menu - see
+  # WM_RESUME_PROMPT_RE's own docstring in lib/common.sh for why this is a
+  # second, distinctly-worded regex rather than folded permanently into
+  # WM_PERM_PROMPT_RE's own default.
+  prompt_shape_in "$(printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL")" \
+    "${WM_PERM_PROMPT_RE}|${WM_RESUME_PROMPT_RE}" || return 1
   PFC_SHAPE=1
   [ "$PANE_STABLE" = 1 ]
 }
@@ -679,6 +704,14 @@ fire() {
 while :; do
   : > "$BEATFILE" || true   # liveness beacon for the singleton guard + Stop hook
 
+  # Fleet-wide outage-state signal accumulators (#23, item 0), reset every
+  # iteration regardless of owner scope or tmux-session liveness: only
+  # mutated inside the tmux-session branch below, but always fed to
+  # wm_state outage-update afterward (owner "" only) so the quiet-period
+  # countdown advances in real time even on a poll with nothing to scan.
+  _OUTAGE_API_SIGNALS=0
+  _reconcile_died=""
+
   # Wingman's own Remote Control disconnect (ask 2, detect-only - see
   # self_pane_check's own docstring for why this never injects). Checked first,
   # every cycle, independent of $WM_TMUX_SESSION: wingman's own registered pane
@@ -704,7 +737,11 @@ while :; do
     wm_tmux_adopt_strays
     # Pass this cycle's owner so the dead-owner re-adopt pass runs only under
     # wingman's watcher (--owner ""); a lead's cycle does the death-flip only (N4).
-    wm_state reconcile --windows "$(wm_tmux_windows_csv)" --owner "$OWNER" >/dev/null 2>&1
+    # Captured (not discarded) this time: reconcile prints the ids it JUST
+    # flipped to died this call, space-joined - the outage-state signal below
+    # (#23, item 0) needs exactly this poll's own death count, not the
+    # roster's full died population.
+    _reconcile_died="$(wm_state reconcile --windows "$(wm_tmux_windows_csv)" --owner "$OWNER" 2>/dev/null)"
 
     # Pane backstop over every working OR already-blocked member: two failure
     # shapes never reach the status files on their own. A member frozen on an
@@ -736,6 +773,14 @@ for r in data:
       wm_tmux_windows | grep -qx "$_win" || continue
       wm_pane_snapshot "$_id" "$_win"
 
+      # Pane-tail cache (#23, item 1): the last WM_APIERR_TAIL lines of this
+      # poll's capture, overwritten in place every poll for every live
+      # working/blocked member - never a growing log. Once a window dies,
+      # this is the last thing we know its pane showed; wm-state reconcile
+      # reads it at the moment of the death flip to attribute death_cause.
+      printf '%s\n' "$PANE_TEXT" | tail -n "$WM_APIERR_TAIL" \
+        > "$WM_HOME/pane-tail-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').txt"
+
       # Remote Control auto-recovery (ask 2, crew-side): a settled disconnect
       # banner (stable across two polls, same rule as the checks below) gets one
       # `/remote-control` retry per cooldown window - the existing
@@ -759,9 +804,17 @@ for r in data:
       fi
 
       if prompt_freeze_check && ! liveness_veto "$_id"; then
-        wm_state crew-set --id "$_id" --status blocked \
-          --blocker "frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass" \
-          >/dev/null 2>&1
+        # Which of the two dialog shapes prompt_freeze_check actually matched
+        # (#23/#30) decides the wording: the resume-from-summary menu is a
+        # specific, well-understood freeze needing exactly one keypress, not
+        # the generic "no one at its terminal" framing of an ordinary
+        # permission/trust gate.
+        if printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL" | grep -qE "$WM_RESUME_PROMPT_RE"; then
+          _blocker="frozen on the resume-from-summary prompt (issue #30) after an auto-recovery attempt - needs one keypress via bin/crew-takeover $_id"
+        else
+          _blocker="frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass"
+        fi
+        wm_state crew-set --id "$_id" --status blocked --blocker "$_blocker" >/dev/null 2>&1
         continue   # the permission freeze is the more specific diagnosis, superseding any prior blocker reason
       fi
       # An already-blocked member with no dialog freeze detected needs no further
@@ -811,6 +864,10 @@ for r in data:
         # flips it, which is almost never the same poll as the send.
         if api_error_check; then
           _api=1
+          # Fleet-wide outage signal (#23, item 0): this poll's count of
+          # working members currently showing the API-error signature, fed
+          # to wm_state outage-update below (owner "" only) after this loop.
+          _OUTAGE_API_SIGNALS=$((_OUTAGE_API_SIGNALS+1))
           _nudge_msg="An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."
         else
           _nudge_msg="Checking in: if you're mid-task, keep going. If you're stuck, unstick yourself and continue."
@@ -835,6 +892,80 @@ for r in data:
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
         --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
     done
+  fi
+
+  # Fleet-wide outage-state machine (#23, item 0): advanced every iteration,
+  # wingman's own top-level cycle only (owner "" - concurrency/outage is
+  # fleet-wide, not per-lead-team; a lead's cycle skips this entirely).
+  # Unlike self_pane_check above, this is deliberately NOT a sixth/seventh
+  # top-level --classify outcome: it writes $EXITFILE "fire" (the same token
+  # the ordinary fire() path below writes) so outage-detected/outage-cleared
+  # surface as ordinary fire reasons within the existing five-outcome
+  # classification (healthy/fire/remote-control-dropped/spurious/spurious-
+  # repeated) - structurally identical to a blocked/review/done/died/stalled
+  # reason line today, just fleet-scoped (no per-member id to ack) rather
+  # than routed through fire()'s needs-attention/group-attention machinery.
+  if [ -z "$OWNER" ]; then
+    _died_csv="$(printf '%s' "$_reconcile_died" | tr ' ' ',')"
+    _outage_transition="$(wm_state outage-update --owner "" \
+      --signal-working "$_OUTAGE_API_SIGNALS" --died "$_died_csv" \
+      --mass-min-count "$MASS_MIN_COUNT" --mass-min-ratio "$MASS_MIN_RATIO" \
+      --quiet-seconds "$WM_OUTAGE_QUIET" 2>/dev/null)"
+    case "$_outage_transition" in
+      outage-detected)
+        {
+          echo "# API outage detected (issue #23)"
+          echo
+          echo "Anthropic API-error signals (529/5xx/rate-limit/connection signatures) have"
+          echo "crossed the fleet-wide mass threshold - treat this as a likely outage, not"
+          echo "isolated incidents."
+          echo
+          echo "New spawns are now PAUSED: hooks/api-outage-spawn-guard.sh denies"
+          echo "bin/spawn-crew while this state is active (override per-spawn with"
+          echo "--force-during-outage if one is genuinely needed regardless)."
+          echo
+          echo "Already-running crew are NOT affected - only new spawns are held."
+          echo
+          echo "This clears automatically once the signal quiets down for ${WM_OUTAGE_QUIET}s;"
+          echo "your next watch-fleet cycle fires outage-cleared the moment it does."
+        } > "$WAKEFILE"
+        echo "outage-detected: fleet-wide API-error signal crossed the mass threshold - new spawns paused (bin/spawn-crew denied by hooks/api-outage-spawn-guard.sh; override with --force-during-outage if truly needed). Already-running crew are untouched."
+        printf 'fire\n' > "$EXITFILE"
+        rm -f "$PIDFILE"
+        exit 0
+        ;;
+      outage-cleared)
+        _outage_died_ids="$(wm_state crew-list --status died --json 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-outage"))
+' 2>/dev/null)"
+        {
+          echo "# API outage cleared (issue #23)"
+          echo
+          echo "The fleet-wide API-error signal has been quiet for ${WM_OUTAGE_QUIET}s. New"
+          echo "spawns are unpaused."
+          echo
+          if [ -n "$_outage_died_ids" ]; then
+            echo "Outage-tagged died member(s): $_outage_died_ids"
+            echo
+            echo "Per the pilot's pre-authorized auto-recovery for this case (CLAUDE.md,"
+            echo "\"Mass death or correlated outage detected\"): run \`bin/crew-resume --all-died\`"
+            echo "now, without asking for confirmation, then report the outcome."
+          else
+            echo "No member is currently died with death_cause=api-outage, so there is"
+            echo "nothing to auto-resume."
+          fi
+        } > "$WAKEFILE"
+        echo "outage-cleared: fleet-wide API-error signal has quieted for ${WM_OUTAGE_QUIET}s - new spawns unpaused.${_outage_died_ids:+ Outage-tagged died member(s) ($_outage_died_ids): pre-authorized auto-recovery, run bin/crew-resume --all-died now.}"
+        printf 'fire\n' > "$EXITFILE"
+        rm -f "$PIDFILE"
+        exit 0
+        ;;
+    esac
   fi
 
   # Who needs this owner right now? Scoped to the owner's own direct reports, so a

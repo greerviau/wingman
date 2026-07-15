@@ -369,6 +369,21 @@ WM_PERM_ADJ="${WM_PERM_ADJ:-3}"
 # before it and stop matching.
 WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
 
+# Signature of the CLI's "resume from summary?" menu (issue #30): shown by
+# `claude --resume` once a transcript's last message is both old enough and
+# token-heavy enough to trip an internal size/age gate - exactly the shape a
+# long-transcript session (a lead, worst case per issue #23's own comment) is
+# most likely to hit on an auto-recovery resume. A distinct, separately-named
+# regex from WM_PERM_PROMPT_RE (never folded permanently into that default)
+# so the caller can tell which dialog actually froze the pane and choose
+# different --blocker wording accordingly - see prompt_freeze_check below and
+# bin/watch-fleet's use of it. Matches either of the menu's own option-row
+# phrasings; prompt_shape_in's existing generic UI-shape detector (a phrase
+# anchoring a numbered-options block) recognizes this exactly like the
+# trust/Bypass acceptance rows, where the matched phrase IS itself an option
+# row rather than a header above one.
+WM_RESUME_PROMPT_RE="${WM_RESUME_PROMPT_RE:-[Rr]esuming from a summary|Resume from summary|Resume full session as-is}"
+
 # True if the given text contains the question phrase - rendered as its own line
 # per WM_PERM_LEAD_RE - anchoring a full contiguous option block of at least
 # WM_PERM_MIN_OPTS rows bearing at most one selection marker: the one-block shape a
@@ -384,10 +399,18 @@ WM_PERM_LEAD_RE="${WM_PERM_LEAD_RE:-^[^[:alnum:]]*([0-9]+\.[[:space:]])?}"
 # stopping at the first non-blank non-option line. The block is then accepted iff
 # it holds >=WM_PERM_MIN_OPTS option rows AND <=1 marker rows. The outward walk is
 # capped at WM_PERM_TAIL lines so a pathological pane cannot make it walk far.
+#
+# Optional 2nd arg overrides the phrase alternation to scan for (defaults to
+# $WM_PERM_PROMPT_RE, every existing caller's behavior unchanged) - used by
+# bin/watch-fleet's prompt_freeze_check to also recognize WM_RESUME_PROMPT_RE
+# in the same scan, so a session frozen on the resume-from-summary menu is
+# caught by the identical, already-generic shape detector rather than a
+# second bespoke one.
 prompt_shape_in() {
   _ps_text="$1"
+  _ps_phrase_re="${2:-$WM_PERM_PROMPT_RE}"
   _ps_hits="$(printf '%s\n' "$_ps_text" \
-    | grep -nE "${WM_PERM_LEAD_RE}(${WM_PERM_PROMPT_RE})" | cut -d: -f1)"
+    | grep -nE "${WM_PERM_LEAD_RE}(${_ps_phrase_re})" | cut -d: -f1)"
   [ -n "$_ps_hits" ] || return 1
   _ps_total="$(printf '%s\n' "$_ps_text" | grep -c '')"
   for _ps_n in $_ps_hits; do
