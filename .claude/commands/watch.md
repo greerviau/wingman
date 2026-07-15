@@ -1,23 +1,42 @@
 ---
 description: Process one watch-fleet wake and arm the next cycle
-allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/wake)
+allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/wake*)
 ---
-
-Scoped to wingman's own top-level session only (owner `""`, the bare
-`~/.wingman/wake` path) - not for a lead's own watcher.
 
 1. **If I was just woken because a `watch-fleet` background task I armed
    completed:** run `bin/watch-fleet --classify` (bare - no stdin, no pipe)
-   and act on the single-line result:
+   and act on the single-line result. Throughout, "the owner-scoped wake
+   file" means `~/.wingman/wake` for wingman's own top-level cycle,
+   `~/.wingman/wake-<key>` for a lead's own cycle - `bin/watch-fleet
+   --classify` and `bin/crew-list` already self-scope via
+   `$WINGMAN_CREW_ID` (empty for wingman, the lead's own id for a lead), so
+   nothing extra needs passing; run them exactly as shown, unchanged, from
+   either kind of session.
    - `healthy` - a cycle is already live. Do nothing further: no report, no
      log, no re-arm. End the turn.
-   - `fire` - a genuine crew event. Read `~/.wingman/wake` (or run
-     `bin/crew-list` as the documented fallback) for the full roster, report
-     a compact status to the pilot exactly as CLAUDE.md's "Report" step
-     specifies, then proceed to step 2.
-   - `remote-control-dropped` - my own Remote Control connection dropped.
-     Relay `~/.wingman/wake`'s message to the pilot immediately (run
-     `/remote-control` to restore it), then proceed to step 2.
+   - `fire` - a genuine event for your own crew. Read the owner-scoped wake
+     file (or run `bin/crew-list`, which self-scopes the same way) for the
+     full roster, then act on it per **your own** report/roll-up contract -
+     wingman's own top-level session reports a compact status to the pilot
+     exactly as CLAUDE.md's "Report" step specifies; a lead instead rolls the
+     event into its own `summary` and escalates only a genuine decision, per
+     `playbooks/common/lead.md`'s absorb-and-roll-up discipline to its owner -
+     then proceed to step 2.
+   - `remote-control-dropped` - **wingman's own top-level session's** Remote
+     Control connection dropped. This outcome is only ever produced for the
+     owner `""` cycle: `self_pane_check()` in `bin/watch-fleet` gates on
+     `[ -z "$OWNER" ] || return 1` before it ever reads `$WM_HOME/self-pane`,
+     so a lead's own cycle (non-empty `$WINGMAN_CREW_ID`) can never see this
+     outcome - if you are a lead, this case does not apply to you and needs no
+     action. If you are wingman's own top-level session, relay the wake
+     file's message to the pilot immediately (run `/remote-control` to
+     restore it), then proceed to step 2.
+   - `stopped` - the last cycle ended via a deliberate `bin/watch-fleet
+     --stop` (manual/testing use only), not a failure. Report this once,
+     plainly ("the watcher was intentionally stopped and is not currently
+     armed"), then **do not proceed to step 2** - do not auto-re-arm. A human
+     (or this session, deliberately) re-arms it when ready, exactly as
+     `--stop`'s own contract in CLAUDE.md already requires.
    - `spurious <count> <hint>` - one transient death, not yet at the failure
      budget. Report nothing to the pilot (nothing about the fleet actually
      changed), then proceed to step 2 immediately.

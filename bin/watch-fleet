@@ -76,15 +76,17 @@
 #                          stdin: reads (and consumes) the exit-record this
 #                          script itself wrote at its own exit point, or, if
 #                          none is present, checks whether a fresh cycle is
-#                          already live. Prints exactly one of five outcomes on
-#                          stdout - `healthy`, `fire`, `remote-control-dropped`
-#                          (bare tokens), or `spurious <count> <hint>` /
+#                          already live. Prints exactly one of six outcomes on
+#                          stdout - `healthy`, `fire`, `remote-control-dropped`,
+#                          `stopped` (bare tokens), or `spurious <count> <hint>` /
 #                          `spurious-repeated <count> <hint>` (a consecutive-
 #                          failure count and a forensic hint) - and exits 0.
-#                          Dispatched before claim-lock acquisition: never
-#                          creates the claim lock, never mutates $PIDFILE/
-#                          $BEATFILE (it legitimately reads both via the
-#                          cycle_live check). Intended caller: the `/watch`
+#                          `stopped` means the last cycle ended via a deliberate
+#                          `--stop`, not a failure - never auto-re-arm on this
+#                          alone. Dispatched before claim-lock acquisition:
+#                          never creates the claim lock, never mutates
+#                          $PIDFILE/$BEATFILE (it legitimately reads both via
+#                          the cycle_live check). Intended caller: the `/watch`
 #                          skill, immediately after its armed cycle exits.
 # bash-3.2-safe.
 set -u
@@ -386,10 +388,14 @@ case "$MODE" in
   --stop)
     if [ -f "$PIDFILE" ]; then
       pid="$(cat "$PIDFILE" 2>/dev/null)"
+      printf 'stopped\n' > "$EXITFILE"
       [ -n "$pid" ] && kill "$pid" 2>/dev/null
       rm -f "$PIDFILE"
       wm_ok "watch-fleet stopped"
-    else wm_info "no watch-fleet cycle to stop"; fi
+    else
+      printf 'stopped\n' > "$EXITFILE"
+      wm_info "no watch-fleet cycle to stop"
+    fi
     exit 0 ;;
   --start)
     wm_warn "watch-fleet --start is deprecated: arm 'bin/watch-fleet' as a harness-tracked background task instead. Blocking now."
