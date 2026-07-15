@@ -74,15 +74,56 @@ cat > "$FAKE_PR" <<'JSON'
 JSON
 assert_contains "a changes-requested review fires changes-requested" "$(run)" "changes-requested: #42"
 
-# 5. the crew's own comment must never wake it
+# 5. the crew's own reply, marked with THIS session's own crew id at the body's
+#    start, must never wake it (the reply-loop guard).
 cat > "$FAKE_PR" <<'JSON'
 {"number":42,"state":"OPEN","mergedAt":null,
  "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
  "reviews":[{"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-10T11:00:00Z"}],
- "comments":[{"author":{"login":"botuser"},"body":"fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"}],
+ "comments":[{"author":{"login":"botuser"},"body":"<!-- wingman-crew:pw1 --> fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"}],
  "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
 JSON
-assert_eq "the crew's own reply does not fire" "$(run)" ""
+assert_eq "the crew's own marked reply does not fire" "$(run)" ""
+
+# 5b. a same-login comment with NO marker at all must fire - issue #118's repro
+#     shape (the operator's genuine comment, sharing the crew's login).
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
+ "reviews":[{"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-10T11:00:00Z"}],
+ "comments":[{"author":{"login":"botuser"},"body":"<!-- wingman-crew:pw1 --> fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"},
+             {"author":{"login":"botuser"},"body":"actually, one more thing","createdAt":"2026-07-10T13:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+assert_contains "a same-login comment with no marker fires comment (issue #118)" "$(run)" "comment: #42"
+
+# 5c. a same-login comment marked by a DIFFERENT crew id must fire - issue #59's
+#     repro shape (a different crew session's genuine comment, sharing the login).
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
+ "reviews":[{"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-10T11:00:00Z"}],
+ "comments":[{"author":{"login":"botuser"},"body":"<!-- wingman-crew:pw1 --> fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"},
+             {"author":{"login":"botuser"},"body":"actually, one more thing","createdAt":"2026-07-10T13:00:00Z"},
+             {"author":{"login":"botuser"},"body":"<!-- wingman-crew:reviewer-9 --> concerned about X","createdAt":"2026-07-10T14:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+assert_contains "a same-login comment marked by a different crew id fires comment (issue #59)" "$(run)" "comment: #42"
+
+# 5d. a same-login comment carrying pw1's OWN marker, but only quoted (not at the
+#     body's start) must fire - the round-1 must-fix's repro shape (a human's
+#     GitHub "Quote reply" to a developer's own marked reply).
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
+ "reviews":[{"author":{"login":"reviewer1"},"state":"CHANGES_REQUESTED","submittedAt":"2026-07-10T11:00:00Z"}],
+ "comments":[{"author":{"login":"botuser"},"body":"<!-- wingman-crew:pw1 --> fixed, PTAL","createdAt":"2026-07-10T12:00:00Z"},
+             {"author":{"login":"botuser"},"body":"actually, one more thing","createdAt":"2026-07-10T13:00:00Z"},
+             {"author":{"login":"botuser"},"body":"<!-- wingman-crew:reviewer-9 --> concerned about X","createdAt":"2026-07-10T14:00:00Z"},
+             {"author":{"login":"botuser"},"body":"> <!-- wingman-crew:pw1 --> fixed, PTAL\n\nOne more note before merging.","createdAt":"2026-07-10T15:00:00Z"}],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+assert_contains "a same-login comment with pw1's own marker only quoted fires comment (round-1 must-fix)" "$(run)" "comment: #42"
 
 # 6. merged wins and fires the terminal event
 cat > "$FAKE_PR" <<'JSON'

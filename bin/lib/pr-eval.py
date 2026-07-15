@@ -15,8 +15,32 @@ canned JSON. It reads:
   --review-comments <path>  a JSON array of inline review-thread comments
                             (`gh api repos/{owner}/{repo}/pulls/{n}/comments`), optional
   --cursor <path>           the on-disk cursor of what has already been surfaced
-  --me <login>              the authenticated forge login, so the crew's OWN
-                            comments/reviews never wake it (avoids a reply loop)
+  --me <login>              the authenticated forge login. Combined with
+                            --my-crew-id (below), identifies THIS session's own
+                            comments/reviews so a reply never wakes its own
+                            author (avoids a reply loop). Every crew session
+                            shares one forge login (issue #50) - by itself this
+                            flag can only ever mean "same account", never "same
+                            session", so login alone is never sufficient to
+                            drop an item (see --my-crew-id).
+  --my-crew-id <id>         REQUIRED. This session's own $WINGMAN_CREW_ID. An
+                            item is treated as this session's own reply, and
+                            dropped, only when BOTH its author's login equals
+                            --me AND its body OPENS WITH (not merely contains
+                            - see _is_own_reply) a `<!-- wingman-crew:<id> -->`
+                            marker whose <id> equals this value. A same-login
+                            item with no marker (a human's genuine comment,
+                            issue #118), a marker naming a DIFFERENT crew id
+                            (another crew member's own genuine review/comment,
+                            e.g. a reviewer's verdict, issue #59), or a marker
+                            that appears only quoted/mid-body (a human's
+                            GitHub "Quote reply" to a marked reply) is never
+                            dropped - it surfaces as a real event. This flag is
+                            required (not optional) because a login-only
+                            fallback is exactly the bug this file fixes -
+                            bin/pr-watch always passes its own $WINGMAN_CREW_ID
+                            (guaranteed set at that point), so there is no
+                            legitimate caller this would ever break.
 
 It prints ONE reason line and advances the cursor for exactly that dimension, or
 prints nothing when there is no new event. Priority (highest first):
@@ -41,6 +65,7 @@ settle anew.
 """
 import argparse
 import json
+import re
 import sys
 
 # CheckRun conclusions that count as a failure the crew should fix. NEUTRAL,
@@ -117,6 +142,9 @@ def _map_mergeability(mergeable, merge_state_status):
     return "MERGEABLE"
 
 
+CREW_MARKER_RE = re.compile(r"^\s*<!--\s*wingman-crew:([A-Za-z0-9._-]+)\s*-->")
+
+
 def _login(item):
     a = item.get("author") or item.get("user") or {}
     if isinstance(a, dict):
@@ -124,28 +152,55 @@ def _login(item):
     return a or ""
 
 
+def _body(item):
+    return item.get("body") or ""
+
+
 def _ts(item):
     return item.get("submittedAt") or item.get("createdAt") or item.get("created_at") or ""
 
 
-def conversation(pr, review_comments, me):
+def _is_own_reply(login, body, me, my_crew_id):
+    """True iff this item is THIS session's own reply and should be dropped so
+    it never wakes its own author. Login alone can never decide this (every
+    crew session shares one forge login, issue #50); a marker naming a
+    DIFFERENT crew id is a genuine external event (issue #59), not a reply to
+    drop. The marker is matched ANCHORED to the body's start (re.match, not
+    re.search): every emit site posts it as the body's first characters, so a
+    match anywhere else is not this session's own top-level reply - it is a
+    human quoting a marked reply (GitHub's "Quote reply", or a quoted email
+    reply), which must surface as the genuine feedback it is (issue #118,
+    reintroduced through quoting if matched unanchored)."""
+    if not me or login != me:
+        return False
+    m = CREW_MARKER_RE.match(body)
+    return bool(m) and m.group(1) == my_crew_id
+
+
+def conversation(pr, review_comments, me, my_crew_id):
     """Every conversation item as (ts, kind, login). kind is 'review' (a submitted
-    review, carrying its state) or 'comment'. The crew's own items are dropped so a
-    reply never wakes it."""
+    review, carrying its state) or 'comment'. THIS session's own items are
+    dropped (see _is_own_reply) so a reply never wakes its own author; a
+    same-login item from a different crew session, a human's genuine
+    same-login comment, or a human's quote-reply of a marked comment, is never
+    dropped."""
     items = []
     for r in pr.get("reviews") or []:
         st = str(r.get("state") or "").upper()
         if st in ("PENDING",):
             continue
-        items.append((_ts(r), "review:" + st, _login(r)))
+        items.append((_ts(r), "review:" + st, _login(r), _body(r)))
     for c in pr.get("comments") or []:
-        items.append((_ts(c), "comment", _login(c)))
+        items.append((_ts(c), "comment", _login(c), _body(c)))
     for c in review_comments or []:
-        items.append((_ts(c), "comment", _login(c)))
-    return [(ts, kind, who) for (ts, kind, who) in items if ts and who != me]
+        items.append((_ts(c), "comment", _login(c), _body(c)))
+    return [
+        (ts, kind, who) for (ts, kind, who, body) in items
+        if ts and not _is_own_reply(who, body, me, my_crew_id)
+    ]
 
 
-def evaluate(pr, review_comments, cursor, me):
+def evaluate(pr, review_comments, cursor, me, my_crew_id):
     """Return (reason_or_None, new_cursor)."""
     cur = dict(cursor) if isinstance(cursor, dict) else {}
     cur.setdefault("ci", "")
@@ -153,7 +208,7 @@ def evaluate(pr, review_comments, cursor, me):
     # First run: treat conversation already present as seen (so we don't fire on
     # the crew's own PR-open state), but leave ci empty so an already-red build
     # still fires.
-    convo = conversation(pr, review_comments, me)
+    convo = conversation(pr, review_comments, me, my_crew_id)
     convo_max = max((ts for ts, _, _ in convo), default="")
     if "conv_hwm" not in cur:
         cur["conv_hwm"] = convo_max
@@ -226,6 +281,7 @@ def main():
     ap.add_argument("--review-comments", default="")
     ap.add_argument("--cursor", required=True)
     ap.add_argument("--me", default="")
+    ap.add_argument("--my-crew-id", required=True)
     args = ap.parse_args()
 
     pr = read_json(args.pr_json, None)
@@ -234,7 +290,7 @@ def main():
     review_comments = read_json(args.review_comments, []) if args.review_comments else []
     cursor = read_json(args.cursor, {})
 
-    reason, new_cursor = evaluate(pr, review_comments, cursor, args.me)
+    reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id)
     write_json(args.cursor, new_cursor)
     if reason:
         print(reason)

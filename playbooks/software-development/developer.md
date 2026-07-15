@@ -64,7 +64,7 @@ $WINGMAN_BIN/pr-watch --pr <PR URL or number>
 
 - **`ci-failed: <pr> <checks>`** - read the failing job's logs, fix the cause in your worktree, and push.
 - **`conflict: <pr>`** - the base branch moved and your PR now has merge conflicts. Merge or rebase `main` into your branch, resolve the conflicts in your worktree, and push. This is yours to fix exactly like a failing check - never report it upward as a problem; only the eventual settled state matters.
-- **`changes-requested: <pr>`** / **`comment: <pr> …`** - read the review, address it in the worktree, push, and **reply on the thread** (`gh pr comment`, or reply to the specific review comment) so the reviewer knows what you did.
+- **`changes-requested: <pr>`** / **`comment: <pr> …`** - read the review, address it in the worktree, push, and **reply on the thread** (`gh pr comment`, or reply to the specific review comment), with the body OPENING with `<!-- wingman-crew:$WINGMAN_CREW_ID -->` (see `bin/pr-watch`'s header comment for why - it must be first in the body, not just present) so the reviewer knows what you did.
 - **`checks-passed: <pr>`** - the PR has settled green (or the repo has no CI), so it is ready for human eyes.
 - **`merged: <pr>`** - the work landed (the pilot merged it, or you did under a granted autonomy - either way this fires once GitHub reports it merged).
   Clean up your worktree (below); the engagement is over.

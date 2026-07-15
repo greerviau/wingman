@@ -26,6 +26,8 @@ This section applies **only when your `--input` is a PR**; a plan review has no 
 
 Use an unambiguous target for every `gh` call below - the full PR URL, or `--repo <owner>/<name>` plus the PR number - never a bare PR number. Your `cwd` is not guaranteed to resolve to the PR's own repo (a global-scope or worktree-based reviewer in particular), and a wrong-repo submission is a real, silent failure mode.
 
+Every review or comment you post below opens with an invisible `<!-- wingman-crew:$WINGMAN_CREW_ID -->` marker (a GitHub HTML comment, hidden from the rendered thread) - the marker `bin/lib/pr-eval.py` uses to tell your own review from a genuinely different actor sharing the same forge login (see `bin/pr-watch`'s header comment for why this matters - issues #118, #59). Always put it first in the body; `pr-eval.py` only recognizes it at the very start.
+
 1. **Decide the verdict from your findings.** Any must-fix finding means **request changes**; no must-fix findings (nice-to-haves alone, or a clean pass) means **approve**.
 2. **Check who authored the PR before attempting anything.** Every crew session (yours included) authenticates as the requester's own GitHub identity, so an approve/request-changes review is only possible when someone else authored the PR:
    ```
@@ -36,15 +38,15 @@ Use an unambiguous target for every `gh` call below - the full PR URL, or `--rep
    - **Different login:** continue to step 3.
 3. **Submit the real review:**
    ```
-   gh pr review <pr> --approve -b "<one-line verdict, top must-fix items if any, and the findings-file path>"
-   gh pr review <pr> --request-changes -b "<same>"
+   gh pr review <pr> --approve -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> <one-line verdict, top must-fix items if any, and the findings-file path>"
+   gh pr review <pr> --request-changes -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> <same>"
    ```
    Keep the body short - it is the summary, not the full findings; point to the analysis file for detail.
    If this still fails despite the different-login check (`gh` reports something matching "your own pull request", case-insensitive - the approve- and request-changes-path error text differ, and neither is worth hardcoding as the sole check), treat it exactly like step 2's same-login case and fall through to step 4.
    Any other failure here is a real submission failure - go to step 5, not step 4.
 4. **Comment fallback (same identity as the PR author):**
    ```
-   gh pr review <pr> --comment -b "VERDICT: <approve|request changes> - <summary, and the findings-file path>"
+   gh pr review <pr> --comment -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> VERDICT: <approve|request changes> - <summary, and the findings-file path>"
    ```
    State this plainly in your `--summary`: `reviewDecision` will stay empty on this PR because of the shared-identity restriction, not because the review didn't happen - the verdict is recorded in the review comment and your findings file instead.
 5. **A submission failure you cannot fix is `blocked`, never a silent retry or a false `done`.** If any `gh pr review` call (step 3 or step 4) fails for a reason other than same-identity - authentication, no permission on the target repo, network, or a wrong PR/repo target - do not loop on it. Two shapes get named explicitly because their remedy is not "just retry":

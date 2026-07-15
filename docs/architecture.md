@@ -117,7 +117,7 @@ A crew Claude session cannot rouse itself once its turn ends, so after opening a
 It blocks, polling the PR through the forge CLI, and exits with one reason line (`merged` / `closed` / `changes-requested` / `ci-failed` / `comment` / `checks-passed`) the instant an actionable event occurs; that exit re-invokes the crew member, which acts and arms exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
 `checks-passed` fires once when the PR settles with nothing failing and nothing pending (all-green, or a repo with no CI), which is what lets a member stay `working` through CI and be woken to move into `review` only when it is genuinely on the humans; it re-arms once checks go pending/failing and settle again.
 
-A cursor at `$WINGMAN_HOME/pr/<crew-id>.json` records what has already been surfaced, so a persistently-red build or an already-handled comment does not re-fire, and the crew's own replies (filtered by the authenticated forge login) never wake it.
+A cursor at `$WINGMAN_HOME/pr/<crew-id>.json` records what has already been surfaced, so a persistently-red build or an already-handled comment does not re-fire, and this session's own replies never wake it - identified by an anchored `<!-- wingman-crew:<id> -->` marker matching its own crew id, not by forge login alone (every crew session shares one forge login, so login alone would also drop a human's own genuine comments or a different crew member's own genuine review).
 Firing advances only the fired dimension, so a co-occurring lower-priority event still surfaces on the next cycle.
 The event-decision logic lives in `bin/lib/pr-eval.py` (pure, unit-testable with canned JSON); `bin/pr-watch` is the thin poll loop around it.
 
