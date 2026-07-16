@@ -133,6 +133,38 @@ Before you assert an external fact as settled - a PR is *approved*, *merged*, *p
 If you have not verified it, attribute the claim explicitly as your own report: say "my review verdict is approve", not "the PR is approved"; "my local run is green", not "CI is green".
 A reviewer's internal "approve" is not a GitHub review decision, and a developer's "CI green" is not the merge gate; conflating the two has surfaced a PR as approved while GitHub still showed REVIEW_REQUIRED and merge BLOCKED.
 
+## Your checkout is a claim, not verified freshness
+
+The discipline above - don't assert external system state you haven't verified - applies just as much to a file you read locally.
+What your working tree shows you is a claim about "the file's current state," not verified truth, unless you've just confirmed your checkout is caught up with `origin/<default-branch>`.
+Any `$WINGMAN_IS_GIT=true` session that is `cd`'d directly into the target checkout - every software-development role except `developer` (whose own worktree-per-run step already guarantees freshness - see `playbooks/software-development/developer.md`'s "Isolate" step), and any other crew type grounded in a git-backed project directory - reads whatever commit that checkout happens to be pinned at, which can silently lag `origin/<default-branch>` if nobody has fetched or pulled it recently.
+This has already produced one confirmed false report: a reviewer's "informational observation" about `bin/crew-resume` was accurate against a stale local `main` and false against `origin/main`, which already had the fix (issue #142, traced in `docs/analysis/2026-07-16-issue-142-crew-resume-review-nudge-plan.md`).
+
+**Before asserting "file X currently does/doesn't do Y"** - a finding, a review comment, a plan's stated current-state assumption - confirm freshness first, whenever `$WINGMAN_IS_GIT=true` and `$WINGMAN_HAS_REMOTE=true` (no `origin` to check against otherwise).
+**If either is unset** - a `--scope global` spawn, or a resumed session, where "unset means not yet known, detect it yourself, and must never be treated as `false`" (`CLAUDE.md`) - detect them yourself for the directory you're actually reading from before deciding whether this applies, exactly as `developer.md`'s own "Isolate" step and `experimentalist.md` already do for the same two variables:
+
+```
+git -C <dir> rev-parse --show-toplevel   # confirms it's a git repo at all
+git -C <dir> remote get-url origin       # confirms an origin to check against
+```
+
+Once you know both hold for the directory in question, run:
+
+```
+$WINGMAN_BIN/lib/git-freshness-check.sh <path-you're-about-to-assert-something-about>
+```
+
+It fetches `origin` and reports whether your checkout as a whole is caught up with `origin/<default-branch>`, plus (given a path) whether that specific file's content differs between your `HEAD` and `origin/<default-branch>`.
+Only `git fetch` runs against your checkout - it updates only `refs/remotes/origin/*`, never the working tree, index, or `HEAD` - so this is exactly as safe to run against a checkout a human or another live session may also be using as a `developer`'s own pre-worktree fetch.
+If it reports your checkout (or the specific file) as stale, **never `git pull`/`checkout`/`reset` the checkout to "fix" it** - that mutates shared state precisely the way a `developer`'s own worktree design exists to avoid.
+Read the file's actual current content instead:
+
+```
+git show origin/<default-branch>:<path>
+```
+
+and base your claim on that, not on the (stale) working-tree copy - noting the discrepancy in your report if it's material to the finding.
+
 ## Keep detail out of chat, on disk
 
 Substantial output (an analysis, a design, a plan) goes in a **file** (under the project's `docs/` or the agreed path), and your status carries only the path.

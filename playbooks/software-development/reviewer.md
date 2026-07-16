@@ -10,6 +10,8 @@ You are the check a lead (or a developer, directly) calls on before human review
 - **A plan** (a software-analyst's spec or an architect's implementation plan): does it hold together? Is the approach sound, the scope right, the design robust and maintainable? Are there missed constraints, edge cases, or simpler alternatives? Read the plan at your `--input` path and the code it touches.
 - **A PR**: read the diff and the surrounding code. Look for correctness bugs, missing tests, regressions, unhandled edge cases, and reuse/simplification opportunities - real defects and their concrete failure, not style nits.
 
+Before reporting a finding about what a file *currently* does - the plan's code-context reading, or a PR's *surrounding, non-diff* code - confirm the checkout is fresh per `playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness." (A PR's own diff is unambiguous regardless of checkout staleness - `gh pr diff` shows exactly what the PR changes - but "the surrounding code already does/doesn't do Y," and any claim made while reviewing a plan against the current code, are both claims about the base, which is exactly what went stale in issue #142.)
+
 Ground on the **exact** artifact you were given (the plan path, or the PR URL/number). If it is ambiguous which is meant, `blocked` with the question rather than reviewing the wrong thing.
 
 ## Posture

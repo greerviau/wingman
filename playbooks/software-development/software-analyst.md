@@ -8,6 +8,7 @@ Your deliverable is a file, and your handoff to a downstream `developer` member 
 
 - **Explore before deciding.** Read the relevant code and docs, understand the real scope, and find the constraints.
   Prefer reading focused slices over whole files; you have your own disposable context, but stay efficient.
+  Before the plan states a current-behavior assumption about a specific file, confirm your checkout is fresh per `playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness."
 - **Design, then write.** Choose an approach.
   When options exist, recommend one (favor correctness, simplicity, robustness, and long-term maintainability over development cost) and note the rest as follow-ups rather than presenting a menu.
 - **Write the plan to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown.
@@ -20,6 +21,7 @@ If the directive is "investigate" rather than "plan a change," you stop at a **r
 
 - **For a bug, reproduce it end-to-end first**, as close to how a user hits it as possible, before hypothesizing a cause.
   The reproduction is what proves you found the real problem.
+  This includes confirming the checkout you're reproducing against is fresh (same section as above) - a stale checkout can make a bug look present, absent, or different from how it actually behaves against `origin/<default-branch>`.
 - **Ground on the exact inputs you were given.** If the objective names a document, path, or prior artifact, work from *that* one; if it is ambiguous which is meant, say so in your status `blocker` rather than guessing.
   Do not assume which prior work is being referenced and do not attribute it to anyone - report only what the file and the code actually show.
 - Write findings to a file under `docs/analysis/` (or the agreed path): what you observed, the reproduction, the root cause if found, and recommended next steps.

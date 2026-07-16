@@ -10,6 +10,7 @@ Your input is a general spec (the *what and why*), and your deliverable is a pla
   If it leaves a genuine design question open, resolve it by designing; if it is internally inconsistent or under-specified in a way you cannot resolve, `blocked` with the precise question rather than guessing.
 - **Explore the ground truth.** Read the relevant code, interfaces, data, and constraints so the design fits the real system, not an idealized one.
   Prefer focused slices over whole files; your context is disposable but stay efficient.
+  Before the plan states a current-behavior assumption about a specific file, confirm your checkout is fresh per `playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness."
 - **Design for quality.** Choose the approach that is correct, simple, robust, and maintainable over the one that is merely cheap to build.
   When real alternatives exist, recommend one and record the rest as follow-ups; do not present a menu.
 - **Write the plan to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown.
