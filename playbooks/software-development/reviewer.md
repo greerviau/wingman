@@ -40,10 +40,10 @@ Every review or comment you post below opens with an invisible `<!-- wingman-cre
    - **Different login:** continue to step 3.
 3. **Submit the real review:**
    ```
-   gh pr review <pr> --approve -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> <one-line verdict, top must-fix items if any, and the findings-file path>"
-   gh pr review <pr> --request-changes -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> <same>"
+   gh pr review <pr> --approve -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> Approve.<one-line nice-to-have note, only if there is one>"
+   gh pr review <pr> --request-changes -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> Request changes: <each must-fix item on its own line, file:line - what's wrong>"
    ```
-   Keep the body short - it is the summary, not the full findings; point to the analysis file for detail.
+   Keep the body short and self-contained - it is read on GitHub by someone with no access to your findings file, so it must never point at it or any other local path (see `playbooks/_status-contract.md`'s "PR-facing content"). Either state a finding inline, briefly, or leave it out. An approve with nothing to add needs nothing beyond "Approve." - the review's own APPROVED state already shows that; don't restate it in prose.
    If this still fails despite the different-login check (`gh` reports something matching "your own pull request", case-insensitive - the approve- and request-changes-path error text differ, and neither is worth hardcoding as the sole check), treat it exactly like step 2's same-login case and fall through to step 4.
    Any other failure here is a real submission failure - go to step 5, not step 4.
 4. **Comment fallback (same identity as the PR author):** because every crew session shares the same forge login, this comment alone is just a public, documented convention - not cryptographic proof it was genuinely you who posted it. If you were spawned with a review-signing token (`$WM_REVIEW_TOKEN` set in your environment - true for every reviewer spawned after issue #135 shipped), embed a proof alongside your marker so `hooks/no-merge-guard.sh` can verify a later comment reusing your marker is not a forged approve, and resolve and sign against the PR's current head commit at post time so a byte-for-byte repost of an earlier comment cannot be replayed as current evidence (issue #138):
@@ -52,13 +52,14 @@ Every review or comment you post below opens with an invisible `<!-- wingman-cre
    PROOF="$($WINGMAN_STATE review-sign --verdict <approve|request changes> --commit "$HEAD_SHA")"
    gh pr review <pr> --comment -b "<!-- wingman-crew:$WINGMAN_CREW_ID -->
    <!-- wingman-review-proof:$PROOF -->
-   VERDICT: <approve|request changes> - <summary, and the findings-file path>"
+   VERDICT: <approve|request changes> - <one-line summary; for request changes, each must-fix item inline as file:line - what's wrong>"
    ```
    `--commit` is passed uniformly for both verdicts (it is a no-op for `request changes`). If you post a fresh `approve` after a later push (a new review round), repeat this step with the fresh `HEAD_SHA` - `hooks/no-merge-guard.sh` rejects an approve whose signed commit no longer matches the PR's current head, including a byte-for-byte repost of an earlier, genuinely-issued comment.
    If `$WM_REVIEW_TOKEN` is unset (a legacy reviewer spawned before issue #135, or one hand-spawned with no token), fall back to the marker-only comment:
    ```
-   gh pr review <pr> --comment -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> VERDICT: <approve|request changes> - <summary, and the findings-file path>"
+   gh pr review <pr> --comment -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> VERDICT: <approve|request changes> - <same>"
    ```
+   This comment is the *only* visible record of your verdict when it's used (GitHub's `reviewDecision` never moves for a same-login review) - so it must carry the actual substance, not a pointer. Never write "see the findings file" or similar; copy the concrete must-fix items into the comment itself, briefly (`playbooks/_status-contract.md`'s "PR-facing content").
    State this plainly in your `--summary`: `reviewDecision` will stay empty on this PR because of the shared-identity restriction, not because the review didn't happen - the verdict is recorded in the review comment and your findings file instead.
 5. **A submission failure you cannot fix is `blocked`, never a silent retry or a false `done`.** If any `gh pr review` call (step 3 or step 4) fails for a reason other than same-identity - authentication, no permission on the target repo, network, or a wrong PR/repo target - do not loop on it. Two shapes get named explicitly because their remedy is not "just retry":
    - **A pending review already exists** (`422: a pending review already exists`, or similar): the requester likely has an unsubmitted review open on this PR in the GitHub UI - an ordinary thing for them to be doing on a PR they just asked you to look at. This is never yours to clear (deleting someone else's pending review is not your call). Write your findings file (you always do this, regardless of submission outcome), then report `blocked` with a blocker naming the PR and asking the requester to submit or discard their pending review before you can submit yours.

@@ -96,7 +96,7 @@ cwd = data.get("cwd") or os.getcwd()
 
 COMMENT_BODY = (
     "<!-- wingman-crew:%s -->\n"
-    "Merged by wingman crew `%s` (type: `%s`), not by the human - see issue #46."
+    "Merged by wingman crew `%s` (type: `%s`), not by the human."
     % (crew_id, crew_id, crew_type)
 )
 
