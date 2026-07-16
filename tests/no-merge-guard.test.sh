@@ -749,6 +749,62 @@ out="$(run_hook '$WINGMAN_STATE crew-set --id admin-added --delivery https://git
 assert_eq "wingman's own top-level session can set delivery on any id (no output)" "$out" ""
 
 # ============================================================================
+# issue #136: crew-set --type gets the identical self/wingman restriction
+# already applied to --delivery (not crew-add's lead-non-self carve-out -
+# there is no legitimate flow that changes an existing id's type after
+# crew-add time).
+# ============================================================================
+export WINGMAN_CREW_ID=devA
+export WINGMAN_CREW_TYPE=developer
+
+# --- repointing an EXISTING other id's --type is denied ---------------------
+wm_state crew-add --id rev-real2 --type reviewer --repo "$TEST_REPO" \
+  --window wrr2 --session-id srr2 >/dev/null
+out="$(run_hook '$WINGMAN_STATE crew-set --id rev-real2 --type developer')"
+assert_contains "a developer cannot repoint another id's --type" "$out" '"permissionDecision": "deny"'
+assert_contains "type-repoint denial cites issue #136" "$out" "issue #136"
+
+# --- ordinary self-report of one's OWN type is unaffected -------------------
+out="$(run_hook '$WINGMAN_STATE crew-set --id devA --type developer')"
+assert_eq "a developer setting --type on ITS OWN literal id is allowed (no output)" "$out" ""
+
+out="$(run_hook '$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --type developer')"
+assert_eq "a developer self-reporting via the \$WINGMAN_CREW_ID idiom is allowed (no output)" "$out" ""
+
+# A crew-set call with no --type at all is untouched by this restriction.
+out="$(run_hook '$WINGMAN_STATE crew-set --id someone-else --status working --summary "hi"')"
+assert_eq "a crew-set with no --type is unaffected regardless of --id (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# --- a lead cannot repoint a worker's --type either (type is self-report- ---
+# only, unlike crew-add's lead-non-self carve-out) --------------------------
+export WINGMAN_CREW_ID=lead1
+export WINGMAN_CREW_TYPE=lead
+out="$(run_hook '$WINGMAN_STATE crew-set --id new-worker-1 --type reviewer')"
+assert_contains "a lead repointing a worker's type is still denied (type is self-report-only)" \
+  "$out" '"permissionDecision": "deny"'
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# --- wingman's own top-level session is exempt ------------------------------
+out="$(run_hook '$WINGMAN_STATE crew-set --id admin-added --type reviewer')"
+assert_eq "wingman's own top-level session can set type on any id (no output)" "$out" ""
+
+# --- the narrowed pre-gate leaves unrelated, non-crew-set commands alone ----
+# (paralleling the existing "an unrelated malformed command never even
+# reaches command_segments" test at lines 386-391): a command that mentions
+# --type but never mentions crew-set, and that the lexer cannot fully parse,
+# must still be allowed - the pre-gate should exit 0 before any Python/
+# parsing runs, exactly as it does today for an unrelated malformed command
+# with no trigger word at all. This is the regression this fix's own review
+# flagged against a bare `*--type*` pre-gate alternative.
+export WINGMAN_CREW_ID=dev1
+export WINGMAN_CREW_TYPE=developer
+out="$(run_hook "kubectl create secret generic foo --type=Opaque --from-literal=key='oops")"
+assert_eq "an unrelated, unparseable --type command with no crew-set is allowed (pre-gate skips it)" "$out" ""
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
 # PR #134 review, minor finding 1: shape-1 (a real APPROVED review, any
 # author) must respect latest-verdict-per-author ordering exactly like
 # shape-2 already does - a stale APPROVED must not outlive a later
