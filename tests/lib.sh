@@ -222,9 +222,7 @@ wm_cleanup_all() {
     while IFS= read -r _cmd; do
       [ -z "$_cmd" ] && continue
       eval "$_cmd"
-    done <<EOF
-$_cmds
-EOF
+    done <<<"$_cmds"
   fi
   _wait_pids="$(_wm_live_watch_pids)"
   [ -n "$WM_TRACKED_PIDS" ] && kill $WM_TRACKED_PIDS 2>/dev/null

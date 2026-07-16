@@ -79,6 +79,7 @@ fails=0
 swept=0
 stale=0
 swept_dirs=0
+stale_dirs=0
 
 # The suite-level backstop: runs unconditionally after the loop below, even if
 # a child test hangs and this script itself is killed and its own trap fires
@@ -95,19 +96,27 @@ _wm_run_sweep() {
   while read -r _name; do
     [ -z "$_name" ] && continue
     case "$_name" in
-      wm-test-"$WM_TEST_RUN_ID"-*) tmux kill-session -t "$_name" 2>/dev/null; swept=$((swept+1)) ;;
+      wm-test-"$WM_TEST_RUN_ID"-*) tmux kill-session -t "=$_name" 2>/dev/null; swept=$((swept+1)) ;;
       wm-test-*)
         stale=$((stale+1))
-        [ "${WM_TEST_SWEEP_STALE:-0}" = 1 ] && tmux kill-session -t "$_name" 2>/dev/null
+        [ "${WM_TEST_SWEEP_STALE:-0}" = 1 ] && tmux kill-session -t "=$_name" 2>/dev/null
         ;;
     esac
   done <<<"$_sessions"
 
-  _dirs="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name "wm-test.${WM_TEST_RUN_ID}.*" 2>/dev/null)"
+  _dirs="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'wm-test.*' 2>/dev/null)"
   while read -r _d; do
     [ -z "$_d" ] && continue
-    rm -rf "$_d"
-    swept_dirs=$((swept_dirs+1))
+    case "$_d" in
+      "${TMPDIR:-/tmp}/wm-test.$WM_TEST_RUN_ID".*)
+        rm -rf "$_d"
+        swept_dirs=$((swept_dirs+1))
+        ;;
+      *)
+        stale_dirs=$((stale_dirs+1))
+        [ "${WM_TEST_SWEEP_STALE:-0}" = 1 ] && rm -rf "$_d"
+        ;;
+    esac
   done <<<"$_dirs"
 
   rm -rf "$_wm_logdir"
@@ -116,6 +125,7 @@ _wm_run_sweep() {
   printf "this run's leaked tmux sessions swept (swept):        %d\n" "$swept"
   printf 'stale (pre-existing or concurrent) wm-test-* sessions found, left alone: %d (rerun with WM_TEST_SWEEP_STALE=1 to remove)\n' "$stale"
   printf "this run's leaked temp dirs/files swept (swept_dirs):  %d\n" "$swept_dirs"
+  printf 'stale (pre-existing or concurrent) wm-test.* temp dirs found, left alone: %d (rerun with WM_TEST_SWEEP_STALE=1 to remove)\n' "$stale_dirs"
 
   # Gated behind WM_TEST_STRICT_LEAK_CHECK: CI runners are ephemeral and
   # always start clean, so it is set there unconditionally (no baseline to
