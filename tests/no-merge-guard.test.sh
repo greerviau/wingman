@@ -216,6 +216,35 @@ assert_contains "issue #117: an unresolvable -C argument falls back to exec_cwd 
 out="$(run_hook "git -C $WORKTREE -C ../work push" "$SCRATCH")"
 assert_contains "issue #117: multiple -C flags compound relative to the preceding -C and correctly deny" "$out" '"permissionDecision": "deny"'
 
+# ---- destination-unresolvable-therefore-deny: closes a bypass found in review ----
+#
+# resolve_cd_target()/git_push_target_dir() accept ANY syntactically valid
+# cd/-C argument as a real, resolved directory - they never check it is an
+# actual, accessible git checkout. If the resulting target_dir is NOT a git
+# checkout, current_branch(target_dir) fails and returns None; for a bare
+# push, `if dest:` being false previously meant the destination check was
+# SKIPPED entirely - an allow, not a deny - even though the payload cwd
+# ($CLONE) genuinely sits on main. A crew session could bypass the guard on
+# any bare push just by cd'ing (or git -C'ing) into an ordinary, real,
+# non-git directory first - no adversarial intent required. An unresolvable
+# destination on a bare/HEAD push must now deny instead of silently
+# skipping the check.
+out="$(run_hook "cd /tmp && git push" "$CLONE")"
+assert_contains "issue #117: cd into a non-git directory (/tmp) no longer bypasses the guard - denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "git -C /tmp push" "$CLONE")"
+assert_contains "issue #117: git -C into a non-git directory (/tmp) no longer bypasses the guard - denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "cd /this/dir/does/not/exist/nowhere && git push" "$CLONE")"
+assert_contains "issue #117: cd into a nonexistent directory no longer bypasses the guard - denied" "$out" '"permissionDecision": "deny"'
+
+# An explicit-refspec push is unaffected by this: its destination comes
+# directly from the command text, never from a git call that can be steered
+# onto a bogus directory and made to fail - so it still denies/allows on the
+# refspec itself, unchanged by the fix above.
+out="$(run_hook "cd /tmp && git push origin feature/foo" "$CLONE")"
+assert_eq "issue #117: an explicit-refspec push after cd into a non-git dir is still evaluated on the refspec (allowed, no output)" "$out" ""
+
 ( cd "$CLONE" && git checkout -q feature/foo )
 git worktree remove -q "$WORKTREE" 2>/dev/null || true
 

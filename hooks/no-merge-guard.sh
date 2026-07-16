@@ -311,6 +311,34 @@ def check_merge_paths():
                 refspec = positional[1] if len(positional) > 1 else None
                 if refspec is None or refspec == "HEAD":
                     dest = current_branch(target_dir)
+                    if dest is None:
+                        # target_dir came from this SAME command'"'"'s cd/-C text
+                        # (or, absent either, the payload cwd), and its
+                        # destination could not be determined - target_dir is
+                        # not a valid, accessible git checkout, or the git
+                        # call otherwise failed. Before exec_cwd/target_dir
+                        # tracking existed, cwd was always the hook payload'"'"'s
+                        # own real working directory, so this failure was
+                        # never reachable from the command text itself; now
+                        # that a cd/-C argument can steer it, an unresolvable
+                        # destination must deny (fail closed, matching
+                        # issue #56'"'"'s precedent in this same hook) rather
+                        # than silently skip the check - the skip-on-None
+                        # fallback below is only safe for the OTHER refspec
+                        # shapes, where dest comes directly from the command
+                        # text, not from a git call that can be steered onto
+                        # a bogus directory and made to fail.
+                        deny(
+                            "Could not determine the destination branch of "
+                            "this git push - the directory it resolves to "
+                            "(via a preceding cd or git -C in the same "
+                            "command) is not a valid, accessible git "
+                            "checkout, so whether it targets the default "
+                            "branch cannot be verified. Denied out of "
+                            "caution rather than silently allowed (issue "
+                            "#117). Push from (or git -C into) a real "
+                            "checkout of this repository."
+                        )
                 elif ":" in refspec:
                     dest = refspec.split(":", 1)[1] or None
                 else:
