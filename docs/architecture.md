@@ -42,6 +42,13 @@ The rules stated in prose throughout this document and `CLAUDE.md` are also enfo
 
 Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
 
+## Checkout freshness (advisory, not a hook)
+
+Not every risk this project has hit can be intercepted by a `PreToolUse` hook: "about to assert that file X currently does/doesn't do Y" is a claim made in prose, inside a plan or a review finding, not a distinguishable tool call the way `gh pr merge` or an unpublished-artifact report is.
+A repo-scoped crew session other than `developer` (which already isolates into a fresh worktree every run) is `cd`'d directly into the target project's existing checkout, which can silently lag `origin/<default-branch>` if nobody has fetched or pulled it recently - a stale read has already produced one confirmed false finding, filed and then retracted as issue #142.
+`bin/lib/git-freshness-check.sh` makes the fix to this - checking freshness before making such a claim - cheap and consistent instead of an ad hoc `git log`/`git status` improvisation: it fetches `origin` (read-only against the working tree, index, and `HEAD`) and reports whether the checkout as a whole is caught up with `origin/<default-branch>`, plus, given path arguments, whether each named file's content specifically differs between `HEAD` and `origin/<default-branch>`.
+`playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness" is the shared convention that tells every git-backed session to run it before asserting a file's current state, with targeted pointers at the three points in the software-development playbooks where this risk is most concentrated (`software-analyst.md`, `reviewer.md`, `architect.md`).
+
 ## Harness-agnostic by design
 
 The **crew** coordination layer - tmux windows, the JSON status files, the watcher loop, and the board - does not depend on any one agent harness.
