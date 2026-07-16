@@ -1069,6 +1069,84 @@ assert_not_contains "an already-reset reading never fires usage-limit-approachin
 assert_contains "usage state file stays clear" \
   "$(cat "$WINGMAN_HOME/usage-limit-state.json")" '"state": "clear"'
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- usage/*.json sweep of long-dead sessions' files (#125, follow-up to #24) --
+# The same aggregation pass removes usage/*.json files whose owning session
+# has long since ended, so $WM_HOME/usage/ doesn't grow unboundedly for the
+# lifetime of $WM_HOME.
+
+# A file whose captured_at is older than a (test-overridden, small)
+# WM_USAGE_SWEEP_SECS is removed by one poll cycle.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+mkdir -p "$WINGMAN_HOME/usage"
+_ul_sweep_future=$(( $(date +%s) + 3600 ))
+_ul_sweep_old_iso="$(uv run --no-project --quiet python -c '
+import datetime
+print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+')"
+cat > "$WINGMAN_HOME/usage/ul-sweep-old.json" <<EOF
+{"five_hour": {"used_percentage": 10, "resets_at": $_ul_sweep_future}, "captured_at": "$_ul_sweep_old_iso"}
+EOF
+wm_timeout 45 env WM_WATCH_INTERVAL=1 WM_USAGE_SWEEP_SECS=1 "$WF" >/dev/null 2>&1
+assert_true "an old usage file (captured_at beyond WM_USAGE_SWEEP_SECS) is swept" \
+  "[ ! -e \"$WINGMAN_HOME/usage/ul-sweep-old.json\" ]"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A fresh file (current captured_at) survives a poll cycle under the default
+# WM_USAGE_SWEEP_SECS (24h) - nowhere near old enough to sweep.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+mkdir -p "$WINGMAN_HOME/usage"
+_ul_sweep_fresh_iso="$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"
+cat > "$WINGMAN_HOME/usage/ul-sweep-fresh.json" <<EOF
+{"five_hour": {"used_percentage": 10, "resets_at": $_ul_sweep_future}, "captured_at": "$_ul_sweep_fresh_iso"}
+EOF
+wm_timeout 6 env WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1
+assert_true "a fresh usage file survives the sweep" \
+  "[ -e \"$WINGMAN_HOME/usage/ul-sweep-fresh.json\" ]"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# A well-formed JSON dict with a missing/malformed captured_at can never
+# contribute to the aggregate (captured is None), so it is swept the same as
+# a too-old file - regardless of WM_USAGE_SWEEP_SECS.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+mkdir -p "$WINGMAN_HOME/usage"
+cat > "$WINGMAN_HOME/usage/ul-sweep-bad.json" <<EOF
+{"five_hour": {"used_percentage": 10, "resets_at": $_ul_sweep_future}, "captured_at": "not-a-timestamp"}
+EOF
+wm_timeout 6 env WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1
+assert_true "a usage file with an unparseable captured_at is swept" \
+  "[ ! -e \"$WINGMAN_HOME/usage/ul-sweep-bad.json\" ]"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# The sweep does not change what value ends up aggregated: with a swept-away
+# old file and a fresh in-window file both present, usage-limit-approaching
+# still fires off the fresh reading exactly as it does with no sweep in play.
+# WM_USAGE_SWEEP_SECS is set well above the old file's age but well below
+# the fresh file's, so the watcher's own poll latency can't accidentally
+# sweep the fresh reading out from under the test before it gets aggregated.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+mkdir -p "$WINGMAN_HOME/usage"
+_ul_sweep_old2_iso="$(uv run --no-project --quiet python -c '
+import datetime
+print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+')"
+cat > "$WINGMAN_HOME/usage/ul-sweep-old2.json" <<EOF
+{"five_hour": {"used_percentage": 10, "resets_at": $_ul_sweep_future}, "captured_at": "$_ul_sweep_old2_iso"}
+EOF
+cat > "$WINGMAN_HOME/usage/ul-sweep-fresh2.json" <<EOF
+{"five_hour": {"used_percentage": 85, "resets_at": $_ul_sweep_future}, "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"}
+EOF
+out_sweep_agg="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 WM_USAGE_SWEEP_SECS=30 "$WF" 2>/dev/null)"
+assert_contains "usage-limit-approaching still fires off the fresh reading" "$out_sweep_agg" "usage-limit-approaching:"
+assert_true "the swept-away old file is gone" \
+  "[ ! -e \"$WINGMAN_HOME/usage/ul-sweep-old2.json\" ]"
+assert_true "the fresh in-window file survives" \
+  "[ -e \"$WINGMAN_HOME/usage/ul-sweep-fresh2.json\" ]"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 rm -f "$WINGMAN_HOME"/watch.pid "$WINGMAN_HOME"/watch.beat
 
 test_summary
