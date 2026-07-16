@@ -100,6 +100,8 @@ Once cleared, crew in that repo run unattended.
 A resumed session (`bin/crew-resume`, or `claude --resume` by hand) can also hit the CLI's own "resume from summary?" prompt on a large or old transcript.
 `bin/crew-resume` defeats it outright on every relaunch; if it appears anyway, wingman recognizes it and wakes you with a specific one-keypress fix via `bin/crew-takeover`.
 
+**Model selection.** An explicit `--model` on a spawn always wins; otherwise `$WM_MODEL` (settable in `config.local.sh`, see [`config.example.sh`](config.example.sh)) is the default for every spawn; with neither set, the agent CLI's own default applies.
+
 ## Customizing crew behavior (playbooks)
 
 A crew type is just a playbook - plain prose in `playbooks/`, grouped by category (`playbooks/<category>/<role>.md`).

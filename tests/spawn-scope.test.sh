@@ -237,6 +237,18 @@ xid="$(WM_MODEL=opus "$SPAWN" --type software-analyst --repo repoA --objective "
 assert_contains "an explicit --model wins over WM_MODEL" \
   "$(grep -- '--model' "$WINGMAN_HOME/crew/$xid.launch.sh")" "--model 'sonnet'"
 
+# --- config.local.sh wiring (issue #13): WM_MODEL sourced via lib/common.sh --
+# Previously only WM_ROOTS/WM_IGNORE/WM_PINS were sourced from config.local.sh,
+# and only by discover-projects - a WM_MODEL set there had no effect anywhere.
+# Appended to the shared $CFG only now, after every test above that depends on
+# WM_MODEL being otherwise unset has already run.
+printf 'WM_MODEL=%q\n' "config-local-test-model" >> "$CFG"
+unset WM_MODEL
+cfgmid="$("$SPAWN" --type software-analyst --repo repoA --objective "config.local.sh model" 2>/dev/null | tail -1)"
+assert_true "spawn with config.local.sh WM_MODEL succeeds" "[ -n '$cfgmid' ]"
+assert_contains "config.local.sh WM_MODEL is picked up absent --model/env WM_MODEL" \
+  "$(grep -- '--model' "$WINGMAN_HOME/crew/$cfgmid.launch.sh")" "--model 'config-local-test-model'"
+
 # --- argument guards ---------------------------------------------------------
 if "$SPAWN" --type software-analyst --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
 assert_true "invalid --scope is rejected" "[ $rc -ne 0 ]"
