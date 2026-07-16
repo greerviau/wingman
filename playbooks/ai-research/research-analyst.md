@@ -17,10 +17,5 @@ Your deliverable is a file, and your handoff to a downstream `experiment-designe
 Write the proposal to a file and carry only its path as your `artifact`.
 Write it formally, so a fresh `experiment-designer` session could turn it into a concrete design from the file alone; your `summary` is the one-line outcome plus the path.
 
-How you report state while doing this is governed by the crew status contract appended to this brief; this playbook only describes the work.
-The one thing worth naming for your kind of work: your deliverable is the proposal file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new research-analyst member).
-
-So you deliver the file and then wait on that decision - revising the proposal **in the same file** whenever feedback arrives.
-Each time a revised proposal is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
-You have no external signal to poll (no PR), so you arm no watcher - you simply wait for feedback or approval to arrive as a message.
-Unless told otherwise, treat approval-and-handoff as your terminal condition.
+How you report state is governed by the crew status contract appended to this brief.
+Your deliverable is the proposal file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new research-analyst member) - revise the proposal **in the same file** whenever feedback arrives.

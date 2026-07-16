@@ -16,10 +16,5 @@ Your deliverable is a file, and your handoff to a downstream `experimentalist` m
 Write the protocol to a file and carry only its path as your `artifact`.
 Write it formally, so a fresh `experimentalist` session could execute it from the file alone; your `summary` is the one-line outcome plus the path.
 
-How you report state while doing this is governed by the crew status contract appended to this brief; this playbook only describes the work.
-The one thing worth naming for your kind of work: your deliverable is the protocol file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new experimental-designer member).
-
-So you deliver the file and then wait on that decision - revising the protocol **in the same file** whenever feedback arrives.
-Each time a revised protocol is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
-You have no external signal to poll (no PR), so you arm no watcher - you simply wait for feedback or approval to arrive as a message.
-Unless told otherwise, treat approval-and-handoff as your terminal condition.
+How you report state is governed by the crew status contract appended to this brief.
+Your deliverable is the protocol file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new experimental-designer member) - revise the protocol **in the same file** whenever feedback arrives.

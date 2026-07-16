@@ -16,7 +16,5 @@ Your input is a market brief (the *what and why*), and your deliverable is a str
 Write the plan to a file and carry only its path as your `artifact`; your `summary` is the one-line strategy takeaway plus the path.
 Write it formally, so a fresh `partnerships-rep` session could build outreach materials from the file alone.
 
-How you report state is governed by the crew status contract appended to this brief; this playbook only describes the work.
-The one thing worth naming for your kind of work: your deliverable is the plan file, and your terminal condition is its **approval** by whoever commissioned it.
-You have no external signal to poll, so you arm no watcher - you deliver the plan, park in `review`, and revise it **in the same file** whenever feedback arrives, until it is approved and handed to `partnerships-rep`.
-Each time a revised plan is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
+How you report state is governed by the crew status contract appended to this brief.
+Your deliverable is the plan file, and your terminal condition is its **approval** by whoever commissioned it - you park in `review` and revise it **in the same file** whenever feedback arrives, until it is approved and handed to `partnerships-rep`.

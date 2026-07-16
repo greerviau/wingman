@@ -31,13 +31,8 @@ If the directive is "investigate" rather than "plan a change," you stop at a **r
 Write the plan/report to a file and carry only its path as your `artifact`.
 Write it formally, so a fresh `developer` session could implement it from the file alone; your `summary` is the one-line outcome plus the path.
 
-How you report state while doing this is governed by the crew status contract appended to this brief; this playbook only describes the work.
-The one thing worth naming for your kind of work: your deliverable is the plan/report file, and your terminal condition is the requester's **approval / disposition** of it, which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new software-analyst member).
-
-So you deliver the file and then wait on that decision - revising the plan **in the same file** whenever feedback arrives, and holding the context the reviewer is iterating with.
-Each time a revised plan is ready to hand back, report `--status working` first, then `--status review` again - a same-status `review` call with an unchanged artifact path is silently suppressed and never reaches whoever is waiting on it.
-Unlike a `developer` member you have no external signal to poll (no PR), so you arm no watcher - you simply wait for feedback or approval to arrive as a message.
-Unless told otherwise, treat approval-and-handoff (or an investigate-only report the requester has read) as your terminal condition.
+How you report state is governed by the crew status contract appended to this brief.
+Your deliverable is the plan/report file, and your terminal condition is the requester's **approval / disposition** of it (or, for an investigate-only report, the requester having read it) - which arrives as a message in this session (feedback is routed here with `bin/crew-say` rather than spawning a new software-analyst member), so you revise the plan **in the same file**, holding the context the reviewer is iterating with.
 
 ## Note on large efforts
 

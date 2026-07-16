@@ -46,25 +46,21 @@ Only pass the flags that changed.
 
 ## Re-entering `review` without re-announcing
 
-This rule is **universal**: it binds every crew type in this library today, and any type added later, whatever domain-specific loop its `working` state covers - a PR's CI/merge cycle, an infra-operator's apply-and-verify cycle, a re-run experiment or training run, a re-triggered data pipeline, a rebuilt report. It is not a PR-specific or developer-specific rule; the examples below (a merge conflict, a failing check) are illustrations of the general case, not its scope.
+This rule is **universal**, binding every crew type regardless of domain and whatever domain-specific loop its `working` state covers - a PR's CI/merge cycle, an infra-operator's apply-and-verify cycle, a re-run experiment or training run, a re-triggered data pipeline, a rebuilt report. It is not a PR-specific or developer-specific rule; the examples below are illustrations of the general case, not its scope.
 
 Returning to `review` after a stint in `working` announces again **only when you are handing back a direct response to a request the party watching you made** - feedback that arrived as a message from your owner (the pilot, your lead, or a peer via `bin/crew-say`/`crew-ask`), where they are genuinely waiting to hear the outcome.
 
-It must **not** announce again when you cycled through `working` to silently resolve something that was **yours to fix** and that **nobody upstream asked about**.
-The domain varies but the shape never does: a failing check, a merge conflict, a stale branch, a routine review comment you've already replied to at its own source (e.g. the PR thread), a failed data-pipeline run you re-triggered, a broken build you repaired, an experiment or training run you re-executed after a bad result, a calculation you corrected, an applied change you had to retry and re-verify - any self-detected, self-resolved hiccup in work that was already yours to own, on which no one upstream raised a question, is the same case.
+It must **not** announce again when you cycled through `working` to silently resolve something that was **yours to fix** and that **nobody upstream asked about**: a failing check, a merge conflict, a stale branch, a routine review comment you've already replied to at its own source (e.g. the PR thread), a failed run you re-triggered, a calculation you corrected - any self-detected, self-resolved hiccup in work that was already yours to own, on which no one upstream raised a question.
 Your owner already knows this deliverable exists and is in flight; telling them again that it's "ready" for the second or third time is exactly the noise the reporting contract rules out.
 
 Use `crew-set --status review --silent` for the second kind of transition: it updates your status/summary/artifact/delivery exactly like a normal call (so `bin/crew-list`/`board.md` stay accurate for anyone who looks), but does not re-fire the watcher/Stop-hook wake.
 Reserve the plain (non-`--silent`) call for: the very first time a deliverable reaches `review`, and any return to `review` that answers feedback your owner gave you.
-Never pass `--silent` with `--status blocked` or `--status done` - those are always genuine, always announce.
-
-This working-dip is not just a lifecycle nicety - it is *how* a genuine re-delivery is distinguished from self-managed churn under the hood: the same `review` -> `working` -> `review` shape covers both "silently fixed something of my own" (use `--silent` on the way back in) and "here is round 2 for you" (plain call, no `--silent`). The dip itself is what makes the second case re-announce at all - a same-status `--status review` call that never leaves `review` only re-announces if it also changes the `artifact`/`blocker`/`delivery` pointer, so restating the same deliverable in place without dipping through `working` first is silently suppressed, not delivered.
+Never pass `--silent` with `--status blocked` or `--status done` - those are always genuine, always announce; see "When to update" item 4 below for the mechanics of the working-dip itself.
 
 ## A state you never set yourself: `stalled`
 
 The supervisor watching you may externally flip your line to `stalled` when you show no sign of life on any channel - no pane output, no status update, no running child process, no CPU activity - for an extended period (default 180s) while your status claims `working`.
-That combination means your agent has likely errored or gone idle without reporting - but the flip is not immediate: the supervisor first sends you one check-in nudge (the same primitive `bin/crew-say` uses) and waits a full stall-idle window for activity.
-Only if that nudge produces nothing - or your session is confirmed dead, in which case no nudge is possible at all - does a takeover/stand-down choice reach your owner.
+That combination means your agent has likely errored or gone idle without reporting - but the flip is not immediate: the supervisor first sends you one check-in nudge (the same primitive `bin/crew-say` uses) and waits a full stall-idle window for activity, escalating a takeover/stand-down choice to your owner only if that nudge produces nothing (or immediately, with no nudge at all, if your session is confirmed dead).
 If you resume on your own, or in response to the nudge, before that window elapses, you never flip at all; your next self-report overwrites `stalled` regardless.
 The flip, when it does happen, preserves your last summary inside the stall reason.
 Parking on an armed harness-tracked watcher is recognized (the armed watcher is a live descendant process in your pane) and is never flagged, so the wake-loop pattern below needs no defensive status refreshes.
@@ -131,14 +127,13 @@ Update your status at these moments, without being asked:
 Your status, summary, artifact, and any verdict you produce are *your own report* of what you did - never proof of external system state.
 Before you assert an external fact as settled - a PR is *approved*, *merged*, *passing/green*, or *deployed* - verify it against the system of record (for a PR, `gh pr view <pr> --json state,mergeStateStatus,reviewDecision,statusCheckRollup`) and report what that shows.
 If you have not verified it, attribute the claim explicitly as your own report: say "my review verdict is approve", not "the PR is approved"; "my local run is green", not "CI is green".
-A reviewer's internal "approve" is not a GitHub review decision, and a developer's "CI green" is not the merge gate; conflating the two has surfaced a PR as approved while GitHub still showed REVIEW_REQUIRED and merge BLOCKED.
+A reviewer's internal "approve" is not a GitHub review decision, and a developer's "CI green" is not the merge gate; conflating the two can surface a PR as approved while GitHub still shows REVIEW_REQUIRED and merge BLOCKED.
 
 ## Your checkout is a claim, not verified freshness
 
 The discipline above - don't assert external system state you haven't verified - applies just as much to a file you read locally.
 What your working tree shows you is a claim about "the file's current state," not verified truth, unless you've just confirmed your checkout is caught up with `origin/<default-branch>`.
 Any `$WINGMAN_IS_GIT=true` session that is `cd`'d directly into the target checkout - every software-development role except `developer` (whose own worktree-per-run step already guarantees freshness - see `playbooks/software-development/developer.md`'s "Isolate" step), and any other crew type grounded in a git-backed project directory - reads whatever commit that checkout happens to be pinned at, which can silently lag `origin/<default-branch>` if nobody has fetched or pulled it recently.
-This has already produced one confirmed false report: a reviewer's "informational observation" about `bin/crew-resume` was accurate against a stale local `main` and false against `origin/main`, which already had the fix (issue #142, traced in `docs/analysis/2026-07-16-issue-142-crew-resume-review-nudge-plan.md`).
 
 **Before asserting "file X currently does/doesn't do Y"** - a finding, a review comment, a plan's stated current-state assumption - confirm freshness first, whenever `$WINGMAN_IS_GIT=true` and `$WINGMAN_HAS_REMOTE=true` (no `origin` to check against otherwise).
 **If either is unset** - a `--scope global` spawn, or a resumed session, where "unset means not yet known, detect it yourself, and must never be treated as `false`" (`CLAUDE.md`) - detect them yourself for the directory you're actually reading from before deciding whether this applies, exactly as `developer.md`'s own "Isolate" step and `experimentalist.md` already do for the same two variables:
@@ -232,17 +227,16 @@ Each question:
 
 - Only include a question here if you would otherwise have written it as a prose "open question" needing the requester's input - this is a transcription of that same content into a structured form, not an invitation to invent extra questions.
 - Always give a `recommended` option and its `detail` for `choice` questions. Per this repo's standing guidance (technical decisions favor quality/correctness/simplicity over development cost, and options get one recommendation rather than a menu), the same discipline applies here: you did the research, so you state the recommendation, not wingman.
-- Do not force a `choice` shape onto a question that doesn't have 2-4 genuine options (a date, a name, an amount, "what should we call this," anything where the right answer is open-ended). Use `type: "open"` instead - this is the one rule most likely to be gamed by cramming an open question into fake options, and it is a schema violation, not a style preference.
-- If the block fails to parse, wingman falls back to relaying the plan pointer and prose exactly as it does today for a deliverable with no block at all - so a malformed block degrades safely, but the requester gets the old prose-relay experience instead of the structured one. Keep the JSON valid.
+- Do not force a `choice` shape onto a question that doesn't have 2-4 genuine options - use `type: "open"` instead (see "Limits" below); this is the one rule most likely to be gamed by cramming an open question into fake options, and it is a schema violation, not a style preference.
+- If the block fails to parse, wingman falls back to relaying the plan pointer and prose, the same handling as a deliverable with no block at all - a malformed block degrades safely, though the requester gets the prose-relay experience instead of the structured one. Keep the JSON valid.
 
 **Limits - what this convention does not fit:**
 
-- **Genuinely open-ended asks** - a date, a name, a free-form scope call, "what should this be called." Forcing these into 2-4 fake options produces options that are either arbitrary or a false choice. These stay `type: "open"` and are relayed as prose questions, exactly as they are today; this convention adds a `hint` field for them, nothing more.
+- **Genuinely open-ended asks** - a date, a name, a free-form scope call, "what should this be called." Forcing these into 2-4 fake options produces options that are either arbitrary or a false choice. These stay `type: "open"` and are relayed as prose questions; this convention adds only a `hint` field for them.
 - **A hard-enforced restriction to the listed set.** `AskUserQuestion` always offers a free-text "Other," by the tool's own design, for every question it asks. `free_text: false` in this schema is informational only - it cannot make the tool refuse an override. Treat it as "flag this if the requester goes off-script," never as a hard gate.
 - **Anything requiring more than 4 options.** The tool caps at 4; a decision that genuinely needs more choices than that does not compress into this convention and should stay prose (or be broken into a follow-up narrower question).
 
-Wingman parses this block with `bin/lib/parse-open-questions.py` (never by reading the deliverable itself) the moment your `review` report reaches the requester as a pilot-facing hand-off, maps `choice` entries onto `AskUserQuestion` calls (recommended option first, `(Recommended)` appended to its label) and `open` entries onto prose questions, then relays the requester's answers back to you via `crew-say`, mapping `id -> answer`.
-If you revise the deliverable and re-enter `review` with a new round, wingman re-runs the same parse-and-ask flow against the new artifact.
+Wingman parses this block automatically the moment your `review` report reaches the requester as a pilot-facing hand-off; keep the JSON valid, and expect the requester's answers to come back via `crew-say`, mapping `id -> answer`.
 
 ## Publishing a deliverable as a hosted Artifact (only when it helps)
 
@@ -251,7 +245,7 @@ But when your `--artifact` deliverable is a markdown file (a plan, a report, an 
 This is never unconditional.
 Check three conditions, all required, at the moment you are about to report a markdown `--artifact` deliverable via `--status review` **or** `--status done` (a reviewer-type member's delivery is terminal and never passes through `review`; the same conditions apply to it):
 
-**A - the content is rendering-sensitive.** A markdown file with headers, tables, or code fences, that is itself the `--artifact` deliverable. If it isn't markdown, skip straight to reporting the path only, exactly as before this section existed.
+**A - the content is rendering-sensitive.** A markdown file with headers, tables, or code fences, that is itself the `--artifact` deliverable. If it isn't markdown, skip straight to reporting the path only.
 
 **B - the requester asked for Artifact links, not assumed.** Whether markdown deliverables should also be published is the requester's own preference (`artifact_linking`), independent of whether they are remote - a remote requester may still prefer local-only paths, and a local one may want a shareable link. It is asked once and cached for the rest of one wingman run, never per-deliverable or per-crew-member. Wingman's own `CLAUDE.md` asks it eagerly at the start of every run (its batched onboarding-preferences step), before any crew is spawned, so by the time a crew member reaches this check the cache is normally already populated:
 
@@ -270,8 +264,6 @@ When it is unanswered, two cases, resolved differently:
   $WINGMAN_STATE pref-set --run-id "$WINGMAN_RUN_ID" --key artifact_linking --value <artifact|local>
   ```
 
-  This fallback is uncommon but not rare - the two ways that still reach it are a member resumed by a tool predating the resume-path environment fix, and manual interference with `preferences.json` mid-run (a true edge case). A wingman restart with crew already in flight mints a fresh `WINGMAN_RUN_ID`, but the store keys its cached answers by run id (never a single shared slot - see issue #85), so a member still carrying the old run id keeps reading its own previously-cached answers rather than finding nothing; only a genuinely new run id with no prior entry reaches this ask.
-
 **C - the content passes the deterministic security gate.** This is a check on whether *this repo's own internal information* is safe to host externally (secrets, infra details) - a different question from the `Artifact` tool's own built-in refusal categories (which guard against misusing the hosting mechanism itself), so do not treat those as covering this. Run:
 
 ```
@@ -286,7 +278,7 @@ It prints one verdict line and exits accordingly:
 **Only if A holds, B prints `artifact`, and C exits 0:** publish via the `Artifact` tool as usual.
 No separate step is needed to report the resulting URL: the moment you next call `crew-set --status review` or `--status done` with that same `--artifact` path, `crew-set` derives `artifact_url` automatically from the publish marker `hooks/artifact-publish-tracker.sh` already recorded, and surfaces it everywhere `bin/crew-list`/`board.md` render your other pointer fields.
 The local file remains the ground truth regardless of which channel is read.
-In every other case, today's behavior is unchanged - report the path only.
+In every other case, report the path only.
 
 If auto-detection can't find a marker for some reason (a publish done outside this session, or a value that needs correcting), pass `--artifact-url <url>` explicitly on that `crew-set` call - an explicit value always wins over auto-detection, and `--artifact-url ""` clears a stale one.
 
@@ -301,7 +293,7 @@ $WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key remote
 ```
 
 When it prints `true` for this run, format every URL you surface to the requester - an Artifact link, a GitHub PR/issue link, a `delivery` reference - as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`), never a bare URL: a bare URL read on a phone or in a browser is exactly where a plain-text link is least usable.
-When it prints `false`, is unanswered, or could not be asked, today's plain-URL phrasing is unchanged.
+When it prints `false`, is unanswered, or could not be asked, use plain-URL phrasing.
 This is one cached answer reused - never a second question - and is presentation-only: it changes how you phrase a message, never what gets published or scanned, so condition C does not apply to it.
 
 ## Communication register
@@ -318,7 +310,7 @@ It never belongs in anything a crew member authors that a human outside that rel
 - **Inter-agent messages** (`bin/crew-say`) use the same neutral register.
 - **Status-file fields keep their contract vocabulary** as-is: `working`/`blocked`/`review`/`done` are protocol, not prose; a `summary`/`blocker` you write for `crew-set` is read by wingman only and never published anywhere, so it is not an "outward artifact" and may use the contract's own terms freely.
 - **Exception - internal orchestration reference is not the thing this rule targets.** A playbook's own instructional prose may use "pilot" (or the rest of the session-role vocabulary) when the sentence describes the crew↔wingman/lead relationship itself: routing an escalation, what a status-file field means, whose sign-off gates a phase transition, how a rollup reaches wingman. None of that is ever restated in an artifact you author, so repeated exposure to it doesn't condition a leak. `playbooks/common/lead.md` (its escalation-chain and phase-gate prose) and this file's own protocol description above are worked examples of this - both use "pilot" and are correct as written; this section does not ask you to reword them.
-- **What *is* a defect to flag: "pilot" used to describe a real-world fact you might independently restate in something you author** - who may merge a PR, whose authorization a change needs, whose GitHub credentials are in play. That is the pattern that leaked into real PRs (issue #109): a playbook saying "the pilot merges it" primes you to write the same fact the same way in your own PR text. If a playbook's prose describes this kind of fact using "pilot" instead of "human", that is a playbook defect worth flagging (or fixing, if you're the one editing it) - not the orchestration-relationship prose the exception above already covers.
+- **What *is* a defect to flag: "pilot" used to describe a real-world fact you might independently restate in something you author** - who may merge a PR, whose authorization a change needs, whose GitHub credentials are in play. A playbook saying "the pilot merges it" primes you to write the same fact the same way in your own PR text. If a playbook's prose describes this kind of fact using "pilot" instead of "human", that is a playbook defect worth flagging (or fixing, if you're the one editing it) - not the orchestration-relationship prose the exception above already covers.
 
 ## PR-facing content (PR bodies, reviews, and comments)
 
