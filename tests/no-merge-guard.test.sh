@@ -262,23 +262,28 @@ export WINGMAN_CREW_ID=dev1
 export WINGMAN_CREW_TYPE=developer
 
 # ============================================================================
-# Crew session WITH the grant recorded (allow_merge: true): every path above
-# is now permitted.
+# Crew session WITH the grant recorded (allow_merge: true, review_gate_waived:
+# true): every path above is now permitted. review_gate_waived is granted
+# alongside allow_merge here deliberately - this section is only testing that
+# a grant lifts the deny across every merge-equivalent shape (issue #46's
+# original coverage), unchanged by issue #132. The review-evidence gate ITSELF
+# (allow_merge granted, waiver NOT granted) gets its own dedicated coverage
+# further below, against a fake `gh`.
 # ============================================================================
 wm_state crew-add --id dev1 --type developer --repo "$TEST_REPO" \
-  --window w1 --session-id s1 --allow-merge >/dev/null
+  --window w1 --session-id s1 --allow-merge --waive-review-gate >/dev/null
 
 out="$(run_hook "gh pr merge 46")"
-assert_eq "crew, GRANTED: gh pr merge 46 is allowed (no output)" "$out" ""
+assert_eq "crew, GRANTED (+waived): gh pr merge 46 is allowed (no output)" "$out" ""
 
 out="$(run_hook "gh pr merge --auto")"
-assert_eq "crew, GRANTED: gh pr merge --auto is allowed (no output)" "$out" ""
+assert_eq "crew, GRANTED (+waived): gh pr merge --auto is allowed (no output)" "$out" ""
 
 out="$(run_hook "gh api -X PUT repos/owner/repo/pulls/46/merge")"
-assert_eq "crew, GRANTED: gh api -X PUT .../merge is allowed (no output)" "$out" ""
+assert_eq "crew, GRANTED (+waived): gh api -X PUT .../merge is allowed (no output)" "$out" ""
 
 out="$(run_hook "git push origin main" "$CLONE")"
-assert_eq "crew, GRANTED: git push origin main is allowed (no output)" "$out" ""
+assert_eq "crew, GRANTED (+waived): git push origin main is allowed (no output)" "$out" ""
 
 # A grant recorded for a DIFFERENT crew id must not leak to this one.
 unset WINGMAN_CREW_ID; export WINGMAN_CREW_ID=dev2
@@ -408,6 +413,410 @@ assert_contains "a merge hidden behind a here-string is still denied (no heredoc
 # heredoc delimiter).
 out="$(run_hook 'grep foo <<< "$var"')"
 assert_eq "a plain here-string with a variable is allowed (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# issue #132: the review-evidence gate itself. allow_merge is granted but the
+# waiver is NOT, so every gh pr merge attempt below must resolve a real PR
+# (via a fake `gh` answering `gh pr view ... --json reviews,number,url`) and
+# find genuine, verifiable review evidence before it is allowed through.
+# ============================================================================
+mkdir -p "$SCRATCH/bin"
+GH_REVIEWS_JSON="$SCRATCH/reviews.json"
+GH_NODE_JSON="$SCRATCH/node.json"
+GH_LOG="$SCRATCH/gh.log"
+: > "$GH_LOG"
+cat > "$SCRATCH/bin/gh" <<SH
+#!/usr/bin/env bash
+echo "\$@" >> "$GH_LOG"
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  cat "$GH_REVIEWS_JSON"
+  exit 0
+fi
+# The graphql node(id:\$id){...on PullRequest{...}} resolution call (issue
+# #132's GraphQL merge path): identified by the "\$id:ID!" fragment the
+# hook's own NODE_TO_PR_QUERY always embeds, so it never collides with the
+# mergePullRequest mutation itself (which this fake gh never has to answer -
+# the hook only ever inspects that command's own text, it never runs it).
+case "\$*" in
+  *'\$id:ID!'*) cat "$GH_NODE_JSON"; exit 0 ;;
+esac
+exit 1
+SH
+chmod +x "$SCRATCH/bin/gh"
+export PATH="$SCRATCH/bin:$PATH"
+
+export WINGMAN_CREW_ID=devA
+export WINGMAN_CREW_TYPE=developer
+wm_state crew-add --id devA --type developer --repo "$TEST_REPO" \
+  --window wA --session-id sA --allow-merge >/dev/null
+
+# --- no reviews at all: denied, and NOT with the old merge_reason() text ---
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "review gate: no reviews at all is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: denial cites issue #132" "$out" "issue #132"
+assert_not_contains "review gate: denial is the NEW reason, not the old merge_reason()" \
+  "$out" "let the pilot merge it"
+
+# --- a COMMENTED review carrying the requester's OWN crew id's marker + ----
+# VERDICT: approve - self-approval, denied.
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:devA --> VERDICT: approve - looks fine"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "review gate: own-crew-id VERDICT: approve is denied (self-approval)" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: self-approval denial names it" "$out" "self-approval"
+
+# --- a COMMENTED review from a DIFFERENT crew id + VERDICT: approve, but no -
+# matching type:reviewer roster record at all - unrecognized id, denied.
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:ghost-reviewer --> VERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "review gate: an unrecognized reviewer crew id is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: denial names the unrecognized id" "$out" "no matching roster record"
+
+# --- a real, independently-spawned reviewer whose delivery matches this PR -
+# allowed.
+wm_state crew-add --id rev1 --type reviewer --repo "$TEST_REPO" \
+  --window wr1 --session-id sr1 >/dev/null
+wm_state crew-set --id rev1 --delivery "https://github.com/acme/widgets/pull/46" >/dev/null
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "review gate: a genuine reviewer's comment-fallback approve is allowed (no output)" "$out" ""
+
+# --- same reviewer record, but its delivery points at a DIFFERENT PR -------
+# mismatched delivery, denied.
+wm_state crew-set --id rev1 --delivery "https://github.com/acme/widgets/pull/999" >/dev/null
+out="$(run_hook "gh pr merge 46")"
+assert_contains "review gate: a reviewer's delivery pointing elsewhere is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: denial names the delivery mismatch" "$out" "does not name this PR"
+wm_state crew-set --id rev1 --delivery "https://github.com/acme/widgets/pull/46" >/dev/null
+
+# --- the reviewer id resolves, but its roster record is not type:reviewer --
+wm_state crew-add --id rev-imposter --type developer --repo "$TEST_REPO" \
+  --window wri --session-id sri >/dev/null
+wm_state crew-set --id rev-imposter --delivery "https://github.com/acme/widgets/pull/46" >/dev/null
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-imposter --> VERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "review gate: a non-reviewer-type crew id's approve is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: denial names the wrong type" "$out" "not \`reviewer\`"
+
+# --- a real APPROVED review state (any author) - allowed, no marker needed -
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good to me"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "review gate: a real APPROVED review state is allowed regardless of marker (no output)" "$out" ""
+
+# --- a stale request-changes verdict from an old round can't be shadowed by -
+# an earlier approve still counting as live: latest per crew id wins.
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: request changes - actually no"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "review gate: a later request-changes shadows an earlier approve from the same reviewer" \
+  "$out" '"permissionDecision": "deny"'
+
+# --- ...and the reverse: a later approve supersedes an earlier request-changes
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: request changes - fix X"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - fixed, lgtm now"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "review gate: a later approve from the same reviewer supersedes an earlier request-changes (no output)" "$out" ""
+
+# --- a reviewer already stood down and pruned into crew-archive.jsonl is ----
+# still recognized (the roster cross-check falls back to the archive).
+wm_state crew-add --id rev-archived --type reviewer --repo "$TEST_REPO" \
+  --window wra --session-id sra >/dev/null
+wm_state crew-set --id rev-archived --delivery "https://github.com/acme/widgets/pull/46" --status done >/dev/null
+wm_state standdown --id rev-archived >/dev/null
+wm_state prune >/dev/null
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-archived --> VERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "review gate: an archived (stood-down, pruned) reviewer record is still recognized (no output)" "$out" ""
+
+# --- allow_merge + review_gate_waived: true, no reviews at all - allowed ---
+# (the waiver is honored - unchanged post-grant behavior).
+wm_state crew-set --id devA --review-gate-waived true >/dev/null
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "review gate: review_gate_waived honored with no reviews at all (no output)" "$out" ""
+wm_state crew-set --id devA --review-gate-waived false >/dev/null
+
+# --- the REST merge endpoint shape (gh api -X PUT .../merge) goes through ---
+# the identical evidence check, resolving owner/repo/number straight out of
+# the REST path itself (no gh call needed to resolve the PR).
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+JSON
+out="$(run_hook "gh api -X PUT repos/acme/widgets/pulls/46/merge")"
+assert_contains "review gate: REST merge endpoint with no reviews is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: REST merge denial cites issue #132" "$out" "issue #132"
+
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good"}
+]}
+JSON
+out="$(run_hook "gh api -X PUT repos/acme/widgets/pulls/46/merge")"
+assert_eq "review gate: REST merge endpoint with a real APPROVED review is allowed (no output)" "$out" ""
+
+# --- the graphql mergePullRequest mutation shape (issue #132's decided-in- --
+# scope GraphQL path): the pullRequestId node id is resolved to owner/repo/
+# number via one extra `gh api graphql` call before the same evidence check
+# runs.
+cat > "$GH_NODE_JSON" <<'JSON'
+{"data": {"node": {"number": 46, "repository": {"owner": {"login": "acme"}, "name": "widgets"}}}}
+JSON
+GRAPHQL_MERGE='gh api graphql -f query='"'"'mutation{mergePullRequest(input:{pullRequestId:"PR_kwABC"}){clientMutationId}}'"'"''
+
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+JSON
+out="$(run_hook "$GRAPHQL_MERGE")"
+assert_contains "review gate: graphql mergePullRequest with no reviews is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: graphql merge denial cites issue #132" "$out" "issue #132"
+
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good"}
+]}
+JSON
+out="$(run_hook "$GRAPHQL_MERGE")"
+assert_eq "review gate: graphql mergePullRequest resolves the node id and allows with a real APPROVED review (no output)" "$out" ""
+
+# A node id the fake gh cannot resolve (simulated resolution failure) - fails
+# CLOSED (denied), not allowed unchecked.
+rm -f "$GH_NODE_JSON"
+out="$(run_hook "$GRAPHQL_MERGE")"
+assert_contains "review gate: an unresolvable graphql node id fails closed (denied)" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: node-resolution-failure denial cites issue #132" "$out" "issue #132"
+cat > "$GH_NODE_JSON" <<'JSON'
+{"data": {"node": {"number": 46, "repository": {"owner": {"login": "acme"}, "name": "widgets"}}}}
+JSON
+
+# --- git push straight to the default branch with allow_merge granted and --
+# no waiver - denied (no PR to point review evidence against).
+out="$(run_hook "git push origin main" "$CLONE")"
+assert_contains "review gate: a direct default-branch push with no waiver is denied (no PR to check)" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "review gate: push-with-no-PR denial names the reason" "$out" "no PR to point review evidence"
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# issue #132: --review-gate-waived is gated by the identical self-grant
+# restriction --allow-merge already carries.
+# ============================================================================
+export WINGMAN_CREW_ID=devA
+export WINGMAN_CREW_TYPE=developer
+
+out="$(run_hook '$WINGMAN_STATE crew-set --id devA --review-gate-waived true')"
+assert_contains "a developer cannot waive its own review gate" "$out" '"permissionDecision": "deny"'
+assert_contains "review-gate self-grant denial cites issue #132" "$out" "issue #132"
+
+out="$(run_hook '$WINGMAN_STATE crew-set --id someone-else --review-gate-waived true')"
+assert_contains "a non-lead crew member cannot waive the review gate for anyone" \
+  "$out" '"permissionDecision": "deny"'
+
+export WINGMAN_CREW_ID=lead1
+export WINGMAN_CREW_TYPE=lead
+out="$(run_hook '$WINGMAN_STATE crew-set --id devA --review-gate-waived true')"
+assert_eq "a lead waiving a worker's review gate is allowed (no output)" "$out" ""
+
+out="$(run_hook '$WINGMAN_STATE crew-set --id lead1 --review-gate-waived true')"
+assert_contains "a lead cannot waive its own review gate" "$out" '"permissionDecision": "deny"'
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+out="$(run_hook '$WINGMAN_STATE crew-set --id devA --review-gate-waived true')"
+assert_eq "wingman's own top-level session can waive the review gate (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# PR #134 review, findings 1+2: the roster writes the review-evidence gate
+# ITSELF trusts (crew-add, crew-set --delivery) must be as tightly gated as
+# allow_merge/review_gate_waived - otherwise a policed session can just write
+# its way past the gate instead of getting a genuine review.
+# ============================================================================
+export WINGMAN_CREW_ID=devA
+export WINGMAN_CREW_TYPE=developer
+
+# --- finding 1: self-waive via crew-add (re-adding one's own record) -------
+out="$(run_hook '$WINGMAN_STATE crew-add --id devA --type developer --repo /tmp --window w --session-id s --allow-merge --waive-review-gate')"
+assert_contains "a developer cannot re-add its own record via crew-add" "$out" '"permissionDecision": "deny"'
+assert_contains "self-add denial cites issue #132" "$out" "issue #132"
+assert_contains "self-add denial names crew-add specifically" "$out" "crew-add"
+
+# The identical attempt via the documented self-report idiom
+# (--id "$WINGMAN_CREW_ID", unexpanded at this hook) must be denied the same
+# way - a literal-string-only comparison would have missed this spelling.
+out="$(run_hook '$WINGMAN_STATE crew-add --id "$WINGMAN_CREW_ID" --type developer --repo /tmp --window w --session-id s --allow-merge')"
+assert_contains "self-add via the \$WINGMAN_CREW_ID idiom is denied identically" "$out" '"permissionDecision": "deny"'
+
+# --- finding 2: minting a sockpuppet reviewer via crew-add ------------------
+out="$(run_hook '$WINGMAN_STATE crew-add --id fake-reviewer --type reviewer --repo /tmp --window w2 --session-id s2')"
+assert_contains "a developer cannot mint a NEW crew-add record at all" "$out" '"permissionDecision": "deny"'
+assert_contains "sockpuppet-mint denial cites issue #132" "$out" "issue #132"
+
+# --- finding 2, other half: repointing an EXISTING id's delivery -----------
+wm_state crew-add --id rev-real --type reviewer --repo "$TEST_REPO" \
+  --window wrr --session-id srr >/dev/null
+out="$(run_hook '$WINGMAN_STATE crew-set --id rev-real --delivery https://github.com/acme/widgets/pull/999')"
+assert_contains "a developer cannot repoint another id's --delivery" "$out" '"permissionDecision": "deny"'
+assert_contains "delivery-repoint denial cites issue #132" "$out" "issue #132"
+
+# --- ordinary self-report of one's OWN delivery is unaffected --------------
+out="$(run_hook '$WINGMAN_STATE crew-set --id devA --delivery https://github.com/acme/widgets/pull/46')"
+assert_eq "a developer setting --delivery on ITS OWN literal id is allowed (no output)" "$out" ""
+
+# The documented idiom (--id "$WINGMAN_CREW_ID") must be recognized as self
+# too, not just a literal id string match.
+out="$(run_hook '$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --delivery https://github.com/acme/widgets/pull/46')"
+assert_eq "a developer self-reporting via the \$WINGMAN_CREW_ID idiom is allowed (no output)" "$out" ""
+
+# A crew-set call with no --delivery at all is untouched by this restriction.
+out="$(run_hook '$WINGMAN_STATE crew-set --id someone-else --status working --summary "hi"')"
+assert_eq "a crew-set with no --delivery is unaffected regardless of --id (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# --- a lead spawning one of its own NEW workers via crew-add is unaffected -
+export WINGMAN_CREW_ID=lead1
+export WINGMAN_CREW_TYPE=lead
+out="$(run_hook '$WINGMAN_STATE crew-add --id new-worker-1 --type developer --repo /tmp --window w3 --session-id s3')"
+assert_eq "a lead creating a NEW worker via crew-add is allowed (no output)" "$out" ""
+
+# ...but a lead can never crew-add ITSELF, literally or via the idiom.
+out="$(run_hook '$WINGMAN_STATE crew-add --id lead1 --type lead --repo /tmp --window w4 --session-id s4 --allow-merge')"
+assert_contains "a lead cannot re-add its own record via crew-add" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook '$WINGMAN_STATE crew-add --id "$WINGMAN_CREW_ID" --type lead --repo /tmp --window w4 --session-id s4 --allow-merge')"
+assert_contains "...nor via the \$WINGMAN_CREW_ID idiom" "$out" '"permissionDecision": "deny"'
+
+# ...nor repoint its OWN delivery onto anyone else, or vice versa.
+out="$(run_hook '$WINGMAN_STATE crew-set --id new-worker-1 --delivery https://github.com/acme/widgets/pull/46')"
+assert_contains "a lead repointing a worker's delivery is still denied (delivery is self-report-only)" \
+  "$out" '"permissionDecision": "deny"'
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# --- wingman's own top-level session (no WINGMAN_CREW_ID) is exempt from ---
+# both new restrictions, exactly like every other actor-restriction in this
+# file.
+out="$(run_hook '$WINGMAN_STATE crew-add --id admin-added --type reviewer --repo /tmp --window w5 --session-id s5')"
+assert_eq "wingman's own top-level session can crew-add anything (no output)" "$out" ""
+
+out="$(run_hook '$WINGMAN_STATE crew-set --id admin-added --delivery https://github.com/acme/widgets/pull/46')"
+assert_eq "wingman's own top-level session can set delivery on any id (no output)" "$out" ""
+
+# ============================================================================
+# PR #134 review, minor finding 1: shape-1 (a real APPROVED review, any
+# author) must respect latest-verdict-per-author ordering exactly like
+# shape-2 already does - a stale APPROVED must not outlive a later
+# CHANGES_REQUESTED from that SAME (necessarily distinct) account.
+# ============================================================================
+export WINGMAN_CREW_ID=devA
+export WINGMAN_CREW_TYPE=developer
+
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "APPROVED", "author": {"login": "real-human"}, "body": "lgtm"},
+  {"state": "CHANGES_REQUESTED", "author": {"login": "real-human"}, "body": "actually no"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "shape-1: a later CHANGES_REQUESTED from the SAME real reviewer supersedes an earlier APPROVED" \
+  "$out" '"permissionDecision": "deny"'
+
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "CHANGES_REQUESTED", "author": {"login": "real-human"}, "body": "fix X"},
+  {"state": "APPROVED", "author": {"login": "real-human"}, "body": "fixed, lgtm now"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "shape-1: ...and the reverse - a later APPROVED from the same reviewer is allowed (no output)" "$out" ""
+
+# A different real reviewer's still-live APPROVED is unaffected by an
+# unrelated reviewer's own CHANGES_REQUESTED.
+cat > "$GH_REVIEWS_JSON" <<'JSON'
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "CHANGES_REQUESTED", "author": {"login": "reviewer-one"}, "body": "fix X"},
+  {"state": "APPROVED", "author": {"login": "reviewer-two"}, "body": "lgtm from me"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "shape-1: a DIFFERENT reviewer's live APPROVED still counts on its own (no output)" "$out" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# PR #134 review, minor finding 2: `gh pr merge`'s own ref parsing must skip
+# a value-taking flag's argument (e.g. --body/--subject) rather than misread
+# it as the positional PR ref - proven by observing which `gh pr view`
+# invocation actually ran, not just the allow/deny outcome (which failed
+# closed either way and so could not distinguish the two).
+# ============================================================================
+export WINGMAN_CREW_ID=devA
+export WINGMAN_CREW_TYPE=developer
+# devA picked up review_gate_waived: true from an earlier section in this
+# file (lead1 granted it) - reset directly (test setup, not through the
+# hook) so the evidence check actually runs and calls `gh pr view` for this
+# section to observe, rather than short-circuiting on the waiver.
+wm_state crew-set --id devA --review-gate-waived false >/dev/null
+
+: > "$GH_LOG"
+run_hook 'gh pr merge --body "merge it" --squash' >/dev/null
+assert_contains "a --body value is never misread as the PR ref (falls through to current-branch resolution)" \
+  "$(cat "$GH_LOG")" "pr view --json number -q .number"
+assert_not_contains "...and specifically never queries a PR literally named \"merge it\"" \
+  "$(cat "$GH_LOG")" "pr view merge it"
+
+: > "$GH_LOG"
+run_hook 'gh pr merge 46 --subject "release notes" --squash' >/dev/null
+assert_contains "an explicit ref is still read correctly alongside a --subject value" \
+  "$(cat "$GH_LOG")" "pr view 46"
+assert_not_contains "...and the --subject value itself is never queried as if it were the ref" \
+  "$(cat "$GH_LOG")" "pr view release notes"
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 

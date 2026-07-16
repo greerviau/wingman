@@ -7,7 +7,7 @@
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] \
-#              [--allow-merge] [--force-during-outage]
+#              [--allow-merge] [--waive-review-gate] [--force-during-outage]
 #
 # --repo grounds the member in one git checkout (the default). --scope global
 # grounds it at the workspace root with every discovered repo added, so it can work
@@ -28,6 +28,17 @@
 # crew-set --id <id> --allow-merge true` takes effect on the member's very next
 # merge attempt, no respawn required.
 #
+# --waive-review-gate (issue #132): once --allow-merge is granted,
+# hooks/no-merge-guard.sh also requires verifiable evidence of a genuinely
+# separate approving review before a merge attempt succeeds - see the hook's
+# own header for the two shapes it accepts. --waive-review-gate is the
+# explicit, per-effort escape hatch for the legitimate case where the
+# requester has personally examined the diff and wants no review round at
+# all; same actor restriction as --allow-merge (never settable by the member
+# on itself), same visibility (`bin/crew-list` / board.md show it). Omit it
+# (the default) and grant later instead: `$WINGMAN_STATE crew-set --id <id>
+# --review-gate-waived true`.
+#
 # Remote Control: every crew member launches Remote-Control-visible by default
 # (reachable from claude.ai/code, not only via tmux attach), as name "wm-<id>".
 # Set WM_REMOTE_CONTROL= (empty) to disable.
@@ -44,7 +55,7 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
-TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0; FORCE_DURING_OUTAGE=0
+TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0; WAIVE_REVIEW_GATE=0; FORCE_DURING_OUTAGE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --type)      TYPE="$2"; shift 2 ;;
@@ -56,6 +67,7 @@ while [ $# -gt 0 ]; do
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift 1 ;;
+    --waive-review-gate) WAIVE_REVIEW_GATE=1; shift 1 ;;
     --force-during-outage) FORCE_DURING_OUTAGE=1; shift 1 ;;
     --list-types) wm_crew_types; exit 0 ;;
     -h|--help)   sed -n '2,22p' "$0"; exit 0 ;;
@@ -362,6 +374,7 @@ ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
   --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE")
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
+[ "$WAIVE_REVIEW_GATE" = 1 ] && ADD_ARGS+=(--waive-review-gate)
 # is_git/has_remote mirror the launch-script export above: recorded for repo
 # scope only, so the JSON field stays absent (not false) for global scope - the
 # same true/false/unset distinction, now on the roster record too. Passed as the
@@ -414,6 +427,7 @@ else
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 fi
 [ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort (issue #46)"
+[ "$WAIVE_REVIEW_GATE" = 1 ] && wm_ok "'$ID' spawned with the review gate waived for this effort (issue #132)"
 [ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage (issue #23)"
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
 echo "$ID"

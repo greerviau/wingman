@@ -37,6 +37,60 @@
 # per-effort, and visible" requirement from issue #46 without a hidden
 # global switch.
 #
+# issue #132: `allow_merge: true` alone is no longer sufficient. Because every
+# crew session authenticates as the same forge account (issue #50), a
+# developer granted merge autonomy could post its own comment-fallback
+# `VERDICT: approve` (the same shape a genuinely separate reviewer crew
+# member uses - see playbooks/software-development/reviewer.md) and treat
+# that as satisfying an effort's own "merge once genuinely reviewed"
+# instruction - nothing mechanical stopped it. Once `allow_merge` is granted,
+# this hook now ALSO requires verifiable evidence of a genuinely separate
+# approving review before letting a merge-equivalent proceed:
+#   - a real `APPROVED` review state (any author) - GitHub itself refuses this
+#     from the PR's own author, so its mere presence is structurally
+#     guaranteed to be a different account; or
+#   - a same-login comment-fallback verdict (`COMMENTED`, marker-anchored
+#     `<!-- wingman-crew:<id> -->`, `VERDICT: approve`) whose `<id>` is NOT
+#     this session's own, and resolves to a real roster record with
+#     `type == "reviewer"` and a `delivery` naming this same PR.
+# `review_gate_waived: true` (mirroring `allow_merge`'s own grant shape and
+# actor restriction exactly - see check_review_gate_waiver_grant) is the
+# explicit, per-effort escape hatch for a requester who has personally
+# examined the diff and wants no review round at all. This evidence check
+# calls `gh pr view` live (see fetch_reviews) - a security-relevant gate, so a
+# resolution failure (network hiccup, unresolvable PR/node id) fails CLOSED
+# (denied), unlike hooks/merge-attribution-tracker.sh's best-effort posture.
+#
+# issue #132 review (PR #134): the evidence check above trusts a roster
+# record's `type`/`delivery` fields (crew.json/crew-archive.jsonl) to tell a
+# genuine reviewer's comment-fallback approve from a self-dealing one - but
+# the FIRST version of this hook left the write paths to those exact fields
+# ungated, so the sessions it polices could write the state it trusts. Two
+# reproduced bypasses, same root cause:
+#   1. `wm-state crew-add` dedups by id (re-adding an existing id silently
+#      replaces the whole record), and check_allow_merge_grant/check_review_
+#      gate_waiver_grant only ever inspected `crew-set` segments - so a
+#      developer could re-add its OWN record with `--allow-merge
+#      --waive-review-gate` and merge unreviewed, bypassing the self-grant
+#      restriction entirely.
+#   2. `crew-add --type reviewer` (to mint a new id) plus `crew-set
+#      --delivery <this PR>` (to point it at the PR being merged) were both
+#      similarly ungated, so a developer could fabricate a `type: reviewer`
+#      roster record with no real, independently-spawned session behind it,
+#      post the marker verdict itself under that forged id, and have the
+#      evidence check treat it as genuine.
+# check_crew_add_restriction() and check_crew_set_delivery_restriction()
+# close both: `wm-state crew-add` is grep-confirmed to be called from exactly
+# one place in this codebase (bin/spawn-crew, on behalf of wingman or a lead
+# spawning one of its own NEW workers) - so ANY crew-add from a live crew
+# session is now denied outright, not just the merge-flag-carrying ones. This
+# alone closes bypass 1 (crew-add can no longer replace one's own record at
+# all) and the minting half of bypass 2 (a fresh sockpuppet id can no longer
+# be created either). `--delivery` gets its own restriction (self-id, or
+# wingman, only - every legitimate delivery report in this codebase is
+# self-targeted, see playbooks/_status-contract.md) closing the remaining
+# half of bypass 2: repointing an *existing* other id's delivery at this PR.
+#
 # The `--allow-merge` grant check does NOT rely on cmd_match.py resolving the
 # call to `wm-state.py` (unlike every other hook in this repo): the
 # documented invocation shape is `$WINGMAN_STATE crew-set --id ... `, and
@@ -62,10 +116,13 @@ INPUT="$(cat)"
 
 # Cheap no-op gate: only a command mentioning one of these words can possibly
 # match anything below (gh pr merge / gh api .../merge / mergePullRequest all
-# contain "merge"; git push contains "push"; the grant-guard needs
-# "allow-merge"). Precise matching happens in the python block.
+# contain "merge"; git push contains "push"; the grant-guards need
+# "allow-merge" and "review-gate" respectively; the roster-integrity guards
+# (issue #132 review) need "crew-add" and "--delivery" - a bare `crew-add
+# --type reviewer ...` or `crew-set --delivery ...` carries none of the other
+# trigger words). Precise matching happens in the python block.
 case "$INPUT" in
-  *merge*|*push*|*allow-merge*) ;;
+  *merge*|*push*|*allow-merge*|*review-gate*|*crew-add*|*--delivery*) ;;
   *) exit 0 ;;
 esac
 
@@ -125,20 +182,338 @@ def flag_value(tokens, *names):
     return None
 
 
-def allow_merge_granted():
+def own_roster_record():
     if not crew_id:
-        return False
+        return None
     try:
         with open(os.path.join(home, "crew.json")) as fh:
             roster = json.load(fh)
     except (OSError, ValueError):
-        return False
+        return None
     if not isinstance(roster, list):
-        return False
+        return None
     for r in roster:
         if r.get("id") == crew_id:
-            return bool(r.get("allow_merge"))
+            return r
+    return None
+
+
+def allow_merge_granted():
+    r = own_roster_record()
+    return bool(r and r.get("allow_merge"))
+
+
+def review_gate_waived():
+    r = own_roster_record()
+    return bool(r and r.get("review_gate_waived"))
+
+
+# ---------------------------------------------------------------------------
+# issue #132: verifiable evidence of a genuinely separate approving review.
+# ---------------------------------------------------------------------------
+
+CREW_MARKER_RE = re.compile(r"^\s*<!--\s*wingman-crew:([A-Za-z0-9._-]+)\s*-->")
+VERDICT_RE = re.compile(r"VERDICT:\s*(approve|request changes)", re.IGNORECASE)
+
+NODE_TO_PR_QUERY = (
+    "query($id:ID!){node(id:$id){... on PullRequest{number repository{"
+    "owner{login} name}}}}"
+)
+
+
+def run_gh(argv, exec_cwd, timeout=20):
+    try:
+        return subprocess.run(argv, cwd=exec_cwd, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=timeout)
+    except Exception:
+        return None
+
+
+def resolve_current_pr_ref(exec_cwd):
+    r = run_gh(["gh", "pr", "view", "--json", "number", "-q", ".number"], exec_cwd)
+    if r is None or r.returncode != 0:
+        return None
+    out = r.stdout.decode().strip()
+    return out or None
+
+
+def resolve_graphql_pr(node_id, exec_cwd):
+    r = run_gh(["gh", "api", "graphql", "-f", "query=" + NODE_TO_PR_QUERY,
+                "-f", "id=" + node_id], exec_cwd)
+    if r is None or r.returncode != 0:
+        return None, None
+    try:
+        node = json.loads(r.stdout.decode())["data"]["node"]
+        number = str(node["number"])
+        owner_repo = "%s/%s" % (node["repository"]["owner"]["login"],
+                                 node["repository"]["name"])
+        return owner_repo, number
+    except Exception:
+        return None, None
+
+
+def fetch_reviews(owner_repo, ref, exec_cwd):
+    argv = ["gh", "pr", "view"]
+    if ref:
+        argv.append(str(ref))
+    if owner_repo:
+        argv += ["--repo", owner_repo]
+    argv += ["--json", "reviews,number,url"]
+    r = run_gh(argv, exec_cwd)
+    if r is None or r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout.decode())
+    except Exception:
+        return None
+
+
+def find_roster_record(rid, home_dir):
+    # crew.json first (the common, still-live case)...
+    try:
+        with open(os.path.join(home_dir, "crew.json")) as fh:
+            roster = json.load(fh)
+        if isinstance(roster, list):
+            for r in roster:
+                if r.get("id") == rid:
+                    return r
+    except (OSError, ValueError):
+        pass
+    # ...falling back to crew-archive.jsonl for a reviewer already stood down
+    # and pruned. Append-only, one JSON object per line; the LAST matching
+    # line wins (an id could in principle be reused across time).
+    found = None
+    try:
+        with open(os.path.join(home_dir, "crew-archive.jsonl")) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("id") == rid:
+                    found = rec
+    except OSError:
+        pass
+    return found
+
+
+def delivery_matches_pr(delivery, pr_number, pr_url):
+    if not delivery:
+        return False
+    delivery = str(delivery).strip()
+    if pr_url and delivery.rstrip("/") == str(pr_url).rstrip("/"):
+        return True
+    if pr_number is not None:
+        target = str(pr_number)
+        m = re.search(r"/pull/(\d+)/?$", delivery)
+        if m and m.group(1) == target:
+            return True
+        m = re.search(r"#(\d+)$", delivery)
+        if m and m.group(1) == target:
+            return True
+        if delivery.lstrip("#") == target:
+            return True
     return False
+
+
+def no_evidence_reason(pr_number, pr_url, issues):
+    target = pr_url or ("PR #%s" % pr_number if pr_number else "this PR")
+    parts = [
+        "No verifiable evidence of a genuinely separate approving review was "
+        "found for %s (issue #132) - allow_merge alone no longer permits a "
+        "merge." % target
+    ]
+    if issues:
+        parts.append("Found: " + "; ".join(issues) + ".")
+    parts.append(
+        "Get a real, independently-spawned `reviewer` crew member to approve "
+        "this PR (a genuine APPROVED review, or its documented comment-"
+        "fallback `VERDICT: approve` with a matching roster record and "
+        "delivery - see playbooks/software-development/reviewer.md), or ask "
+        "the requester/lead to grant review_gate_waived for this effort if no "
+        "review round is actually wanted (never settable by this session on "
+        "itself): $WINGMAN_STATE crew-set --id %s --review-gate-waived true"
+        % (crew_id or "<this-crew-id>")
+    )
+    return " ".join(parts)
+
+
+def unresolved_pr_reason(detail):
+    return (
+        "Could not verify review evidence for this merge attempt (issue "
+        "#132): %s Denied out of caution rather than allowed unchecked - this "
+        "is a security-relevant gate, not a best-effort attribution comment. "
+        "Retry once resolvable, or ask the requester/lead to grant "
+        "review_gate_waived for this effort if no review round is actually "
+        "wanted." % detail
+    )
+
+
+def verify_reviewer_approval(pr_json):
+    reviews = pr_json.get("reviews") or []
+    pr_number = pr_json.get("number")
+    pr_url = pr_json.get("url") or ""
+
+    # Shape 1: a real APPROVED review, any author. GitHub refuses this from
+    # the PR'"'"'s own author, so an APPROVED/CHANGES_REQUESTED state can only
+    # ever come from a genuinely different account already - no marker/roster
+    # check needed. Only the LATEST state per author login counts (PR #134
+    # review, minor finding): `any(APPROVED)` alone would let a stale approve
+    # stay load-bearing even after that SAME reviewer later requested
+    # changes. COMMENTED is deliberately excluded from this login-keyed
+    # tracking - it is always the shared-login marker convention (shape 2
+    # below), never a distinct-account signal, and collapsing it in here
+    # would let one crew id'"'"'s marker verdict get silently shadowed by an
+    # unrelated later comment under the same shared login.
+    latest_state_by_login = {}
+    for r in reviews:
+        st = str(r.get("state") or "").upper()
+        if st not in ("APPROVED", "CHANGES_REQUESTED"):
+            continue
+        login = ((r.get("author") or {}).get("login")) or ""
+        if not login:
+            continue
+        latest_state_by_login[login] = st
+    if any(st == "APPROVED" for st in latest_state_by_login.values()):
+        return True, ""
+
+    # Shape 2: comment-fallback marker verdict. Only the LATEST verdict per
+    # marked crew id counts (reviewer.md step 6'"'"'s own "a rerun stacks
+    # additional reviews, check the latest" rule) - gh returns reviews in
+    # chronological order, so a later entry for the same id simply
+    # overwrites an earlier one in this dict.
+    latest_by_id = {}
+    for r in reviews:
+        if str(r.get("state") or "").upper() != "COMMENTED":
+            continue
+        body = r.get("body") or ""
+        m = CREW_MARKER_RE.match(body)
+        if not m:
+            continue
+        vm = VERDICT_RE.search(body)
+        latest_by_id[m.group(1)] = vm.group(1).lower() if vm else None
+
+    issues = []
+    for rid, verdict in latest_by_id.items():
+        if verdict != "approve":
+            continue
+        if rid == crew_id:
+            issues.append(
+                "crew `%s` posted its own VERDICT: approve comment - "
+                "self-approval never counts" % rid)
+            continue
+        record = find_roster_record(rid, home)
+        if record is None:
+            issues.append(
+                "crew `%s` posted VERDICT: approve but no matching roster "
+                "record exists (unrecognized reviewer id)" % rid)
+            continue
+        if record.get("type") != "reviewer":
+            issues.append(
+                "crew `%s` posted VERDICT: approve but its roster record is "
+                "type `%s`, not `reviewer`" % (rid, record.get("type") or "?"))
+            continue
+        if not delivery_matches_pr(record.get("delivery"), pr_number, pr_url):
+            issues.append(
+                "crew `%s` (a reviewer) posted VERDICT: approve but its "
+                "delivery (%s) does not name this PR"
+                % (rid, record.get("delivery") or "none"))
+            continue
+        return True, ""
+
+    return False, no_evidence_reason(pr_number, pr_url, issues)
+
+
+# `gh pr merge` flags that consume a following value token (from `gh help pr
+# merge`'"'"'s FLAGS + INHERITED FLAGS) - a naive "first token not starting with
+# -" scan (this file'"'"'s original approach, matching hooks/merge-attribution-
+# tracker.sh'"'"'s best-effort attribution parsing) would misread e.g. `--body
+# "merge it"` as the PR ref (PR #134 review, minor finding). Misreading it
+# already failed safe here (an unresolvable ref denies via unresolved_pr_
+# reason below), but it verified the WRONG PR when the misread token
+# happened to resolve to a real one - a correctness bug, not just a safety
+# one.
+GH_PR_MERGE_VALUE_FLAGS = (
+    "-A", "--author-email", "-b", "--body", "-F", "--body-file",
+    "--match-head-commit", "-t", "--subject", "-R", "--repo",
+)
+
+
+def gh_pr_merge_ref(argv):
+    """The explicit PR ref argument to `gh pr merge argv[3:]`, or None if the
+    command relies on the current branch'"'"'s PR (no positional ref given)."""
+    i = 3  # argv[0:3] == ["gh", "pr", "merge"]
+    while i < len(argv):
+        tok = argv[i]
+        if tok in GH_PR_MERGE_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
+    return None
+
+
+def evidence_check(shape, argv, exec_cwd, command, path_arg=None):
+    """Returns None if this merge-equivalent segment may proceed (real
+    APPROVED review, or a verified comment-fallback approve from a
+    genuinely different, real reviewer crew member), else a denial reason."""
+    if shape == "git_push":
+        return no_evidence_reason(None, None, [
+            "a direct push to the default branch has no PR to point review "
+            "evidence against"])
+
+    owner_repo = None
+    if shape == "gh_pr_merge":
+        ref = gh_pr_merge_ref(argv) or resolve_current_pr_ref(exec_cwd)
+        if ref is None:
+            return unresolved_pr_reason(
+                "could not resolve the current branch'"'"'s PR (no ref given "
+                "and `gh pr view` failed).")
+    elif shape == "gh_api_put":
+        m = re.match(r"^/?repos/([^/]+)/([^/]+)/pulls/(\d+)/merge/?$", path_arg or "")
+        if not m:
+            return unresolved_pr_reason(
+                "could not parse the REST merge endpoint path.")
+        owner, repo, number = m.groups()
+        owner_repo, ref = "%s/%s" % (owner, repo), number
+    elif shape == "gh_api_graphql":
+        m = re.search(r"pullRequestId[\"'"'"']?\s*[:=]\s*[\"'"'"']([^\"'"'"']+)[\"'"'"']", command)
+        if not m:
+            return unresolved_pr_reason(
+                "could not extract the pullRequestId node id from this "
+                "mutation.")
+        owner_repo, ref = resolve_graphql_pr(m.group(1), exec_cwd)
+        if not owner_repo or not ref:
+            return unresolved_pr_reason(
+                "could not resolve the pullRequestId node to a PR number via "
+                "the GitHub API.")
+    else:
+        return unresolved_pr_reason("unrecognized merge-equivalent shape.")
+
+    pr_json = fetch_reviews(owner_repo, ref, exec_cwd)
+    if pr_json is None:
+        return unresolved_pr_reason(
+            "`gh pr view` failed while fetching reviews for verification.")
+    ok, reason = verify_reviewer_approval(pr_json)
+    return None if ok else reason
+
+
+def enforce_merge_gate(shape, argv, exec_cwd, command, not_granted_reason, path_arg=None):
+    """The single choke point every merge-equivalent shape below routes
+    through: unchanged not-granted denial, unchanged waived-allow, and (only
+    when granted-but-not-waived) the new review-evidence check."""
+    if not allow_merge_granted():
+        deny(not_granted_reason)
+    if review_gate_waived():
+        return
+    reason = evidence_check(shape, argv, exec_cwd, command, path_arg)
+    if reason:
+        deny(reason)
 
 
 def resolve_cd_target(base, arg):
@@ -261,8 +636,11 @@ def git_push_target_dir(argv, exec_cwd):
 def check_merge_paths():
     if not crew_id:
         return  # not a crew session - out of scope for this guard
-    if allow_merge_granted():
-        return
+    # No early return on allow_merge_granted() any more (issue #132): a grant
+    # alone no longer means every merge-equivalent segment below is a no-op -
+    # each one now routes through enforce_merge_gate(), which still returns
+    # instantly for a granted-AND-waived record (unchanged from today'"'"'s
+    # post-grant behavior) but otherwise requires the new evidence check.
     # Tracks the directory a `cd` segment earlier in this SAME command chain
     # switches into, so a later `git push` segment is evaluated against
     # where it actually runs - not the hook payload'"'"'s cwd, which can be an
@@ -281,7 +659,7 @@ def check_merge_paths():
                 exec_cwd = target
             continue
         if b == "gh" and len(argv) > 2 and argv[1] == "pr" and argv[2] == "merge":
-            deny(merge_reason())
+            enforce_merge_gate("gh_pr_merge", argv, exec_cwd, command, merge_reason())
         if b == "gh" and len(argv) > 1 and argv[1] == "api":
             method = (flag_value(argv, "-X", "--method") or "GET").upper()
             path_arg = None
@@ -300,10 +678,10 @@ def check_merge_paths():
                 break
             if path_arg == "graphql":
                 if re.search(r"mergePullRequest\s*\(", command):
-                    deny(merge_reason())
+                    enforce_merge_gate("gh_api_graphql", argv, exec_cwd, command, merge_reason())
             elif path_arg and method == "PUT":
                 if re.search(r"^/?repos/[^/]+/[^/]+/pulls/\d+/merge/?$", path_arg):
-                    deny(merge_reason())
+                    enforce_merge_gate("gh_api_put", argv, exec_cwd, command, merge_reason(), path_arg=path_arg)
         if b == "git":
             push_index, target_dir = git_push_target_dir(argv, exec_cwd)
             if push_index is not None:
@@ -347,7 +725,8 @@ def check_merge_paths():
                     if dest.startswith("refs/heads/"):
                         dest = dest[len("refs/heads/"):]
                     if dest in default_branch_candidates(target_dir):
-                        deny(
+                        enforce_merge_gate(
+                            "git_push", argv, exec_cwd, command,
                             "Pushing directly to the default branch (%s) from a crew "
                             "session is a merge-equivalent and is not yours to do "
                             "(issue #46) - same rule as gh pr merge. Push your own "
@@ -356,31 +735,133 @@ def check_merge_paths():
                         )
 
 
-def check_allow_merge_grant():
+def _is_self_target(target):
+    # `--id "$WINGMAN_CREW_ID"` (the standard, documented self-report idiom -
+    # see playbooks/_status-contract.md) arrives at this PreToolUse hook
+    # UNEXPANDED, exactly like $WINGMAN_STATE itself (see this file'"'"'s header
+    # comment on why) - so a literal string match of `target` against
+    # `crew_id` alone would treat the DOCUMENTED, ordinary self-report form
+    # as "a different id". That is not just a false-positive risk: read the
+    # other way round, it would ALSO let a lead (or any grantor) self-target
+    # THROUGH the variable form while a literal self-id string is correctly
+    # caught - a lead typing `crew-add --id "$WINGMAN_CREW_ID" --allow-merge`
+    # would slip past a bare `target != crew_id` check. Recognized as self
+    # either way this token can spell "my own id".
+    return bool(target) and target in (crew_id, "$WINGMAN_CREW_ID")
+
+
+def _check_no_self_grant(flag_token, label):
+    # Shared by check_allow_merge_grant() and check_review_gate_waiver_grant()
+    # (issue #132): both fields carry the identical actor restriction - only
+    # wingman'"'"'s own top-level session, or a lead granting one of its OWN
+    # workers, may set either. Matched by token presence, not by resolving
+    # argv[0] to wm-state.py - see this hook'"'"'s header comment on why
+    # (issue #49'"'"'s $WINGMAN_STATE expansion gap).
     for seg in segments or []:
-        # Matched by token presence, not by resolving argv[0] to wm-state.py -
-        # see this hook'"'"'s header comment on why (issue #49'"'"'s $WINGMAN_STATE
-        # expansion gap).
         if "crew-set" not in seg:
             continue
-        if not any(t == "--allow-merge" or t.startswith("--allow-merge=") for t in seg):
+        if not any(t == flag_token or t.startswith(flag_token + "=") for t in seg):
             continue
         target = flag_value(seg, "--id") or ""
         if not crew_id:
             continue  # wingman'"'"'s own top-level session - always allowed
-        if crew_type == "lead" and target and target != crew_id:
+        if crew_type == "lead" and target and not _is_self_target(target):
             continue  # a lead granting one of its OWN workers - allowed
         deny(
-            "Granting merge autonomy (--allow-merge) is not yours to set from a "
-            "crew session, including on yourself (issue #46) - it must come from "
-            "the pilot via wingman'"'"'s top-level session, or a lead relaying the "
-            "pilot'"'"'s decision to one of its own workers. Report --status blocked "
-            "if you believe this PR needs it, and let the pilot/lead grant it "
-            "instead."
+            "Granting %s is not yours to set from a crew session, including "
+            "on yourself (issue #46) - it must come from the pilot via "
+            "wingman'"'"'s top-level session, or a lead relaying the pilot'"'"'s "
+            "decision to one of its own workers. Report --status blocked if "
+            "you believe this PR needs it, and let the pilot/lead grant it "
+            "instead." % label
+        )
+
+
+def check_allow_merge_grant():
+    _check_no_self_grant("--allow-merge", "merge autonomy (--allow-merge)")
+
+
+def check_review_gate_waiver_grant():
+    _check_no_self_grant(
+        "--review-gate-waived",
+        "the review-gate waiver (--review-gate-waived, issue #132)")
+
+
+def check_crew_add_restriction():
+    # PR #134 review, findings 1+2: `wm-state crew-add` dedups by id (re-
+    # adding an existing id silently REPLACES the whole record - allow_
+    # merge/review_gate_waived/type/delivery included), and it is called
+    # from exactly one legitimate place in this codebase - bin/spawn-crew,
+    # on behalf of wingman'"'"'s own top-level session or a lead spawning one of
+    # its own NEW workers. No live crew session has any other legitimate
+    # reason to call it: not on itself (that would silently replace allow_
+    # merge/review_gate_waived wholesale, bypassing _check_no_self_grant
+    # above entirely, since that check only ever inspects `crew-set`), and
+    # not on a fresh id of its own choosing (that mints a roster record -
+    # e.g. a fabricated `type: reviewer` entry - with no real, independently
+    # spawned session behind it, defeating verify_reviewer_approval'"'"'s
+    # roster cross-check at its root). So ANY crew-add from a policed
+    # session is denied outright, regardless of which flags it carries.
+    for seg in segments or []:
+        if "crew-add" not in seg:
+            continue
+        target = flag_value(seg, "--id") or ""
+        if not crew_id:
+            continue  # wingman'"'"'s own top-level session - always allowed
+        if crew_type == "lead" and target and not _is_self_target(target):
+            continue  # a lead spawning one of its OWN new workers - allowed
+        deny(
+            "Creating or replacing a crew roster record (wm-state crew-add) "
+            "is not yours to do from a crew session (issue #132) - it is "
+            "called only by bin/spawn-crew, by wingman'"'"'s own top-level "
+            "session or a lead spawning one of its own workers. A worker "
+            "session can never call crew-add on itself (crew-add replaces "
+            "the whole record, including allow_merge/review_gate_waived, "
+            "silently bypassing the self-grant restriction) or on a fresh "
+            "id (which would fabricate a roster record - e.g. a fake "
+            "`reviewer` entry - with no real session behind it). Report "
+            "--status blocked if you believe you genuinely need a new crew "
+            "member spawned."
+        )
+
+
+def check_crew_set_delivery_restriction():
+    # PR #134 review, finding 2 (the other half): verify_reviewer_approval()
+    # trusts a roster record'"'"'s `delivery` field to decide whether a comment-
+    # fallback approve names THIS PR - so `delivery` is exactly as security-
+    # relevant as allow_merge/review_gate_waived, but crew-set never
+    # restricted who could set it on which id. Every legitimate delivery
+    # report in this codebase is self-targeted (`crew-set --id
+    # "$WINGMAN_CREW_ID" --delivery ...` - see playbooks/_status-
+    # contract.md); nothing here sets delivery on another crew id'"'"'s behalf,
+    # so restricting it to "your own id, or wingman" breaks no legitimate
+    # flow while closing the "repoint an existing reviewer'"'"'s delivery at
+    # this PR" half of finding 2 (check_crew_add_restriction above already
+    # closes the "mint a fresh one" half).
+    for seg in segments or []:
+        if "crew-set" not in seg:
+            continue
+        if not any(t == "--delivery" or t.startswith("--delivery=") for t in seg):
+            continue
+        if not crew_id:
+            continue  # wingman'"'"'s own top-level session - always allowed
+        target = flag_value(seg, "--id") or ""
+        if _is_self_target(target):
+            continue  # ordinary self-report - allowed
+        deny(
+            "Setting --delivery on a crew id other than your own "
+            "($WINGMAN_CREW_ID) is not yours to do from a crew session "
+            "(issue #132) - every legitimate delivery report is self-"
+            "targeted, and this hook now trusts `delivery` as one of the "
+            "review-evidence gate'"'"'s roster fields. Report --status blocked "
+            "if you believe you genuinely need this."
         )
 
 
 check_allow_merge_grant()
+check_review_gate_waiver_grant()
+check_crew_add_restriction()
+check_crew_set_delivery_restriction()
 check_merge_paths()
 
 # Both known-shape checks above have already had their chance to deny (or,
