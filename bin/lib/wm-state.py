@@ -411,6 +411,14 @@ def cmd_crew_add(args):
         # itself requested it (bin/spawn-crew --allow-merge); a mid-session grant
         # goes through crew-set --allow-merge instead, never through here again.
         "allow_merge": bool(getattr(args, "allow_merge", False)),
+        # Explicit, per-effort escape hatch from the review-evidence gate
+        # hooks/no-merge-guard.sh now layers on top of allow_merge (issue #132):
+        # False unless the spawn itself requested it (bin/spawn-crew
+        # --waive-review-gate); a mid-session grant goes through crew-set
+        # --review-gate-waived instead, never through here again. Gated by the
+        # identical self-grant restriction allow_merge already carries - see
+        # hooks/no-merge-guard.sh's check_review_gate_waiver_grant().
+        "review_gate_waived": bool(getattr(args, "review_gate_waived", False)),
         # Remote Control visibility (issue #96): whether this member launched
         # Remote-Control-visible (bin/spawn-crew --remote-control), and
         # wingman's own best-known estimate of whether that connection is
@@ -611,6 +619,12 @@ def cmd_crew_set(args):
                 # crew/<id>.json - only the roster record hooks/no-merge-guard.sh reads.
                 if getattr(args, "allow_merge", None) is not None:
                     r["allow_merge"] = args.allow_merge == "true"
+                # review_gate_waived is likewise roster-only (issue #132): a grant/
+                # revoke is never part of a member's own live-status report, so it
+                # never touches crew/<id>.json - only the roster record
+                # hooks/no-merge-guard.sh reads.
+                if getattr(args, "review_gate_waived", None) is not None:
+                    r["review_gate_waived"] = args.review_gate_waived == "true"
                 # remote_control_connected is likewise roster-only (issue #96):
                 # bin/watch-fleet's regular, stability-gated poll is the only
                 # writer, so bin/crew-standdown can read a previously-vetted
@@ -815,6 +829,7 @@ def cmd_reconcile(args):
                     "delivery": None,
                     "worktree": "",
                     "allow_merge": False,
+                    "review_gate_waived": False,
                     "is_git": None,
                     "has_remote": None,
                     "orphaned_from": None,
@@ -1900,6 +1915,8 @@ def render_roster_text(rows):
             lines.append("      artifact-url: %s" % r["artifact_url"])
         if r.get("allow_merge"):
             lines.append("      merge: AUTHORIZED for this effort (issue #46)")
+        if r.get("review_gate_waived"):
+            lines.append("      review gate: WAIVED for this effort (issue #132)")
     return "\n".join(lines)
 
 
@@ -1924,6 +1941,8 @@ def render_tree_text(rows):
             lines.append("%s    artifact-url: %s" % (indent, r["artifact_url"]))
         if r.get("allow_merge"):
             lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
+        if r.get("review_gate_waived"):
+            lines.append("%s    review gate: WAIVED for this effort (issue #132)" % indent)
     return "\n".join(lines)
 
 
@@ -1941,7 +1960,7 @@ def render_board():
         # letting a human read the org rather than a flat list.
         for r, depth in order_tree(active):
             marker = ("&nbsp;&nbsp;" * depth) + ("↳ " if depth else "")
-            id_cell = r.get("id", "") + (" (merge-authorized)" if r.get("allow_merge") else "")
+            id_cell = r.get("id", "") + (" (merge-authorized)" if r.get("allow_merge") else "") + (" (review-waived)" if r.get("review_gate_waived") else "")
             repo_cell = (
                 os.path.basename(r.get("repo", "") or "")
                 + (" (global)" if r.get("scope") == "global" else "")
@@ -2012,6 +2031,13 @@ def build_parser():
     # roster record on every merge attempt, so a mid-session grant takes effect
     # without needing to respawn the member.
     a.add_argument("--allow-merge", action="store_true", dest="allow_merge")
+    # Explicit, per-effort escape hatch from the review-evidence gate (issue #132):
+    # unset by default. Set only via bin/spawn-crew --waive-review-gate at spawn
+    # time, or later via crew-set --review-gate-waived (itself gated by
+    # hooks/no-merge-guard.sh so a crew member can never grant this to itself).
+    # Mirrors --allow-merge's shape exactly - see hooks/no-merge-guard.sh for how
+    # the two combine.
+    a.add_argument("--waive-review-gate", action="store_true", dest="review_gate_waived")
     # Remote-Control-visible at spawn (issue #96): mirrors bin/spawn-crew's own
     # --remote-control "wm-<id>" launch flag, gated on the same $REMOTE_CONTROL
     # variable. Drives both this record's own remote_control field and the
@@ -2050,6 +2076,11 @@ def build_parser():
     # field, see crew-add's --allow-merge above. Never provided by the member on
     # its own --id; hooks/no-merge-guard.sh enforces that boundary.
     a.add_argument("--allow-merge", default=None, choices=("true", "false"), dest="allow_merge")
+    # Grant (or revoke) the review-evidence-gate waiver for this member's effort -
+    # roster-only field, see crew-add's --waive-review-gate above. Never provided
+    # by the member on its own --id; hooks/no-merge-guard.sh enforces that
+    # boundary identically to --allow-merge.
+    a.add_argument("--review-gate-waived", default=None, choices=("true", "false"), dest="review_gate_waived")
     # Roster-only, single-field write (issue #96): bin/watch-fleet's own
     # regular, stability-gated poll is the only writer of this field - never a
     # crew member itself, and never bin/crew-standdown, which only reads it.
