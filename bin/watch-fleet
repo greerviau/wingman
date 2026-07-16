@@ -48,7 +48,10 @@
 # "Fleet-wide usage-limit-quota detection" section for the rationale). Unlike
 # #23, this decision needs the pilot's explicit wait-vs-continue answer
 # (wm_state usage-decide), so wingman's own
-# CLAUDE.md tells it what to do on this fire.
+# CLAUDE.md tells it what to do on this fire. The same aggregation pass also
+# sweeps any usage/*.json file whose captured_at is older than
+# WM_USAGE_SWEEP_SECS (default 24h), since its owning session has long since
+# ended (#125).
 #
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
@@ -244,6 +247,7 @@ WM_OUTAGE_QUIET="${WM_OUTAGE_QUIET:-$(( INTERVAL * 3 ))}"
 # staleness bound cannot substitute for both.
 WM_USAGE_WARN_THRESHOLD="${WM_USAGE_WARN_THRESHOLD:-80}"
 WM_USAGE_STALE_SECS="${WM_USAGE_STALE_SECS:-900}"
+WM_USAGE_SWEEP_SECS="${WM_USAGE_SWEEP_SECS:-86400}"
 
 # Remote Control disconnect signature (design: docs/plans/2026-07-12-remote-
 # control-visibility-and-auto-reconnect-design.md, ask 2): the CLI's own
@@ -1070,12 +1074,20 @@ print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-out
   # ordinary `fire` reason line within the existing five-outcome --classify
   # contract, exactly like outage-detected/outage-cleared above - no new
   # --classify outcome is introduced.
+  #
+  # The same pass also sweeps usage/*.json files whose session has long
+  # since ended (#125, follow-up to #24): a file whose captured_at is more
+  # than WM_USAGE_SWEEP_SECS old (default 24h - an order of magnitude past
+  # WM_USAGE_STALE_SECS, so a live session's own file is never at risk) is
+  # removed so the directory does not grow unboundedly for the lifetime of
+  # $WM_HOME.
   if [ -z "$OWNER" ]; then
     _usage_agg="$(wm_py -c '
 import datetime, glob, json, os, sys, time
 
 home = os.environ.get("WINGMAN_HOME") or os.path.expanduser("~/.wingman")
 stale_secs = float(sys.argv[1])
+sweep_secs = float(sys.argv[2])
 now = time.time()
 
 
@@ -1102,7 +1114,13 @@ for path in glob.glob(os.path.join(home, "usage", "*.json")):
     if not isinstance(rec, dict):
         continue
     captured = parse_iso(rec.get("captured_at"))
-    if captured is None or (now - captured) > stale_secs:
+    if captured is None or (now - captured) > sweep_secs:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        continue
+    if (now - captured) > stale_secs:
         continue
     for window in ("five_hour", "seven_day"):
         w = rec.get(window)
@@ -1121,7 +1139,7 @@ for path in glob.glob(os.path.join(home, "usage", "*.json")):
 five = best.get("five_hour", ("", ""))
 seven = best.get("seven_day", ("", ""))
 print("%s\t%s\t%s\t%s" % (five[0], five[1], seven[0], seven[1]))
-' "$WM_USAGE_STALE_SECS" 2>/dev/null)"
+' "$WM_USAGE_STALE_SECS" "$WM_USAGE_SWEEP_SECS" 2>/dev/null)"
     IFS=$'\t' read -r _usage_five_pct _usage_five_reset _usage_seven_pct _usage_seven_reset <<EOF_USAGE
 $_usage_agg
 EOF_USAGE
