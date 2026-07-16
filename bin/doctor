@@ -306,6 +306,64 @@ EOF
   fi
 fi
 
+# --- PR-open attribution marker hook (crew sessions, any repo), user scope --
+# hooks/pr-open-marker-tracker.sh (PostToolUse) closes issue #50's remaining
+# "beyond merges" gap: it prepends the same `<!-- wingman-crew:<id> -->`
+# marker the merge-attribution comment and pr-watch's self-filter (issue
+# #118) already use to every PR body a crew member opens via `gh pr create`,
+# so a crew-authored PR is no longer indistinguishable from one the human
+# wrote by hand. Must fire inside crew sessions whose project root is some
+# other repo entirely, so like the other crew-facing hooks it needs
+# user-level registration - a project-level entry in this repo's settings
+# never loads there.
+pr_open_marker_hook_specs() {
+  cat <<EOF
+$WM_REPO/hooks/pr-open-marker-tracker.sh PostToolUse Bash
+EOF
+}
+pr_open_marker_hooks_missing=0
+while read -r _h _e _m; do
+  [ -n "$_h" ] || continue
+  uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+      --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --check >/dev/null 2>&1 \
+    || pr_open_marker_hooks_missing=1
+done <<EOF
+$(pr_open_marker_hook_specs)
+EOF
+if [ "$pr_open_marker_hooks_missing" = 0 ]; then
+  wm_ok "PR-open attribution marker hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "PR-open attribution marker hook (issue #50) not registered in $GUARD_SETTINGS"
+  printf '    marks every PR a crew member opens with the same attribution marker,\n'
+  printf '    for crew sessions in any repo, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; re-run bin/doctor -y to register it"
+  fi
+  if [ "$do_it" = 1 ]; then
+    pr_open_marker_install_failed=0
+    while read -r _h _e _m; do
+      [ -n "$_h" ] || continue
+      uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+          --settings "$GUARD_SETTINGS" --hook "$_h" --event "$_e" --matcher "$_m" >/dev/null \
+        || pr_open_marker_install_failed=1
+    done <<EOF
+$(pr_open_marker_hook_specs)
+EOF
+    if [ "$pr_open_marker_install_failed" = 0 ]; then
+      wm_ok "registered PR-open attribution marker hook"
+    else
+      wm_err "failed to register PR-open attribution marker hook"
+    fi
+  fi
+fi
+
 # --- Watcher-protection guard (any session, any repo), user scope -----------
 # hooks/no-watcher-kill-guard.sh (PreToolUse) denies a kill/pkill/tmux
 # kill-window/tmux kill-session command whose target resolves to a currently
