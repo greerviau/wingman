@@ -18,7 +18,12 @@
 #     merge-equivalent action as pressing the merge button, whether or not a
 #     PR exists for them. Pushing a crew member's own feature branch (the
 #     normal `developer` "Publish" step) is unaffected: only a push whose
-#     resolved destination IS the default branch trips this.
+#     resolved destination IS the default branch trips this. The directory
+#     used to resolve that destination is not unconditionally the hook
+#     payload's own cwd: a `cd <path>` (or `git -C <path>`) earlier in the
+#     SAME command chain is tracked and takes precedence, since the payload
+#     cwd can name an unrelated checkout of the same repo (a worktree) that
+#     sits on a different branch (issue #117).
 #
 # What lifts the deny: the crew member's own crew.json record carries
 # `"allow_merge": true` - set only via `wm-state.py crew-set --id <id>
@@ -136,7 +141,23 @@ def allow_merge_granted():
     return False
 
 
-def current_branch():
+def resolve_cd_target(base, arg):
+    # Resolve a single `cd` argument against the currently tracked execution
+    # directory. Returns the resolved absolute path, or None when the
+    # argument cannot be resolved from the command text alone: a bare `cd`
+    # with no argument (defaults to $HOME - not modeled), `cd -` (the
+    # previous directory - not tracked), or an argument containing an
+    # unexpanded `$VAR` (the hook sees the command before shell expansion
+    # and has no reliable value for an arbitrary variable). A None return
+    # leaves the previously tracked directory in place - the same
+    # "cannot determine it, do not guess" stance current_branch() already
+    # takes on a git failure.
+    if not arg or arg == "-" or "$" in arg:
+        return None
+    return os.path.normpath(os.path.join(base, arg))
+
+
+def current_branch(cwd):
     try:
         r = subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
@@ -148,7 +169,7 @@ def current_branch():
     return None
 
 
-def default_branch_candidates():
+def default_branch_candidates(cwd):
     # Prefer the repo'"'"'s actual default branch (local, no network call); fall
     # back to the two conventional names if it cannot be resolved (e.g. no
     # origin/HEAD cached locally).
@@ -193,14 +214,71 @@ def merge_reason():
     )
 
 
+def git_push_target_dir(argv, exec_cwd):
+    # argv[0] resolves to git (b == "git"). Scans past any leading global
+    # options for a `push` subcommand, tracking an explicit `-C <dir>` along
+    # the way - the one global git option that redirects execution to a
+    # different directory, exactly like a `cd` earlier in the same command
+    # chain. Returns (push_index, target_dir): push_index is the index of
+    # push in argv (None if this segment is not a push invocation at all);
+    # target_dir is the directory THIS git invocation actually runs in - an
+    # explicit `-C <dir>` if one was given (resolved against the directory
+    # tracked so far, exactly like a `cd` argument - an unresolvable one,
+    # e.g. containing an unexpanded $VAR, leaves target_dir where it already
+    # was, the same fallback resolve_cd_target() gives a `cd` that cannot be
+    # resolved), else exec_cwd itself unchanged. Resolving each `-C` against
+    # the RUNNING target_dir, not the original exec_cwd, matches real git'"'"'s
+    # own semantics for multiple `-C` flags in one invocation: each
+    # subsequent non-absolute `-C <path>` is relative to the PRECEDING `-C`,
+    # not to the process'"'"'s original cwd (`git -C a -C b push` lands in
+    # `<cwd>/a/b`, not `<cwd>/b`) - so this loop compounds them the same way,
+    # not just the common single-`-C` case. Only `-C` is unwrapped as a
+    # directory-changing flag; every other leading global option (e.g.
+    # `-c name=value`) is skipped as one opaque token - the same depth of
+    # handling today'"'"'s code gives no global git options at all, so this is
+    # a strict improvement, not a regression, and deliberately not
+    # exhaustive (see cmd_match.py'"'"'s own "known caveats, both
+    # false-negative-only" precedent for this kind of scope line).
+    i = 1
+    target_dir = exec_cwd
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "-C" and i + 1 < len(argv):
+            resolved = resolve_cd_target(target_dir, argv[i + 1])
+            if resolved:
+                target_dir = resolved
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    if i < len(argv) and argv[i] == "push":
+        return i, target_dir
+    return None, target_dir
+
+
 def check_merge_paths():
     if not crew_id:
         return  # not a crew session - out of scope for this guard
     if allow_merge_granted():
         return
+    # Tracks the directory a `cd` segment earlier in this SAME command chain
+    # switches into, so a later `git push` segment is evaluated against
+    # where it actually runs - not the hook payload'"'"'s cwd, which can be an
+    # unrelated checkout of the same repo (a worktree: multiple checkouts of
+    # one repo, each potentially on a different branch - issue #117).
+    # Starts at the payload cwd, exactly like today, when no `cd` precedes
+    # the push.
+    exec_cwd = cwd
     for seg in segments or []:
         b, argv = resolve_command(seg)
         if not argv:
+            continue
+        if b == "cd" and len(argv) > 1:
+            target = resolve_cd_target(exec_cwd, argv[1])
+            if target:
+                exec_cwd = target
             continue
         if b == "gh" and len(argv) > 2 and argv[1] == "pr" and argv[2] == "merge":
             deny(merge_reason())
@@ -226,28 +304,28 @@ def check_merge_paths():
             elif path_arg and method == "PUT":
                 if re.search(r"^/?repos/[^/]+/[^/]+/pulls/\d+/merge/?$", path_arg):
                     deny(merge_reason())
-        if b == "git" and len(argv) > 1 and argv[1] == "push":
-            positional = [t for t in argv[2:] if not t.startswith("-")]
-            refspec = positional[1] if len(positional) > 1 else None
-            if refspec is None:
-                dest = current_branch()
-            elif refspec == "HEAD":
-                dest = current_branch()
-            elif ":" in refspec:
-                dest = refspec.split(":", 1)[1] or None
-            else:
-                dest = refspec
-            if dest:
-                if dest.startswith("refs/heads/"):
-                    dest = dest[len("refs/heads/"):]
-                if dest in default_branch_candidates():
-                    deny(
-                        "Pushing directly to the default branch (%s) from a crew "
-                        "session is a merge-equivalent and is not yours to do "
-                        "(issue #46) - same rule as gh pr merge. Push your own "
-                        "branch and open/update a PR instead; leave landing it on "
-                        "%s to the pilot." % (dest, dest)
-                    )
+        if b == "git":
+            push_index, target_dir = git_push_target_dir(argv, exec_cwd)
+            if push_index is not None:
+                positional = [t for t in argv[push_index + 1:] if not t.startswith("-")]
+                refspec = positional[1] if len(positional) > 1 else None
+                if refspec is None or refspec == "HEAD":
+                    dest = current_branch(target_dir)
+                elif ":" in refspec:
+                    dest = refspec.split(":", 1)[1] or None
+                else:
+                    dest = refspec
+                if dest:
+                    if dest.startswith("refs/heads/"):
+                        dest = dest[len("refs/heads/"):]
+                    if dest in default_branch_candidates(target_dir):
+                        deny(
+                            "Pushing directly to the default branch (%s) from a crew "
+                            "session is a merge-equivalent and is not yours to do "
+                            "(issue #46) - same rule as gh pr merge. Push your own "
+                            "branch and open/update a PR instead; leave landing it on "
+                            "%s to the pilot." % (dest, dest)
+                        )
 
 
 def check_allow_merge_grant():
