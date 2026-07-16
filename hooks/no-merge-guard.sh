@@ -61,6 +61,36 @@
 # resolution failure (network hiccup, unresolvable PR/node id) fails CLOSED
 # (denied), unlike hooks/merge-attribution-tracker.sh's best-effort posture.
 #
+# issue #132 review (PR #134): the evidence check above trusts a roster
+# record's `type`/`delivery` fields (crew.json/crew-archive.jsonl) to tell a
+# genuine reviewer's comment-fallback approve from a self-dealing one - but
+# the FIRST version of this hook left the write paths to those exact fields
+# ungated, so the sessions it polices could write the state it trusts. Two
+# reproduced bypasses, same root cause:
+#   1. `wm-state crew-add` dedups by id (re-adding an existing id silently
+#      replaces the whole record), and check_allow_merge_grant/check_review_
+#      gate_waiver_grant only ever inspected `crew-set` segments - so a
+#      developer could re-add its OWN record with `--allow-merge
+#      --waive-review-gate` and merge unreviewed, bypassing the self-grant
+#      restriction entirely.
+#   2. `crew-add --type reviewer` (to mint a new id) plus `crew-set
+#      --delivery <this PR>` (to point it at the PR being merged) were both
+#      similarly ungated, so a developer could fabricate a `type: reviewer`
+#      roster record with no real, independently-spawned session behind it,
+#      post the marker verdict itself under that forged id, and have the
+#      evidence check treat it as genuine.
+# check_crew_add_restriction() and check_crew_set_delivery_restriction()
+# close both: `wm-state crew-add` is grep-confirmed to be called from exactly
+# one place in this codebase (bin/spawn-crew, on behalf of wingman or a lead
+# spawning one of its own NEW workers) - so ANY crew-add from a live crew
+# session is now denied outright, not just the merge-flag-carrying ones. This
+# alone closes bypass 1 (crew-add can no longer replace one's own record at
+# all) and the minting half of bypass 2 (a fresh sockpuppet id can no longer
+# be created either). `--delivery` gets its own restriction (self-id, or
+# wingman, only - every legitimate delivery report in this codebase is
+# self-targeted, see playbooks/_status-contract.md) closing the remaining
+# half of bypass 2: repointing an *existing* other id's delivery at this PR.
+#
 # The `--allow-merge` grant check does NOT rely on cmd_match.py resolving the
 # call to `wm-state.py` (unlike every other hook in this repo): the
 # documented invocation shape is `$WINGMAN_STATE crew-set --id ... `, and
@@ -87,10 +117,12 @@ INPUT="$(cat)"
 # Cheap no-op gate: only a command mentioning one of these words can possibly
 # match anything below (gh pr merge / gh api .../merge / mergePullRequest all
 # contain "merge"; git push contains "push"; the grant-guards need
-# "allow-merge" and "review-gate" respectively). Precise matching happens in
-# the python block.
+# "allow-merge" and "review-gate" respectively; the roster-integrity guards
+# (issue #132 review) need "crew-add" and "--delivery" - a bare `crew-add
+# --type reviewer ...` or `crew-set --delivery ...` carries none of the other
+# trigger words). Precise matching happens in the python block.
 case "$INPUT" in
-  *merge*|*push*|*allow-merge*|*review-gate*) ;;
+  *merge*|*push*|*allow-merge*|*review-gate*|*crew-add*|*--delivery*) ;;
   *) exit 0 ;;
 esac
 
@@ -326,10 +358,26 @@ def verify_reviewer_approval(pr_json):
     pr_url = pr_json.get("url") or ""
 
     # Shape 1: a real APPROVED review, any author. GitHub refuses this from
-    # the PR'"'"'s own author, so its mere presence on a PR every crew session
-    # opens under the same shared login is structurally guaranteed to be a
-    # genuinely different account already - no marker/roster check needed.
-    if any(str(r.get("state") or "").upper() == "APPROVED" for r in reviews):
+    # the PR'"'"'s own author, so an APPROVED/CHANGES_REQUESTED state can only
+    # ever come from a genuinely different account already - no marker/roster
+    # check needed. Only the LATEST state per author login counts (PR #134
+    # review, minor finding): `any(APPROVED)` alone would let a stale approve
+    # stay load-bearing even after that SAME reviewer later requested
+    # changes. COMMENTED is deliberately excluded from this login-keyed
+    # tracking - it is always the shared-login marker convention (shape 2
+    # below), never a distinct-account signal, and collapsing it in here
+    # would let one crew id'"'"'s marker verdict get silently shadowed by an
+    # unrelated later comment under the same shared login.
+    latest_state_by_login = {}
+    for r in reviews:
+        st = str(r.get("state") or "").upper()
+        if st not in ("APPROVED", "CHANGES_REQUESTED"):
+            continue
+        login = ((r.get("author") or {}).get("login")) or ""
+        if not login:
+            continue
+        latest_state_by_login[login] = st
+    if any(st == "APPROVED" for st in latest_state_by_login.values()):
         return True, ""
 
     # Shape 2: comment-fallback marker verdict. Only the LATEST verdict per
@@ -379,6 +427,37 @@ def verify_reviewer_approval(pr_json):
     return False, no_evidence_reason(pr_number, pr_url, issues)
 
 
+# `gh pr merge` flags that consume a following value token (from `gh help pr
+# merge`'"'"'s FLAGS + INHERITED FLAGS) - a naive "first token not starting with
+# -" scan (this file'"'"'s original approach, matching hooks/merge-attribution-
+# tracker.sh'"'"'s best-effort attribution parsing) would misread e.g. `--body
+# "merge it"` as the PR ref (PR #134 review, minor finding). Misreading it
+# already failed safe here (an unresolvable ref denies via unresolved_pr_
+# reason below), but it verified the WRONG PR when the misread token
+# happened to resolve to a real one - a correctness bug, not just a safety
+# one.
+GH_PR_MERGE_VALUE_FLAGS = (
+    "-A", "--author-email", "-b", "--body", "-F", "--body-file",
+    "--match-head-commit", "-t", "--subject", "-R", "--repo",
+)
+
+
+def gh_pr_merge_ref(argv):
+    """The explicit PR ref argument to `gh pr merge argv[3:]`, or None if the
+    command relies on the current branch'"'"'s PR (no positional ref given)."""
+    i = 3  # argv[0:3] == ["gh", "pr", "merge"]
+    while i < len(argv):
+        tok = argv[i]
+        if tok in GH_PR_MERGE_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
+    return None
+
+
 def evidence_check(shape, argv, exec_cwd, command, path_arg=None):
     """Returns None if this merge-equivalent segment may proceed (real
     APPROVED review, or a verified comment-fallback approve from a
@@ -390,8 +469,7 @@ def evidence_check(shape, argv, exec_cwd, command, path_arg=None):
 
     owner_repo = None
     if shape == "gh_pr_merge":
-        positional = [t for t in argv[3:] if not t.startswith("-")]
-        ref = positional[0] if positional else resolve_current_pr_ref(exec_cwd)
+        ref = gh_pr_merge_ref(argv) or resolve_current_pr_ref(exec_cwd)
         if ref is None:
             return unresolved_pr_reason(
                 "could not resolve the current branch'"'"'s PR (no ref given "
@@ -657,6 +735,21 @@ def check_merge_paths():
                         )
 
 
+def _is_self_target(target):
+    # `--id "$WINGMAN_CREW_ID"` (the standard, documented self-report idiom -
+    # see playbooks/_status-contract.md) arrives at this PreToolUse hook
+    # UNEXPANDED, exactly like $WINGMAN_STATE itself (see this file'"'"'s header
+    # comment on why) - so a literal string match of `target` against
+    # `crew_id` alone would treat the DOCUMENTED, ordinary self-report form
+    # as "a different id". That is not just a false-positive risk: read the
+    # other way round, it would ALSO let a lead (or any grantor) self-target
+    # THROUGH the variable form while a literal self-id string is correctly
+    # caught - a lead typing `crew-add --id "$WINGMAN_CREW_ID" --allow-merge`
+    # would slip past a bare `target != crew_id` check. Recognized as self
+    # either way this token can spell "my own id".
+    return bool(target) and target in (crew_id, "$WINGMAN_CREW_ID")
+
+
 def _check_no_self_grant(flag_token, label):
     # Shared by check_allow_merge_grant() and check_review_gate_waiver_grant()
     # (issue #132): both fields carry the identical actor restriction - only
@@ -672,7 +765,7 @@ def _check_no_self_grant(flag_token, label):
         target = flag_value(seg, "--id") or ""
         if not crew_id:
             continue  # wingman'"'"'s own top-level session - always allowed
-        if crew_type == "lead" and target and target != crew_id:
+        if crew_type == "lead" and target and not _is_self_target(target):
             continue  # a lead granting one of its OWN workers - allowed
         deny(
             "Granting %s is not yours to set from a crew session, including "
@@ -694,8 +787,81 @@ def check_review_gate_waiver_grant():
         "the review-gate waiver (--review-gate-waived, issue #132)")
 
 
+def check_crew_add_restriction():
+    # PR #134 review, findings 1+2: `wm-state crew-add` dedups by id (re-
+    # adding an existing id silently REPLACES the whole record - allow_
+    # merge/review_gate_waived/type/delivery included), and it is called
+    # from exactly one legitimate place in this codebase - bin/spawn-crew,
+    # on behalf of wingman'"'"'s own top-level session or a lead spawning one of
+    # its own NEW workers. No live crew session has any other legitimate
+    # reason to call it: not on itself (that would silently replace allow_
+    # merge/review_gate_waived wholesale, bypassing _check_no_self_grant
+    # above entirely, since that check only ever inspects `crew-set`), and
+    # not on a fresh id of its own choosing (that mints a roster record -
+    # e.g. a fabricated `type: reviewer` entry - with no real, independently
+    # spawned session behind it, defeating verify_reviewer_approval'"'"'s
+    # roster cross-check at its root). So ANY crew-add from a policed
+    # session is denied outright, regardless of which flags it carries.
+    for seg in segments or []:
+        if "crew-add" not in seg:
+            continue
+        target = flag_value(seg, "--id") or ""
+        if not crew_id:
+            continue  # wingman'"'"'s own top-level session - always allowed
+        if crew_type == "lead" and target and not _is_self_target(target):
+            continue  # a lead spawning one of its OWN new workers - allowed
+        deny(
+            "Creating or replacing a crew roster record (wm-state crew-add) "
+            "is not yours to do from a crew session (issue #132) - it is "
+            "called only by bin/spawn-crew, by wingman'"'"'s own top-level "
+            "session or a lead spawning one of its own workers. A worker "
+            "session can never call crew-add on itself (crew-add replaces "
+            "the whole record, including allow_merge/review_gate_waived, "
+            "silently bypassing the self-grant restriction) or on a fresh "
+            "id (which would fabricate a roster record - e.g. a fake "
+            "`reviewer` entry - with no real session behind it). Report "
+            "--status blocked if you believe you genuinely need a new crew "
+            "member spawned."
+        )
+
+
+def check_crew_set_delivery_restriction():
+    # PR #134 review, finding 2 (the other half): verify_reviewer_approval()
+    # trusts a roster record'"'"'s `delivery` field to decide whether a comment-
+    # fallback approve names THIS PR - so `delivery` is exactly as security-
+    # relevant as allow_merge/review_gate_waived, but crew-set never
+    # restricted who could set it on which id. Every legitimate delivery
+    # report in this codebase is self-targeted (`crew-set --id
+    # "$WINGMAN_CREW_ID" --delivery ...` - see playbooks/_status-
+    # contract.md); nothing here sets delivery on another crew id'"'"'s behalf,
+    # so restricting it to "your own id, or wingman" breaks no legitimate
+    # flow while closing the "repoint an existing reviewer'"'"'s delivery at
+    # this PR" half of finding 2 (check_crew_add_restriction above already
+    # closes the "mint a fresh one" half).
+    for seg in segments or []:
+        if "crew-set" not in seg:
+            continue
+        if not any(t == "--delivery" or t.startswith("--delivery=") for t in seg):
+            continue
+        if not crew_id:
+            continue  # wingman'"'"'s own top-level session - always allowed
+        target = flag_value(seg, "--id") or ""
+        if _is_self_target(target):
+            continue  # ordinary self-report - allowed
+        deny(
+            "Setting --delivery on a crew id other than your own "
+            "($WINGMAN_CREW_ID) is not yours to do from a crew session "
+            "(issue #132) - every legitimate delivery report is self-"
+            "targeted, and this hook now trusts `delivery` as one of the "
+            "review-evidence gate'"'"'s roster fields. Report --status blocked "
+            "if you believe you genuinely need this."
+        )
+
+
 check_allow_merge_grant()
 check_review_gate_waiver_grant()
+check_crew_add_restriction()
+check_crew_set_delivery_restriction()
 check_merge_paths()
 
 # Both known-shape checks above have already had their chance to deny (or,
