@@ -177,6 +177,24 @@ if [ "$SCOPE" = repo ] && [ "$CATEGORY" = software-development ] && [ "$IS_GIT" 
   wm_die "'$TYPE' is a software-development crew type and requires a git checkout; '$REPO' is not one (or is not the repo's root - see the subdirectory rule in docs/plans/2026-07-13-conditional-git-branch-pr-workflow.md)"
 fi
 
+# A role's playbook is written against the shared PR-delivery apparatus
+# (isolate/worktree, publish, open a PR, pr-watch shepherding, merge
+# authorization, cleanup) rather than carrying its own copy - append
+# _pr-delivery.md to its brief the same way _status-contract.md is always
+# appended. Matched on the playbook's own bare name (not $TYPE), so a
+# category-qualified spawn (--type software-development/developer) still
+# matches. Add a role's name here only once its playbook is written to
+# reference the fragment instead of duplicating it.
+ROLE_NAME="$(basename "$PLAYBOOK")"
+case "$ROLE_NAME" in
+  *.local.md) ROLE_NAME="${ROLE_NAME%.local.md}" ;;
+  *.md)       ROLE_NAME="${ROLE_NAME%.md}" ;;
+esac
+INCLUDE_PR_DELIVERY=0
+case " developer ml-engineer data-engineer " in
+  *" $ROLE_NAME "*) INCLUDE_PR_DELIVERY=1 ;;
+esac
+
 # --- preflight: workspace-trust gate (issue #16) -----------------------------
 # The one-time-per-directory workspace-trust dialog survives
 # --permission-mode bypassPermissions and would otherwise freeze the crew
@@ -287,6 +305,10 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
   fi
   printf -- '---\n\n'
   cat "$PLAYBOOK"
+  if [ "$INCLUDE_PR_DELIVERY" -eq 1 ]; then
+    printf '\n\n---\n\n'
+    cat "$WM_PLAYBOOKS/_pr-delivery.md"
+  fi
   printf '\n\n---\n\n'
   cat "$WM_PLAYBOOKS/_status-contract.md"
 } > "$SYSPROMPT"
