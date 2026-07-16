@@ -52,7 +52,10 @@
 #   - a same-login comment-fallback verdict (`COMMENTED`, marker-anchored
 #     `<!-- wingman-crew:<id> -->`, `VERDICT: approve`) whose `<id>` is NOT
 #     this session's own, and resolves to a real roster record with
-#     `type == "reviewer"` and a `delivery` naming this same PR.
+#     `type == "reviewer"` and a `delivery` naming this same PR - and, when
+#     that record carries a spawn-time review-token commitment (issue #135,
+#     see below), a matching `wingman-review-proof` marker in the same
+#     comment.
 # `review_gate_waived: true` (mirroring `allow_merge`'s own grant shape and
 # actor restriction exactly - see check_review_gate_waiver_grant) is the
 # explicit, per-effort escape hatch for a requester who has personally
@@ -102,6 +105,38 @@
 # today - defense-in-depth against a future `crew-set --type` addition
 # silently inheriting an ungated write path.
 #
+# issue #135: even a genuine `type == reviewer` record with a `delivery`
+# naming this PR was not enough - shape 2 has no cryptographic binding at
+# all, so any crew session that knows a genuine reviewer's id and the PR
+# number (both visible via bin/crew-list/board.md and the PR thread itself)
+# could post a LATER `COMMENTED` `VERDICT: approve` bearing that reviewer's
+# marker, overriding the real reviewer's verdict ("latest wins"). Closed with
+# a spawn-time, per-verdict one-way hash commitment: `bin/spawn-crew` mints a
+# random 32-byte token for every `--type reviewer` spawn, held only in that
+# member's own process environment (`WM_REVIEW_TOKEN`, never written to any
+# file); `wm-state crew-add` derives and stores only
+# `sha256(sha256(token||id||verdict))` for each of "approve"/"request
+# changes" (`review_commit_approve`/`review_commit_request_changes`); the
+# reviewer embeds the *preimage* (`$WINGMAN_STATE review-sign --verdict ...`)
+# in a second marker line in its own comment; this hook now requires that
+# preimage to hash to the recorded commitment before trusting a `VERDICT:
+# approve` from a record that carries one. A record with no commitment on
+# file (predates this fix, or was hand-spawned with no token) falls straight
+# through to the pre-issue-#135 marker-only acceptance, unchanged. The
+# commitment is re-derived whenever a live reviewer's `delivery` is
+# genuinely repointed at a different PR (`review_delivery_bound`, a
+# dedicated monotonic roster field immune to an intervening `--delivery ""`
+# clear) so a proof genuinely posted for one PR cannot keep validating
+# against another, and whenever `bin/crew-resume` relaunches a `died`
+# reviewer (`--regenerate-review-token`, gated below identically to
+# `--allow-merge`/`--review-gate-waived` - see
+# check_regenerate_review_token_grant) since the crashed process's token is
+# unrecoverable. See `bin/lib/wm-state.py`'"'"'s `_apply_review_token` and
+# `docs/analysis/2026-07-16-issue-135-review-evidence-forgery-plan.md` for
+# the full design and its threat-model boundary (a genuinely snooping peer
+# session on this shared-OS-user architecture is explicitly out of scope -
+# see that plan's "constraint that shapes every option" section).
+#
 # The `--allow-merge` grant check does NOT rely on cmd_match.py resolving the
 # call to `wm-state.py` (unlike every other hook in this repo): the
 # documented invocation shape is `$WINGMAN_STATE crew-set --id ... `, and
@@ -131,7 +166,9 @@ INPUT="$(cat)"
 # "allow-merge" and "review-gate" respectively; the roster-integrity guards
 # (issue #132 review) need "crew-add" and "--delivery" - a bare `crew-add
 # --type reviewer ...` or `crew-set --delivery ...` carries none of the other
-# trigger words). Precise matching happens in the python block.
+# trigger words; the review-token grant guard (issue #135) needs
+# "review-token", covering both `crew-add --review-token` and `crew-set
+# --regenerate-review-token`). Precise matching happens in the python block.
 #
 # issue #136: `crew-set --type` gets its own, narrower arm rather than being
 # folded into the bare-alternative list above. Unlike every other trigger
@@ -147,7 +184,7 @@ INPUT="$(cat)"
 # appear (in either order) keeps the pre-gate scoped to actual crew-set
 # calls, exactly as tightly as the other trigger words already are.
 case "$INPUT" in
-  *merge*|*push*|*allow-merge*|*review-gate*|*crew-add*|*--delivery*) ;;
+  *merge*|*push*|*allow-merge*|*review-gate*|*crew-add*|*--delivery*|*review-token*) ;;
   *crew-set*--type*) ;;
   *) exit 0 ;;
 esac
@@ -157,7 +194,7 @@ printf '%s' "$INPUT" | \
   WINGMAN_CREW_ID="${WINGMAN_CREW_ID:-}" \
   WINGMAN_CREW_TYPE="${WINGMAN_CREW_TYPE:-}" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
-import json, os, re, subprocess, sys
+import hashlib, json, os, re, subprocess, sys
 
 from cmd_match import command_segments, resolve_command
 
@@ -240,6 +277,13 @@ def review_gate_waived():
 
 CREW_MARKER_RE = re.compile(r"^\s*<!--\s*wingman-crew:([A-Za-z0-9._-]+)\s*-->")
 VERDICT_RE = re.compile(r"VERDICT:\s*(approve|request changes)", re.IGNORECASE)
+# issue #135: the spawn-time hash-commitment proof a genuine reviewer embeds
+# alongside its marker (playbooks/software-development/reviewer.md step 4,
+# via `$WINGMAN_STATE review-sign`) - a 64-hex-char sha256 preimage. Required
+# on a VERDICT: approve comment only when the resolved roster record carries
+# a review_commit_approve commitment (see the shape-2 loop below); absent
+# entirely, this falls through to the pre-issue-#135 marker-only check.
+PROOF_MARKER_RE = re.compile(r"<!--\s*wingman-review-proof:([0-9a-fA-F]{64})\s*-->")
 
 NODE_TO_PR_QUERY = (
     "query($id:ID!){node(id:$id){... on PullRequest{number repository{"
@@ -410,7 +454,10 @@ def verify_reviewer_approval(pr_json):
     # marked crew id counts (reviewer.md step 6'"'"'s own "a rerun stacks
     # additional reviews, check the latest" rule) - gh returns reviews in
     # chronological order, so a later entry for the same id simply
-    # overwrites an earlier one in this dict.
+    # overwrites an earlier one in this dict. The body itself is retained too
+    # (not just the parsed verdict), so the proof-marker check below (issue
+    # #135) can be run against the LATEST comment for that id, not just its
+    # verdict string.
     latest_by_id = {}
     for r in reviews:
         if str(r.get("state") or "").upper() != "COMMENTED":
@@ -420,10 +467,10 @@ def verify_reviewer_approval(pr_json):
         if not m:
             continue
         vm = VERDICT_RE.search(body)
-        latest_by_id[m.group(1)] = vm.group(1).lower() if vm else None
+        latest_by_id[m.group(1)] = (vm.group(1).lower() if vm else None, body)
 
     issues = []
-    for rid, verdict in latest_by_id.items():
+    for rid, (verdict, body) in latest_by_id.items():
         if verdict != "approve":
             continue
         if rid == crew_id:
@@ -448,6 +495,29 @@ def verify_reviewer_approval(pr_json):
                 "delivery (%s) does not name this PR"
                 % (rid, record.get("delivery") or "none"))
             continue
+        # issue #135: a reviewer record minted with a spawn-time token
+        # carries a review_commit_approve commitment - require and verify a
+        # matching proof marker before trusting this approve. A record with
+        # no commitment on file (predates this fix, or was hand-spawned with
+        # no token) falls straight through to the marker-only acceptance
+        # below, unchanged from before this fix.
+        commitment = record.get("review_commit_approve")
+        if commitment:
+            pm = PROOF_MARKER_RE.search(body)
+            if not pm:
+                issues.append(
+                    "crew `%s` posted VERDICT: approve but the comment "
+                    "carries no wingman-review-proof marker, required "
+                    "because this reviewer'"'"'s roster record has a "
+                    "review-token commitment on file (issue #135)" % rid)
+                continue
+            if hashlib.sha256(bytes.fromhex(pm.group(1).lower())).hexdigest() != commitment:
+                issues.append(
+                    "crew `%s` posted VERDICT: approve but its wingman-"
+                    "review-proof marker does not match the commitment "
+                    "recorded for this reviewer at spawn time - treating as "
+                    "a forged approve (issue #135)" % rid)
+                continue
         return True, ""
 
     return False, no_evidence_reason(pr_number, pr_url, issues)
@@ -813,6 +883,22 @@ def check_review_gate_waiver_grant():
         "the review-gate waiver (--review-gate-waived, issue #132)")
 
 
+def check_regenerate_review_token_grant():
+    # issue #135: --regenerate-review-token must never be settable by a crew
+    # session on itself - a compromised or naive developer session could
+    # otherwise overwrite the GENUINE reviewer'"'"'s commitment with one derived
+    # from a token IT knows, then forge a matching proof. bin/crew-resume is
+    # a wingman-/lead-side script, never invoked from inside a policed crew
+    # session'"'"'s own Bash calls, so this is not reachable through any
+    # legitimate flow - gated anyway for defense in depth, matching this
+    # hook'"'"'s existing paranoid posture (every security-relevant roster field
+    # gets an explicit restriction rather than relying on "nobody would call
+    # this").
+    _check_no_self_grant(
+        "--regenerate-review-token",
+        "review-token regeneration (issue #135)")
+
+
 def check_crew_add_restriction():
     # PR #134 review, findings 1+2: `wm-state crew-add` dedups by id (re-
     # adding an existing id silently REPLACES the whole record - allow_
@@ -917,6 +1003,7 @@ def check_crew_set_type_restriction():
 
 check_allow_merge_grant()
 check_review_gate_waiver_grant()
+check_regenerate_review_token_grant()
 check_crew_add_restriction()
 check_crew_set_delivery_restriction()
 check_crew_set_type_restriction()

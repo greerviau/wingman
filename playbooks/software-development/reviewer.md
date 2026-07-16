@@ -44,7 +44,14 @@ Every review or comment you post below opens with an invisible `<!-- wingman-cre
    Keep the body short - it is the summary, not the full findings; point to the analysis file for detail.
    If this still fails despite the different-login check (`gh` reports something matching "your own pull request", case-insensitive - the approve- and request-changes-path error text differ, and neither is worth hardcoding as the sole check), treat it exactly like step 2's same-login case and fall through to step 4.
    Any other failure here is a real submission failure - go to step 5, not step 4.
-4. **Comment fallback (same identity as the PR author):**
+4. **Comment fallback (same identity as the PR author):** because every crew session shares the same forge login, this comment alone is just a public, documented convention - not cryptographic proof it was genuinely you who posted it. If you were spawned with a review-signing token (`$WM_REVIEW_TOKEN` set in your environment - true for every reviewer spawned after issue #135 shipped), embed a proof alongside your marker so `hooks/no-merge-guard.sh` can verify a later comment reusing your marker is not a forged approve:
+   ```
+   PROOF="$($WINGMAN_STATE review-sign --verdict <approve|request changes>)"
+   gh pr review <pr> --comment -b "<!-- wingman-crew:$WINGMAN_CREW_ID -->
+   <!-- wingman-review-proof:$PROOF -->
+   VERDICT: <approve|request changes> - <summary, and the findings-file path>"
+   ```
+   If `$WM_REVIEW_TOKEN` is unset (a legacy reviewer spawned before issue #135, or one hand-spawned with no token), fall back to the marker-only comment:
    ```
    gh pr review <pr> --comment -b "<!-- wingman-crew:$WINGMAN_CREW_ID --> VERDICT: <approve|request changes> - <summary, and the findings-file path>"
    ```

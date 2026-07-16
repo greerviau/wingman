@@ -75,6 +75,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -373,6 +374,48 @@ def cmd_init(_args):
     print(home())
 
 
+# ---------------------------------------------------------------------------
+# Spawn-time per-verdict hash commitments for a `reviewer` member's
+# comment-fallback verdict (issue #135). A random 32-byte token, generated at
+# spawn time and held only in the reviewer's own process environment
+# ($WM_REVIEW_TOKEN), never written to any file - see `review-sign` below and
+# hooks/no-merge-guard.sh's shape-2 verification for how the derived
+# commitments close the marker-impersonation gap this exists for.
+# ---------------------------------------------------------------------------
+def _verdict_label(verdict):
+    v = (verdict or "").strip().lower()
+    if v == "approve":
+        return b"approve"
+    if v in ("request changes", "request-changes", "request_changes"):
+        return b"request_changes"
+    raise ValueError("verdict must be 'approve' or 'request changes'")
+
+
+def _review_preimage(token_bytes, crew_id, verdict):
+    # crew_id binds the preimage to the specific roster record for defense in
+    # depth; the actual security comes from token_bytes being an independent
+    # 256-bit random value per reviewer, not from this.
+    return hashlib.sha256(
+        token_bytes + b"\x00" + crew_id.encode("utf-8") + b"\x00" + _verdict_label(verdict)
+    ).digest()
+
+
+def _review_commitment(preimage_bytes):
+    return hashlib.sha256(preimage_bytes).hexdigest()
+
+
+def _apply_review_token(record, token_hex):
+    """(Re)derive and store review_commit_approve/review_commit_request_changes
+    from a raw hex token, discarding the raw value immediately - shared by the
+    initial mint (cmd_crew_add), an explicit resume regeneration, and an
+    automatic delivery-change regeneration (issue #135)."""
+    token_bytes = bytes.fromhex(token_hex)
+    record["review_commit_approve"] = _review_commitment(
+        _review_preimage(token_bytes, record["id"], "approve"))
+    record["review_commit_request_changes"] = _review_commitment(
+        _review_preimage(token_bytes, record["id"], "request changes"))
+
+
 def cmd_crew_add(args):
     ensure_home()
     # One stamp for the spawn: the roster `updated`, the immutable `spawned_at`, and
@@ -419,6 +462,24 @@ def cmd_crew_add(args):
         # identical self-grant restriction allow_merge already carries - see
         # hooks/no-merge-guard.sh's check_review_gate_waiver_grant().
         "review_gate_waived": bool(getattr(args, "review_gate_waived", False)),
+        # Spawn-time per-verdict hash commitments (issue #135), reviewer type
+        # only: sha256(sha256(token || id || verdict)) for each of "approve"
+        # and "request changes", derived below via _apply_review_token and
+        # storing only the hashes - never the raw token itself, which lives
+        # only in this member's own process environment (WM_REVIEW_TOKEN, see
+        # bin/spawn-crew). None for every non-reviewer record, and for a
+        # reviewer record with no token (a manual/legacy crew-add) - in
+        # either case hooks/no-merge-guard.sh's shape-2 check falls straight
+        # through to today's marker-only acceptance.
+        "review_commit_approve": None,
+        "review_commit_request_changes": None,
+        # A dedicated, monotonic marker of "the last non-empty delivery this
+        # record was ever genuinely bound to" (issue #135, round 2) - see
+        # cmd_crew_set's delivery-change regeneration trigger for why this
+        # must never be inferred from the live, clearable `delivery` field
+        # itself. None until a delivery is first set, for every reviewer
+        # record regardless of whether it carries a token.
+        "review_delivery_bound": None,
         # Remote Control visibility (issue #96): whether this member launched
         # Remote-Control-visible (bin/spawn-crew --remote-control), and
         # wingman's own best-known estimate of whether that connection is
@@ -464,6 +525,8 @@ def cmd_crew_add(args):
         "spawned_at": stamp,
         "updated": stamp,
     }
+    if args.type == "reviewer" and getattr(args, "review_token", None):
+        _apply_review_token(record, args.review_token)
     with with_locked(crew_json_path()):
         roster = load_roster()
         roster = [r for r in roster if r.get("id") != args.id]
@@ -600,6 +663,65 @@ def cmd_crew_set(args):
         roster = load_roster()
         for r in roster:
             if r.get("id") == args.id:
+                # --- issue #135: review-token commitment regeneration. Both
+                # triggers live in this same per-record block (never a
+                # separate pass appended after it) so they run atomically
+                # with the rest of this record's write, under the single
+                # with_locked(...) critical section already guarding this
+                # whole function.
+                #
+                # 1. Delivery-change trigger: fires only when a non-empty
+                # --delivery differs from a non-empty review_delivery_bound
+                # already on an already-tokened `type == reviewer` record - a
+                # live reviewer repointed at a different PR mid-session, the
+                # exact scenario that would otherwise let a proof genuinely
+                # posted for the OLD PR keep validating against the new one
+                # (issue #135, round 1). review_delivery_bound is a
+                # dedicated, monotonic field - unlike the live `delivery`
+                # field, an intervening `--delivery ""` clear never resets it
+                # (round 2), so however many clear-and-reassign steps
+                # separate two real deliveries, the next non-empty
+                # --delivery is always compared against the last one this
+                # record was genuinely bound to. The far more common
+                # first-ever delivery set (review_delivery_bound still None)
+                # regenerates nothing - the commitment was never PR-specific
+                # to begin with.
+                if args.delivery is not None and r.get("type") == "reviewer" \
+                        and r.get("review_commit_approve"):
+                    bound = r.get("review_delivery_bound")
+                    if args.delivery and bound and bound != args.delivery:
+                        new_token_hex = secrets.token_hex(32)
+                        _apply_review_token(r, new_token_hex)
+                        print("review-token: %s" % new_token_hex)
+                    if args.delivery:
+                        r["review_delivery_bound"] = args.delivery
+                # 2. Explicit resume regeneration: bin/crew-resume passes a
+                # freshly generated token for every resumed `died` reviewer
+                # (its stdout redirected to /dev/null - the token is never
+                # echoed back to the invoking wingman/lead session, unlike
+                # the internally-generated one printed just above, which has
+                # no other holder that already knows it).
+                if getattr(args, "regenerate_review_token", None):
+                    _apply_review_token(r, args.regenerate_review_token)
+                    # A freshly-minted commitment carries no evidence yet,
+                    # regardless of what delivery this record already had
+                    # going into the regeneration (issue #135, round 3):
+                    # re-baseline review_delivery_bound to the CURRENT
+                    # delivery so the next delivery CHANGE is correctly
+                    # detected, rather than misread as a "first-ever"
+                    # assignment. Reads `live`, not `r` (round 4 should-fix):
+                    # `live` was already resolved from args.delivery earlier
+                    # in this function, before this roster block even opens,
+                    # so this is correct regardless of insertion order here
+                    # and regardless of whether a future caller ever combines
+                    # this flag with --delivery in the same call - the same
+                    # convention several other fields in this block already
+                    # follow (e.g. artifact_url below). A no-op when
+                    # review_delivery_bound is already in sync (the common,
+                    # already-tokened-reviewer-crashes-and-resumes case);
+                    # only changes behavior for a reviewer gaining its
+                    # first-ever commitment here.
+                    r["review_delivery_bound"] = live.get("delivery")
                 for field in ("status", "artifact", "delivery"):
                     if getattr(args, field, None) is not None:
                         r[field] = live.get(field)
@@ -641,6 +763,27 @@ def cmd_crew_set(args):
         write_json(crew_json_path(), roster)
     render_board()
     print(args.id)
+
+
+def cmd_review_sign(args):
+    """Produce the preimage for a reviewer's own review-token commitment, to
+    embed in a comment-fallback PR verdict (issue #135). Performs no file I/O
+    and touches no roster field, so any crew session may call it - only a
+    session that actually holds WM_REVIEW_TOKEN (a genuine reviewer, or one
+    resumed via --regenerate-review-token) produces a preimage that matches
+    anything a merge-gate check trusts."""
+    token_hex = args.token or os.environ.get("WM_REVIEW_TOKEN", "")
+    crew_id = os.environ.get("WINGMAN_CREW_ID", "")
+    if not token_hex or not crew_id:
+        sys.exit("wm-state: WM_REVIEW_TOKEN/WINGMAN_CREW_ID not set in this "
+                  "session's environment - only a reviewer session spawned "
+                  "with a review token has this")
+    try:
+        token_bytes = bytes.fromhex(token_hex)
+        preimage = _review_preimage(token_bytes, crew_id, args.verdict)
+    except ValueError as e:
+        sys.exit("wm-state: %s" % e)
+    print(preimage.hex())
 
 
 def cmd_crew_get(args):
@@ -2056,6 +2199,13 @@ def build_parser():
     # flag is typed as a string; cmd_crew_add converts to a real bool/None.
     a.add_argument("--is-git", default=None, choices=("true", "false"), dest="is_git")
     a.add_argument("--has-remote", default=None, choices=("true", "false"), dest="has_remote")
+    # A random 32-byte hex token (bin/spawn-crew generates it), reviewer type
+    # only (issue #135): derives the spawn-time per-verdict hash commitments
+    # (see _apply_review_token) - the raw value itself is never stored, only
+    # its derived hashes. Omitted (or on a non-reviewer type) leaves both
+    # commitment fields None, the backward-compatible "no token on file"
+    # case hooks/no-merge-guard.sh's shape-2 check falls through on.
+    a.add_argument("--review-token", default=None, dest="review_token")
     a.set_defaults(fn=cmd_crew_add)
 
     a = sub.add_parser("crew-set")
@@ -2089,6 +2239,17 @@ def build_parser():
     a.add_argument("--remote-control-connected", default=None, choices=("true", "false"), dest="remote_control_connected")
     # Re-register the window id after crew-resume replaces the window. Roster-only.
     a.add_argument("--window-id", default=None, dest="window_id")
+    # Roster-only, explicit-token write (issue #135): bin/crew-resume's own
+    # relaunch of a died `reviewer` passes a freshly generated token here so
+    # the resumed session's stale, pre-crash commitments are replaced before
+    # it can post another comment-fallback verdict. Gated identically to
+    # --allow-merge/--review-gate-waived (see
+    # hooks/no-merge-guard.sh:check_regenerate_review_token_grant) - never
+    # settable by a crew session on itself. Never echoed back to the caller
+    # (bin/crew-resume redirects this call's stdout) - unlike the automatic
+    # delivery-change regeneration below, which DOES print the new token
+    # since nothing else in that path already holds it.
+    a.add_argument("--regenerate-review-token", default=None, dest="regenerate_review_token")
     # Update status/summary/artifact/delivery without re-firing the watcher/Stop-
     # hook wake (see the `announced` field and playbooks/_status-contract.md,
     # "Re-entering review without re-announcing"). Refused with --status
@@ -2099,6 +2260,18 @@ def build_parser():
     a = sub.add_parser("crew-get")
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_crew_get)
+
+    # review-sign (issue #135): produces the preimage for a reviewer's own
+    # review-token commitment, to embed in a comment-fallback PR verdict (see
+    # playbooks/software-development/reviewer.md step 4). Unrestricted - see
+    # cmd_review_sign's own docstring for why.
+    a = sub.add_parser("review-sign")
+    a.add_argument("--verdict", required=True, choices=("approve", "request changes"))
+    # Optional override for the rare case a live reviewer's cached
+    # $WM_REVIEW_TOKEN went stale mid-session (its own delivery-change
+    # triggered regeneration) - see _apply_review_token's callers.
+    a.add_argument("--token", default=None)
+    a.set_defaults(fn=cmd_review_sign)
 
     a = sub.add_parser("crew-list")
     a.add_argument("--json", action="store_true")

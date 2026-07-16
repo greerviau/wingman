@@ -39,6 +39,15 @@
 # (the default) and grant later instead: `$WINGMAN_STATE crew-set --id <id>
 # --review-gate-waived true`.
 #
+# Review-signing token (issue #135, --type reviewer only): a random 32-byte
+# token, generated here and held only in the reviewer's own process
+# environment (WM_REVIEW_TOKEN) - never written to any file. wm_state
+# crew-add derives and stores only its one-way hash commitments, which
+# hooks/no-merge-guard.sh's shape-2 check uses to require a matching
+# `$WINGMAN_STATE review-sign` proof on a genuine reviewer's comment-fallback
+# approve, closing the marker-impersonation gap a later forged comment under
+# that reviewer's id would otherwise exploit. Automatic; no flag needed.
+#
 # Remote Control: every crew member launches Remote-Control-visible by default
 # (reachable from claude.ai/code, not only via tmux attach), as name "wm-<id>".
 # Set WM_REMOTE_CONTROL= (empty) to disable.
@@ -250,6 +259,14 @@ if wm_have uuidgen; then SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"; else
   SID="$(wm_py -c 'import uuid;print(uuid.uuid4())')"
 fi
 
+# --- generate a per-verdict review-signing token (reviewer type only) --------
+# issue #135: a random 32-byte token, held only in this member's own process
+# environment (WM_REVIEW_TOKEN below) and never written to any file. wm_state
+# crew-add derives and stores only the one-way hash commitments of this value
+# (never the raw token itself) - see bin/lib/wm-state.py's _apply_review_token.
+REVIEW_TOKEN=""
+[ "$TYPE" = reviewer ] && REVIEW_TOKEN="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
+
 # --- compose the crew member's appended system prompt ------------------------
 wm_state init >/dev/null
 SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
@@ -310,6 +327,12 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
     echo "export WINGMAN_IS_GIT=$([ "$IS_GIT" -eq 1 ] && echo true || echo false)"
     [ "$IS_GIT" -eq 1 ] && echo "export WINGMAN_HAS_REMOTE=$([ "$HAS_REMOTE" -eq 1 ] && echo true || echo false)"
   fi
+  # The raw review-signing token (reviewer type only, issue #135): referenced
+  # in the reviewer playbook only as "$WM_REVIEW_TOKEN" (never echoed into a
+  # captured tool result), so it never appears anywhere but this one process's
+  # own environment - not the roster, not any file, not a conversation
+  # transcript.
+  [ -n "$REVIEW_TOKEN" ] && echo "export WM_REVIEW_TOKEN=$(quote "$REVIEW_TOKEN")"
   # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
   # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
   # it to substitute a stub).
@@ -375,6 +398,7 @@ ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
   --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE")
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
 [ "$WAIVE_REVIEW_GATE" = 1 ] && ADD_ARGS+=(--waive-review-gate)
+[ -n "$REVIEW_TOKEN" ] && ADD_ARGS+=(--review-token "$REVIEW_TOKEN")
 # is_git/has_remote mirror the launch-script export above: recorded for repo
 # scope only, so the JSON field stays absent (not false) for global scope - the
 # same true/false/unset distinction, now on the roster record too. Passed as the
