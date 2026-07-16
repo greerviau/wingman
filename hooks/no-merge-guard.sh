@@ -91,6 +91,17 @@
 # self-targeted, see playbooks/_status-contract.md) closing the remaining
 # half of bypass 2: repointing an *existing* other id's delivery at this PR.
 #
+# issue #136 (round-2 review of PR #134): verify_reviewer_approval() also
+# trusts a roster record's `type` field (must equal "reviewer") - exactly as
+# security-relevant as `delivery`, but left ungated. check_crew_set_type_
+# restriction() extends the identical self/wingman restriction already
+# applied to `--delivery` to `--type` for the same reason. `crew-set` does
+# not currently define a `--type` flag at all (wm-state.py's crew-add
+# subparser is the only place `--type` is accepted, at creation time), so
+# this closes a write path pre-emptively rather than one that's reachable
+# today - defense-in-depth against a future `crew-set --type` addition
+# silently inheriting an ungated write path.
+#
 # The `--allow-merge` grant check does NOT rely on cmd_match.py resolving the
 # call to `wm-state.py` (unlike every other hook in this repo): the
 # documented invocation shape is `$WINGMAN_STATE crew-set --id ... `, and
@@ -121,8 +132,23 @@ INPUT="$(cat)"
 # (issue #132 review) need "crew-add" and "--delivery" - a bare `crew-add
 # --type reviewer ...` or `crew-set --delivery ...` carries none of the other
 # trigger words). Precise matching happens in the python block.
+#
+# issue #136: `crew-set --type` gets its own, narrower arm rather than being
+# folded into the bare-alternative list above. Unlike every other trigger
+# word here, a bare `*--type*` alternative would NOT be purely additive:
+# `--type` is a common flag on many unrelated CLI tools crew members
+# legitimately run in arbitrary repos (e.g. `kubectl ... --type=Opaque`), and
+# this hook is registered user-level, firing for every crew Bash call in
+# every repo, not just wingman's own. A bare `*--type*` alternative would
+# newly expose any unrelated, unparseable command containing `--type` (e.g. a
+# quoting slip in an otherwise ordinary kubectl/config-tool invocation) to
+# the fail-closed PARSE_FAIL_REASON denial below, despite having nothing to
+# do with crew-set, merges, or PRs. Requiring `crew-set` and `--type` to both
+# appear (in either order) keeps the pre-gate scoped to actual crew-set
+# calls, exactly as tightly as the other trigger words already are.
 case "$INPUT" in
   *merge*|*push*|*allow-merge*|*review-gate*|*crew-add*|*--delivery*) ;;
+  *crew-set*--type*) ;;
   *) exit 0 ;;
 esac
 
@@ -858,10 +884,42 @@ def check_crew_set_delivery_restriction():
         )
 
 
+def check_crew_set_type_restriction():
+    # issue #136 (round-2 review of PR #134'"'"'s issue #132 fix): verify_reviewer_
+    # approval() also trusts a roster record'"'"'s `type` field (must equal
+    # "reviewer") to accept a comment-fallback approve marker - exactly as
+    # security-relevant as `delivery`, so it gets the identical self/wingman
+    # restriction, not crew-add'"'"'s lead-non-self carve-out: there is no
+    # legitimate flow that changes an existing id'"'"'s `type` after crew-add
+    # time (crew-set does not even define a --type flag today - see this
+    # file'"'"'s header - so this is pre-emptive: it keeps the hook'"'"'s own
+    # restriction independent of whatever wm-state.py happens to accept,
+    # rather than relying on argparse to reject an unrecognized flag).
+    for seg in segments or []:
+        if "crew-set" not in seg:
+            continue
+        if not any(t == "--type" or t.startswith("--type=") for t in seg):
+            continue
+        if not crew_id:
+            continue  # wingman'"'"'s own top-level session - always allowed
+        target = flag_value(seg, "--id") or ""
+        if _is_self_target(target):
+            continue  # ordinary self-report - allowed
+        deny(
+            "Setting --type on a crew id other than your own "
+            "($WINGMAN_CREW_ID) is not yours to do from a crew session "
+            "(issue #136) - every legitimate type assignment happens once, "
+            "at crew-add time, and this hook now trusts `type` as one of "
+            "the review-evidence gate'"'"'s roster fields (see issue #132). "
+            "Report --status blocked if you believe you genuinely need this."
+        )
+
+
 check_allow_merge_grant()
 check_review_gate_waiver_grant()
 check_crew_add_restriction()
 check_crew_set_delivery_restriction()
+check_crew_set_type_restriction()
 check_merge_paths()
 
 # Both known-shape checks above have already had their chance to deny (or,
