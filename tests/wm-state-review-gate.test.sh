@@ -6,6 +6,15 @@
 # as a merge-authorized one, and bin/spawn-crew's --waive-review-gate wiring
 # end-to-end (no-merge-guard.sh's own test file covers the hook's actual
 # enforcement logic - this file only covers that the field lands correctly).
+#
+# Also covers the review_commit_approve/review_commit_request_changes/
+# review_delivery_bound roster fields (issue #135's spawn-time hash-
+# commitment scheme) at the same state-engine level: crew-add --review-token,
+# review-sign, and crew-set --regenerate-review-token/--delivery-driven
+# regeneration. The hook's actual proof-marker verification, and the
+# self-grant restriction on --regenerate-review-token, are covered end-to-end
+# in tests/no-merge-guard.test.sh instead, per this file's own scope line
+# above.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -15,6 +24,25 @@ import sys, json
 v = json.load(sys.stdin).get(sys.argv[1])
 print("" if v is None else ("true" if v else "false"))
 ' "$2"
+}
+
+# Like field_of, but returns the raw string value (not coerced to true/false)
+# - needed for review_commit_approve/review_delivery_bound, which are hex
+# strings or PR URLs, not booleans.
+raw_field_of() {
+  wm_state crew-get --id "$1" | uv run --no-project --quiet python -c '
+import sys, json
+v = json.load(sys.stdin).get(sys.argv[1])
+print("" if v is None else v)
+' "$2"
+}
+
+random_token() {
+  uv run --no-project --quiet python -c 'import secrets; print(secrets.token_hex(32))'
+}
+
+sha256_hex() {
+  uv run --no-project --quiet python -c 'import sys, hashlib; print(hashlib.sha256(bytes.fromhex(sys.argv[1])).hexdigest())' "$1"
 }
 
 test_new_home
@@ -104,6 +132,201 @@ id2="$("$SPAWN" --type developer --repo "$WS" --objective "test, no waiver" 2>/d
 assert_true "a plain spawn-crew call (no waiver flag) succeeds" "[ -n '$id2' ]"
 assert_eq "...and defaults review_gate_waived to false" \
   "$(field_of "$id2" review_gate_waived)" "false"
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# issue #135: spawn-time per-verdict hash commitments. This file covers only
+# that the fields land correctly at the state-engine level - no-merge-guard.
+# test.sh's own "issue #135" section covers the hook's actual enforcement
+# (the paired end-to-end half for tests 14-16 below, mirroring how tests 7/7a
+# there already pair with tests 14/15 here for the earlier rounds of this
+# same fix).
+# ============================================================================
+
+# --- test 10: crew-add --review-token stores only the derived commitments, -
+# never the raw token itself.
+TOKEN10="$(random_token)"
+wm_state crew-add --id rev10 --type reviewer --repo /tmp \
+  --window w10 --session-id s10 --review-token "$TOKEN10" >/dev/null
+COMMIT10="$(raw_field_of rev10 review_commit_approve)"
+assert_true "crew-add --review-token stores a review_commit_approve commitment" \
+  "[ -n '$COMMIT10' ]"
+assert_true "...and a review_commit_request_changes commitment too" \
+  "[ -n '$(raw_field_of rev10 review_commit_request_changes)' ]"
+RAW_DUMP="$(wm_state crew-get --id rev10)"
+assert_not_contains "the raw token itself never appears anywhere in crew-get's output" \
+  "$RAW_DUMP" "$TOKEN10"
+
+# A reviewer spawned with NO token leaves both commitment fields None -
+# unchanged, backward-compatible default.
+wm_state crew-add --id rev10-notoken --type reviewer --repo /tmp \
+  --window w10b --session-id s10b >/dev/null
+assert_eq "crew-add with no --review-token leaves review_commit_approve empty" \
+  "$(raw_field_of rev10-notoken review_commit_approve)" ""
+
+# A non-reviewer type is unaffected even if --review-token is somehow passed.
+wm_state crew-add --id dev10 --type developer --repo /tmp \
+  --window w10c --session-id s10c --review-token "$(random_token)" >/dev/null
+assert_eq "--review-token on a non-reviewer type is a no-op (no commitment stored)" \
+  "$(raw_field_of dev10 review_commit_approve)" ""
+
+# --- test 11: review-sign reproduces the exact commitment crew-add derived -
+# (round-trip), and --token overrides the environment value.
+PREIMAGE10="$(WM_REVIEW_TOKEN="$TOKEN10" WINGMAN_CREW_ID=rev10 wm_state review-sign --verdict approve)"
+assert_eq "review-sign's preimage round-trips to the commitment crew-add derived" \
+  "$(sha256_hex "$PREIMAGE10")" "$COMMIT10"
+
+TOKEN11B="$(random_token)"
+PREIMAGE_OVERRIDE="$(WM_REVIEW_TOKEN="$TOKEN10" WINGMAN_CREW_ID=rev10 wm_state review-sign --token "$TOKEN11B" --verdict approve)"
+PREIMAGE_FROM_TOKEN11B_DIRECT="$(WM_REVIEW_TOKEN="$TOKEN11B" WINGMAN_CREW_ID=rev10 wm_state review-sign --verdict approve)"
+assert_eq "review-sign --token overrides \$WM_REVIEW_TOKEN" \
+  "$PREIMAGE_OVERRIDE" "$PREIMAGE_FROM_TOKEN11B_DIRECT"
+assert_true "...and the override genuinely changes the output (different token, different preimage)" \
+  "[ '$PREIMAGE_OVERRIDE' != '$PREIMAGE10' ]"
+
+# --- test 12: review-sign with no token anywhere exits nonzero, never -----
+# silently producing a bogus value.
+if err="$(WINGMAN_CREW_ID=rev10 wm_state review-sign --verdict approve 2>&1 >/dev/null)"; then
+  assert_true "review-sign with no WM_REVIEW_TOKEN/--token must fail, not succeed" "false"
+else
+  assert_contains "review-sign's failure message names what's missing" \
+    "$err" "WM_REVIEW_TOKEN"
+fi
+
+# --- test 13: crew-set --regenerate-review-token overwrites both commitment
+# fields; a proof derived from the OLD token no longer matches.
+TOKEN13_OLD="$(random_token)"
+wm_state crew-add --id rev13 --type reviewer --repo /tmp \
+  --window w13 --session-id s13 --review-token "$TOKEN13_OLD" >/dev/null
+COMMIT13_OLD="$(raw_field_of rev13 review_commit_approve)"
+PREIMAGE13_OLD="$(WM_REVIEW_TOKEN="$TOKEN13_OLD" WINGMAN_CREW_ID=rev13 wm_state review-sign --verdict approve)"
+
+TOKEN13_NEW="$(random_token)"
+wm_state crew-set --id rev13 --regenerate-review-token "$TOKEN13_NEW" >/dev/null
+COMMIT13_NEW="$(raw_field_of rev13 review_commit_approve)"
+assert_true "--regenerate-review-token changes the commitment on record" \
+  "[ '$COMMIT13_OLD' != '$COMMIT13_NEW' ]"
+assert_true "a proof derived from the OLD token no longer matches the NEW commitment" \
+  "[ '$(sha256_hex "$PREIMAGE13_OLD")' != '$COMMIT13_NEW' ]"
+PREIMAGE13_NEW="$(WM_REVIEW_TOKEN="$TOKEN13_NEW" WINGMAN_CREW_ID=rev13 wm_state review-sign --verdict approve)"
+assert_eq "...but a proof derived from the NEW token does match" \
+  "$(sha256_hex "$PREIMAGE13_NEW")" "$COMMIT13_NEW"
+
+# --- test 14: delivery-change auto-regeneration ----------------------------
+TOKEN14="$(random_token)"
+wm_state crew-add --id rev14 --type reviewer --repo /tmp \
+  --window w14 --session-id s14 --review-token "$TOKEN14" >/dev/null
+COMMIT14_INITIAL="$(raw_field_of rev14 review_commit_approve)"
+
+# First-ever delivery set: leaves the commitment untouched (it was never
+# PR-specific to begin with) and sets review_delivery_bound.
+wm_state crew-set --id rev14 --delivery "https://github.com/acme/widgets/pull/701" >/dev/null
+assert_eq "a first-ever --delivery does not regenerate the commitment" \
+  "$(raw_field_of rev14 review_commit_approve)" "$COMMIT14_INITIAL"
+assert_eq "...and sets review_delivery_bound" \
+  "$(raw_field_of rev14 review_delivery_bound)" "https://github.com/acme/widgets/pull/701"
+
+# A SECOND, different delivery regenerates both commitment fields, advances
+# review_delivery_bound, and prints a review-token line.
+regen_out="$(wm_state crew-set --id rev14 --delivery "https://github.com/acme/widgets/pull/702")"
+assert_contains "a genuine delivery CHANGE prints a review-token line" \
+  "$regen_out" "review-token: "
+COMMIT14_AFTER="$(raw_field_of rev14 review_commit_approve)"
+assert_true "...and the commitment actually changed" \
+  "[ '$COMMIT14_INITIAL' != '$COMMIT14_AFTER' ]"
+assert_eq "...and review_delivery_bound advanced to the new value" \
+  "$(raw_field_of rev14 review_delivery_bound)" "https://github.com/acme/widgets/pull/702"
+
+# A REPEATED delivery (same value already on record) is an idempotent no-op.
+COMMIT14_BEFORE_REPEAT="$COMMIT14_AFTER"
+wm_state crew-set --id rev14 --delivery "https://github.com/acme/widgets/pull/702" >/dev/null
+assert_eq "re-setting the SAME delivery value does not regenerate the commitment" \
+  "$(raw_field_of rev14 review_commit_approve)" "$COMMIT14_BEFORE_REPEAT"
+
+# --- test 15: review_delivery_bound survives a clear (round 2 regression) --
+TOKEN15="$(random_token)"
+wm_state crew-add --id rev15 --type reviewer --repo /tmp \
+  --window w15 --session-id s15 --review-token "$TOKEN15" >/dev/null
+wm_state crew-set --id rev15 --delivery "https://github.com/acme/widgets/pull/801" >/dev/null
+assert_eq "review_delivery_bound is set on the first delivery" \
+  "$(raw_field_of rev15 review_delivery_bound)" "https://github.com/acme/widgets/pull/801"
+
+wm_state crew-set --id rev15 --delivery "" >/dev/null
+assert_eq "clearing --delivery empties the live delivery field" \
+  "$(field_of rev15 delivery)" ""
+assert_eq "...but review_delivery_bound is UNCHANGED by the clear (round 2 fix)" \
+  "$(raw_field_of rev15 review_delivery_bound)" "https://github.com/acme/widgets/pull/801"
+
+COMMIT15_BEFORE="$(raw_field_of rev15 review_commit_approve)"
+wm_state crew-set --id rev15 --delivery "https://github.com/acme/widgets/pull/802" >/dev/null
+assert_true "a delivery set AFTER a clear still regenerates against the pre-clear bound" \
+  "[ '$COMMIT15_BEFORE' != '$(raw_field_of rev15 review_commit_approve)' ]"
+assert_eq "...and review_delivery_bound advances to the new value" \
+  "$(raw_field_of rev15 review_delivery_bound)" "https://github.com/acme/widgets/pull/802"
+
+# --- test 16: --regenerate-review-token backfills review_delivery_bound for
+# a legacy-first-commitment reviewer (round 3 regression). Pure state-engine
+# here (round-4 should-fix 2) - the paired end-to-end assertion (a resumed
+# reviewer's stale PR-X proof denied on PR-Y) lives in no-merge-guard.
+# test.sh, which alone has the gh-fixture/run_hook machinery this file's own
+# header comment scopes out.
+wm_state crew-add --id rev16 --type reviewer --repo /tmp \
+  --window w16 --session-id s16 >/dev/null
+assert_eq "a legacy (no-token) reviewer has no commitment yet" \
+  "$(raw_field_of rev16 review_commit_approve)" ""
+
+wm_state crew-set --id rev16 --delivery "https://github.com/acme/widgets/pull/901" >/dev/null
+assert_eq "...and setting --delivery while still uncommitted leaves it uncommitted" \
+  "$(raw_field_of rev16 review_commit_approve)" ""
+# The delivery-driven trigger is itself gated on an EXISTING commitment
+# (review_commit_approve truthy) - an untokened record has nothing to
+# invalidate yet, so review_delivery_bound stays untouched (None) here too.
+# This is exactly the gap --regenerate-review-token's backfill exists to
+# close, asserted next.
+assert_eq "review_delivery_bound is NOT tracked yet for an uncommitted record" \
+  "$(raw_field_of rev16 review_delivery_bound)" ""
+
+# Simulate bin/crew-resume regenerating this pre-existing, already-delivery-
+# set record's first-ever commitment.
+TOKEN16="$(random_token)"
+wm_state crew-set --id rev16 --regenerate-review-token "$TOKEN16" >/dev/null
+assert_true "regenerate-review-token mints the first-ever commitment" \
+  "[ -n '$(raw_field_of rev16 review_commit_approve)' ]"
+assert_eq "...and BACKFILLS review_delivery_bound to the pre-existing delivery (round 3 fix)" \
+  "$(raw_field_of rev16 review_delivery_bound)" "https://github.com/acme/widgets/pull/901"
+
+# A following delivery CHANGE is now correctly read as a genuine change (not
+# a first-ever assignment) and regenerates.
+COMMIT16_BEFORE="$(raw_field_of rev16 review_commit_approve)"
+wm_state crew-set --id rev16 --delivery "https://github.com/acme/widgets/pull/902" >/dev/null
+assert_true "the next delivery CHANGE after a resume-backfill correctly regenerates" \
+  "[ '$COMMIT16_BEFORE' != '$(raw_field_of rev16 review_commit_approve)' ]"
+
+# --- test 17: a 3+-step clear/reset sequence (round 3 nice-to-have) --------
+TOKEN17="$(random_token)"
+wm_state crew-add --id rev17 --type reviewer --repo /tmp \
+  --window w17 --session-id s17 --review-token "$TOKEN17" >/dev/null
+wm_state crew-set --id rev17 --delivery "https://github.com/acme/widgets/pull/X" >/dev/null
+COMMIT17_X="$(raw_field_of rev17 review_commit_approve)"
+
+wm_state crew-set --id rev17 --delivery "" >/dev/null
+wm_state crew-set --id rev17 --delivery "" >/dev/null
+assert_eq "a repeated clear is a no-op on review_delivery_bound" \
+  "$(raw_field_of rev17 review_delivery_bound)" "https://github.com/acme/widgets/pull/X"
+
+# Re-setting the SAME value as the still-tracked bound is an idempotent
+# no-op, even after intervening clears.
+wm_state crew-set --id rev17 --delivery "https://github.com/acme/widgets/pull/X" >/dev/null
+assert_eq "re-asserting the same bound value (after clears) does not regenerate" \
+  "$(raw_field_of rev17 review_commit_approve)" "$COMMIT17_X"
+
+wm_state crew-set --id rev17 --delivery "" >/dev/null
+wm_state crew-set --id rev17 --delivery "https://github.com/acme/widgets/pull/Y" >/dev/null
+assert_true "a genuinely different delivery, several steps later, still regenerates" \
+  "[ '$COMMIT17_X' != '$(raw_field_of rev17 review_commit_approve)' ]"
+assert_eq "...and review_delivery_bound reaches the final value" \
+  "$(raw_field_of rev17 review_delivery_bound)" "https://github.com/acme/widgets/pull/Y"
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 

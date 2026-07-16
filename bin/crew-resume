@@ -44,6 +44,14 @@
 # state has already flipped back to "clear", so the guard is a no-op there.
 # A missing/unreadable state file reads as "clear" (fail open), matching
 # wm_state outage-update's own default for a fresh install.
+#
+# Review-signing token regeneration (issue #135, reviewer type only): a
+# resumed reviewer's WM_REVIEW_TOKEN cannot be recovered from the crashed
+# process, so this mints a fresh one and calls `wm_state crew-set --id <id>
+# --regenerate-review-token <token>` before relaunching - see
+# bin/lib/wm-state.py's _apply_review_token. Invalidates any pre-crash
+# comment-fallback verdict until the resumed reviewer re-affirms it with the
+# new token (the resume nudge says so); fails closed, never open.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -177,6 +185,22 @@ EOF
   _cwd="$_repo"
   [ -n "$_worktree" ] && _cwd="$_worktree"
 
+  # --- regenerate the review-signing token (reviewer type only, issue #135) --
+  # WM_REVIEW_TOKEN is never persisted anywhere except the crashed process's
+  # own (now-gone) environment - it cannot be recovered, so a resumed
+  # reviewer needs a genuinely fresh one, exactly as bin/spawn-crew mints at
+  # first spawn. This also invalidates any pre-crash comment-fallback verdict
+  # (its proof no longer matches the regenerated commitment on record) until
+  # the resumed reviewer re-affirms it - an availability cost, never a
+  # security hole (fails closed). Stdout is redirected: the caller running
+  # this script has no legitimate need to see the raw token, and printing it
+  # would put it in that orchestrator session's own transcript for no reason.
+  _review_token=""
+  if [ "$_type" = reviewer ]; then
+    _review_token="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
+    wm_state crew-set --id "$_rid" --regenerate-review-token "$_review_token" >/dev/null
+  fi
+
   # --- write the resume launch script (avoids all in-tmux quoting) -----------
   _launch="$WM_HOME/crew/$_rid.resume.sh"
   {
@@ -217,6 +241,9 @@ EOF
     # handles.
     [ -n "$_is_git" ] && echo "export WINGMAN_IS_GIT=$_is_git"
     [ -n "$_has_remote" ] && echo "export WINGMAN_HAS_REMOTE=$_has_remote"
+    # The freshly regenerated review-signing token (reviewer type only),
+    # exactly like a fresh spawn - see the regeneration block above.
+    [ -n "$_review_token" ] && echo "export WM_REVIEW_TOKEN=$(quote "$_review_token")"
     wm_guard_test_fixture_agent "${WM_AGENT:-claude}"
     printf 'exec %s' "${WM_AGENT:-claude}"
     printf ' --resume %s' "$(quote "$_sid")"
@@ -243,8 +270,11 @@ EOF
   # answer to that dialog. Non-fatal here - the window and roster record are
   # already in place - but the nudge was NOT delivered, so it is surfaced rather
   # than silently assumed to have landed.
-  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" \
-    "Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
+  _resume_nudge="Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
+  # issue #135: a resumed reviewer's review-signing token was just
+  # regenerated above, invalidating any pre-crash comment-fallback proof.
+  [ "$_type" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
+  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge"
   if [ $? -eq 2 ]; then
     wm_warn "'$_rid': resume nudge NOT delivered - its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $_rid)"
   fi
