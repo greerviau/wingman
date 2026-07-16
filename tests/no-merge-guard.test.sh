@@ -427,6 +427,12 @@ GH_REVIEWS_JSON="$SCRATCH/reviews.json"
 GH_NODE_JSON="$SCRATCH/node.json"
 GH_LOG="$SCRATCH/gh.log"
 : > "$GH_LOG"
+# issue #138: the PR's current head commit, used throughout this section's
+# fixtures as `headRefOid` (and, for a genuine APPROVED review meant to be
+# fresh, that same review's own `commit.oid`) so shape-1/shape-2's new
+# staleness checks see a matching, non-stale head unless a fixture
+# deliberately diverges it to exercise staleness.
+HEAD_SHA_FRESH="deadbeef00000000000000000000000000000001"
 cat > "$SCRATCH/bin/gh" <<SH
 #!/usr/bin/env bash
 echo "\$@" >> "$GH_LOG"
@@ -453,8 +459,8 @@ wm_state crew-add --id devA --type developer --repo "$TEST_REPO" \
   --window wA --session-id sA --allow-merge >/dev/null
 
 # --- no reviews at all: denied, and NOT with the old merge_reason() text ---
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": []}
 JSON
 out="$(run_hook "gh pr merge 46")"
 assert_contains "review gate: no reviews at all is denied" "$out" '"permissionDecision": "deny"'
@@ -464,8 +470,8 @@ assert_not_contains "review gate: denial is the NEW reason, not the old merge_re
 
 # --- a COMMENTED review carrying the requester's OWN crew id's marker + ----
 # VERDICT: approve - self-approval, denied.
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:devA --> VERDICT: approve - looks fine"}
 ]}
 JSON
@@ -476,8 +482,8 @@ assert_contains "review gate: self-approval denial names it" "$out" "self-approv
 
 # --- a COMMENTED review from a DIFFERENT crew id + VERDICT: approve, but no -
 # matching type:reviewer roster record at all - unrecognized id, denied.
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:ghost-reviewer --> VERDICT: approve - lgtm"}
 ]}
 JSON
@@ -491,8 +497,8 @@ assert_contains "review gate: denial names the unrecognized id" "$out" "no match
 wm_state crew-add --id rev1 --type reviewer --repo "$TEST_REPO" \
   --window wr1 --session-id sr1 >/dev/null
 wm_state crew-set --id rev1 --delivery "https://github.com/acme/widgets/pull/46" >/dev/null
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"}
 ]}
 JSON
@@ -512,8 +518,8 @@ wm_state crew-set --id rev1 --delivery "https://github.com/acme/widgets/pull/46"
 wm_state crew-add --id rev-imposter --type developer --repo "$TEST_REPO" \
   --window wri --session-id sri >/dev/null
 wm_state crew-set --id rev-imposter --delivery "https://github.com/acme/widgets/pull/46" >/dev/null
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-imposter --> VERDICT: approve - lgtm"}
 ]}
 JSON
@@ -523,9 +529,9 @@ assert_contains "review gate: a non-reviewer-type crew id's approve is denied" \
 assert_contains "review gate: denial names the wrong type" "$out" "not \`reviewer\`"
 
 # --- a real APPROVED review state (any author) - allowed, no marker needed -
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
-  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good to me"}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good to me", "commit": {"oid": "$HEAD_SHA_FRESH"}}
 ]}
 JSON
 out="$(run_hook "gh pr merge 46")"
@@ -533,8 +539,8 @@ assert_eq "review gate: a real APPROVED review state is allowed regardless of ma
 
 # --- a stale request-changes verdict from an old round can't be shadowed by -
 # an earlier approve still counting as live: latest per crew id wins.
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"},
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: request changes - actually no"}
 ]}
@@ -544,8 +550,8 @@ assert_contains "review gate: a later request-changes shadows an earlier approve
   "$out" '"permissionDecision": "deny"'
 
 # --- ...and the reverse: a later approve supersedes an earlier request-changes
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: request changes - fix X"},
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - fixed, lgtm now"}
 ]}
@@ -560,8 +566,8 @@ wm_state crew-add --id rev-archived --type reviewer --repo "$TEST_REPO" \
 wm_state crew-set --id rev-archived --delivery "https://github.com/acme/widgets/pull/46" --status done >/dev/null
 wm_state standdown --id rev-archived >/dev/null
 wm_state prune >/dev/null
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-archived --> VERDICT: approve - lgtm"}
 ]}
 JSON
@@ -571,8 +577,8 @@ assert_eq "review gate: an archived (stood-down, pruned) reviewer record is stil
 # --- allow_merge + review_gate_waived: true, no reviews at all - allowed ---
 # (the waiver is honored - unchanged post-grant behavior).
 wm_state crew-set --id devA --review-gate-waived true >/dev/null
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": []}
 JSON
 out="$(run_hook "gh pr merge 46")"
 assert_eq "review gate: review_gate_waived honored with no reviews at all (no output)" "$out" ""
@@ -581,17 +587,17 @@ wm_state crew-set --id devA --review-gate-waived false >/dev/null
 # --- the REST merge endpoint shape (gh api -X PUT .../merge) goes through ---
 # the identical evidence check, resolving owner/repo/number straight out of
 # the REST path itself (no gh call needed to resolve the PR).
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": []}
 JSON
 out="$(run_hook "gh api -X PUT repos/acme/widgets/pulls/46/merge")"
 assert_contains "review gate: REST merge endpoint with no reviews is denied" \
   "$out" '"permissionDecision": "deny"'
 assert_contains "review gate: REST merge denial cites issue #132" "$out" "issue #132"
 
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
-  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good"}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good", "commit": {"oid": "$HEAD_SHA_FRESH"}}
 ]}
 JSON
 out="$(run_hook "gh api -X PUT repos/acme/widgets/pulls/46/merge")"
@@ -606,17 +612,17 @@ cat > "$GH_NODE_JSON" <<'JSON'
 JSON
 GRAPHQL_MERGE='gh api graphql -f query='"'"'mutation{mergePullRequest(input:{pullRequestId:"PR_kwABC"}){clientMutationId}}'"'"''
 
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": []}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": []}
 JSON
 out="$(run_hook "$GRAPHQL_MERGE")"
 assert_contains "review gate: graphql mergePullRequest with no reviews is denied" \
   "$out" '"permissionDecision": "deny"'
 assert_contains "review gate: graphql merge denial cites issue #132" "$out" "issue #132"
 
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
-  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good"}
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "looks good", "commit": {"oid": "$HEAD_SHA_FRESH"}}
 ]}
 JSON
 out="$(run_hook "$GRAPHQL_MERGE")"
@@ -813,9 +819,9 @@ unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 export WINGMAN_CREW_ID=devA
 export WINGMAN_CREW_TYPE=developer
 
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
-  {"state": "APPROVED", "author": {"login": "real-human"}, "body": "lgtm"},
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "APPROVED", "author": {"login": "real-human"}, "body": "lgtm", "commit": {"oid": "$HEAD_SHA_FRESH"}},
   {"state": "CHANGES_REQUESTED", "author": {"login": "real-human"}, "body": "actually no"}
 ]}
 JSON
@@ -823,10 +829,10 @@ out="$(run_hook "gh pr merge 46")"
 assert_contains "shape-1: a later CHANGES_REQUESTED from the SAME real reviewer supersedes an earlier APPROVED" \
   "$out" '"permissionDecision": "deny"'
 
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "CHANGES_REQUESTED", "author": {"login": "real-human"}, "body": "fix X"},
-  {"state": "APPROVED", "author": {"login": "real-human"}, "body": "fixed, lgtm now"}
+  {"state": "APPROVED", "author": {"login": "real-human"}, "body": "fixed, lgtm now", "commit": {"oid": "$HEAD_SHA_FRESH"}}
 ]}
 JSON
 out="$(run_hook "gh pr merge 46")"
@@ -834,10 +840,10 @@ assert_eq "shape-1: ...and the reverse - a later APPROVED from the same reviewer
 
 # A different real reviewer's still-live APPROVED is unaffected by an
 # unrelated reviewer's own CHANGES_REQUESTED.
-cat > "$GH_REVIEWS_JSON" <<'JSON'
-{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
   {"state": "CHANGES_REQUESTED", "author": {"login": "reviewer-one"}, "body": "fix X"},
-  {"state": "APPROVED", "author": {"login": "reviewer-two"}, "body": "lgtm from me"}
+  {"state": "APPROVED", "author": {"login": "reviewer-two"}, "body": "lgtm from me", "commit": {"oid": "$HEAD_SHA_FRESH"}}
 ]}
 JSON
 out="$(run_hook "gh pr merge 46")"
@@ -1103,6 +1109,126 @@ cat > "$GH_REVIEWS_JSON" <<JSON
 JSON
 out="$(run_hook "gh pr merge 401")"
 assert_contains "issue #135 round 3 regression: a resumed reviewer's stale PR-X proof is denied on PR-Y (backfill closed the gap)" \
+  "$out" '"permissionDecision": "deny"'
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
+# ============================================================================
+# issue #138: review evidence must be bound to the PR's CURRENT head commit,
+# not merely genuine at some point in the past. See
+# docs/analysis/2026-07-16-issue-138-review-evidence-commit-binding-plan.md.
+# Uses a fresh reviewer (rev138) and a fresh PR number (500) to stay isolated
+# from the mutable roster state the earlier sections in this file left
+# behind.
+# ============================================================================
+export WINGMAN_CREW_ID=dev-tok
+export WINGMAN_CREW_TYPE=developer
+
+REVIEW_TOKEN138="$(uv run --no-project --quiet python -c 'import secrets;print(secrets.token_hex(32))')"
+wm_state crew-add --id rev138 --type reviewer --repo "$TEST_REPO" \
+  --window wr138 --session-id sr138 --review-token "$REVIEW_TOKEN138" >/dev/null
+wm_state crew-set --id rev138 --delivery "https://github.com/acme/widgets/pull/500" >/dev/null
+
+SHA_A="1111111111111111111111111111111111111a"
+SHA_B="2222222222222222222222222222222222222b"
+
+# --- test 1: shape 1, a fresh APPROVED review (commit.oid == headRefOid) is
+# allowed - the explicit matching case, distinct from the incidental coverage
+# the fixture updates earlier in this file already give it.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "headRefOid": "$SHA_A", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "lgtm", "commit": {"oid": "$SHA_A"}}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_eq "issue #138: shape 1, a fresh APPROVED review (matching commit.oid) is allowed (no output)" "$out" ""
+
+# --- test 2: shape 1, a STALE APPROVED review (commit.oid differs from the
+# PR's current headRefOid - new commits landed after the approval) is denied.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "headRefOid": "$SHA_B", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "lgtm", "commit": {"oid": "$SHA_A"}}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_contains "issue #138: shape 1, a stale APPROVED review is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "issue #138: shape-1 stale denial names stale evidence / issue #138" \
+  "$out" "stale evidence (issue #138)"
+
+# --- test 3: shape 1, an APPROVED review with NO commit field at all is
+# denied - defensive; absence is never treated as license to skip the check.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "headRefOid": "$SHA_A", "reviews": [
+  {"state": "APPROVED", "author": {"login": "a-real-human"}, "body": "lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_contains "issue #138: shape 1, an APPROVED review with no commit field is denied" \
+  "$out" '"permissionDecision": "deny"'
+
+# --- test 4: shape 2, a freshly commit-bound approve (review-sign --commit
+# matching the fixture's headRefOid) is allowed - the full Tier 2 path.
+PROOF138_A="$(WM_REVIEW_TOKEN="$REVIEW_TOKEN138" WINGMAN_CREW_ID=rev138 wm_state review-sign --verdict approve --commit "$SHA_A")"
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "headRefOid": "$SHA_A", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev138 -->\n<!-- wingman-review-proof:$PROOF138_A -->\nVERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_eq "issue #138: shape 2, a freshly commit-bound approve matching the current head is allowed (no output)" "$out" ""
+
+# --- test 5: the exact issue #138 replay repro, now closed - a byte-for-byte
+# repost of the round-1 comment (same marker, same proof, VERDICT: approve)
+# after the head has moved on to commit B is denied.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "headRefOid": "$SHA_B", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev138 -->\n<!-- wingman-review-proof:$PROOF138_A -->\nVERDICT: approve - lgtm"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev138 -->\n<!-- wingman-review-proof:$PROOF138_A -->\nVERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_contains "issue #138: the exact replay repro (byte-for-byte repost of an old genuine approve) is denied" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "issue #138: replay denial names stale evidence" \
+  "$out" "stale evidence"
+
+# --- test 6: shape 2, a genuine re-sign for the new head after a push is
+# allowed - confirms the fix does not block genuine re-approval, only stale
+# replay.
+PROOF138_B="$(WM_REVIEW_TOKEN="$REVIEW_TOKEN138" WINGMAN_CREW_ID=rev138 wm_state review-sign --verdict approve --commit "$SHA_B")"
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "headRefOid": "$SHA_B", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev138 -->\n<!-- wingman-review-proof:$PROOF138_A -->\nVERDICT: approve - lgtm"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev138 -->\n<!-- wingman-review-proof:$PROOF138_B -->\nVERDICT: approve - re-reviewed after the push, still lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_eq "issue #138: a genuine re-sign for the new head after a push is allowed (no output)" "$out" ""
+
+# --- test 7: shape 2, Tier 1 backward compatibility still holds - a reviewer
+# that never called review-sign --commit (review_commit_approve_sha still
+# None) is still allowed even though the fixture now also carries a
+# headRefOid the record's review_commit_approve_sha is never compared
+# against. Reuses rev-tok1/PROOF_APPROVE1 from the issue #135 section above.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$SHA_A", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-tok1 -->\n<!-- wingman-review-proof:$PROOF_APPROVE1 -->\nVERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "issue #138: Tier 1 backward compat - a never-commit-bound reviewer's proof is still allowed (no output)" "$out" ""
+
+# --- test 8: a missing/empty headRefOid in the gh pr view response fails
+# CLOSED - a fixture that would otherwise be a fresh, valid Tier-2 approve,
+# but with headRefOid omitted entirely from the top-level JSON.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 500, "url": "https://github.com/acme/widgets/pull/500", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev138 -->\n<!-- wingman-review-proof:$PROOF138_B -->\nVERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 500")"
+assert_contains "issue #138: a missing headRefOid fails closed (denied), not allowed unchecked" \
   "$out" '"permissionDecision": "deny"'
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE

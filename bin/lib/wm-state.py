@@ -404,6 +404,17 @@ def _review_commitment(preimage_bytes):
     return hashlib.sha256(preimage_bytes).hexdigest()
 
 
+def _review_preimage_for_commit(token_bytes, crew_id, commit_sha):
+    # issue #138: bound to a SPECIFIC PR head commit, unlike _review_preimage
+    # (which is fixed per id+verdict forever). Used only for "approve" - the
+    # only verdict this merge gate's staleness check consumes (see #135's
+    # decision to leave request-changes unchecked).
+    return hashlib.sha256(
+        token_bytes + b"\x00" + crew_id.encode("utf-8") + b"\x00" +
+        b"approve" + b"\x00" + commit_sha.strip().lower().encode("utf-8")
+    ).digest()
+
+
 def _apply_review_token(record, token_hex):
     """(Re)derive and store review_commit_approve/review_commit_request_changes
     from a raw hex token, discarding the raw value immediately - shared by the
@@ -414,6 +425,14 @@ def _apply_review_token(record, token_hex):
         _review_preimage(token_bytes, record["id"], "approve"))
     record["review_commit_request_changes"] = _review_commitment(
         _review_preimage(token_bytes, record["id"], "request changes"))
+    # issue #138: a delivery-change or resume regeneration replaces
+    # review_commit_approve with a fresh, non-commit-bound legacy value -
+    # any review_commit_approve_sha left over from before would now compare
+    # a leftover, meaningless commit reference against whatever PR this
+    # record is newly pointed at. Reset to None (the same "not yet
+    # commit-bound" tier a never-signed reviewer already sits in) until the
+    # reviewer re-signs.
+    record["review_commit_approve_sha"] = None
 
 
 def cmd_crew_add(args):
@@ -473,6 +492,13 @@ def cmd_crew_add(args):
         # through to today's marker-only acceptance.
         "review_commit_approve": None,
         "review_commit_request_changes": None,
+        # The commit SHA the CURRENT review_commit_approve commitment is
+        # bound to (issue #138) - None until the reviewer has performed at
+        # least one commit-bound sign (`review-sign --commit`, see
+        # cmd_review_sign). This is the field hooks/no-merge-guard.sh's
+        # shape-2 staleness check consults; reset to None alongside every
+        # review_commit_approve regeneration by _apply_review_token.
+        "review_commit_approve_sha": None,
         # A dedicated, monotonic marker of "the last non-empty delivery this
         # record was ever genuinely bound to" (issue #135, round 2) - see
         # cmd_crew_set's delivery-change regeneration trigger for why this
@@ -768,10 +794,13 @@ def cmd_crew_set(args):
 def cmd_review_sign(args):
     """Produce the preimage for a reviewer's own review-token commitment, to
     embed in a comment-fallback PR verdict (issue #135). Performs no file I/O
-    and touches no roster field, so any crew session may call it - only a
-    session that actually holds WM_REVIEW_TOKEN (a genuine reviewer, or one
-    resumed via --regenerate-review-token) produces a preimage that matches
-    anything a merge-gate check trusts."""
+    and touches no roster field UNLESS --commit is given with --verdict
+    approve (issue #138), in which case it also derives and persists a fresh,
+    commit-bound commitment onto this session's OWN roster record before
+    printing the preimage. Any crew session may call this - only a session
+    that actually holds WM_REVIEW_TOKEN (a genuine reviewer, or one resumed
+    via --regenerate-review-token) produces a preimage that matches anything
+    a merge-gate check trusts."""
     token_hex = args.token or os.environ.get("WM_REVIEW_TOKEN", "")
     crew_id = os.environ.get("WINGMAN_CREW_ID", "")
     if not token_hex or not crew_id:
@@ -780,9 +809,35 @@ def cmd_review_sign(args):
                   "with a review token has this")
     try:
         token_bytes = bytes.fromhex(token_hex)
-        preimage = _review_preimage(token_bytes, crew_id, args.verdict)
-    except ValueError as e:
-        sys.exit("wm-state: %s" % e)
+    except ValueError:
+        sys.exit("wm-state: WM_REVIEW_TOKEN/--token is not valid hex")
+
+    if args.commit and args.verdict == "approve":
+        # issue #138: derive a commitment bound to THIS commit and persist it
+        # onto this session's OWN roster record before printing the preimage.
+        # Self-scoped by construction - crew_id always comes from THIS
+        # process's own environment, never a --id flag, so this write can
+        # never target another crew member's record and needs no additional
+        # hook-side gating (matches #135's reasoning for why review-sign
+        # needed none).
+        preimage = _review_preimage_for_commit(token_bytes, crew_id, args.commit)
+        commitment = _review_commitment(preimage)
+        ensure_home()
+        with with_locked(crew_json_path()):
+            roster = load_roster()
+            for r in roster:
+                if r.get("id") == crew_id:
+                    r["review_commit_approve"] = commitment
+                    r["review_commit_approve_sha"] = args.commit.strip().lower()
+                    r["updated"] = now()
+                    write_json(crew_json_path(), roster)
+                    render_board()
+                    break
+    else:
+        try:
+            preimage = _review_preimage(token_bytes, crew_id, args.verdict)
+        except ValueError as e:
+            sys.exit("wm-state: %s" % e)
     print(preimage.hex())
 
 
@@ -2271,6 +2326,10 @@ def build_parser():
     # $WM_REVIEW_TOKEN went stale mid-session (its own delivery-change
     # triggered regeneration) - see _apply_review_token's callers.
     a.add_argument("--token", default=None)
+    # issue #138: the PR's current head commit SHA at post time. Only takes
+    # effect for --verdict approve (see cmd_review_sign); omitted entirely,
+    # this reproduces today's exact pre-#138 behavior byte for byte.
+    a.add_argument("--commit", default=None)
     a.set_defaults(fn=cmd_review_sign)
 
     a = sub.add_parser("crew-list")
