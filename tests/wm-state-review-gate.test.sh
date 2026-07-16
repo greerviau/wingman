@@ -330,4 +330,108 @@ assert_eq "...and review_delivery_bound reaches the final value" \
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 
+# ============================================================================
+# issue #138: review-sign --commit derives and persists a per-commit
+# commitment (review_commit_approve_sha) onto the calling session's own
+# roster record, and _apply_review_token resets it whenever
+# review_commit_approve itself is regenerated. hooks/no-merge-guard.sh's own
+# test file covers the hook's actual staleness enforcement - this file only
+# covers that the fields land correctly, mirroring how it already scopes the
+# rest of the issue #135 fields above.
+# ============================================================================
+
+# --- test 18: review-sign --commit derives and persists a fresh, commit-bound
+# commitment onto the calling session's OWN roster record.
+TOKEN18="$(random_token)"
+wm_state crew-add --id rev18 --type reviewer --repo /tmp \
+  --window w18 --session-id s18 --review-token "$TOKEN18" >/dev/null
+COMMIT18_INITIAL="$(raw_field_of rev18 review_commit_approve)"
+assert_eq "a fresh reviewer record has no commit-bound sha yet" \
+  "$(raw_field_of rev18 review_commit_approve_sha)" ""
+SHA18_A="deadbeef00000000000000000000000000000001"
+
+PREIMAGE18_A="$(WM_REVIEW_TOKEN="$TOKEN18" WINGMAN_CREW_ID=rev18 wm_state review-sign --verdict approve --commit "$SHA18_A")"
+assert_true "review-sign --commit changes review_commit_approve from its crew-add-time value" \
+  "[ '$COMMIT18_INITIAL' != '$(raw_field_of rev18 review_commit_approve)' ]"
+assert_eq "...and review_commit_approve_sha now equals the signed commit" \
+  "$(raw_field_of rev18 review_commit_approve_sha)" "$SHA18_A"
+COMMIT18_AFTER_A="$(raw_field_of rev18 review_commit_approve)"
+
+# --- test 19: a second review-sign --commit <different-sha> overwrites both
+# fields again; a preimage derived against the FIRST commit no longer
+# round-trips to the current commitment.
+SHA18_B="deadbeef00000000000000000000000000000002"
+WM_REVIEW_TOKEN="$TOKEN18" WINGMAN_CREW_ID=rev18 wm_state review-sign --verdict approve --commit "$SHA18_B" >/dev/null
+COMMIT18_AFTER_B="$(raw_field_of rev18 review_commit_approve)"
+assert_true "a second review-sign --commit <different-sha> changes the commitment again" \
+  "[ '$COMMIT18_AFTER_A' != '$COMMIT18_AFTER_B' ]"
+assert_eq "...and review_commit_approve_sha advances to the new value" \
+  "$(raw_field_of rev18 review_commit_approve_sha)" "$SHA18_B"
+assert_true "a preimage derived against the FIRST commit no longer round-trips to the current commitment" \
+  "[ '$(sha256_hex "$PREIMAGE18_A")' != '$COMMIT18_AFTER_B' ]"
+
+# --- test 20: review-sign --verdict "request changes" --commit <sha> is a
+# no-op on review_commit_approve/review_commit_approve_sha - --commit only
+# takes effect for approve.
+COMMIT18_BEFORE_RC="$(raw_field_of rev18 review_commit_approve)"
+SHA18_BEFORE_RC="$(raw_field_of rev18 review_commit_approve_sha)"
+RC_COMMIT_BEFORE="$(raw_field_of rev18 review_commit_request_changes)"
+PREIMAGE_RC="$(WM_REVIEW_TOKEN="$TOKEN18" WINGMAN_CREW_ID=rev18 wm_state review-sign --verdict "request changes" --commit "deadbeef00000000000000000000000000000003")"
+assert_eq "review-sign request-changes --commit does not touch review_commit_approve" \
+  "$(raw_field_of rev18 review_commit_approve)" "$COMMIT18_BEFORE_RC"
+assert_eq "...or review_commit_approve_sha" \
+  "$(raw_field_of rev18 review_commit_approve_sha)" "$SHA18_BEFORE_RC"
+assert_eq "...and review_commit_request_changes is unchanged too (no roster write at all)" \
+  "$(raw_field_of rev18 review_commit_request_changes)" "$RC_COMMIT_BEFORE"
+assert_eq "the printed preimage matches the pre-#138 request-changes preimage exactly" \
+  "$(sha256_hex "$PREIMAGE_RC")" "$RC_COMMIT_BEFORE"
+
+# --- test 21: review-sign with no --commit reproduces exactly today's #135
+# behavior - no roster write at all, preimage round-trips against whatever
+# commitment was already on file. Uses a FRESH record that has never been
+# commit-bound (rev18 no longer qualifies after tests 18-19 rebound its
+# review_commit_approve to a commit-bound value) so the pre-#138,
+# non-commit-bound preimage is the thing actually on file to round-trip
+# against.
+TOKEN21="$(random_token)"
+wm_state crew-add --id rev21 --type reviewer --repo /tmp \
+  --window w21 --session-id s21 --review-token "$TOKEN21" >/dev/null
+COMMIT21_BEFORE="$(raw_field_of rev21 review_commit_approve)"
+SHA21_BEFORE="$(raw_field_of rev21 review_commit_approve_sha)"
+PREIMAGE21="$(WM_REVIEW_TOKEN="$TOKEN21" WINGMAN_CREW_ID=rev21 wm_state review-sign --verdict approve)"
+assert_eq "review-sign with no --commit does not change review_commit_approve" \
+  "$(raw_field_of rev21 review_commit_approve)" "$COMMIT21_BEFORE"
+assert_eq "...or review_commit_approve_sha" \
+  "$(raw_field_of rev21 review_commit_approve_sha)" "$SHA21_BEFORE"
+assert_eq "...and its preimage round-trips against whatever commitment was already on file" \
+  "$(sha256_hex "$PREIMAGE21")" "$COMMIT21_BEFORE"
+
+# --- test 22: _apply_review_token resets review_commit_approve_sha to None -
+# both a delivery-change regeneration and an explicit
+# --regenerate-review-token must clear a stale commit-bound sha, not just a
+# stale commitment.
+TOKEN22="$(random_token)"
+wm_state crew-add --id rev22 --type reviewer --repo /tmp \
+  --window w22 --session-id s22 --review-token "$TOKEN22" >/dev/null
+wm_state crew-set --id rev22 --delivery "https://github.com/acme/widgets/pull/950" >/dev/null
+SHA22="deadbeef00000000000000000000000000000009"
+WM_REVIEW_TOKEN="$TOKEN22" WINGMAN_CREW_ID=rev22 wm_state review-sign --verdict approve --commit "$SHA22" >/dev/null
+assert_eq "rev22 is commit-bound before the delivery-change regeneration" \
+  "$(raw_field_of rev22 review_commit_approve_sha)" "$SHA22"
+
+wm_state crew-set --id rev22 --delivery "https://github.com/acme/widgets/pull/951" >/dev/null
+assert_eq "a delivery-change regeneration resets review_commit_approve_sha to None" \
+  "$(raw_field_of rev22 review_commit_approve_sha)" ""
+
+# Re-bind, then verify --regenerate-review-token resets it too.
+SHA22B="deadbeef0000000000000000000000000000000a"
+WM_REVIEW_TOKEN="$TOKEN22" WINGMAN_CREW_ID=rev22 wm_state review-sign --verdict approve --commit "$SHA22B" >/dev/null
+assert_eq "rev22 is commit-bound again before the resume regeneration" \
+  "$(raw_field_of rev22 review_commit_approve_sha)" "$SHA22B"
+wm_state crew-set --id rev22 --regenerate-review-token "$(random_token)" >/dev/null
+assert_eq "--regenerate-review-token also resets review_commit_approve_sha to None" \
+  "$(raw_field_of rev22 review_commit_approve_sha)" ""
+
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
 test_summary

@@ -137,6 +137,44 @@
 # session on this shared-OS-user architecture is explicitly out of scope -
 # see that plan's "constraint that shapes every option" section).
 #
+# issue #138: both #135-closed shapes could still be STALE relative to the
+# PR's current head, distinct from forgery - #135 named this as an explicit
+# follow-up. A shape-1 `APPROVED` review submitted before new commits landed
+# remains genuinely valid GitHub state, but unless branch protection is
+# separately configured to dismiss stale reviews on push (invisible to this
+# hook), it stays load-bearing after the PR has moved on. A shape-2 proof is
+# worse: a byte-for-byte repost of an OLD, genuinely-issued `VERDICT: approve`
+# comment still carries a VALID proof (the hash commitment `review_commit_
+# approve` was, before this fix, fixed forever per id+verdict, never bound to
+# a specific commit) and would win under "latest verdict per marked id wins".
+# Two shortcuts were checked and rejected: comparing GitHub's own `commit.oid`
+# on a shape-2 review does not help, since a repost is a brand-new review
+# object stamped with whatever is HEAD *at repost time*, not what the stale
+# text still means; and a plaintext commit marker (or a hash of a public
+# preimage plus a commit SHA) is forgeable by anyone once the round-1 preimage
+# has been seen publicly, which it always has by the time a replay is
+# possible. What actually works: `review_commit_approve` must be RE-DERIVED
+# per commit by the reviewer's own process (the only holder of the token),
+# and the result written to the roster (a location the hook trusts and a
+# forging session cannot write) before it counts as current. `review-sign`
+# gains a `--commit <sha>` argument (used only for `approve`) that derives a
+# commit-bound commitment and persists it, alongside the commit SHA itself
+# (`review_commit_approve_sha`), onto the calling session's OWN roster
+# record - self-scoped by construction, needing no new hook-side gating, the
+# same reasoning #135 already used for `review-sign`'s general lack of
+# restriction. Shape 1 now additionally requires the latest `APPROVED`
+# review's own `commit.oid` to match the PR's current `headRefOid`; shape 2
+# now additionally requires `review_commit_approve_sha` (when present) to
+# match it too. Both comparisons fail closed on an empty/unresolvable
+# `headRefOid` by construction (no populated commit SHA can ever equal an
+# empty string). A record with no commit-bound sign yet (predates this fix,
+# or a delivery-change/resume regeneration not yet re-signed for a commit)
+# falls through to the pre-issue-#138 behavior unchanged - the same bounded,
+# additive backward-compat posture #135 established for its own proof check.
+# See `docs/analysis/2026-07-16-issue-138-review-evidence-commit-binding-plan.md`
+# for the full design, including the two rejected shortcuts and their exact
+# failure modes.
+#
 # The `--allow-merge` grant check does NOT rely on cmd_match.py resolving the
 # call to `wm-state.py` (unlike every other hook in this repo): the
 # documented invocation shape is `$WINGMAN_STATE crew-set --id ... `, and
@@ -328,7 +366,7 @@ def fetch_reviews(owner_repo, ref, exec_cwd):
         argv.append(str(ref))
     if owner_repo:
         argv += ["--repo", owner_repo]
-    argv += ["--json", "reviews,number,url"]
+    argv += ["--json", "reviews,number,url,headRefOid"]
     r = run_gh(argv, exec_cwd)
     if r is None or r.returncode != 0:
         return None
@@ -426,6 +464,13 @@ def verify_reviewer_approval(pr_json):
     reviews = pr_json.get("reviews") or []
     pr_number = pr_json.get("number")
     pr_url = pr_json.get("url") or ""
+    # issue #138: the PR'"'"'s current head commit, used to reject evidence that
+    # is genuinely valid but STALE relative to commits that landed after it
+    # was produced. An unresolvable/empty value can never equal a populated,
+    # real commit SHA, so every comparison below fails closed by construction
+    # - no separate upfront gate is needed (see this fix'"'"'s plan, "Fail-closed
+    # behavior on a missing headRefOid").
+    head_ref_oid = (pr_json.get("headRefOid") or "").strip().lower()
 
     # Shape 1: a real APPROVED review, any author. GitHub refuses this from
     # the PR'"'"'s own author, so an APPROVED/CHANGES_REQUESTED state can only
@@ -438,7 +483,15 @@ def verify_reviewer_approval(pr_json):
     # below), never a distinct-account signal, and collapsing it in here
     # would let one crew id'"'"'s marker verdict get silently shadowed by an
     # unrelated later comment under the same shared login.
-    latest_state_by_login = {}
+    #
+    # issue #138: the whole review object is now tracked per login (not just
+    # its state), because an APPROVED review that is stale relative to the
+    # PR'"'"'s CURRENT head must not be trusted even though it is entirely
+    # genuine - GitHub stamps every review with a `commit.oid` reflecting
+    # whatever was HEAD when it was submitted, and branch protection'"'"'s
+    # stale-review dismissal (if configured at all) is not something this
+    # hook has visibility into.
+    latest_review_by_login = {}
     for r in reviews:
         st = str(r.get("state") or "").upper()
         if st not in ("APPROVED", "CHANGES_REQUESTED"):
@@ -446,9 +499,23 @@ def verify_reviewer_approval(pr_json):
         login = ((r.get("author") or {}).get("login")) or ""
         if not login:
             continue
-        latest_state_by_login[login] = st
-    if any(st == "APPROVED" for st in latest_state_by_login.values()):
-        return True, ""
+        latest_review_by_login[login] = r  # gh returns chronological order; last wins
+
+    stale_shape1 = []
+    for login, r in latest_review_by_login.items():
+        if str(r.get("state") or "").upper() != "APPROVED":
+            continue
+        commit_oid = ((r.get("commit") or {}).get("oid") or "").strip().lower()
+        if commit_oid and commit_oid == head_ref_oid:
+            return True, ""
+        stale_shape1.append((login, commit_oid))
+
+    issues = []
+    for login, commit_oid in stale_shape1:
+        issues.append(
+            "%s'"'"'s APPROVED review was submitted against commit %s, but the "
+            "PR'"'"'s current head is now %s - stale evidence (issue #138)"
+            % (login, (commit_oid or "unknown")[:12], (head_ref_oid or "unknown")[:12]))
 
     # Shape 2: comment-fallback marker verdict. Only the LATEST verdict per
     # marked crew id counts (reviewer.md step 6'"'"'s own "a rerun stacks
@@ -469,7 +536,6 @@ def verify_reviewer_approval(pr_json):
         vm = VERDICT_RE.search(body)
         latest_by_id[m.group(1)] = (vm.group(1).lower() if vm else None, body)
 
-    issues = []
     for rid, (verdict, body) in latest_by_id.items():
         if verdict != "approve":
             continue
@@ -518,6 +584,24 @@ def verify_reviewer_approval(pr_json):
                     "recorded for this reviewer at spawn time - treating as "
                     "a forged approve (issue #135)" % rid)
                 continue
+        # issue #138: even a genuine, verified proof can be a byte-for-byte
+        # repost of OLD evidence - require the reviewer'"'"'s LATEST commit-bound
+        # sign (review_commit_approve_sha, only ever advanced by a fresh
+        # `review-sign --commit` call from a session holding the real token)
+        # to match the PR'"'"'s CURRENT head. Absent (a legacy sign predating
+        # issue #138, or a delivery-change/resume regeneration not yet
+        # re-signed for a commit), this check is skipped - the same bounded,
+        # additive backward-compat posture issue #135 established for the
+        # proof check itself.
+        commit_sha = (record.get("review_commit_approve_sha") or "").strip().lower()
+        if commit_sha and commit_sha != head_ref_oid:
+            issues.append(
+                "crew `%s` posted VERDICT: approve but its latest signed "
+                "commit (%s) does not match the PR'"'"'s current head (%s) - "
+                "stale evidence, likely because new commits landed after it "
+                "was signed (issue #138)"
+                % (rid, commit_sha[:12], (head_ref_oid or "unknown")[:12]))
+            continue
         return True, ""
 
     return False, no_evidence_reason(pr_number, pr_url, issues)
