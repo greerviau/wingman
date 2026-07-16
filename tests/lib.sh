@@ -48,6 +48,10 @@ test_new_home() {
   # inside a crew session, the inherited crew id would silently re-scope
   # watch-fleet and the Stop hook to that crew's (empty) reports.
   unset WINGMAN_CREW_ID
+  # A wingman/crew session (or a dev shell sourcing this box's autostart env)
+  # may export a non-default budget, which would silently invalidate every
+  # assertion that depends on the documented implicit default of 3.
+  unset WM_SPURIOUS_BUDGET_COUNT
   # Isolated Claude Code gate fixtures (issue #16), so bin/spawn-crew's
   # preflight trust/bypass checks never read (or write) a real developer
   # machine's ~/.claude.json / ~/.claude/settings.json, and never block a
