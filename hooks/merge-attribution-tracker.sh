@@ -2,8 +2,8 @@
 # merge-attribution-tracker.sh - a Claude Code PostToolUse hook (matcher
 # "Bash"). The other half of issue #46's requirement: "if an agent IS
 # authorized to merge, it must leave an attribution marker" - because a crew
-# session acts under the pilot's own GitHub credentials, `mergedBy`/`author`
-# report the pilot for every crew action (issue #50), so an agent merge and a
+# session acts under the human's own GitHub credentials, `mergedBy`/`author`
+# report the human for every crew action (issue #50), so an agent merge and a
 # genuine human merge are otherwise indistinguishable forever after.
 #
 # Fires automatically, as a side effect the agent cannot skip - never an
@@ -14,7 +14,7 @@
 # Trigger: a Bash tool call that SUCCEEDED (PostToolUse only fires on a
 # zero-exit Bash command - a failing one fires PostToolUseFailure instead;
 # see hooks/artifact-publish-tracker.sh's header for the same confirmed
-# wiring) from a crew session (WINGMAN_CREW_ID set - a bare pilot session has
+# wiring) from a crew session (WINGMAN_CREW_ID set - a bare human session has
 # no crew id and needs no attribution comment, since there is no agent
 # identity to disclose) whose command matched one of the merge shapes
 # hooks/no-merge-guard.sh gates:
@@ -32,11 +32,14 @@
 #     silent guarantee.
 #
 # Posts one PR comment identifying the crew member (id + type) that merged
-# it, via `gh pr comment`/`gh api graphql addComment`. Best-effort: any
-# failure (gh not authenticated in this exact call context, network hiccup,
-# an unresolvable PR reference) is swallowed silently rather than surfaced as
-# a tool error - the merge already happened, and a hook must not turn a
-# missed comment into a crashed turn.
+# it, via `gh pr comment`/`gh api graphql addComment`. The comment opens with
+# the same `<!-- wingman-crew:<id> -->` marker hooks/pr-open-marker-tracker.sh
+# prepends to a PR's body - one marker convention, not two - so every
+# crew-authored PR write in the repo carries it with no carve-out. Best-effort:
+# any failure (gh not authenticated in this exact call context, network
+# hiccup, an unresolvable PR reference) is swallowed silently rather than
+# surfaced as a tool error - the merge already happened, and a hook must not
+# turn a missed comment into a crashed turn.
 #
 # On a merge commit trailer instead of/in addition to a comment: deliberately
 # NOT implemented. This hook runs PostToolUse - after gh has already created
@@ -45,7 +48,7 @@
 # the shared default branch, which trades a comment (durable, visible,
 # reversible) for a history rewrite (exactly the class of destructive
 # operation this project's own git safety protocol reserves for explicit,
-# one-off pilot requests). The PR comment is the durable marker; it survives
+# one-off human requests). The PR comment is the durable marker; it survives
 # in the PR's own history even if the thread is later collapsed.
 #
 # Registered user-level by bin/doctor (crew sessions have their project root
@@ -85,15 +88,16 @@ if data.get("hook_event_name") != "PostToolUse" or data.get("tool_name") != "Bas
 crew_id = os.environ.get("WINGMAN_CREW_ID", "")
 crew_type = os.environ.get("WINGMAN_CREW_TYPE", "") or "?"
 if not crew_id:
-    sys.exit(0)  # a bare pilot session merged this - no agent identity to disclose
+    sys.exit(0)  # a bare human session merged this - no agent identity to disclose
 
 tool_input = data.get("tool_input", {}) or {}
 command = tool_input.get("command", "") or ""
 cwd = data.get("cwd") or os.getcwd()
 
 COMMENT_BODY = (
-    "Merged by wingman crew `%s` (type: `%s`), not by the pilot - see issue #46."
-    % (crew_id, crew_type)
+    "<!-- wingman-crew:%s -->\n"
+    "Merged by wingman crew `%s` (type: `%s`), not by the human - see issue #46."
+    % (crew_id, crew_id, crew_type)
 )
 
 

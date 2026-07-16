@@ -113,9 +113,31 @@ ev >/dev/null  # seed: baseline, nothing fires yet
 echo '{"number":11,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"> <!-- wingman-crew:dev-1 --> fixed, PTAL\n\nActually, one more thing before this merges."}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
 assert_contains "a same-login comment whose own marker is only quoted (not at body start) surfaces (round-1 must-fix, quote-reply)" "$(ev)" "comment: #11"
 
-# --- omitting --my-crew-id is a hard argument error, not a silent fallback ---
+# --- the merge-attribution comment marker (issue #50's consistency fix) follows
+# --- the exact same self-filter rule as every other marked comment ----------
+# hooks/merge-attribution-tracker.sh's COMMENT_BODY now opens with the same
+# <!-- wingman-crew:<id> --> marker as any other crew-authored comment - it
+# gets no special-casing here: a watching session filters it out only when its
+# own --my-crew-id matches the id that performed the merge, and sees it as a
+# real event otherwise (e.g. a reviewer polling the same PR after a different
+# crew member merged it).
+ev_as() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me --my-crew-id "$1" 2>/dev/null; }
+
 rm -f "$CUR"
 echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev_as dev1 >/dev/null  # seed: baseline, nothing fires yet
+echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"<!-- wingman-crew:dev1 --> Merged by wingman crew `dev1` (type: `developer`), not by the human - see issue #46."}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_eq "the merging session's own merge-attribution comment is filtered out (pointless self-wake)" "$(ev_as dev1)" ""
+
+rm -f "$CUR"
+echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev_as reviewer-9 >/dev/null  # seed: baseline, nothing fires yet
+echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"<!-- wingman-crew:dev1 --> Merged by wingman crew `dev1` (type: `developer`), not by the human - see issue #46."}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "a different watching session (e.g. a reviewer) still surfaces the same comment (issue #59)" "$(ev_as reviewer-9)" "comment: #12"
+
+# --- omitting --my-crew-id is a hard argument error, not a silent fallback ---
+rm -f "$CUR"
+echo '{"number":13,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
 if uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me >/dev/null 2>&1; then
   fail "omitting --my-crew-id must be a hard argparse error, not a silent login-only fallback"
 else

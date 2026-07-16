@@ -3,7 +3,7 @@
 # command actually succeeds (PostToolUse - a failing Bash command fires
 # PostToolUseFailure instead, so this hook only ever sees a merge that went
 # through) from a crew session, it posts a PR comment attributing the merge
-# to the crew member. A merge from a bare pilot session (no crew id) needs no
+# to the crew member. A merge from a bare human session (no crew id) needs no
 # attribution and gets none.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
@@ -45,7 +45,7 @@ print(json.dumps(data))
 
 test_new_home
 
-# --- a bare pilot session (no crew id) needs no attribution --------------
+# --- a bare human session (no crew id) needs no attribution --------------
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 : > "$GH_LOG"
 run_tracker PostToolUse "gh pr merge 46"
@@ -59,7 +59,8 @@ run_tracker PostToolUse "gh pr merge 46"
 assert_contains "gh pr merge 46: a pr comment is posted on 46" "$(cat "$GH_LOG")" "pr comment 46"
 assert_contains "the comment identifies the crew id" "$(cat "$GH_LOG")" "dev1"
 assert_contains "the comment identifies the crew type" "$(cat "$GH_LOG")" "developer"
-assert_contains "the comment says it is not the pilot" "$(cat "$GH_LOG")" "not by the pilot"
+assert_contains "the comment says it is not the human" "$(cat "$GH_LOG")" "not by the human"
+assert_contains "the comment opens with the same wingman-crew marker pr-open-marker-tracker.sh uses" "$(cat "$GH_LOG")" "pr comment 46 --body <!-- wingman-crew:dev1 -->"
 
 # --- crew session, no ref given: resolved via `gh pr view` ----------------
 : > "$GH_LOG"
