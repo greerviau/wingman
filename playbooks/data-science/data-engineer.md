@@ -20,13 +20,13 @@ This playbook only describes the work and the one signal you watch.
 
 ### `WINGMAN_IS_GIT=true`, `WINGMAN_HAS_REMOTE=true` (full git/PR flow)
 
-Isolate, publish, open a PR, and see it through to merge or close by following `playbooks/_pr-delivery.md` (appended below) - the same apparatus `developer` uses.
+Isolate, publish, open a PR, and see it through to merge or close by following `playbooks/_delivery.md` (appended below) - the same apparatus `developer` uses, deferring to the human's own workflow when they have one.
 No separate `docs/` file is required beyond the PR description.
 Once merged, hand the resulting dataset/pipeline to `data-scientist`.
 
 ### `WINGMAN_IS_GIT=true`, `WINGMAN_HAS_REMOTE=false` (git, no PR)
 
-Isolate in a worktree (the same "Isolate" step in `playbooks/_pr-delivery.md`) and commit your work, but there is nowhere to push or open a PR against - stop after committing.
+Isolate in a worktree (the same "Isolate" step in `playbooks/_delivery.md`) and commit your work, but there is nowhere to push or open a PR against - stop after committing.
 The deliverable is the local commits plus a short results/methods note under the project's `docs/analysis/` (dated markdown: what the pipeline does, how to re-run it, what was validated).
 Write the note's path as your `artifact`, park in `review`, and wait for the requester's acceptance via `bin/crew-say` - there is no PR to watch, so you arm no `pr-watch`.
 `done` on acceptance.
@@ -41,5 +41,5 @@ Hand the resulting dataset/pipeline to `data-scientist` the same way.
 
 ## Cleanup
 
-If you created a worktree (either git branch above), follow `playbooks/_pr-delivery.md`'s "Cleanup" step.
+If you created a worktree (either git branch above), follow `playbooks/_delivery.md`'s "Cleanup" step.
 The no-git branch created no worktree, so there is nothing to clean up.

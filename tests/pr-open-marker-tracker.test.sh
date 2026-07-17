@@ -5,7 +5,9 @@
 # that actually opened) from a crew session, it prepends the same
 # `<!-- wingman-crew:<id> -->` marker issue #118's pr-watch self-filter
 # already uses to the new PR's body. A PR opened from a bare human session
-# (no crew id) needs no marker and gets none.
+# (no crew id) needs no marker and gets none. Writing to a PR is opt-in: the
+# tracker only marks when the pr_comments run preference is `on`; off, unset,
+# or with no run id it leaves the body untouched.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -57,8 +59,13 @@ unset WINGMAN_CREW_ID
 run_tracker PostToolUse "gh pr create --title x --body y" "https://github.com/acme/widgets/pull/99"
 assert_eq "non-crew PR open: no gh invocation is logged" "$(cat "$GH_LOG")" ""
 
-# --- crew session, PR URL resolved from tool_response ----------------------
+# Writing to a PR is opt-in (pr_comments=on). Set it for the marker cases
+# below; the off/unset cases at the end assert the tracker stays its hand.
 export WINGMAN_CREW_ID=dev1
+export WINGMAN_RUN_ID=run-marker
+wm_state pref-set --run-id run-marker --key pr_comments --value on >/dev/null
+
+# --- crew session, PR URL resolved from tool_response ----------------------
 : > "$GH_LOG"
 echo '{"number":99,"body":"Problem/request..."}' > "$PR_VIEW_JSON"
 run_tracker PostToolUse "gh pr create --title x --body y" "https://github.com/acme/widgets/pull/99"
@@ -110,6 +117,27 @@ assert_eq "a failed/denied PR-open attempt marks nothing" "$(cat "$GH_LOG")" ""
 out="$(run_tracker PostToolUse "gh pr create --title 'oops")"
 assert_eq "an unresolvable command does not crash the tracker (no output)" "$out" ""
 assert_eq "an unresolvable command marks no PR" "$(cat "$GH_LOG")" ""
+
+# --- pr_comments=off: writing to a PR is opt-in, so nothing is marked -------
+: > "$GH_LOG"
+echo '{"number":99,"body":"Problem/request..."}' > "$PR_VIEW_JSON"
+wm_state pref-set --run-id run-marker --key pr_comments --value off >/dev/null
+run_tracker PostToolUse "gh pr create --title x --body y" "https://github.com/acme/widgets/pull/99"
+assert_eq "pr_comments=off: no gh invocation at all (PR body left untouched)" "$(cat "$GH_LOG")" ""
+wm_state pref-set --run-id run-marker --key pr_comments --value on >/dev/null
+
+# --- pr_comments unanswered for this run: conservative default is no mark ----
+: > "$GH_LOG"
+export WINGMAN_RUN_ID=run-unanswered
+run_tracker PostToolUse "gh pr create --title x --body y" "https://github.com/acme/widgets/pull/99"
+assert_eq "pr_comments unset for this run: nothing is marked" "$(cat "$GH_LOG")" ""
+export WINGMAN_RUN_ID=run-marker
+
+# --- no run id at all: conservative default is no mark -----------------------
+: > "$GH_LOG"
+unset WINGMAN_RUN_ID
+run_tracker PostToolUse "gh pr create --title x --body y" "https://github.com/acme/widgets/pull/99"
+assert_eq "no WINGMAN_RUN_ID: nothing is marked" "$(cat "$GH_LOG")" ""
 
 unset WINGMAN_CREW_ID
 

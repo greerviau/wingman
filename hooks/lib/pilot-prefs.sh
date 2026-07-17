@@ -11,7 +11,7 @@
 # cache).
 # bash-3.2-safe. Sourced, never executed.
 
-WM_PREF_KEYS="remote artifact_linking verbosity direct_spawn_visibility"
+WM_PREF_KEYS="remote artifact_linking verbosity direct_spawn_visibility pr_comments"
 
 wm_pref_prompt() {
   case "$1" in
@@ -19,6 +19,7 @@ wm_pref_prompt() {
     artifact_linking)        echo "For markdown deliverables (plans/reports), also publish as a hosted Artifact link, or local file path only?" ;;
     verbosity)               echo "How much should I narrate my own reasoning/routing as I work - concise, or more detailed explanations?" ;;
     direct_spawn_visibility) echo "For work you spawn directly (not through a lead), see each round of a revise loop as it happens, or just the terminal outcome?" ;;
+    pr_comments)             echo "May crew write to GitHub PRs (reviews, thread replies, provenance markers), or keep all inter-agent review feedback on wingman's own channel?" ;;
   esac
 }
 
@@ -28,6 +29,7 @@ wm_pref_values() {
     artifact_linking)        echo "artifact|local" ;;
     verbosity)               echo "concise|detailed" ;;
     direct_spawn_visibility) echo "each-round|summary-only" ;;
+    pr_comments)             echo "on|off" ;;
   esac
 }
 

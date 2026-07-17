@@ -20,13 +20,13 @@ This playbook only describes the work and the one signal you watch.
 
 ### `WINGMAN_IS_GIT=true`, `WINGMAN_HAS_REMOTE=true` (full git/PR flow)
 
-Isolate, publish, open a PR, and see it through to merge or close by following `playbooks/_pr-delivery.md` (appended below) - the same apparatus `developer` uses.
+Isolate, publish, open a PR, and see it through to merge or close by following `playbooks/_delivery.md` (appended below) - the same apparatus `developer` uses, deferring to the human's own workflow when they have one.
 Point the PR body at your results file.
-A `research-reviewer` may also review your PR; treat its comments exactly like any other review feedback in the fragment's reply etiquette.
+A `research-reviewer` may also review your work; by default its verdict reaches you over wingman's own channel (`bin/crew-say`), not as PR comments - treat it exactly like any other review feedback per the delivery fragment.
 
 ### `WINGMAN_IS_GIT=true`, `WINGMAN_HAS_REMOTE=false` (git, no PR)
 
-Isolate in a worktree (the same "Isolate" step in `playbooks/_pr-delivery.md`) and commit your work, but there is nowhere to push or open a PR against - stop after committing.
+Isolate in a worktree (the same "Isolate" step in `playbooks/_delivery.md`) and commit your work, but there is nowhere to push or open a PR against - stop after committing.
 The deliverable is the local commits plus the results file under `docs/analysis/`.
 Write the results file's path as your `artifact`, park in `review`, and wait for the requester's acceptance via `bin/crew-say` - there is no PR to watch, so you arm no `pr-watch`.
 `done` on acceptance.
@@ -39,5 +39,5 @@ Write the results file's path as your `artifact`, park in `review`, and wait for
 
 ## Cleanup
 
-If you created a worktree (either git branch above), follow `playbooks/_pr-delivery.md`'s "Cleanup" step.
+If you created a worktree (either git branch above), follow `playbooks/_delivery.md`'s "Cleanup" step.
 The no-git branch created no worktree, so there is nothing to clean up.

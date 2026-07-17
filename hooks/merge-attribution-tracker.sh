@@ -6,6 +6,16 @@
 # report the human for every crew action (issue #50), so an agent merge and a
 # genuine human merge are otherwise indistinguishable forever after.
 #
+# Deliberately NOT gated on the pr_comments preference (unlike hooks/pr-open-
+# marker-tracker.sh): this comment is a disclosure invariant, not review
+# bloat. It only ever fires when a crew session actually MERGES, which is the
+# opt-in auto-merge path (a granted allow_merge) - and that path already
+# requires pr_comments=on, since hooks/no-merge-guard.sh reads its review
+# evidence from the forge. In the default human-merges flow no crew session
+# merges, so this hook never fires and no comment is ever posted. Disclosing
+# that an agent, not the human, merged under the human's own credentials is
+# required whenever it does happen, regardless of the preference.
+#
 # Fires automatically, as a side effect the agent cannot skip - never an
 # instruction in a playbook a member has to remember to follow (this repo has
 # been burned repeatedly by exactly that failure shape: see #39, #44, and

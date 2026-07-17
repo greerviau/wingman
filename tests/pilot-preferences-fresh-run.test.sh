@@ -86,7 +86,7 @@ assert_true "the ask marker exists once a real AskUserQuestion completed" \
 # For each key: the guard accepts the literal documented shape, AND that same
 # literal string actually runs. Single-quoted here so this test's own shell does
 # not expand it - the hook, like the real one, receives it unexpanded.
-for pair in "remote:false" "artifact_linking:local" "verbosity:concise" "direct_spawn_visibility:each-round"; do
+for pair in "remote:false" "artifact_linking:local" "verbosity:concise" "direct_spawn_visibility:each-round" "pr_comments:off"; do
   key="${pair%%:*}"; val="${pair##*:}"
   cmd='$WINGMAN_STATE pref-set --run-id "$WINGMAN_RUN_ID" --key '"$key"' --value '"$val"
 
@@ -104,6 +104,7 @@ assert_contains "remote is now cached" "$out" "remote"
 assert_contains "artifact_linking is now cached" "$out" "artifact_linking"
 assert_contains "verbosity is now cached" "$out" "verbosity"
 assert_contains "direct_spawn_visibility is now cached" "$out" "direct_spawn_visibility"
+assert_contains "pr_comments is now cached" "$out" "pr_comments"
 
 out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
 assert_eq "the gate is cleared: Edit is allowed" "$out" ""
@@ -160,7 +161,7 @@ assert_eq "the answer it printed is genuinely cached" "$out" "false"
 
 # The rest of the way out is the same command, so finish the gate with it and
 # confirm a stranded-by-a-missing-export run really does get free.
-for pair in "artifact_linking:local" "verbosity:concise" "direct_spawn_visibility:each-round"; do
+for pair in "artifact_linking:local" "verbosity:concise" "direct_spawn_visibility:each-round" "pr_comments:off"; do
   key="${pair%%:*}"; val="${pair##*:}"
   bash -c "${escape_cmd/--key remote --value false/--key $key --value $val}" >/dev/null 2>&1
 done

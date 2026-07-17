@@ -68,10 +68,15 @@ fi
 check python3  optional python3 "optional; uv provides the interpreter"
 check jq       optional jq "optional; the state engine handles JSON"
 
-# Soft: only flag gh if the ACTIVE developer playbook references it.
+# Soft: only flag gh if the ACTIVE developer brief references it. The role
+# playbook itself is now a slim purpose prompt; the gh/PR mechanics live in
+# the shared _delivery.md fragment appended to it (and any developer.local.md
+# override still gets that fragment), so check both - either referencing gh
+# means the default delivery flow can use it.
 dev_playbook="$WM_REPO/playbooks/software-development/developer.md"
 [ -f "$WM_REPO/playbooks/software-development/developer.local.md" ] && dev_playbook="$WM_REPO/playbooks/software-development/developer.local.md"
-if [ -f "$dev_playbook" ] && grep -q '\bgh\b' "$dev_playbook" 2>/dev/null; then
+if { [ -f "$dev_playbook" ] && grep -q '\bgh\b' "$dev_playbook" 2>/dev/null; } \
+   || grep -q '\bgh\b' "$WM_REPO/playbooks/_delivery.md" 2>/dev/null; then
   check gh optional gh "used by the active developer playbook for PRs (run 'gh auth login')"
 fi
 
