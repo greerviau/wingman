@@ -314,6 +314,8 @@ It never belongs in anything a crew member authors that a human outside that rel
 
 ## PR-facing content (PR bodies, reviews, and comments)
 
+Inter-agent review runs over wingman's own channel (`bin/crew-say`/`crew-ask`) by default; writing reviews or comments to a PR is opt-in (`pr_comments=on`, read via `$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key pr_comments`), and this section governs those writes **when they happen**.
+A PR *body* (opened via `gh pr create` as part of delivery) always follows rule 1 regardless of the preference; rules 2 and 3 bind any review or comment you post under `pr_comments=on`.
 Every playbook that opens a PR, submits a review, or posts a PR comment follows the same three rules, regardless of crew type - your own playbook's PR section adds only the mechanics specific to your role, never a different standard.
 
 1. **A PR body describes the work done, never the process that produced it.** Write every section (Problem/request, Intent, Changes, Testing, Additional testing required, Regressions - or whatever structure your playbook specifies) for a reader with zero visibility into this crew, this wingman instance, or how the change was planned. Never mention a plan file or its path, a crew id, a worktree or branch-naming scheme, a session id, a review-round number, "the software-analyst," "the architect," or any other wingman-internal term - a human reading this PR on GitHub cannot resolve any of it and has no reason to. State the intent and reasoning in your own voice, as if you had reasoned your way to the change directly, not as a report on a process you followed.

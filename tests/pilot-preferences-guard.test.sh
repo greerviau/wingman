@@ -39,7 +39,7 @@ export CLAUDE_PROJECT_DIR="$TEST_REPO"
 export WINGMAN_RUN_ID="run-guard"
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 
-# --- zero of four answered: only the narrow exemptions pass -------------------
+# --- zero of five answered: only the narrow exemptions pass -------------------
 out="$(run_tool AskUserQuestion '{}')"
 assert_eq "AskUserQuestion is always allowed (no output)" "$out" ""
 
@@ -216,7 +216,7 @@ assert_not_contains "a healthy unanswered run does not fail open" "$out" "FAILED
 assert_false "no fail-open marker is written on the healthy path" \
   "[ -f '$WINGMAN_HOME/prefs-guard-failopen-$SID' ]"
 
-# --- two of four answered: the denial narrows to what is left ------------------
+# --- two of five answered: the denial narrows to what is left ------------------
 wm_state pref-set --run-id run-guard --key remote --value true >/dev/null
 wm_state pref-set --run-id run-guard --key artifact_linking --value artifact >/dev/null
 out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
@@ -229,15 +229,16 @@ assert_not_contains "the denial no longer names the answered linking prompt" "$o
 out="$(run_bash "bin/crew-list")"
 assert_eq "the Bash exemptions still apply with two missing" "$out" ""
 
-# --- three of four answered: the denial narrows to the last one ----------------
+# --- four of five answered: the denial narrows to what is left -----------------
 wm_state pref-set --run-id run-guard --key verbosity --value concise >/dev/null
+wm_state pref-set --run-id run-guard --key direct_spawn_visibility --value each-round >/dev/null
 out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
 assert_contains "Edit is still denied with one preference missing" "$out" '"permissionDecision": "deny"'
-assert_contains "the denial names the one missing prompt" "$out" "each round of a revise loop"
+assert_contains "the denial names the one missing prompt (pr_comments)" "$out" "write to GitHub PRs"
 assert_not_contains "the denial no longer names the answered verbosity prompt" "$out" "narrate my own reasoning"
 
-# --- all four answered: the guard is a full no-op -------------------------------
-wm_state pref-set --run-id run-guard --key direct_spawn_visibility --value each-round >/dev/null
+# --- all five answered: the guard is a full no-op ------------------------------
+wm_state pref-set --run-id run-guard --key pr_comments --value off >/dev/null
 out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
 assert_eq "Edit is allowed once all preferences are answered" "$out" ""
 out="$(run_bash "git status")"

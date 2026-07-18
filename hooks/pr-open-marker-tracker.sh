@@ -23,7 +23,13 @@
 # Trigger: a Bash tool call that SUCCEEDED (PostToolUse only fires on a
 # zero-exit Bash command) from a crew session (WINGMAN_CREW_ID set - a bare
 # human session has no crew id and needs no marker, since there is no agent
-# identity to disclose) whose command resolves to `gh pr create`.
+# identity to disclose) whose command resolves to `gh pr create` - AND the
+# pr_comments run preference is `on`. Writing anything to a PR is opt-in
+# (default off): when the human keeps review feedback on wingman's own channel
+# and off the forge, this hook leaves the PR body untouched. The marker's only
+# consumer is the GitHub review/merge machinery, which is exactly the
+# pr_comments=on case, so gating it here breaks nothing while respecting "do
+# not write in my PR."
 #
 # Resolving the just-opened PR: preferred, `gh pr create`'s own stdout is the
 # created PR's URL, and PostToolUse's hook payload exposes the command's
@@ -53,6 +59,8 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
+REPO="$(dirname "$HERE")"
+STATE_PY="$REPO/bin/lib/wm-state.py"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
 
 INPUT="$(cat)"
@@ -69,7 +77,11 @@ case "$INPUT" in
 esac
 
 printf '%s' "$INPUT" | \
+  WINGMAN_HOME="${WINGMAN_HOME:-$HOME/.wingman}" \
   WINGMAN_CREW_ID="${WINGMAN_CREW_ID:-}" \
+  WINGMAN_RUN_ID="${WINGMAN_RUN_ID:-}" \
+  WM_MARK_STATE_PY="$STATE_PY" \
+  WM_MARK_UV="$WM_UV" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
 import json, os, re, subprocess, sys
 
@@ -86,6 +98,26 @@ if data.get("hook_event_name") != "PostToolUse" or data.get("tool_name") != "Bas
 crew_id = os.environ.get("WINGMAN_CREW_ID", "")
 if not crew_id:
     sys.exit(0)  # a bare human session opened this - no agent identity to disclose
+
+# Writing anything to a PR (including this invisible provenance marker) is
+# opt-in per the pr_comments run preference: when it is off/unanswered/
+# unaskable the crew respects "do not write in my PR", so this hook leaves the
+# body untouched. Provenance is only load-bearing when the GitHub review/merge
+# machinery is in use, which is exactly the pr_comments=on case. Conservative
+# default (no run id, unset pref, unreadable engine) is "do not mark".
+run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+if not run_id:
+    sys.exit(0)
+try:
+    _pref = subprocess.run(
+        os.environ["WM_MARK_UV"].split() + [os.environ["WM_MARK_STATE_PY"],
+            "pref-get", "--run-id", run_id, "--key", "pr_comments"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    _pr_comments = _pref.stdout.decode().strip() if _pref.returncode == 0 else ""
+except Exception:
+    _pr_comments = ""
+if _pr_comments != "on":
+    sys.exit(0)
 
 tool_input = data.get("tool_input", {}) or {}
 command = tool_input.get("command", "") or ""

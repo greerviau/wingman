@@ -3,6 +3,23 @@
 In-depth reference for how wingman works internally.
 For day-to-day use, see the [README](../README.md).
 
+## Overview
+
+Wingman is a long-lived orchestrator session that delegates real work to a crew of independent agent sessions and is woken only when one needs attention. The pieces and how they relate:
+
+```mermaid
+flowchart TB
+    pilot([Pilot]) <-->|"directives / reports"| wingman[Wingman<br/>orchestrator session]
+    wingman -->|"bin/spawn-crew"| crew[Crew members<br/>independent agent sessions,<br/>each in its own tmux window]
+    crew -->|"crew-set status"| state[("~/.wingman/<br/>crew.json · board.md · status files")]
+    crew <-->|"crew-say / crew-ask<br/>(peer + owner messaging)"| crew
+    watcher[["watch-fleet<br/>(the wake loop)"]] -->|"reads state + pane liveness"| state
+    watcher -.->|"exits on blocked / review / done /<br/>died / stalled — that exit is the wake"| wingman
+    wingman -->|"arms exactly one cycle"| watcher
+```
+
+State lives on disk, not in wingman's transcript, so it survives compaction and restarts; the watcher is event-driven, so an idle fleet costs no tokens. The rest of this document details each piece.
+
 ## The wingman launcher
 
 `bin/wingman` is a thin wrapper around the real `claude` binary: it wires up a few things, then execs `claude` so the rest of the session is an ordinary Claude Code session.
@@ -33,7 +50,7 @@ Wingman wires this up in both directions:
 The rules stated in prose throughout this document and `CLAUDE.md` are also enforced mechanically, via Claude Code `PreToolUse`/`PostToolUse` hooks in `hooks/`, not left to prompt discipline alone:
 
 - `hooks/no-direct-edit-guard.sh` blocks wingman's own top-level session (and any lead) from editing code or running long investigations directly - heavy work always goes to a crew member.
-- `hooks/no-merge-guard.sh` denies `gh pr merge` and equivalents from every crew session unless that specific effort was granted `--allow-merge` - and, once granted, also requires verifiable evidence of a genuinely separate approving review (a real distinct-account `APPROVED` GitHub review, or the documented marker-and-roster-verified comment-fallback `VERDICT: approve` from a different, real `reviewer` crew member, cryptographically bound to that reviewer via a spawn-time hash commitment so a later comment cannot forge its way past the gate under a genuine reviewer's marker - issue #135) before the merge actually succeeds, unless the effort's `review_gate_waived` field was also explicitly granted (issue #132); `hooks/merge-attribution-tracker.sh` posts a PR comment attributing an authorized merge to the crew member that made it, and `hooks/pr-open-marker-tracker.sh` prepends the same `<!-- wingman-crew:<id> -->` marker to the body of every PR a crew member opens via `gh pr create`.
+- `hooks/no-merge-guard.sh` denies `gh pr merge` and equivalents from every crew session unless that specific effort was granted `--allow-merge` - and, once granted, also requires verifiable evidence of a genuinely separate approving review (a real distinct-account `APPROVED` GitHub review, or the documented marker-and-roster-verified comment-fallback `VERDICT: approve` from a different, real `reviewer` crew member, cryptographically bound to that reviewer via a spawn-time hash commitment so a later comment cannot forge its way past the gate under a genuine reviewer's marker - issue #135) before the merge actually succeeds, unless the effort's `review_gate_waived` field was also explicitly granted (issue #132); `hooks/merge-attribution-tracker.sh` posts a PR comment attributing an authorized merge to the crew member that made it (a disclosure invariant, so it fires whenever a crew session actually merges - the opt-in auto-merge path, which requires `pr_comments=on` anyway - and is not itself gated on the preference), and `hooks/pr-open-marker-tracker.sh` prepends the same `<!-- wingman-crew:<id> -->` marker to the body of every PR a crew member opens via `gh pr create` **when `pr_comments=on`** (writing to a PR is opt-in; the marker's only consumer is this review/merge machinery). Inter-agent review is otherwise `crew-say`-native and writes nothing to the forge; because the merge gate reads its review evidence from the forge, an effort granted `allow_merge` needs `pr_comments=on` so a reviewer's verdict is recorded where the gate can see it.
 - `hooks/no-watcher-kill-guard.sh` denies a `kill`/`pkill`/`tmux kill-window`/`tmux kill-session` whose target resolves to a live `watch-fleet` cycle, so the wake loop's own process can't be killed by accident.
 - `hooks/api-outage-spawn-guard.sh` denies new crew spawns while a fleet-wide API outage is detected as active.
 - `hooks/usage-limit-spawn-guard.sh` denies new crew spawns while a fleet-wide usage-quota window is approaching its cap or the pilot chose to wait for it to reset; both this and the outage guard share their `PreToolUse` machinery (`hooks/lib/spawn_pause_guard.py`) rather than duplicating it.
@@ -63,6 +80,15 @@ Swapping harnesses means swapping that one arming primitive, exactly as it means
 ## The wake loop
 
 A file on disk cannot rouse an idle session, so the only reliable way wingman is woken when crew need it is the **completion of a task the harness tracks**.
+
+```mermaid
+flowchart LR
+    arm["Arm one cycle<br/>(harness-tracked bg task)"] --> block["watch-fleet blocks,<br/>absorbing benign<br/>'still working' updates"]
+    block -->|"a crew member flips to<br/>blocked / review / done /<br/>died / stalled, or freezes"| fire["Exit with one reason line<br/>— that exit IS the wake"]
+    fire --> handle["Wingman reads the reason,<br/>surfaces the event to the pilot"]
+    handle -->|"re-arm after every fire"| arm
+```
+
 The watcher, `bin/watch-fleet`, is built for exactly this:
 
 - It **blocks** - watching status files and window liveness, silently absorbing benign "still working" updates - and **exits with one reason line** the instant a crew member flips to `blocked`/`review`/`done`/`died`/`stalled` or freezes on a prompt.
@@ -105,6 +131,23 @@ Where outage detection is reactive (inferred from API-error pane text after some
 
 A crew member is not spun down the moment its deliverable appears; one session sees a piece of work through from creation to final disposition.
 The **state model is defined once** in the shared status contract (`playbooks/_status-contract.md`), which is appended to every crew brief; playbooks describe only the work, not how to move between states.
+
+```mermaid
+stateDiagram-v2
+    [*] --> working: spawned
+    working --> blocked: needs a human decision
+    blocked --> working: answer relayed back
+    working --> review: deliverable ready (announced once)
+    review --> working: feedback / CI / a watched event
+    working --> done: terminal condition met
+    review --> done: terminal condition met
+    done --> [*]: reaped (crew-standdown)
+    note right of review
+        live + surfaced: the member keeps
+        running, watching an external condition
+    end note
+```
+
 The status state machine (`bin/lib/wm-state.py`) encodes the same states:
 
 - `LIVE_STATES = (working, blocked, review, stalled)` - a member in any of these is still in flight and stays on the board's Active list.
@@ -112,7 +155,7 @@ The status state machine (`bin/lib/wm-state.py`) encodes the same states:
   It is never surfaced, so summary refreshes here don't wake the pilot.
 - `review` is the parked-and-waiting state: the deliverable is produced and surfaced, and the member is now watching an external condition it does not control (a PR merge, a plan approval).
   It is both **live** and **surfaced** - `needs-attention` (`ATTENTION_STATES`) announces it to the pilot once per entry, exactly as `blocked` is announced, but the member keeps running.
-  A member moves back to `working` to act on an event (a review comment, a CI failure) and returns to `review` when it settles.
+  A member moves back to `working` to act on an event (review feedback via `crew-say`, a CI failure) and returns to `review` when it settles.
   The dedup key `needs-attention` actually reads is `announced`, not `updated`: `announced` advances on a genuine transition into an attention state, and - for `review` specifically - also on a material change to its `artifact`/`blocker`/`delivery` pointer, but not on a same-status `review` refresh that only touches `summary`.
   `blocked` and `done` are unscoped by this gate: `--silent` is forbidden for them, so every non-silent call announces.
   This is why a re-delivery that answers feedback on an already-`review` deliverable must transition out of `review` and back (through `working`), not restate `--status review` directly: only the transition, or a changed pointer, re-announces.
@@ -126,11 +169,13 @@ Wingman holds **no** waiting logic itself: it recognizes crew status updates and
 Nothing else reaps a member.
 *How long* and *why* a member stays alive after delivering is entirely the playbook's concern; wingman only avoids cutting it short.
 
-## The crew-level wake loop (PR review)
+## The crew-level wake loop (PR shepherding)
 
-A developer member's "seeing it through" is watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
-A crew Claude session cannot rouse itself once its turn ends, so after opening a PR the member arms `bin/pr-watch` as a **harness-tracked background task** (never detached).
+A developer member's "seeing it through" often means watching its own PR, and it uses the same wake primitive wingman uses on itself, one level down.
+`bin/pr-watch` is **one available, forge-specific** dependency-watcher for PR-shaped delivery, not a mandated step: after opening a PR a member *may* arm it as a **harness-tracked background task** (never detached) to be woken on forge state.
 It blocks, polling the PR through the forge CLI, and exits with one reason line (`merged` / `closed` / `changes-requested` / `ci-failed` / `comment` / `checks-passed`) the instant an actionable event occurs; that exit re-invokes the crew member, which acts and arms exactly one fresh cycle - the identical arm-one-cycle discipline as `watch-fleet`.
+Inter-agent **review** feedback, though, travels over wingman's own channel (`crew-say`) by default, not the PR: a reviewer reports its verdict to whoever commissioned it, and a parked developer is woken by that incoming message rather than by pr-watch spotting a comment.
+The `changes-requested`/`comment` reasons therefore only carry review feedback when the human has opted into writing to the forge (`pr_comments=on`); in the default flow pr-watch is effectively just a CI/merge/close watcher, and a developer whose delivery has no forge signal to watch arms no watcher at all.
 `checks-passed` fires once when the PR settles with nothing failing and nothing pending (all-green, or a repo with no CI), which is what lets a member stay `working` through CI and be woken to move into `review` only when it is genuinely on the humans; it re-arms once checks go pending/failing and settle again.
 
 A cursor at `$WINGMAN_HOME/pr/<crew-id>.json` records what has already been surfaced, so a persistently-red build or an already-handled comment does not re-fire, and this session's own replies never wake it - identified by an anchored `<!-- wingman-crew:<id> -->` marker matching its own crew id, not by forge login alone (every crew session shares one forge login, so login alone would also drop a human's own genuine comments or a different crew member's own genuine review).
@@ -144,6 +189,34 @@ Analyst (and other non-PR) members have no external signal to poll, so they arm 
 ## The crew hierarchy (leads)
 
 Wingman's crew is a **tree**, with the pilot at the top. A large effort is owned by a **lead** - a crew member whose playbook is "be a manager for one effort." A lead runs the *same* intake → scope → spawn → supervise → report → escalate loop wingman runs, one layer down, over its own crew (a software-analyst, an architect, one or more developers, a reviewer). This is recursion over the existing primitives, not a parallel subsystem: the lead uses the same `bin/` scripts and the same watcher.
+
+```mermaid
+flowchart TD
+    pilot([Pilot])
+    wingman["Wingman<br/>(owner &quot;&quot; — top level)"]
+    analyst["software-analyst<br/>(direct spawn)"]
+    lead["Lead<br/>(owns one effort)"]
+    dev1[developer]
+    dev2[developer]
+    rev[reviewer]
+
+    pilot --> wingman
+    wingman -->|"parent = &quot;&quot;"| analyst
+    wingman -->|"parent = &quot;&quot;"| lead
+    lead -->|"parent = lead-id"| dev1
+    lead -->|"parent = lead-id"| dev2
+    lead -->|"parent = lead-id"| rev
+    dev1 <-.->|"crew-say (peers)"| rev
+
+    subgraph cap["depth cap: 2 crew layers"]
+        lead
+        dev1
+        dev2
+        rev
+    end
+```
+
+Each layer sees only its direct reports (`blocked` escalates one hop up; a lead rolls a single line up to wingman). Wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers; a lead does not spawn further leads.
 
 **Ownership falls out of who spawns.** Every crew record carries a `parent` field, stamped by `bin/spawn-crew` from the spawner's `$WINGMAN_CREW_ID`. Wingman has none (it is the top orchestrator), so its spawns get `parent=""` (top level); a lead has its own id, so its spawns get `parent=<lead-id>`. No new flags - the tree is implicit in who ran the spawn.
 
@@ -179,8 +252,8 @@ A crew type is defined entirely by a playbook - plain prose in `playbooks/<categ
 
 - `playbooks/software-development/software-analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
 - `playbooks/software-development/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
-- `playbooks/software-development/developer.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
-- `playbooks/software-development/reviewer.md` - review a plan or a PR and report findings.
+- `playbooks/software-development/developer.md` - a purpose prompt: implement the assigned work and see it through to delivery, following the project's/human's own development workflow (the shared `_delivery.md` fragment carries only what coordination needs plus a default git/PR flow used when the environment defines none).
+- `playbooks/software-development/reviewer.md` - review a plan or a PR and report findings; its verdict travels over wingman's own channel by default, with GitHub-native review posting opt-in via `pr_comments`.
 - `playbooks/common/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up. Domain-neutral, so it lives outside any one category.
 - `playbooks/common/research.md` - example non-dev type: gather evidence, write a cited report. Also domain-neutral.
   Shows the shape a `scientist`/`pm` role takes.
