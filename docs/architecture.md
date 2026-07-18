@@ -3,6 +3,23 @@
 In-depth reference for how wingman works internally.
 For day-to-day use, see the [README](../README.md).
 
+## Overview
+
+Wingman is a long-lived orchestrator session that delegates real work to a crew of independent agent sessions and is woken only when one needs attention. The pieces and how they relate:
+
+```mermaid
+flowchart TB
+    pilot([Pilot]) <-->|"directives / reports"| wingman[Wingman<br/>orchestrator session]
+    wingman -->|"bin/spawn-crew"| crew[Crew members<br/>independent agent sessions,<br/>each in its own tmux window]
+    crew -->|"crew-set status"| state[("~/.wingman/<br/>crew.json · board.md · status files")]
+    crew <-->|"crew-say / crew-ask<br/>(peer + owner messaging)"| crew
+    watcher[["watch-fleet<br/>(the wake loop)"]] -->|"reads state + pane liveness"| state
+    watcher -.->|"exits on blocked / review / done /<br/>died / stalled — that exit is the wake"| wingman
+    wingman -->|"arms exactly one cycle"| watcher
+```
+
+State lives on disk, not in wingman's transcript, so it survives compaction and restarts; the watcher is event-driven, so an idle fleet costs no tokens. The rest of this document details each piece.
+
 ## The wingman launcher
 
 `bin/wingman` is a thin wrapper around the real `claude` binary: it wires up a few things, then execs `claude` so the rest of the session is an ordinary Claude Code session.
@@ -63,6 +80,15 @@ Swapping harnesses means swapping that one arming primitive, exactly as it means
 ## The wake loop
 
 A file on disk cannot rouse an idle session, so the only reliable way wingman is woken when crew need it is the **completion of a task the harness tracks**.
+
+```mermaid
+flowchart LR
+    arm["Arm one cycle<br/>(harness-tracked bg task)"] --> block["watch-fleet blocks,<br/>absorbing benign<br/>'still working' updates"]
+    block -->|"a crew member flips to<br/>blocked / review / done /<br/>died / stalled, or freezes"| fire["Exit with one reason line<br/>— that exit IS the wake"]
+    fire --> handle["Wingman reads the reason,<br/>surfaces the event to the pilot"]
+    handle -->|"re-arm after every fire"| arm
+```
+
 The watcher, `bin/watch-fleet`, is built for exactly this:
 
 - It **blocks** - watching status files and window liveness, silently absorbing benign "still working" updates - and **exits with one reason line** the instant a crew member flips to `blocked`/`review`/`done`/`died`/`stalled` or freezes on a prompt.
@@ -105,6 +131,23 @@ Where outage detection is reactive (inferred from API-error pane text after some
 
 A crew member is not spun down the moment its deliverable appears; one session sees a piece of work through from creation to final disposition.
 The **state model is defined once** in the shared status contract (`playbooks/_status-contract.md`), which is appended to every crew brief; playbooks describe only the work, not how to move between states.
+
+```mermaid
+stateDiagram-v2
+    [*] --> working: spawned
+    working --> blocked: needs a human decision
+    blocked --> working: answer relayed back
+    working --> review: deliverable ready (announced once)
+    review --> working: feedback / CI / a watched event
+    working --> done: terminal condition met
+    review --> done: terminal condition met
+    done --> [*]: reaped (crew-standdown)
+    note right of review
+        live + surfaced: the member keeps
+        running, watching an external condition
+    end note
+```
+
 The status state machine (`bin/lib/wm-state.py`) encodes the same states:
 
 - `LIVE_STATES = (working, blocked, review, stalled)` - a member in any of these is still in flight and stays on the board's Active list.
@@ -147,6 +190,34 @@ Analyst (and other non-PR) members have no external signal to poll, so they arm 
 
 Wingman's crew is a **tree**, with the pilot at the top. A large effort is owned by a **lead** - a crew member whose playbook is "be a manager for one effort." A lead runs the *same* intake → scope → spawn → supervise → report → escalate loop wingman runs, one layer down, over its own crew (a software-analyst, an architect, one or more developers, a reviewer). This is recursion over the existing primitives, not a parallel subsystem: the lead uses the same `bin/` scripts and the same watcher.
 
+```mermaid
+flowchart TD
+    pilot([Pilot])
+    wingman["Wingman<br/>(owner &quot;&quot; — top level)"]
+    analyst["software-analyst<br/>(direct spawn)"]
+    lead["Lead<br/>(owns one effort)"]
+    dev1[developer]
+    dev2[developer]
+    rev[reviewer]
+
+    pilot --> wingman
+    wingman -->|"parent = &quot;&quot;"| analyst
+    wingman -->|"parent = &quot;&quot;"| lead
+    lead -->|"parent = lead-id"| dev1
+    lead -->|"parent = lead-id"| dev2
+    lead -->|"parent = lead-id"| rev
+    dev1 <-.->|"crew-say (peers)"| rev
+
+    subgraph cap["depth cap: 2 crew layers"]
+        lead
+        dev1
+        dev2
+        rev
+    end
+```
+
+Each layer sees only its direct reports (`blocked` escalates one hop up; a lead rolls a single line up to wingman). Wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers; a lead does not spawn further leads.
+
 **Ownership falls out of who spawns.** Every crew record carries a `parent` field, stamped by `bin/spawn-crew` from the spawner's `$WINGMAN_CREW_ID`. Wingman has none (it is the top orchestrator), so its spawns get `parent=""` (top level); a lead has its own id, so its spawns get `parent=<lead-id>`. No new flags - the tree is implicit in who ran the spawn.
 
 **Each layer sees only its direct reports.** Surfacing (`needs-attention --owner`), the watcher, and the default `crew-list` are all scoped to an owner (`""` = top level). Wingman's watcher runs `--owner ""` and sees only the top level (including a lead's rolled-up line); a lead's watcher runs `--owner <lead-id>` (the default from its own `$WINGMAN_CREW_ID`) and sees only its own workers. The pidfile/beacon/wake are keyed by owner (`watch-<owner>.*`, `wake-<owner>`; wingman keeps the legacy unsuffixed names), so wingman's watcher and each lead's watcher coexist without contending. Drill-down is always available: `crew-list --owner <id>`, `crew-list --tree`, and the tree-rendered `board.md`.
@@ -181,8 +252,8 @@ A crew type is defined entirely by a playbook - plain prose in `playbooks/<categ
 
 - `playbooks/software-development/software-analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
 - `playbooks/software-development/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
-- `playbooks/software-development/developer.md` - the dev cycle: worktree → implement → commit → push → PR, then watch the PR (CI + review feedback) through to merge/close.
-- `playbooks/software-development/reviewer.md` - review a plan or a PR and report findings.
+- `playbooks/software-development/developer.md` - a purpose prompt: implement the assigned work and see it through to delivery, following the project's/human's own development workflow (the shared `_delivery.md` fragment carries only what coordination needs plus a default git/PR flow used when the environment defines none).
+- `playbooks/software-development/reviewer.md` - review a plan or a PR and report findings; its verdict travels over wingman's own channel by default, with GitHub-native review posting opt-in via `pr_comments`.
 - `playbooks/common/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up. Domain-neutral, so it lives outside any one category.
 - `playbooks/common/research.md` - example non-dev type: gather evidence, write a cited report. Also domain-neutral.
   Shows the shape a `scientist`/`pm` role takes.
