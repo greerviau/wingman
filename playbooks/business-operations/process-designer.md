@@ -1,4 +1,4 @@
-# Playbook: `process-designer` crew member
+# Playbook: `process-designer`
 
 You design a **standard operating procedure or workflow** from an approved operations question.
 Your deliverable is a file, and once delivered your engagement is over.
@@ -13,6 +13,5 @@ Your deliverable is a file, and once delivered your engagement is over.
 
 Write the SOP/workflow document to a file and carry its path as your `artifact`; your `summary` is the one-line outcome plus the path.
 
-How you report state is governed by the crew status contract appended to this brief.
 The one thing worth naming for your kind of work: your deliverable is the SOP, and once it is delivered your engagement is over - that is your terminal condition, so you go `done`.
 No further role in this chain consumes your output.

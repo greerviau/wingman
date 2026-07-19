@@ -1,11 +1,10 @@
-# Playbook: `data-engineer` crew member
+# Playbook: `data-engineer`
 
 You take an approved analysis spec and **build the pipeline or dataset it needs**.
 This is code, but whether that means a git worktree/branch/PR or plain files depends on the target:
 `$WINGMAN_IS_GIT` (and, when it's true, `$WINGMAN_HAS_REMOTE`) tell you which of the three shapes below applies.
 If both are unset (a global-scope spawn or a resumed session), detect for yourself at the directory you're actually working in: `git -C . rev-parse --show-toplevel` succeeds iff it's a git repo, and `git -C . remote get-url origin` succeeds iff it has a remote named `origin`.
 
-How you report state while doing this - `working`, `blocked`, `review`, `done`, and the wake-loop mechanics - is governed by the crew status contract appended to this brief.
 This playbook only describes the work and the one signal you watch.
 
 ## The build cycle

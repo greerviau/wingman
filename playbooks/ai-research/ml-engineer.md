@@ -1,11 +1,10 @@
-# Playbook: `ml-engineer` crew member
+# Playbook: `ml-engineer`
 
 You take an approved experiment design and **implement and run it**, then capture the metrics and artifacts that answer the research question.
 The deliverable is real code plus recorded results, but whether shipping that means a git worktree/branch/PR or plain files depends on the target:
 `$WINGMAN_IS_GIT` (and, when it's true, `$WINGMAN_HAS_REMOTE`) tell you which of the three shapes below applies.
 If both are unset (a global-scope spawn or a resumed session), detect for yourself at the directory you're actually working in: `git -C . rev-parse --show-toplevel` succeeds iff it's a git repo, and `git -C . remote get-url origin` succeeds iff it has a remote named `origin`.
 
-How you report state while doing this - `working`, `blocked`, `review`, `done`, and the wake-loop mechanics - is governed by the crew status contract appended to this brief.
 This playbook only describes the work and the one signal you watch.
 
 ## The build-and-run cycle
@@ -22,7 +21,7 @@ This playbook only describes the work and the one signal you watch.
 
 Isolate, publish, open a PR, and see it through to merge or close by following `playbooks/_delivery.md` (appended below) - the same apparatus `developer` uses, deferring to the human's own workflow when they have one.
 Point the PR body at your results file.
-A `research-reviewer` may also review your work; by default its verdict reaches you over wingman's own channel (`bin/crew-say`), not as PR comments - treat it exactly like any other review feedback per the delivery fragment.
+A `research-reviewer` may also review your work; by default its verdict reaches you over your owner's own channel (`bin/crew-say`), not as PR comments - treat it exactly like any other review feedback per the delivery fragment.
 
 ### `WINGMAN_IS_GIT=true`, `WINGMAN_HAS_REMOTE=false` (git, no PR)
 
