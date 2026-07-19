@@ -3,6 +3,13 @@
 In-depth reference for how wingman works internally.
 For day-to-day use, see the [README](../README.md).
 
+This document covers the core model - the wake loop, the deliverable lifecycle, and the crew hierarchy. Operational detail lives in focused companion docs:
+
+- [configuration.md](configuration.md) - the launcher, the spawn recipe, model selection, and machine-local state in `~/.wingman/`.
+- [guards.md](guards.md) - the mechanical `PreToolUse`/`PostToolUse` guards, checkout freshness, and autonomous mode.
+- [fleet-resilience.md](fleet-resilience.md) - correlated fleet events, API-outage detection, and usage-limit-quota detection.
+- [playbooks.md](playbooks.md) - crew types, categories, and local overrides.
+
 ## Overview
 
 Wingman is a long-lived orchestrator session that delegates real work to a crew of independent agent sessions and is woken only when one needs attention. The pieces and how they relate:
@@ -18,20 +25,7 @@ flowchart TB
     wingman -->|"arms exactly one cycle"| watcher
 ```
 
-State lives on disk, not in wingman's transcript, so it survives compaction and restarts; the watcher is event-driven, so an idle fleet costs no tokens. The rest of this document details each piece.
-
-## The wingman launcher
-
-`bin/wingman` is a thin wrapper around the real `claude` binary: it wires up a few things, then execs `claude` so the rest of the session is an ordinary Claude Code session.
-
-- It mints and exports a fresh `WINGMAN_RUN_ID`, inherited by every crew member spawned during that run.
-  This is the cache key the onboarding-preference questions (remote vs. local, whether markdown deliverables also get published as Artifact links, verbosity, direct-spawn visibility) are asked and cached against exactly once per run rather than once per crew member.
-  Every consumer of a missing run id treats it as "unanswered, apply the conservative default" rather than asking - skipping the launcher does not error, it just means the whole session runs on defaults with nothing cached.
-- It resolves every discovered sibling project root (`bin/discover-projects`) and passes `--add-dir` for each, so a global-scope spawn, or wingman's own occasional cross-project read, never blocks on a first-time directory-permission prompt.
-- It registers this session's own tmux pane path at `$WM_HOME/self-pane` (only when running inside tmux) - the read-only signal `bin/watch-fleet`'s `self_pane_check` uses to detect wingman's own dropped Remote Control connection (see "Remote Control" below).
-- It refreshes `~/.wingman/` state and the project-discovery cache unconditionally on every launch, so the roster and project list are never stale from a previous run.
-
-None of this is required - the underlying scripts work without the launcher - but skipping it means hand-approving `--add-dir` prompts, no onboarding-preference caching for the run, and no disconnect detection for wingman's own session.
+State lives on disk, not in wingman's transcript, so it survives compaction and restarts; the watcher is event-driven, so an idle fleet costs no tokens. The rest of this reference details each piece.
 
 ## Remote Control
 
@@ -44,27 +38,6 @@ Wingman wires this up in both directions:
 - Wingman's own connection is watched differently, on purpose: `self_pane_check` can see wingman's own disconnect banner but deliberately never types into wingman's own pane - doing so from outside would race the very tool call meant to send the reconnect command.
   Instead it wakes wingman with an explicit `remote-control-dropped` event, and wingman tells the pilot to run `/remote-control` themselves.
 - There is no reliable way to detect programmatically whether a given session is being watched locally or over Remote Control at any moment - see [`docs/analysis/2026-07-13-remote-control-transport-detectability.md`](analysis/2026-07-13-remote-control-transport-detectability.md) - which is why wingman asks once, up front, rather than guessing.
-
-## Mechanical guards
-
-The rules stated in prose throughout this document and `CLAUDE.md` are also enforced mechanically, via Claude Code `PreToolUse`/`PostToolUse` hooks in `hooks/`, not left to prompt discipline alone:
-
-- `hooks/no-direct-edit-guard.sh` blocks wingman's own top-level session (and any lead) from editing code or running long investigations directly - heavy work always goes to a crew member.
-- `hooks/no-merge-guard.sh` denies `gh pr merge` and equivalents from every crew session unless that specific effort was granted `--allow-merge` - and, once granted, also requires verifiable evidence of a genuinely separate approving review (a real distinct-account `APPROVED` GitHub review, or the documented marker-and-roster-verified comment-fallback `VERDICT: approve` from a different, real `reviewer` crew member, cryptographically bound to that reviewer via a spawn-time hash commitment so a later comment cannot forge its way past the gate under a genuine reviewer's marker - issue #135) before the merge actually succeeds, unless the effort's `review_gate_waived` field was also explicitly granted (issue #132); `hooks/merge-attribution-tracker.sh` posts a PR comment attributing an authorized merge to the crew member that made it (a disclosure invariant, so it fires whenever a crew session actually merges - the opt-in auto-merge path, which requires `pr_comments=on` anyway - and is not itself gated on the preference), and `hooks/pr-open-marker-tracker.sh` prepends the same `<!-- wingman-crew:<id> -->` marker to the body of every PR a crew member opens via `gh pr create` **when `pr_comments=on`** (writing to a PR is opt-in; the marker's only consumer is this review/merge machinery). Inter-agent review is otherwise `crew-say`-native and writes nothing to the forge; because the merge gate reads its review evidence from the forge, an effort granted `allow_merge` needs `pr_comments=on` so a reviewer's verdict is recorded where the gate can see it.
-- `hooks/no-watcher-kill-guard.sh` denies a `kill`/`pkill`/`tmux kill-window`/`tmux kill-session` whose target resolves to a live `watch-fleet` cycle, so the wake loop's own process can't be killed by accident.
-- `hooks/api-outage-spawn-guard.sh` denies new crew spawns while a fleet-wide API outage is detected as active.
-- `hooks/usage-limit-spawn-guard.sh` denies new crew spawns while a fleet-wide usage-quota window is approaching its cap or the pilot chose to wait for it to reset; both this and the outage guard share their `PreToolUse` machinery (`hooks/lib/spawn_pause_guard.py`) rather than duplicating it.
-- `hooks/artifact-link-guard.sh` and `hooks/artifact-publish-tracker.sh` enforce the Artifact-publish contract - a markdown deliverable is published as a hosted link only when the pilot asked for that and a content scan passes.
-- `hooks/pilot-preferences-guard.sh` denies every other tool call in a fresh run until the onboarding-preference questions are answered.
-
-Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
-
-## Checkout freshness (advisory, not a hook)
-
-Not every risk this project has hit can be intercepted by a `PreToolUse` hook: "about to assert that file X currently does/doesn't do Y" is a claim made in prose, inside a plan or a review finding, not a distinguishable tool call the way `gh pr merge` or an unpublished-artifact report is.
-A repo-scoped crew session other than `developer` (which already isolates into a fresh worktree every run) is `cd`'d directly into the target project's existing checkout, which can silently lag `origin/<default-branch>` if nobody has fetched or pulled it recently - a stale read has already produced one confirmed false finding, filed and then retracted as issue #142.
-`bin/lib/git-freshness-check.sh` makes the fix to this - checking freshness before making such a claim - cheap and consistent instead of an ad hoc `git log`/`git status` improvisation: it fetches `origin` (read-only against the working tree, index, and `HEAD`) and reports whether the checkout as a whole is caught up with `origin/<default-branch>`, plus, given path arguments, whether each named file's content specifically differs between `HEAD` and `origin/<default-branch>`.
-`playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness" is the shared convention that tells every git-backed session to run it before asserting a file's current state, with targeted pointers at the three points in the software-development playbooks where this risk is most concentrated (`software-analyst.md`, `reviewer.md`, `architect.md`).
 
 ## Harness-agnostic by design
 
@@ -105,27 +78,7 @@ The watcher, `bin/watch-fleet`, is built for exactly this:
 The watcher also detects a crew frozen on a permission or trust prompt - a terminal-UI stall the status files can't see - and flips it to `blocked`. A second, distinctly-worded regex (`WM_RESUME_PROMPT_RE`) layered onto the same generic dialog-shape detector recognizes one further freeze: the CLI's own "resume from summary?" menu, which a `claude --resume` relaunch of a long-transcript session can land on (issue #30). That gets its own specific `blocked` wording (needs one keypress via `bin/crew-takeover`) rather than the generic permission/trust one, so an automated resume attempt that silently froze there is never misreported as a healthy `working` member.
 It detects a member gone silently idle (no pane output, no status update, no execution in its process tree) and, before flipping it to `stalled`, sends it a one-shot check-in nudge - a plain message into its pane, worded for an API/connectivity-error signature (a rate limit, a 5xx, a connection reset) if the pane tail shows one, generic otherwise - and waits a full cooldown window for activity; only silence through that whole window confirms the flip. This lets a transient outage, or any other self-resolvable hiccup, self-heal where possible instead of paging the pilot immediately.
 
-### Correlated fleet events
-
-A single `blocked`/`stalled`/`died` member is routine and is always reported individually.
-When several members hit the **same** signal in one pass - many crew died together, or many are simultaneously `stalled` with an API-error reason - the watcher collapses them into one synthetic bullet naming every affected id, rather than paging the pilot once per member.
-This grouping (`wm_state group-attention`) is a pure, stateless display filter: it only changes what the two `fire()` display channels (stdout, the wake file) render, never the underlying roster, and it is recomputed fresh on every fire rather than persisted.
-A `died` batch is partitioned by cause **before** the collapse threshold is applied: a `death_cause` of `api-outage` (see below) collapses into its own `correlated:api-outage-death` bucket, everything else collapses into the crash-flavored `correlated:mass-death` - each partition is evaluated independently, so a minority of one cause is never absorbed into the other's message.
-`bin/crew-resume` is the bulk recovery tool a mass-death bullet names as its default remedy: it relaunches every currently-`died` member with `claude --resume <session-id>`, reusing its roster record (parent, worktree, session id) as-is, and is idempotent - a member that is not `died`, or whose window already exists, is skipped rather than relaunched.
-
-### Fleet-wide outage detection
-
-Recurring Anthropic-side `529`/`5xx` bursts are common enough to warrant their own persisted state, not just per-member correlation. `bin/watch-fleet` (owner `""`, wingman's own top-level cycle only - never a lead's) tracks a fleet-wide outage-state machine (`wm_state outage-update`, `$WM_HOME/api-outage-state.json`: `clear`/`active`, `since`, `last_signal`, `signal_count`), advanced every poll from the same per-member API-error pane signature already used for the stall-nudge, plus however many members died *that poll* with `death_cause: api-outage` - a tag `wm_state reconcile` writes at the moment of the death flip, read from a small per-member pane-tail cache (`pane-tail-<id>.txt`, overwritten in place every poll, the last thing known about a pane before its window disappeared) matched against the same regex. `clear` -> `active` crosses the identical count/ratio threshold `group-attention` already applies to a single poll's batch, evaluated continuously; `active` -> `clear` requires a quiet period (`WM_OUTAGE_QUIET`) with zero fresh signal.
-
-A transition fires as an ordinary watcher wake (never a new `--classify` outcome) with its own reason line and wake-file content - structurally identical to a `blocked`/`review`/`done`/`died`/`stalled` reason, just fleet-scoped rather than per-member. Two other mechanisms read this state directly (not through `wm_state`): `hooks/api-outage-spawn-guard.sh` denies `bin/spawn-crew` while it reads `active` (lifted per-call with `--force-during-outage`), pausing new spawns - both wingman's own and any lead's, since both call the same script - without touching already-running crew; and `bin/crew-resume` itself refuses (`--force` required) to relaunch a `died` member while the state is `active`, defense in depth for a human running it by hand. The pilot's own standing instruction (`CLAUDE.md`) treats an `outage-cleared` fire naming outage-tagged deaths as pre-authorized: `bin/crew-resume --all-died` runs immediately, without a fresh confirmation, since the recovery is reversible and low-risk.
-
-### Fleet-wide usage-limit-quota detection
-
-Where outage detection is reactive (inferred from API-error pane text after something has already failed), usage-limit detection is proactive: the Claude Code CLI's own `statusLine` feature carries a `rate_limits` object (`five_hour`/`seven_day`, each an optional `used_percentage`/`resets_at` pair) for a Claude.ai-subscription session, populated from the same rate-limit response headers the client already tracks. `bin/lib/usage-statusline.py`, installed once as the user-level `statusLine` command (chaining to any statusline the pilot already configured, so nothing visible changes), writes one file per live session (`$WM_HOME/usage/<session-id>.json`) every time Claude Code invokes it - this covers wingman's own top-level session and every crew member alike, since the signal reflects the account's shared rolling usage window regardless of which session reports it.
-
-`bin/watch-fleet` (owner `""` only, same restriction as outage detection) aggregates every fresh `usage/*.json` file each poll - discarding a reading whose `captured_at` is stale (`WM_USAGE_STALE_SECS`) or whose `resets_at` has already passed (a frozen high reading must never be allowed to outlive the window it describes) - into the max `used_percentage`/`resets_at` per window, fed to `wm_state usage-update`. The same pass also removes any `usage/*.json` file whose `captured_at` is older than `WM_USAGE_SWEEP_SECS` (default 24h, an order of magnitude past `WM_USAGE_STALE_SECS`), since a file that old belongs to a session that has long since ended - this keeps the directory from growing unboundedly for the lifetime of `$WM_HOME` without ever risking a live session's own reading. That call advances a persisted state machine (`$WM_HOME/usage-limit-state.json`): `clear` -> `approaching` the moment either window crosses `WM_USAGE_WARN_THRESHOLD` (default 80%) while its `resets_at` is still in the future; `approaching` -> `paused`/`acknowledged` only via `wm_state usage-decide --decision wait|continue`, recording the pilot's explicit choice; and `approaching`/`paused`/`acknowledged` -> `clear` automatically, uniformly, the instant `resets_at` passes - no quiet-period heuristic needed, since there is an exact epoch to wait for. This closes the slow-pilot case: if the window resets before the pilot ever answers, the state clears itself, spawns unpause, and the still-outstanding ask is moot.
-
-`hooks/usage-limit-spawn-guard.sh` denies `bin/spawn-crew` while the state reads `approaching` or `paused` (both "not yet resolved to continue"), lifted per-call with `--force-during-usage-limit`. As with the outage guard, only *new* spawns are held - a crew member already running keeps working and keeps consuming quota regardless of the pilot's answer, and can still hit the hard limit on its own mid-turn even under "wait": there is no primitive in this codebase to checkpoint-and-hold a session mid-turn, and forcing a stop risks producing exactly the inconsistent, half-finished state (a member interrupted between a commit and opening its PR, say) this feature exists to avoid. A genuine hard-limit exhaustion still surfaces through the existing reactive path above (`WM_APIERR_RE` also matches the CLI's own `"usage limit reached"`/`"credit balance too low"` error text), where it reads as a likely "API outage" rather than being distinguished as quota exhaustion - an accepted, known mislabel, since the remedy (pause and wait) is correct either way.
+When the **same** signal hits many crew at once - a mass death, a correlated API-error stall, an outage, or an approaching usage-quota window - the watcher collapses or escalates it rather than paging per member, and pauses new spawns where appropriate. That machinery is documented in [fleet-resilience.md](fleet-resilience.md).
 
 ## The deliverable lifecycle and `review`
 
@@ -228,93 +181,7 @@ Each layer sees only its direct reports (`blocked` escalates one hop up; a lead 
 
 **Depth cap: two crew layers.** The full chain is pilot → wingman → lead → worker; wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers. A lead does not spawn further leads; deeper nesting is a future opt-in gated behind cost guardrails.
 
-**Domain generality.** The tree, escalation, rollup, and owner-scoping know nothing about software; only the playbooks carry domain. The playbook library ships this as a first-class taxonomy rather than a hypothetical: category subdirectories under `playbooks/` (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, alongside `software-development`) each carry a domain-appropriate pipeline, so a science lab (experimental-designer → experimentalist → analysis-scientist → peer-reviewer) or a business team (market-analyst → gtm-strategist → partnerships-rep) runs the same machinery out of the box. Adding a further domain is still a playbook swap, not a code change: reuse the default role names with domain-appropriate `*.local.md` prose, or add named roles (`playbooks/<category>/pi.md`, …) and a `lead.local.md` that sequences them. The lead playbook is written in role-and-handoff terms ("gather requirements → design → execute → review → integrate") with software as the concrete default.
-
-## Autonomous mode and interactive gates
-
-Because no human sits at a crew member's terminal, `bin/spawn-crew` launches each member with `--permission-mode bypassPermissions` (`WM_PERMISSION_MODE`) so a gated tool call auto-approves instead of hanging on a prompt forever.
-Set `WM_PERMISSION_MODE=` (empty) to fall back to interactive prompting.
-
-Two one-time interactive gates remain that no flag bypasses:
-
-- Claude Code's Bypass-Permissions acceptance (once, ever).
-- Each repo's first-time workspace-trust dialog (once per repo).
-
-`bin/spawn-crew` checks both non-interactively before ever opening a crew window: `bin/lib/claude-gate-check.py` reads `skipDangerousModePermissionPrompt` from the user settings file and `projects[<repo>].hasTrustDialogAccepted` from `~/.claude.json`, the same two fields Claude Code itself persists on acceptance.
-`bin/doctor` is meant to have already cleared the (global) Bypass-Permissions gate during onboarding; `spawn-crew` re-checks it as a safety net, and always checks the (per-repo) trust gate fresh, since trust is granted per directory.
-Either check failing refuses the spawn outright - no tmux window, no crew record - with a message naming the exact remedy, rather than opening a window that would only freeze on the dialog.
-The watcher's reactive pane-scrape detection (and a per-tool prompt when bypass is off) remains as a backstop for anything this preflight can't cover - a never-before-touched `--add-dir` target in a global-scope spawn, or a signal that drifts after a future Claude Code release - flipping the crew member to `blocked` and waking the pilot to approve once via `bin/crew-takeover`.
-After that, crew in that repo run fully unattended.
-
-## Playbooks and local overrides
-
-A crew type is defined entirely by a playbook - plain prose in `playbooks/<category>/`:
-
-- `playbooks/software-development/software-analyst.md` - gather requirements and turn a problem into a plan (or, in report mode, an investigation report).
-- `playbooks/software-development/architect.md` - turn an approved spec into a detailed technical design / implementation plan.
-- `playbooks/software-development/developer.md` - a purpose prompt: implement the assigned work and see it through to delivery, following the project's/human's own development workflow (the shared `_delivery.md` fragment carries only what coordination needs plus a default git/PR flow used when the environment defines none).
-- `playbooks/software-development/reviewer.md` - review a plan or a PR and report findings; its verdict travels over wingman's own channel by default, with GitHub-native review posting opt-in via `pr_comments`.
-- `playbooks/common/lead.md` - manage an effort end-to-end: decompose it, hire and sequence its own crew, integrate, and roll one status line up. Domain-neutral, so it lives outside any one category.
-- `playbooks/common/research.md` - example non-dev type: gather evidence, write a cited report. Also domain-neutral.
-  Shows the shape a `scientist`/`pm` role takes.
-
-Five further categories ship alongside `software-development`, each a domain-specific pipeline of roles: `ai-research` (research-analyst → experiment-designer → ml-engineer → research-reviewer), `data-science` (data-analyst → data-engineer → data-scientist → analytics-reviewer), `scientific-research` (experimental-designer → experimentalist → analysis-scientist → peer-reviewer, with a nested `biological-research` sub-domain: assay-designer, bioinformatician), `business-development` (market-analyst → gtm-strategist → partnerships-rep), and `business-operations` (ops-analyst → finance-analyst / process-designer).
-A role name is unique across every category, so a bare `--type` (e.g. `developer`) always resolves unambiguously; a category-qualified name (`software-development/developer`) is available to break a future collision.
-
-There is no hardcoded list of types; a type exists iff its playbook does.
-`bin/spawn-crew --list-types` enumerates them, grouped by category.
-
-`playbooks/<category>/<type>.local.md` overrides the tracked `<type>.md` when present.
-`*.local.md` is gitignored, following the same pattern as Claude Code's `settings.json` / `settings.local.json`: customizations and private crew types can't be accidentally committed and survive `git pull` of new defaults.
-Example: to make the software-analyst crew follow your own planning skill or checklist, write `playbooks/software-development/software-analyst.local.md` saying so.
-
-Project-discovery hints follow the same story: an optional gitignored `config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list (`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`).
-It is absent by default; the defaults cover the common case.
-
-## Spawning crew (the recipe)
-
-Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target project:
-
-```
-bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
-  --objective "<one-line task>" [--input <plan-path>] \
-  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
-```
-
-The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
-It prints the crew `id`.
-
-Pass `--scope global` (instead of `--repo`) to ground a crew member at the global project scope: it launches at the workspace root with every discovered repo added, so it can read and work across all of them and choose the target repo(s) itself.
-Use it for cross-repo work or when the repo is genuinely unclear.
-
-The git/branch/PR workflow (worktrees, branches, opening a PR, the no-merge guard) is conditional on git-ness, not universal: it applies whenever the crew type is a `software-development` role (`bin/spawn-crew` refuses to spawn one against a target that isn't a confirmed git repo), or whenever the target project happens to be a confirmed git repo regardless of category.
-`bin/spawn-crew` detects this mechanically at spawn time - for `--repo` targets, `git -C "$REPO" rev-parse --show-toplevel` compared (physically, symlink-resolved) against `$REPO` itself, so a directory merely nested inside a repo reads as non-git - and exports the result as two roster-scoped env vars: `WINGMAN_IS_GIT=true|false` and, only when a repo, `WINGMAN_HAS_REMOTE=true|false` (whether `origin` is configured, i.e. whether there's anywhere to open a PR against).
-Both are a real tri-state: absent (never exported for `--scope global`, and not carried forward by `bin/crew-resume` for a pre-change roster record) means "not yet known - detect it yourself" for whatever directory the member decides to work in, and must never be conflated with `false`.
-A non-software-development member (e.g. `data-engineer`, `ml-engineer`, `experimentalist`) branches on these two variables to choose between the full worktree/branch/PR flow, a git-but-no-remote local-commits-only flow, or a plain-files-no-git flow; `developer` has no non-git fallback by design and blocks if it ever finds itself in one.
-
-## State home - `~/.wingman/`
-
-Machine-local runtime state, created on first run, never committed:
-
-- `crew.json` - the live roster (id, type, session id, tmux window name and window id, repo, status, `parent`, `is_git`/`has_remote`).
-  `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
-  `is_git`/`has_remote` are recorded for repo scope only (`null`/absent for global scope) - see "Spawning crew" above.
-- `crew/<id>.json` - each crew member's distilled status record.
-- `board.md` - the human-readable render of the roster, its Active section indented as a tree so a reader sees the org.
-- `watch.pid` / `watch.beat` - wingman's (owner `""`) watcher cycle's pid and liveness beacon.
-  A lead's watcher keys its own files by owner (`watch-<owner>.pid` / `watch-<owner>.beat`), so per-owner watchers coexist.
-- `wake` - the attention list wingman's watcher writes when it fires; a lead's watcher writes `wake-<owner>`.
-- `acked.json` - the last `announced` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
-  A new `announced` (a genuine state change) re-surfaces.
-- `handled.json` - the last `announced` stamp fully HANDLED by the Stop hook for each crew id, set only when a stop is allowed to proceed - distinct from `acked.json` so a surfaced-but-unhandled event still re-blocks instead of being permanently suppressed by a premature ack.
-- `pr/<id>.json` - a developer member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
-- `projects.json` - the discovered-projects cache.
-- `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
-  Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.
-- `orphan-candidates.json` - `{window_name: first_seen_iso_stamp}` for a live `wm-*` tmux window with no matching `crew.json` record, tracked by `wm_state reconcile`'s grace-period-gated orphan-window adoption (owner `""` only) - see "Survival & reconciliation" below.
-
-All *user-editable* customization lives in the repo as gitignored `*.local.md` / `config.local.*`, not here.
-`~/.wingman/` is pure runtime state you never hand-edit.
+**Domain generality.** The tree, escalation, rollup, and owner-scoping know nothing about software; only the playbooks carry domain (see [playbooks.md](playbooks.md)). The playbook library ships this as a first-class taxonomy rather than a hypothetical: category subdirectories under `playbooks/` (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, alongside `software-development`) each carry a domain-appropriate pipeline, so a science lab (experimental-designer → experimentalist → analysis-scientist → peer-reviewer) or a business team (market-analyst → gtm-strategist → partnerships-rep) runs the same machinery out of the box. Adding a further domain is still a playbook swap, not a code change: reuse the default role names with domain-appropriate `*.local.md` prose, or add named roles (`playbooks/<category>/pi.md`, …) and a `lead.local.md` that sequences them. The lead playbook is written in role-and-handoff terms ("gather requirements → design → execute → review → integrate") with software as the concrete default.
 
 ## Survival & reconciliation
 

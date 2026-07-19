@@ -2,110 +2,84 @@
 
 [![CI](https://github.com/greerviau/wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/greerviau/wingman/actions/workflows/ci.yml)
 
-Wingman is a long-lived Claude Code session that runs a **crew** of agents for you.
-You (the pilot) give it high-level directives - *"implement this feature"*, *"investigate this issue"*, *"what's my crew doing?"* - and it delegates the real work to a crew, tracks their status, raises only real decisions to you, and keeps its own context clean.
-It orchestrates; it does not do the heavy lifting.
+**Talk to one agent. Run a whole crew.**
 
-Each crew member is an **independent `claude` session in its own tmux window**, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman itself is killed.
+Wingman is a long-lived Claude Code session that orchestrates a crew of agents for you.
+You (the pilot) give it high-level directives - *"implement this feature,"* *"investigate this issue,"* *"what's my crew doing?"* - and it delegates the real work, tracks status, and surfaces only real decisions to you.
+It orchestrates; it never does the heavy lifting itself.
+
+Each crew member is an independent `claude` session in its own tmux window, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed.
 
 ## Why not just subagents?
 
-A subagent call is a function call: it runs in your context and disappears when it returns.
-That works for a single bounded task, but not for anything that outlives one turn - a PR sitting through CI and review, a plan awaiting your sign-off, a multi-step effort.
-Wingman is built for that gap:
+A subagent is a function call: it runs in your context and vanishes when it returns.
+That fits a single bounded task, not work that outlives one turn - a PR sitting through CI, a plan awaiting your sign-off, a multi-step effort.
+Wingman fills that gap:
 
-- State lives on disk (`~/.wingman/`), not in a transcript, so it survives compaction and restarts.
-- The wake loop is event-driven, not polled - nothing burns tokens asking "done yet?".
-- Every crew type reports through one shared status contract instead of free-form transcript scraping.
-- Spawning is cost-disciplined and the org is depth-capped, never an unbounded swarm.
-- These rules are backed by mechanical hooks, not prompt discipline alone.
+- **Survives restarts** - state lives on disk (`~/.wingman/`), not in a transcript, so it outlasts compaction and restarts.
+- **Zero-token supervision** - the wake loop is event-driven; nothing burns tokens asking "done yet?"
+- **One status contract** - every crew type reports through a shared contract, never transcript scraping.
+- **Cost-disciplined** - spawning is deliberate and the org is depth-capped, never an unbounded swarm.
+- **Enforced by hooks**, not prompt discipline alone.
 
-This doesn't retire subagents - a crew member can still spin one off for a bounded, single-shot lookup inside its own session; wingman's crew is the coordination layer above that.
-See [`docs/architecture.md`](docs/architecture.md) for how each of these actually works.
+Crew members can still spin off their own subagents for bounded lookups - wingman is the coordination layer above that.
+See [`docs/architecture.md`](docs/architecture.md) for how each piece works.
 
 ## Quick start
 
 ```
 git clone https://github.com/greerviau/wingman.git
 cd wingman
-claude          # or: bin/wingman   (see "Why bin/wingman instead of plain claude?" below)
+bin/wingman          # recommended; plain `claude` also works
 ```
 
 On first launch wingman runs `bin/doctor` (installs any missing dependencies with your consent), discovers your sibling repos with zero config, and starts the supervisor.
-Then give it a directive.
+Then give it a directive. All you need up front is `claude` and `git`.
 
-The only things you must have before the first run are **`claude`** and **`git`**; `doctor` handles the rest.
-
-## Why `bin/wingman` instead of plain `claude`?
-
-`bin/wingman` is a thin launcher: it wires up a few things plain `claude` started in this repo won't have, then execs the real CLI.
-
-- Pre-adds every sibling project (`--add-dir`), so a global-scope spawn never hits a permission prompt.
-- Mints a fresh run id, so onboarding preferences are asked once per run instead of once per crew member.
-- Registers wingman's own pane for Remote Control disconnect detection.
-- Refreshes `~/.wingman/` state and the project cache on every launch.
-
-None of this is required to use wingman - see [`docs/architecture.md`](docs/architecture.md#the-wingman-launcher) for what you lose by skipping it.
+> `bin/wingman` is a thin launcher: it pre-adds sibling repos (`--add-dir`), mints a run id so preferences are asked once per run, and wires up Remote Control disconnect detection. Plain `claude` works too, with less - see [the launcher docs](docs/configuration.md#the-wingman-launcher).
 
 ## Driving wingman
 
-Talk to it in plain language, or use the slash commands:
+Talk in plain language, or use the slash commands:
 
 | You say | Wingman does |
 |---|---|
-| "Implement feature X in `<repo>`" | spawns a **software-analyst** crew → plan → (your review) → **developer** crew → PR → the developer crew watches its PR through to merge/close |
-| "Investigate issue Y in `<repo>`" | spawns a **software-analyst** crew in report mode (reproduces bugs end-to-end first) |
-| "Take the lead on X" (big, end-to-end) | spawns a **lead** that hires and runs its own crew (software-analyst → architect → developers → reviewer) and rolls one status line up to you |
-| `/spawn <type> <repo-or-global> <objective>` | launch a crew member of any type - `software-analyst`, `architect`, `developer`, `reviewer`, `lead`, `research`, or one you added; `bin/spawn-crew --list-types` shows every category's roles, and a bare name still works when it's unique across categories; pass `global` instead of a repo for cross-repo work |
-| `/status` | compact roster: who's on what (with each member's status), what's blocked, what's stalled, what's ready. Closed history is hidden by default |
-| `/blocked` | each blocked member + the decision it needs |
-| (a batch of crew died together, or hit a correlated API outage) | wingman relays the one collapsed event plus the fix: `bin/crew-resume --all-died` for an ordinary mass death (e.g. a host/tmux crash); for a detected Anthropic-side outage, new spawns are paused automatically until it clears, already-running crew are left alone, and any outage-tagged deaths are auto-resumed the moment the outage-cleared signal fires - no confirmation needed |
-| (a usage-quota window is approaching its cap) | new spawns are paused automatically; wingman asks you to wait for the reset or continue anyway (already-running crew are never touched either way) and unpauses on your answer or the moment the window resets on its own |
-| "Take over X" | `bin/crew-takeover <id>` prints the exact takeover command |
-| `/standdown <id>` | wraps up a crew member, closes its window |
-| `/prune` | clean the roster: drop fully-closed records (archived first) |
+| "Implement feature X in `<repo>`" | software-analyst plans it → you review → developer ships a PR and shepherds it to merge |
+| "Investigate issue Y" | software-analyst investigates in report mode (bugs reproduced end-to-end first) |
+| "Take the lead on X" | a **lead** hires and runs its own crew, rolling one status line up to you |
+| `/spawn <type> <repo\|global> <objective>` | launch any crew type; `bin/spawn-crew --list-types` shows them all |
+| `/status` | compact roster: who's on what, blocked, stalled, or ready |
+| `/blocked` | each blocked member and the decision it needs |
+| "Take over X" | prints the exact command to attach to a crew member's window |
+| `/standdown <id>` | wrap up a member and close its window |
+| `/prune` | drop fully-closed records (archived first) |
 
-**One session sees its work through.**
-A crew member is not spun down the moment its deliverable appears:
+Fleet-wide events are handled for you: a mass crew death offers a one-command resume, and a detected API outage or an approaching usage-quota pauses new spawns and resumes automatically - already-running crew are never touched.
+See [fleet resilience](docs/fleet-resilience.md).
 
-- When a developer crew opens a PR, it parks in a `review` state and keeps running: it watches CI and fixes it if it breaks, watches for review feedback and addresses it (dropping back to `working` while it does), and replies on the threads.
-- It reports `done` only when the PR is merged or closed.
-  `done` is the member's own "stand me down" signal, so wingman reaps it right then - finished members don't linger.
-- Feedback you give wingman is routed back to that same session (not a fresh one), so it keeps the full context.
-- It stops early only if you `/standdown` it.
+## One session sees its work through
 
-The same lifecycle applies to software-analyst and other crew types; how each state is entered lives in one shared status contract (`playbooks/_status-contract.md`), so a playbook only describes the work.
+A crew member isn't spun down the moment its deliverable appears.
+A developer that opens a PR parks in a `review` state and keeps running - watching CI, fixing breakage, and addressing feedback (dropping back to `working` while it does) - and reports `done` only when the PR merges or closes.
+Your feedback routes back to that same session, so it keeps full context.
+It stops early only if you `/standdown` it.
 
-**Take the wheel any time.**
+## Take the wheel any time
 
-- "Let me takeover X" prints the exact command to attach to a crew member's tmux window - select, type, take over.
-  Detach (`Ctrl-b d`) to hand back.
-- Killing wingman leaves the crew running; relaunching it rebuilds the roster.
-- Every crew member is also reachable straight from `claude.ai/code` or the Claude desktop/mobile apps, with connection drops recovered automatically in both directions - see [Remote Control](#remote-control) below.
-
-## Remote Control
-
-Claude Code's Remote Control lets you reach a running session from `claude.ai/code` or the Claude desktop/mobile apps, not only by attaching to its tmux window.
-Every crew member is reachable this way by default, and a dropped connection - a crew member's or wingman's own - is either auto-recovered or surfaced to you with a one-line fix.
-See [`docs/architecture.md`](docs/architecture.md#remote-control) for how each direction works.
+- Attach to any crew member's tmux window to type or take over; detach (`Ctrl-b d`) to hand back.
+- Killing wingman leaves the crew running; relaunching rebuilds the roster.
+- Every crew member is also reachable from `claude.ai/code` and the Claude desktop/mobile apps via Remote Control, with dropped connections auto-recovered - see [Remote Control](docs/architecture.md#remote-control).
 
 ## Autonomous by default
 
-Crew launch with `--permission-mode bypassPermissions` so gated tool calls auto-approve instead of hanging forever with no human at the terminal.
+Crew launch with `--permission-mode bypassPermissions`, so gated tool calls auto-approve instead of hanging with no human at the terminal.
+Two one-time gates (Claude Code's Bypass-Permissions acceptance and each repo's first-time trust dialog) are detected before a window opens, refusing the spawn with the exact remedy rather than freezing; once cleared, crew in that repo run unattended.
 
-Two one-time interactive gates remain: Claude Code's Bypass-Permissions acceptance, and each repo's first-time workspace-trust dialog.
-`bin/spawn-crew` detects both non-interactively before opening a crew window, refusing the spawn with the exact remedy rather than letting it freeze; a reactive check still catches anything that preflight can't cover.
-Once cleared, crew in that repo run unattended.
+**Model:** an explicit `--model` on a spawn wins; otherwise `$WM_MODEL` (see [`config.example.sh`](config.example.sh)); otherwise the agent CLI's default.
 
-A resumed session (`bin/crew-resume`, or `claude --resume` by hand) can also hit the CLI's own "resume from summary?" prompt on a large or old transcript.
-`bin/crew-resume` defeats it outright on every relaunch; if it appears anyway, wingman recognizes it and wakes you with a specific one-keypress fix via `bin/crew-takeover`.
+## Playbooks: customize the crew
 
-**Model selection.** An explicit `--model` on a spawn always wins; otherwise `$WM_MODEL` (settable in `config.local.sh`, see [`config.example.sh`](config.example.sh)) is the default for every spawn; with neither set, the agent CLI's own default applies.
-
-## Customizing crew behavior (playbooks)
-
-A crew type is just a playbook - plain prose in `playbooks/`, grouped by category (`playbooks/<category>/<role>.md`).
-The `software-development` category's built-ins read as an org:
+A crew type is just a playbook - plain prose in `playbooks/<category>/<role>.md`. The `software-development` category reads as an org:
 
 | Role | Purpose |
 |---|---|
@@ -114,39 +88,34 @@ The `software-development` category's built-ins read as an org:
 | `developer` | worktree → implement → commit → push → PR |
 | `reviewer` | review a plan or PR and report findings |
 
-`lead` (manage an effort end-to-end with its own crew) and `research` (an example non-dev type) live in the domain-neutral `common` category, since they apply to any discipline.
-Several other categories ship too (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, `infrastructure`) - `bin/spawn-crew --list-types` shows every category's roles.
+`lead` and `research` live in the domain-neutral `common` category; more categories ship too (`ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, `infrastructure`).
+`bin/spawn-crew --list-types` lists every role.
 
-- **Customize a type:** drop a `playbooks/<category>/<type>.local.md` beside the default; if present it wins.
-- **Add a type:** create `playbooks/<category>/<type>.md` (tracked) or `.local.md` (yours only), inside the category it belongs to (or a new category directory, for a genuinely new discipline), then spawn it with `--type <name>`.
-  There's no hardcoded list - a type exists iff its playbook does.
-  A bare name (e.g. `developer`) resolves across every category as long as it's unique; a category-qualified name (`software-development/developer`) breaks a collision.
-  `bin/spawn-crew --list-types` shows what's available.
+- **Customize:** drop a `<type>.local.md` beside the default; if present it wins.
+- **Add:** create `<type>.md` and spawn with `--type <name>`. A type exists iff its playbook does; a bare name works when it's unique, and a category-qualified name (`software-development/developer`) breaks a collision.
 
-`*.local.md` is gitignored, so your customizations can't be accidentally committed and survive `git pull` of new defaults.
-If you have an existing `playbook/<type>.local.md` from before this reorganization, move it yourself to `playbooks/<category>/<type>.local.md` (the category the role now lives under) after pulling this change.
+`*.local.md` is gitignored, so your customizations can't be committed by accident and survive `git pull`.
 
 ## Run an effort as an org (leads)
 
-Your crew is a **tree** with you at the top.
-Small directives take the lean direct paths (a software-analyst for a plan, a developer with a plan in hand).
-A large, end-to-end effort - multi-phase, multi-repo, or requirements-through-ship - gets a **lead**: say *"take the lead on X"* (or let wingman suggest one) and it hires and runs its own crew, one layer down.
+Your crew is a tree with you at the top.
+Small directives take lean direct paths; a large, end-to-end effort gets a **lead** that decomposes it, sequences the phases (software-analyst → architect → developer(s) → reviewer), integrates the results, and rolls a single status line up to you.
 
-- The lead **decomposes** the effort, **sequences** the phases (software-analyst → architect → developer(s) → reviewer), **iterates** each deliverable with its owner, **integrates** the results, and rolls a **single status line** up to you.
-- **Each layer sees only its direct reports.** A worker's blocker surfaces to its lead, not to you; only a decision the lead can't make escalates up the chain, and your answer flows back down. You see effort-level progress ("planning → building (2/3 PRs open)"), not worker chatter.
-- **Peers collaborate directly.** Two developers negotiating an interface, or a developer and a reviewer, talk to each other without going through the lead.
-- **Drill down any time:** `/status --tree` for the whole org, `/status --owner <lead-id>` for one lead's team; `~/.wingman/board.md` renders the tree.
+- **Each layer sees only its direct reports.** A worker's blocker surfaces to its lead; only a decision the lead can't make escalates to you, and your answer flows back down.
+- **Peers collaborate directly** - two developers on an interface, or a developer and a reviewer, without routing through the lead.
+- **Drill down any time:** `/status --tree` for the whole org, `/status --owner <lead-id>` for one team.
 
-The tree is domain-neutral - only the playbooks carry domain, so the same machinery runs a science lab (PI → experimental design → analysis → peer review) or a business team by swapping playbooks.
-Management depth is capped at two crew layers (a lead does not spawn leads).
+The tree is domain-neutral - swap playbooks and the same machinery runs a science lab or a business team. Depth is capped at two crew layers (a lead does not spawn leads).
 
 ## Tests
 
-`bash tests/run.sh` runs the bash E2E suites (no real `claude`/tmux fleet needed).
-Requires `bash`, `git`, `tmux`, and `uv`.
+`bash tests/run.sh` runs the bash E2E suites - no real `claude`/tmux fleet needed, just `bash`, `git`, `tmux`, and `uv`.
+GitHub Actions runs the same suite on every push and PR to `main`.
 
-GitHub Actions runs the same suite on every push and pull request to `main` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)), wrapped in a bounded timeout so a stuck watcher can never hang the job.
+## Learn more
 
-## Under the hood
-
-The crew coordination layer, the wake loop, machine-local state in `~/.wingman/`, and the harness-agnostic design are documented in [`docs/architecture.md`](docs/architecture.md).
+- [architecture.md](docs/architecture.md) - the core model: the wake loop, the deliverable lifecycle, and the crew hierarchy.
+- [configuration.md](docs/configuration.md) - the launcher, the spawn recipe, model selection, and state in `~/.wingman/`.
+- [guards.md](docs/guards.md) - the mechanical guards, checkout freshness, and autonomous mode.
+- [fleet-resilience.md](docs/fleet-resilience.md) - correlated fleet events, API-outage and usage-limit detection.
+- [playbooks.md](docs/playbooks.md) - crew types, categories, and local overrides.
