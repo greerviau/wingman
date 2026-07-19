@@ -87,6 +87,7 @@ The **state model is defined once** in the shared status contract (`playbooks/_s
 
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> working: spawned
     working --> blocked: needs a human decision
     blocked --> working: answer relayed back
@@ -156,17 +157,22 @@ flowchart TD
     pilot --> wingman
     wingman -->|"parent = &quot;&quot;"| analyst
     wingman -->|"parent = &quot;&quot;"| lead
-    lead -->|"parent = lead-id"| dev1
-    lead -->|"parent = lead-id"| dev2
-    lead -->|"parent = lead-id"| rev
-    dev1 <-.->|"crew-say (peers)"| rev
 
-    subgraph cap["depth cap: 2 crew layers"]
+    subgraph cap[" "]
         lead
         dev1
         dev2
         rev
+        lead -->|"parent = lead-id"| dev1
+        lead -->|"parent = lead-id"| dev2
+        lead -->|"parent = lead-id"| rev
+        dev1 <-.->|"crew-say (peers)"| rev
+        caplabel["depth cap: 2 crew layers"]
+        dev2 ~~~ caplabel
     end
+
+    classDef caption fill:none,stroke:none,color:#8a6d00,font-weight:bold
+    class caplabel caption
 ```
 
 Each layer sees only its direct reports (`blocked` escalates one hop up; a lead rolls a single line up to wingman). Wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers; a lead does not spawn further leads.
