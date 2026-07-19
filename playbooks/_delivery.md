@@ -7,10 +7,10 @@ You are a real session running in the target project, so you have already loaded
 If they define how work gets isolated, published, reviewed, and landed, follow that - it takes precedence over anything here.
 What follows is the **default** to fall back on only when the environment defines no workflow of its own; treat it as sensible defaults, not a mandate, and do not let it override a convention the human already has.
 
-Two things here are **not** defaults you can drop, because wingman's coordination depends on them regardless of which workflow you follow:
+Two things here are **not** defaults you can drop, because the coordination layer depends on them regardless of which workflow you follow:
 
-- **Register your worktree path.** However you create your isolated workspace, tell wingman where it is with `$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --worktree <path>` so teardown can find it. (If `$WINGMAN_WORKTREE` is set - a repo-scoped spawn - that is the path wingman already expects; using it means no registration call is needed.)
-- **Report state per the crew status contract** (appended below) - `working`/`blocked`/`review`/`done` - the same way every crew type does.
+- **Register your worktree path.** However you create your isolated workspace, record where it is with `$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --worktree <path>` so teardown can find it. (If `$WINGMAN_WORKTREE` is set - a repo-scoped spawn - that is the path already expected; using it means no registration call is needed.)
+- **Report state per the status contract** (appended below) - `working`/`blocked`/`review`/`done` - the same way every role does.
 
 ## What "delivered" looks like (deliverable shape)
 
@@ -34,7 +34,7 @@ git worktree add "$WINGMAN_WORKTREE" -b <feat|fix>/<short-description> origin/<d
 ```
 
 Do this every time you start, including on a resumed or re-taken-over session, so your base is always current with origin.
-If `$WINGMAN_WORKTREE` is unset (a global-scope member), pick a path yourself and register it (see above).
+If `$WINGMAN_WORKTREE` is unset (a global-scope session), pick a path yourself and register it (see above).
 
 ### Publish and open a PR
 
@@ -45,9 +45,9 @@ Follow `playbooks/_status-contract.md`'s "PR-facing content" rules and the repo'
 If your role produces a separate deliverable file (a results file, methods note, or spec), point the PR body at it.
 Record the PR as your `--delivery`.
 
-## Getting review feedback (the default is wingman's own channel, not the PR)
+## Getting review feedback (the default is your owner's own channel, not the PR)
 
-**Inter-agent review runs over wingman's own channel.** When a reviewer looks at your work, its verdict and findings reach you as a `bin/crew-say` message (its findings file is its `artifact`), not as PR-thread comments - you are woken by that incoming message while parked in `review`.
+**Inter-agent review runs over your owner's own channel.** When a reviewer looks at your work, its verdict and findings reach you as a `bin/crew-say` message (its findings file is its `artifact`), not as PR-thread comments - you are woken by that incoming message while parked in `review`.
 Address the feedback in your workspace, push, and report back the same way (`bin/crew-say` to whoever asked), letting your status settle back to `review`.
 You do not reply on PR threads by default, and a reviewer does not post to the PR by default; nothing about the review is written to GitHub.
 
@@ -59,7 +59,7 @@ $WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key pr_comments
 
 Only when it prints `on` do you also reply on PR threads for feedback that arrived there: reply inline, threaded to the specific review comment when the point was code-anchored, and use one top-level `gh pr comment` only for feedback that wasn't anchored to a line; open every reply body with `<!-- wingman-crew:$WINGMAN_CREW_ID -->` (it must be first in the body - see `bin/pr-watch`'s header comment for why).
 Keep each reply short and specific - one or two sentences naming exactly what changed and where - never a paragraph restating the diff, and reply to every point raised even one you didn't act on, with the specific reasoning.
-When it is `off`, unanswered, or unaskable, write nothing to the PR; all feedback stays on wingman's channel.
+When it is `off`, unanswered, or unaskable, write nothing to the PR; all feedback stays on your owner's channel.
 
 ## Shepherding a PR (when there is one)
 
@@ -84,11 +84,11 @@ A developer whose delivery has no forge signal to watch (no remote, or a workflo
 
 ### Merge authorization
 
-By default you **cannot** merge this PR - a `PreToolUse` hook (`hooks/no-merge-guard.sh`) denies `gh pr merge`, a `gh api` call hitting the merge endpoint, and a direct push to the default branch, from every crew session.
-This is deliberate: crew never merge without the human's explicit, per-effort authorization, because a crew session acts under the human's own GitHub credentials, and an unauthorized agent merge would be indistinguishable from the human's own.
-Once the PR is green, `review` is where you stop and wait; the human merges it directly, or grants **this specific effort** merge autonomy (`allow_merge: true` on your crew record - set only by the human or your lead, never by you on yourself).
+By default you **cannot** merge this PR - a `PreToolUse` hook (`hooks/no-merge-guard.sh`) denies `gh pr merge`, a `gh api` call hitting the merge endpoint, and a direct push to the default branch, from every session.
+This is deliberate: you never merge without the human's explicit, per-effort authorization, because your session acts under the human's own GitHub credentials, and an unauthorized agent merge would be indistinguishable from the human's own.
+Once the PR is green, `review` is where you stop and wait; the human merges it directly, or grants **this specific effort** merge autonomy (`allow_merge: true` on your record - set only by the human or your owner, never by you on yourself).
 
-**Merging requires more than `allow_merge: true`.** Once autonomy is granted, the same hook also requires verifiable evidence of a genuinely separate approving review before a merge succeeds: a real, distinct-account `APPROVED` GitHub review, or the documented comment-fallback verdict from a **different**, real `reviewer` crew member whose own `--delivery` names this PR.
+**Merging requires more than `allow_merge: true`.** Once autonomy is granted, the same hook also requires verifiable evidence of a genuinely separate approving review before a merge succeeds: a real, distinct-account `APPROVED` GitHub review, or the documented comment-fallback verdict from a **different**, real `reviewer` whose own `--delivery` names this PR.
 That evidence lives on the forge, so **auto-merge requires `pr_comments=on` for this effort** - the reviewer must record its verdict on GitHub for the gate to see it.
 If your effort genuinely needs to merge with no review round at all, that is `review_gate_waived: true` (same actor restriction as `allow_merge`).
 If it is granted and satisfied, `gh pr merge` succeeds, and a `PostToolUse` hook (`hooks/merge-attribution-tracker.sh`) automatically posts a PR comment attributing the merge to you (disclosing that an agent, not the human, merged under the human's credentials) - do not add that marker yourself.
@@ -99,7 +99,7 @@ If you believe this PR needs your own merge and autonomy hasn't been granted, or
 While you are writing code, fixing CI, or waiting for checks you triggered, there is active work in flight, so you are **`working`**.
 Once the PR is green and it is on the humans to review, you are delivered-and-waiting, so you park in **`review`**.
 A review comment or requested change (via `bin/crew-say`, or a PR thread under `pr_comments=on`) pulls you back to **`working`**; when you settle green again you return to **`review`**.
-The PR merging or closing is your terminal condition - **`done`**, and wingman reaps you.
+The PR merging or closing is your terminal condition - **`done`**, and your owner closes you out.
 Raise `blocked` only for a genuine decision you cannot make; routine CI fixes and feedback replies are yours to handle.
 
 The **first** time you settle into `review` for this PR, announce it normally.

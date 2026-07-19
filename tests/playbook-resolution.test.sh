@@ -29,9 +29,9 @@ chmod +x "$STUB"
 # stand-in content.
 PB="$(wm_mktemp_dir)/playbooks"
 mkdir -p "$PB/common" "$PB/software-development"
-printf '# Crew status contract (all crew types)\n\nFixture status contract text.\n' > "$PB/_status-contract.md"
-printf '# Playbook: `lead` crew member\n\nFixture lead playbook.\n' > "$PB/common/lead.md"
-printf '# Playbook: `developer` crew member\n\nFixture developer playbook.\n' > "$PB/software-development/developer.md"
+printf '# Status contract (all roles)\n\nFixture status contract text.\n' > "$PB/_status-contract.md"
+printf '# Playbook: `lead`\n\nFixture lead playbook.\n' > "$PB/common/lead.md"
+printf '# Playbook: `developer`\n\nFixture developer playbook.\n' > "$PB/software-development/developer.md"
 
 export WM_AGENT="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB" \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
@@ -44,14 +44,14 @@ assert_true "bare --type developer spawns" "[ -n '$id1' ]"
 sp1="$WINGMAN_HOME/crew/$id1.sysprompt.md"
 assert_true "sysprompt file exists" "[ -f '$sp1' ]"
 assert_true "resolves to software-development/developer.md content" \
-  "grep -q 'Playbook: \`developer\` crew member' '$sp1'"
+  "grep -q 'Playbook: \`developer\`' '$sp1'"
 
 # --- category-qualified name resolves directly --------------------------------
 id2="$("$SPAWN" --type common/lead --repo "$REPO_DIR" --objective "qualified name" 2>/dev/null | tail -1)"
 assert_true "qualified --type common/lead spawns" "[ -n '$id2' ]"
 sp2="$WINGMAN_HOME/crew/$id2.sysprompt.md"
 assert_true "resolves to common/lead.md content" \
-  "grep -q 'Playbook: \`lead\` crew member' '$sp2'"
+  "grep -q 'Playbook: \`lead\`' '$sp2'"
 
 # --- .local.md wins over its sibling .md --------------------------------------
 LOCAL="$PB/software-development/developer.local.md"
@@ -95,7 +95,7 @@ assert_false "list-types excludes the _status-contract partial" \
   "printf '%s\n' \"$LIST\" | grep -q '_status-contract'"
 
 # --- the shared status contract is still concatenated onto the sysprompt ------
-assert_true "sysprompt carries the crew status contract" \
-  "grep -q 'Crew status contract' '$sp1'"
+assert_true "sysprompt carries the status contract" \
+  "grep -q 'Status contract' '$sp1'"
 
 test_summary
