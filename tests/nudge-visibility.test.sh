@@ -90,4 +90,34 @@ json.dump(d, open(p, "w"))
 roster3="$(wm_state crew-list)"
 assert_not_contains "a blocked member is never annotated even with nudged_at present" "$roster3" "self-heal nudge sent"
 
+# --- regression: a self-report that lands ahead of a stall-check side-effect
+# write is never clobbered by it (a reviewer-reported race on PR #156: the
+# original --just-nudged/long-shell-tracker writes reused a `live` dict read
+# at cmd_stall_check's own function entry and wrote it back later with no
+# re-read or lock, so a concurrent self-report landing in between was
+# silently reverted - status, summary, and blocker all erased with no trace.
+# Both writers now take the same per-member with_locked(status_path(id)) and
+# re-read fresh immediately before writing, so whichever completes first is
+# never undone by the other) -------------------------------------------------
+test_new_home
+wm_state crew-add --id race1 --type developer --objective z --repo /tmp --window wm-race1 --session-id s3 >/dev/null
+wm_state crew-set --id race1 --status working --summary "digging through logs" >/dev/null
+# A real qualifying descendant (not just a bare pid) - so the assertion below
+# proves the status-gate inside _track_long_running is why nothing gets
+# written, not merely that there was nothing to track.
+spawn_bg sh -c 'sleep 2; sleep 600 & wait'
+race_pid=$!
+sleep 3.5
+# The self-report that must survive - lands on disk before either side-effect
+# write below runs.
+wm_state crew-set --id race1 --status blocked --blocker "need the human to install a library" >/dev/null
+# Both writers a single poll would have made against this member, exercised
+# directly - neither must revert the blocked transition above.
+wm_state stall-check --id race1 --pane-pid "$race_pid" --just-nudged 1 \
+  --pane-idle 0 --threshold 9999 --root-grace 1 --probe-gap 1 --cpu-eps 0.5 --nudge-age -1 >/dev/null
+after_race="$(wm_state crew-get --id race1)"
+assert_contains "the self-report survives a same-poll --just-nudged write" "$after_race" '"status": "blocked"'
+assert_contains "the blocker text survives intact" "$after_race" "need the human to install a library"
+assert_not_contains "the long-shell tracker skips a no-longer-working member, even with a qualifying descendant present" "$after_race" '"long_shell_pid"'
+
 test_summary
