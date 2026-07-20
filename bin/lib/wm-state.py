@@ -1315,6 +1315,30 @@ def _longest_running_descendant(root_pid, root_grace):
     return best
 
 
+def _stamp_nudged_at(cid):
+    """Stamp nudged_at = now() onto cid's status file the moment bin/watch-
+    fleet passes --just-nudged 1 to cmd_stall_check (#155 fix 1) - the same
+    poll it actually sent the check-in nudge.
+
+    Re-reads the status file fresh under with_locked(...) immediately before
+    writing, rather than trusting any dict a caller might have read earlier
+    (#155 review fix - see _track_long_running's docstring for the full
+    rationale, which applies identically here): cmd_stall_check's own entry
+    read happens before this is called, and writing that back verbatim later
+    would risk silently reverting a genuine self-report that landed on disk
+    in between. A no-op once the member is no longer 'working' by the time
+    the lock is acquired. Touches only nudged_at - never summary/status/
+    `updated`/`announced` - so this can never itself fire the watcher/Stop-
+    hook wake; cmd_crew_set clears it again on the member's own next self-
+    report (same lock), and a genuine stall flip clears it directly too."""
+    path = status_path(cid)
+    with with_locked(path):
+        current = read_json(path, None)
+        if isinstance(current, dict) and current.get("status") == "working":
+            current["nudged_at"] = now()
+            write_json(path, current)
+
+
 def _track_long_running(cid, pane_pid, root_grace):
     """Persist the elapsed time of the single longest-lived qualifying
     descendant (see _longest_running_descendant) onto the member's own status
@@ -1405,24 +1429,10 @@ def cmd_stall_check(args):
     if updated is None:
         return
 
-    # #155 fix 1: stamp nudged_at the moment bin/watch-fleet passes
-    # --just-nudged 1 - the same poll it actually sent the check-in nudge.
-    # Re-reads fresh under with_locked(...) immediately before writing (#155
-    # review fix), the same discipline _track_long_running below uses and for
-    # the identical reason: `live` was read at the top of this function, and
-    # writing it back verbatim later would risk silently reverting a genuine
-    # self-report that landed on disk in between. Touches only nudged_at -
-    # never summary/status/`updated`/`announced` - so this can never itself
-    # fire the watcher/Stop-hook wake; cmd_crew_set clears it again on the
-    # member's own next self-report (see there, same lock), and a genuine
-    # stall flip below clears it directly too.
+    # #155 fix 1: see _stamp_nudged_at's own docstring for why this reads
+    # fresh under a lock rather than reusing `live` from just above.
     if getattr(args, "just_nudged", 0):
-        status_file = status_path(args.id)
-        with with_locked(status_file):
-            current = read_json(status_file, None)
-            if isinstance(current, dict) and current.get("status") == "working":
-                current["nudged_at"] = now()
-                write_json(status_file, current)
+        _stamp_nudged_at(args.id)
 
     # #155 fix 2: long-shell duration tracking runs unconditionally for every
     # 'working' member with a resolvable pid, independent of the idle-
