@@ -2,8 +2,6 @@
 
 [![CI](https://github.com/greerviau/wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/greerviau/wingman/actions/workflows/ci.yml)
 
-**Talk to one agent. Run a whole crew.**
-
 Wingman is a long-lived Claude Code session that orchestrates a crew of agents for you.
 You (the pilot) give it high-level directives - *"implement this feature,"* *"investigate this issue,"* *"what's my crew doing?"* - and it delegates the real work, tracks status, and surfaces only real decisions to you.
 It orchestrates; it never does the heavy lifting itself.
