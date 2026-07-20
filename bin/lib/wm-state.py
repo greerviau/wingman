@@ -87,6 +87,19 @@ except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
     fcntl = None
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "delivery", "updated", "announced")
+# Display-only live-status fields (#155): never part of a member's own reported
+# status surface (STATUS_FIELDS above), never iterated generically by
+# cmd_crew_set, and carrying no gating weight anywhere - purely annotations a
+# render step (merged/render_roster_text/render_tree_text/render_board) may
+# show alongside a 'working' status. nudged_at (fix 1) is written by
+# cmd_stall_check's --just-nudged (riding the same per-poll call bin/watch-
+# fleet already makes for every candidate, rather than a second subprocess
+# spawned just to persist a timestamp) and cleared by cmd_crew_set on the
+# member's next self-report, or by cmd_stall_check itself on a genuine stall
+# flip.
+# long_shell_pid/long_shell_elapsed (fix 2) are written by cmd_stall_check's
+# per-poll duration probe, independent of the idle-nomination gates.
+DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -304,6 +317,9 @@ def merged(record):
     live = read_json(status_path(record["id"]), None)
     if isinstance(live, dict):
         for field in STATUS_FIELDS:
+            if field in live and live[field] is not None:
+                out[field] = live[field]
+        for field in DISPLAY_ONLY_LIVE_FIELDS:
             if field in live and live[field] is not None:
                 out[field] = live[field]
     return out
@@ -633,6 +649,22 @@ def cmd_crew_set(args):
         val = getattr(args, field, None)
         if val is not None:
             live[field] = None if val == "" and field in ("blocker", "artifact", "artifact_url", "delivery") else val
+    # nudged_at (#155 fix 1) is stamped elsewhere (cmd_stall_check's --just-
+    # nudged, riding the existing per-poll stall-check call bin/watch-fleet
+    # already makes for every candidate) - this function only ever CLEARS it,
+    # on the member's own next self-report. A call that touches at least one
+    # of the live-status fields below is exactly that (every self-report sets
+    # at least --summary); a call that touches none of them (a pure
+    # bookkeeping write - --worktree, --remote-control-connected, --window-id,
+    # --allow-merge, --review-gate-waived, --regenerate-review-token) is not,
+    # and must leave nudged_at alone: it comes from the watcher/orchestrator
+    # tooling acting on the member's behalf, not from the member itself, so it
+    # must never silently erase an in-progress nudge episode. cmd_stall_check
+    # also clears nudged_at directly when it confirms a genuine stall - that
+    # path writes the status file itself and never goes through here.
+    if any(getattr(args, f, None) is not None for f in
+           ("status", "summary", "blocker", "artifact", "artifact_url", "delivery")):
+        live.pop("nudged_at", None)
     # Auto-derive artifact_url from the publish marker unless the caller passed an
     # explicit value (including an explicit clear, already applied above) - see
     # _artifact_marker_url. This removes the free-text "remember to report the URL"
@@ -1242,6 +1274,72 @@ def _probe_execution(root_pid, root_grace, gap, eps):
     return delta >= eps
 
 
+def _longest_running_descendant(root_pid, root_grace):
+    """Of root_pid's descendants that qualify as _probe_execution's branch (a)
+    proof-of-life (started more than root_grace seconds after the root - the
+    identical test, from a fresh ps sample), return the (pid, elapsed_seconds)
+    of whichever has the largest OWN elapsed time - i.e. the single descendant
+    that has itself been running longest, in absolute terms. None if the tree
+    cannot be read or nothing qualifies.
+
+    `elapsed` is always the kernel's own current reading for that pid, fetched
+    fresh on every call - never accumulated or extrapolated locally - so pid
+    reuse across polls can never inflate a duration: a reused pid simply
+    reports whatever (short) elapsed time IT has actually been running the
+    moment it is asked, regardless of what the previous occupant's elapsed was
+    a poll ago."""
+    tree = _ps_tree(root_pid)
+    if not tree or root_pid not in tree:
+        return None
+    root_elapsed = tree[root_pid][1]
+    best = None
+    for pid, (_cpu, elapsed) in tree.items():
+        if pid == root_pid:
+            continue
+        if (root_elapsed - elapsed) > root_grace and (best is None or elapsed > best[1]):
+            best = (pid, elapsed)
+    return best
+
+
+def _track_long_running(cid, live, pane_pid, root_grace):
+    """Persist the elapsed time of the single longest-lived qualifying
+    descendant (see _longest_running_descendant) onto the member's own status
+    JSON, so a render step (crew-list/board.md) can surface a 'been running
+    longer than usual' annotation (#155 fix 2) without itself walking the
+    process tree or needing to know the warn ceiling.
+
+    Called on every cmd_stall_check invocation for a 'working' member with a
+    resolvable pid - independent of the idle-nomination gates below it, since
+    the scenario this exists to catch (a single long-outstanding tool call or
+    background shell) keeps Claude Code's own pane repainting via its "N
+    shell(s) still running" indicator, so pane_idle/status_idle may never
+    cross STALL_IDLE and the rest of cmd_stall_check would otherwise never run
+    at all for this member.
+
+    Writes directly to disk (bypassing cmd_crew_set) and touches only
+    long_shell_pid/long_shell_elapsed - never `updated`/`announced` - so this
+    can never itself reset the staleness clock the rest of the stall-detection
+    machinery depends on, and never fires the watcher/Stop-hook wake. Clears
+    both fields the instant no qualifying descendant is found - a legitimately
+    finished command, or the watcher's own next poll simply catching the
+    process tree between two different qualifying descendants - so a stale
+    annotation never lingers past the process it described.
+    """
+    found = _longest_running_descendant(pane_pid, root_grace)
+    if found is None:
+        if "long_shell_pid" in live or "long_shell_elapsed" in live:
+            live.pop("long_shell_pid", None)
+            live.pop("long_shell_elapsed", None)
+            write_json(status_path(cid), live)
+        return
+    pid, elapsed = found
+    if live.get("long_shell_pid") == pid and live.get("long_shell_elapsed") == elapsed:
+        return  # unchanged since the last poll - nothing new to persist
+    live["long_shell_pid"] = pid
+    live["long_shell_elapsed"] = elapsed
+    write_json(status_path(cid), live)
+
+
 def cmd_stall_check(args):
     """Flag a WORKING crew member as 'stalled' iff it shows no external sign of life:
     BOTH staleness gates (pane_idle from the watcher, status_idle computed here) at
@@ -1264,7 +1362,12 @@ def cmd_stall_check(args):
 
     --api-error only changes which reason template a genuine stall is written with
     (an 'api-error:' prefix instead of the default) - it never changes the gates or
-    the probe above, and does not by itself cause a flip."""
+    the probe above, and does not by itself cause a flip.
+
+    --just-nudged and the long-shell duration tracking below (#155 fixes 1/2) are
+    unconditional side effects that run on every call regardless of the gates
+    above - see their own inline comments for why - and never change whether or
+    when a flip happens."""
     ensure_home()
     live = read_json(status_path(args.id), None)
     if not isinstance(live, dict) or live.get("status") != "working":
@@ -1272,6 +1375,23 @@ def cmd_stall_check(args):
     updated = _parse_updated(live.get("updated"))
     if updated is None:
         return
+
+    # #155 fix 1: stamp nudged_at the moment bin/watch-fleet passes
+    # --just-nudged 1 - the same poll it actually sent the check-in nudge.
+    # Written directly (not through cmd_crew_set) so this never touches
+    # summary/status/`updated`/`announced` or fires the watcher/Stop-hook
+    # wake; cmd_crew_set clears it again on the member's own next self-report
+    # (see there), and a genuine stall flip below clears it directly too.
+    if getattr(args, "just_nudged", 0):
+        live["nudged_at"] = now()
+        write_json(status_path(args.id), live)
+
+    # #155 fix 2: long-shell duration tracking runs unconditionally for every
+    # 'working' member with a resolvable pid, independent of the idle-
+    # nomination gates just below - see _track_long_running's docstring for
+    # why it cannot wait for those gates to pass first.
+    _track_long_running(args.id, live, args.pane_pid, args.root_grace)
+
     status_idle = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds()
     if args.pane_idle < args.threshold or status_idle < args.threshold:
         return
@@ -1316,6 +1436,10 @@ def cmd_stall_check(args):
     live["summary"] = reason
     live["updated"] = now()
     live["announced"] = live["updated"]  # a stall flip always announces
+    # #155 fix 1: a genuine stall confirms the nudge did not work - clear the
+    # nudge-in-progress annotation along with the flip itself, since `stalled`
+    # (not a still-'working' render) is now the accurate signal to show.
+    live.pop("nudged_at", None)
     write_json(status_path(args.id), live)
 
     # Mirror into the roster, as crew-set does, so a later loss of the status
@@ -2095,13 +2219,66 @@ def _git_suffix(r):
     return ""
 
 
+def _long_shell_warn_seconds():
+    """WM_LONG_SHELL_WARN (seconds, default 1200 = 20 minutes) - the generous,
+    configurable ceiling past which a single outstanding tool call/background
+    shell earns a 'longer than usual' annotation (#155 fix 2). Purely a
+    render-time threshold, read fresh on every render call so retuning it
+    needs no watcher restart; it never gates a blocked/stalled flip."""
+    try:
+        return int(os.environ.get("WM_LONG_SHELL_WARN", "1200"))
+    except ValueError:
+        return 1200
+
+
+def _human_duration(seconds):
+    """'47s' / '22m' / '1h5m' - short, human-scale duration for the nudge and
+    long-shell annotations."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds" % seconds
+    minutes = seconds // 60
+    if minutes < 60:
+        return "%dm" % minutes
+    hours, minutes = divmod(minutes, 60)
+    return "%dh%dm" % (hours, minutes) if minutes else "%dh" % hours
+
+
+def _stall_annotation(r):
+    """Short parenthetical suffix for a 'working' member's status cell (#155):
+    a self-heal nudge already sent and still within its cooldown window (fix
+    1), and/or a single outstanding tool call/background shell that has been
+    running far longer than usual (fix 2). Both are purely informational -
+    they never change the status value itself - and both apply only while
+    status is still 'working' (nudged_at/long_shell_* can briefly outlive that
+    in the record, e.g. between a stalled flip and the next render, but a
+    non-'working' status is never annotated). Returns "" when neither
+    applies."""
+    if r.get("status") != "working":
+        return ""
+    parts = []
+    nudged_at = r.get("nudged_at")
+    if nudged_at:
+        parsed = _parse_updated(nudged_at)
+        if parsed is not None:
+            age = (datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()
+            if age >= 0:
+                parts.append("self-heal nudge sent %s ago" % _human_duration(age))
+    elapsed = r.get("long_shell_elapsed")
+    if elapsed is not None and elapsed >= _long_shell_warn_seconds():
+        parts.append("1 shell running %s, longer than usual" % _human_duration(elapsed))
+    if not parts:
+        return ""
+    return " (%s)" % "; ".join(parts)
+
+
 def render_roster_text(rows):
     if not rows:
         return "(no crew)"
     lines = []
     for r in rows:
         line = "  [%-10s] %-22s %-9s %s%s" % (
-            r.get("type", "?"), r.get("id", "?"), r.get("status", "?"),
+            r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r),
             (r.get("summary") or "").split("\n")[0][:60], _git_suffix(r),
         )
         lines.append(line)
@@ -2127,7 +2304,7 @@ def render_tree_text(rows):
     for r, depth in ordered:
         indent = "  " * depth
         line = "%s[%s] %s %s %s" % (
-            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?"),
+            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r),
             (r.get("summary") or "").split("\n")[0][:50],
         )
         lines.append(line.rstrip())
@@ -2165,7 +2342,7 @@ def render_board():
                 + _git_suffix(r)
             )
             out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s |" % (
-                r.get("type", ""), marker, id_cell, r.get("status", ""),
+                r.get("type", ""), marker, id_cell, r.get("status", "") + _stall_annotation(r),
                 r.get("window", ""), repo_cell,
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
                 _cell(r.get("artifact_url")),
@@ -2395,6 +2572,14 @@ def build_parser():
     # marker exists yet (#61). Required to be >= 0 and >= --threshold before a
     # genuine stall is allowed to flip - see cmd_stall_check's docstring.
     a.add_argument("--nudge-age", type=int, default=-1, dest="nudge_age")
+    # #155 fix 1: 1 iff bin/watch-fleet's check-in nudge was just sent to this
+    # candidate THIS poll - stamps nudged_at (see cmd_stall_check) so a
+    # render step can annotate a still-'working' member as mid-self-heal.
+    # Rides this same per-poll call rather than a second subprocess spawned
+    # just to persist a timestamp (that extra uv/python startup per nudged
+    # member per poll was enough to visibly skew the tight multi-member
+    # timing the outage-detection tests depend on).
+    a.add_argument("--just-nudged", type=int, default=0, dest="just_nudged")
     a.set_defaults(fn=cmd_stall_check)
 
     a = sub.add_parser("needs-attention")
