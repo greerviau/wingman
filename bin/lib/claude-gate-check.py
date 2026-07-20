@@ -19,10 +19,19 @@ ever happens, rather than reactively via bin/watch-fleet's stall detection
   (bin/doctor's own y/N or -y gate). Refuses (exit 2) if the existing file
   content is not valid JSON, exactly like install-user-hook.py's own rule.
 - `trust-status --config <path> --repo <abs-path>`: exit 0 if the one-time,
-  per-directory workspace-trust dialog has been accepted for <abs-path>
-  (projects[<abs-path>].hasTrustDialogAccepted is true in the main config
-  file), exit 1 otherwise. Read-only: there is deliberately no `trust-set`
-  (see the plan's "Why the trust gate is detect-and-block, not auto-clear").
+  per-directory workspace-trust dialog has been accepted for <abs-path> OR
+  any ancestor directory up to `/` (projects[<path>].hasTrustDialogAccepted
+  is true in the main config file for <abs-path> itself or some ancestor),
+  exit 1 otherwise. Trust is hierarchical in Claude Code: accepting it for a
+  directory trusts every descendant, so a repo nested under an already-trusted
+  parent never re-prompts and its own entry stays unaccepted - checking only
+  the exact path would false-negative in that case (issue #147). <abs-path>
+  is expected to already be physically normalized (no trailing slash,
+  symlinks resolved) by the caller, exactly like the exact-match lookup this
+  replaces; ancestors are derived from it by walking `os.path.dirname`, which
+  stays physically normalized for every prefix of an already-resolved path.
+  Read-only: there is deliberately no `trust-set` (see the plan's "Why the
+  trust gate is detect-and-block, not auto-clear").
 
 Every subcommand treats a missing file, missing key, or invalid JSON as "not
 accepted" (exit 1) rather than erroring - a corrupt or absent file must never
@@ -72,6 +81,15 @@ def cmd_bypass_set(args):
     print(f"skipDangerousModePermissionPrompt set in {args.settings}")
 
 
+def path_and_ancestors(path):
+    """Yield <path> itself, then each ancestor up to and including '/'."""
+    path = path.rstrip("/") or "/"
+    yield path
+    while path != "/":
+        path = os.path.dirname(path)
+        yield path
+
+
 def cmd_trust_status(args):
     data = load_json(args.config)
     if data is None:
@@ -79,10 +97,11 @@ def cmd_trust_status(args):
     projects = data.get("projects")
     if not isinstance(projects, dict):
         sys.exit(1)
-    entry = projects.get(args.repo)
-    if not isinstance(entry, dict):
-        sys.exit(1)
-    sys.exit(0 if entry.get("hasTrustDialogAccepted") is True else 1)
+    for candidate in path_and_ancestors(args.repo):
+        entry = projects.get(candidate)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+            sys.exit(0)
+    sys.exit(1)
 
 
 def main():
