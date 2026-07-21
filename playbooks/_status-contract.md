@@ -36,6 +36,7 @@ Only pass the flags that changed.
   Refreshing your `summary` here never wakes anyone, so keep it current and specific - it is the only thing your owner sees.
 - **`blocked`** - you need a decision or input that only a human can give, and you cannot proceed without it.
   Set a precise `blocker` naming the exact decision, then stop and wait; the answer is relayed back into this session and you continue.
+  This explicitly includes needing the human to perform a privileged or system-level action you cannot perform yourself (install a package, grant an OS permission, provide a credential) and needing the human to make a choice or approve something - see "`blocked` for a human dependency" below for both.
 - **`review`** - your deliverable is produced and surfaced, and your engagement is **not over**: it now depends on an external condition you do not control (a human approval, a PR merge, a downstream result).
   You are **not actively working** in this state - you are parked, watching that condition.
   Entering `review` announces "ready for you" to your owner **once**.
@@ -43,6 +44,13 @@ Only pass the flags that changed.
 - **`done`** - your terminal condition is met and the whole engagement is over.
   This is your signal that you are ready to be closed out, and **your owner closes you out as soon as it sees it**.
   A deliverable that is merely ready is `review`, never `done`; reach `done` only at the true end (the PR merged/closed, the plan approved and handed off) or an explicit close-out.
+
+## `blocked` for a human dependency
+
+Two related cases both belong under `blocked`, raised once, immediately, the moment you recognize them - never carried silently inside a `working` summary, and never worked around on your own:
+
+1. **A privileged or system-level action only the human can perform** - installing a system package, granting an OS permission, provisioning a credential, or anything else outside what your own tool access can do. Naming it as `blocked` the moment you hit it is what wakes your owner (lead or orchestrator) through the existing watcher; you are not required to sit in `blocked` for however long the human takes to act. Once you've raised it, you may arm a background wait for the dependency to clear (a polling loop, a watcher on the resource becoming available) and return to `working` while it runs - that single `blocked` → `working` transition is enough; the watcher does not need you to stay parked in `blocked` to have done its job. What it must never do is sit invisibly: a `working` summary that merely *mentions* "waiting on the library install" or "no C linker in this environment" is not a substitute for the `blocked` report, however accurately worded - `bin/watch-fleet` wakes an owner on a status **transition**, never on the text of an unchanged `working` summary, so a dependency that never became `blocked` even briefly is architecturally invisible to whoever owns you, no matter how clearly you described it to yourself.
+2. **A choice or approval only the human can make**, when no interactive tool is available to ask them directly. You do not have (and must never attempt to use) a way to sit on a live, interactive human-facing prompt and wait for someone to answer it in real time - only the top-level wingman session is ever actually watched by a human that way. `AskUserQuestion`, `EnterPlanMode`, and `ExitPlanMode` are mechanically denied for every crew session for exactly this reason (`hooks/no-interactive-prompt-guard.sh`, issue #155): each one waits for a human to respond interactively, and nobody is watching your pane to do that. If you find yourself needing one of them, that need itself is the signal to report `blocked` instead - set `blocker` to the specific question (with its options, if there are a small fixed set), the same single `blocked` → `working` transition as case 1 applies once you've raised it, and the human's answer comes back to you the ordinary way (relayed via `bin/crew-say`), not through a tool waiting on your own turn.
 
 ## Re-entering `review` without re-announcing
 

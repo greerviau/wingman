@@ -87,6 +87,19 @@ except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
     fcntl = None
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "delivery", "updated", "announced")
+# Display-only live-status fields (#155): never part of a member's own reported
+# status surface (STATUS_FIELDS above), never iterated generically by
+# cmd_crew_set, and carrying no gating weight anywhere - purely annotations a
+# render step (merged/render_roster_text/render_tree_text/render_board) may
+# show alongside a 'working' status. nudged_at (fix 1) is written by
+# cmd_stall_check's --just-nudged (riding the same per-poll call bin/watch-
+# fleet already makes for every candidate, rather than a second subprocess
+# spawned just to persist a timestamp) and cleared by cmd_crew_set on the
+# member's next self-report, or by cmd_stall_check itself on a genuine stall
+# flip.
+# long_shell_pid/long_shell_elapsed (fix 2) are written by cmd_stall_check's
+# per-poll duration probe, independent of the idle-nomination gates.
+DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -304,6 +317,9 @@ def merged(record):
     live = read_json(status_path(record["id"]), None)
     if isinstance(live, dict):
         for field in STATUS_FIELDS:
+            if field in live and live[field] is not None:
+                out[field] = live[field]
+        for field in DISPLAY_ONLY_LIVE_FIELDS:
             if field in live and live[field] is not None:
                 out[field] = live[field]
     return out
@@ -625,63 +641,93 @@ def cmd_crew_set(args):
     if args.silent and args.status in ("blocked", "done"):
         sys.exit("wm-state: --silent may not be used with --status %s - "
                   "blocked/done are always genuine and must always announce" % args.status)
-    live = read_json(status_path(args.id), {"id": args.id})
-    live["id"] = args.id
-    prev_status = live.get("status")
-    prev_pointer = (live.get("artifact"), live.get("blocker"), live.get("delivery"))
-    for field in STATUS_FIELDS[:-2]:  # everything but 'updated' and 'announced'
-        val = getattr(args, field, None)
-        if val is not None:
-            live[field] = None if val == "" and field in ("blocker", "artifact", "artifact_url", "delivery") else val
-    # Auto-derive artifact_url from the publish marker unless the caller passed an
-    # explicit value (including an explicit clear, already applied above) - see
-    # _artifact_marker_url. This removes the free-text "remember to report the URL"
-    # step entirely (issue #110): the member never has to type the URL anywhere.
-    if getattr(args, "artifact_url", None) is None:
-        detected = _artifact_marker_url(args.id, live.get("artifact"))
-        if detected:
-            live["artifact_url"] = detected
-    live["updated"] = now()
-    # `announced` is the dedup key needs-attention actually watches (see its
-    # docstring), and it must survive an intervening `working` dip untouched: a
-    # developer's review -> working (fixing CI) -> review round trip must leave
-    # `announced` exactly where it was before the dip, or the silent re-entry
-    # below would find it already bumped by the plain `working` call and
-    # wrongly surface. So it only ever advances on a call that both (a) is not
-    # silent and (b) actually sets status to one of the attention states this
-    # dedup key exists for (review/blocked/done - died/stalled are set directly
-    # by reconcile/stall-check, not through here). For `review` specifically,
-    # it advances only on a genuine transition into review from a different
-    # prior status, or a material change to the artifact/blocker/delivery
-    # pointer while already in review - a same-status call that only touches
-    # `summary` (the documented anti-stall escape hatch) leaves `announced`
-    # untouched, so a member sitting unchanged in `review` across many benign
-    # refreshes is not re-surfaced on every one of them. `blocked` and `done`
-    # are unscoped by this: `--silent` is already forbidden for them, so every
-    # non-silent call is genuine and always announces, transition or not.
-    # Every other call - a `working` transition, a mid-review summary refresh,
-    # or an explicit `--silent` - leaves `announced` exactly as it was (seeded
-    # via setdefault only if this is the very first write for this id, so a
-    # record is never left without one). See playbooks/_status-contract.md,
-    # "Re-entering review without re-announcing" - a genuine re-delivery must
-    # dip through `working` first so this gate can tell it apart from churn.
-    if not args.silent and args.status in ATTENTION_STATES:
-        if args.status == "review":
-            new_pointer = (live.get("artifact"), live.get("blocker"), live.get("delivery"))
-            genuinely_new = (args.status != prev_status) or (new_pointer != prev_pointer)
-        else:  # blocked/done: --silent is already forbidden, every call is genuine
-            genuinely_new = True
-        if genuinely_new:
-            live["announced"] = live["updated"]
+    # #155 review fix: the read-modify-write below is now shared with
+    # cmd_stall_check's own side-effect writes (--just-nudged, the long-shell
+    # tracker) onto this SAME file from a different process (the watcher) - a
+    # write_json is a full-file replace, not a merge, so two unlocked writers
+    # can silently clobber each other (a self-report landing between this
+    # function's read and write would be reverted by whichever wrote last).
+    # with_locked(status_path(...)) - the identical pattern crew_json_path()
+    # already uses below for the roster - serializes this against every other
+    # writer of this file; the read happens INSIDE the lock so prev_status/
+    # prev_pointer/the nudged_at check below all see the freshest possible
+    # on-disk state, not a snapshot that might already be stale by the time
+    # the lock is acquired.
+    status_file = status_path(args.id)
+    with with_locked(status_file):
+        live = read_json(status_file, {"id": args.id})
+        live["id"] = args.id
+        prev_status = live.get("status")
+        prev_pointer = (live.get("artifact"), live.get("blocker"), live.get("delivery"))
+        for field in STATUS_FIELDS[:-2]:  # everything but 'updated' and 'announced'
+            val = getattr(args, field, None)
+            if val is not None:
+                live[field] = None if val == "" and field in ("blocker", "artifact", "artifact_url", "delivery") else val
+        # nudged_at (#155 fix 1) is stamped elsewhere (cmd_stall_check's --just-
+        # nudged, riding the existing per-poll stall-check call bin/watch-fleet
+        # already makes for every candidate) - this function only ever CLEARS it,
+        # on the member's own next self-report. A call that touches at least one
+        # of the live-status fields below is exactly that (every self-report sets
+        # at least --summary); a call that touches none of them (a pure
+        # bookkeeping write - --worktree, --remote-control-connected, --window-id,
+        # --allow-merge, --review-gate-waived, --regenerate-review-token) is not,
+        # and must leave nudged_at alone: it comes from the watcher/orchestrator
+        # tooling acting on the member's behalf, not from the member itself, so it
+        # must never silently erase an in-progress nudge episode. cmd_stall_check
+        # also clears nudged_at directly when it confirms a genuine stall - that
+        # path writes the status file itself and never goes through here.
+        if any(getattr(args, f, None) is not None for f in
+               ("status", "summary", "blocker", "artifact", "artifact_url", "delivery")):
+            live.pop("nudged_at", None)
+        # Auto-derive artifact_url from the publish marker unless the caller passed an
+        # explicit value (including an explicit clear, already applied above) - see
+        # _artifact_marker_url. This removes the free-text "remember to report the URL"
+        # step entirely (issue #110): the member never has to type the URL anywhere.
+        if getattr(args, "artifact_url", None) is None:
+            detected = _artifact_marker_url(args.id, live.get("artifact"))
+            if detected:
+                live["artifact_url"] = detected
+        live["updated"] = now()
+        # `announced` is the dedup key needs-attention actually watches (see its
+        # docstring), and it must survive an intervening `working` dip untouched: a
+        # developer's review -> working (fixing CI) -> review round trip must leave
+        # `announced` exactly where it was before the dip, or the silent re-entry
+        # below would find it already bumped by the plain `working` call and
+        # wrongly surface. So it only ever advances on a call that both (a) is not
+        # silent and (b) actually sets status to one of the attention states this
+        # dedup key exists for (review/blocked/done - died/stalled are set directly
+        # by reconcile/stall-check, not through here). For `review` specifically,
+        # it advances only on a genuine transition into review from a different
+        # prior status, or a material change to the artifact/blocker/delivery
+        # pointer while already in review - a same-status call that only touches
+        # `summary` (the documented anti-stall escape hatch) leaves `announced`
+        # untouched, so a member sitting unchanged in `review` across many benign
+        # refreshes is not re-surfaced on every one of them. `blocked` and `done`
+        # are unscoped by this: `--silent` is already forbidden for them, so every
+        # non-silent call is genuine and always announces, transition or not.
+        # Every other call - a `working` transition, a mid-review summary refresh,
+        # or an explicit `--silent` - leaves `announced` exactly as it was (seeded
+        # via setdefault only if this is the very first write for this id, so a
+        # record is never left without one). See playbooks/_status-contract.md,
+        # "Re-entering review without re-announcing" - a genuine re-delivery must
+        # dip through `working` first so this gate can tell it apart from churn.
+        if not args.silent and args.status in ATTENTION_STATES:
+            if args.status == "review":
+                new_pointer = (live.get("artifact"), live.get("blocker"), live.get("delivery"))
+                genuinely_new = (args.status != prev_status) or (new_pointer != prev_pointer)
+            else:  # blocked/done: --silent is already forbidden, every call is genuine
+                genuinely_new = True
+            if genuinely_new:
+                live["announced"] = live["updated"]
+            else:
+                live.setdefault("announced", live["updated"])
+                print("wm-state: suppressed as a same-status review refresh (artifact/blocker/delivery "
+                      "unchanged) - if this was meant as a re-delivery, dip through --status working "
+                      "first; if it's routine self-managed churn (a summary refresh while parked), "
+                      "this is expected and no action is needed", file=sys.stderr)
         else:
             live.setdefault("announced", live["updated"])
-            print("wm-state: suppressed as a same-status review refresh (artifact/blocker/delivery "
-                  "unchanged) - if this was meant as a re-delivery, dip through --status working "
-                  "first; if it's routine self-managed churn (a summary refresh while parked), "
-                  "this is expected and no action is needed", file=sys.stderr)
-    else:
-        live.setdefault("announced", live["updated"])
-    write_json(status_path(args.id), live)
+        write_json(status_file, live)
 
     # Mirror the durable fields back into the roster so a stale crew.json alone
     # still tells the truth if the status file is later removed.
@@ -1242,6 +1288,111 @@ def _probe_execution(root_pid, root_grace, gap, eps):
     return delta >= eps
 
 
+def _longest_running_descendant(root_pid, root_grace):
+    """Of root_pid's descendants that qualify as _probe_execution's branch (a)
+    proof-of-life (started more than root_grace seconds after the root - the
+    identical test, from a fresh ps sample), return the (pid, elapsed_seconds)
+    of whichever has the largest OWN elapsed time - i.e. the single descendant
+    that has itself been running longest, in absolute terms. None if the tree
+    cannot be read or nothing qualifies.
+
+    `elapsed` is always the kernel's own current reading for that pid, fetched
+    fresh on every call - never accumulated or extrapolated locally - so pid
+    reuse across polls can never inflate a duration: a reused pid simply
+    reports whatever (short) elapsed time IT has actually been running the
+    moment it is asked, regardless of what the previous occupant's elapsed was
+    a poll ago."""
+    tree = _ps_tree(root_pid)
+    if not tree or root_pid not in tree:
+        return None
+    root_elapsed = tree[root_pid][1]
+    best = None
+    for pid, (_cpu, elapsed) in tree.items():
+        if pid == root_pid:
+            continue
+        if (root_elapsed - elapsed) > root_grace and (best is None or elapsed > best[1]):
+            best = (pid, elapsed)
+    return best
+
+
+def _stamp_nudged_at(cid):
+    """Stamp nudged_at = now() onto cid's status file the moment bin/watch-
+    fleet passes --just-nudged 1 to cmd_stall_check (#155 fix 1) - the same
+    poll it actually sent the check-in nudge.
+
+    Re-reads the status file fresh under with_locked(...) immediately before
+    writing, rather than trusting any dict a caller might have read earlier
+    (#155 review fix - see _track_long_running's docstring for the full
+    rationale, which applies identically here): cmd_stall_check's own entry
+    read happens before this is called, and writing that back verbatim later
+    would risk silently reverting a genuine self-report that landed on disk
+    in between. A no-op once the member is no longer 'working' by the time
+    the lock is acquired. Touches only nudged_at - never summary/status/
+    `updated`/`announced` - so this can never itself fire the watcher/Stop-
+    hook wake; cmd_crew_set clears it again on the member's own next self-
+    report (same lock), and a genuine stall flip clears it directly too."""
+    path = status_path(cid)
+    with with_locked(path):
+        current = read_json(path, None)
+        if isinstance(current, dict) and current.get("status") == "working":
+            current["nudged_at"] = now()
+            write_json(path, current)
+
+
+def _track_long_running(cid, pane_pid, root_grace):
+    """Persist the elapsed time of the single longest-lived qualifying
+    descendant (see _longest_running_descendant) onto the member's own status
+    JSON, so a render step (crew-list/board.md) can surface a 'been running
+    longer than usual' annotation (#155 fix 2) without itself walking the
+    process tree or needing to know the warn ceiling.
+
+    Called on every cmd_stall_check invocation for a 'working' member with a
+    resolvable pid - independent of the idle-nomination gates below it, since
+    the scenario this exists to catch (a single long-outstanding tool call or
+    background shell) keeps Claude Code's own pane repainting via its "N
+    shell(s) still running" indicator, so pane_idle/status_idle may never
+    cross STALL_IDLE and the rest of cmd_stall_check would otherwise never run
+    at all for this member.
+
+    Takes no `live` snapshot from its caller (#155 review fix): the process-
+    tree probe below can take a moment, and cmd_stall_check's own initial read
+    happens even earlier - writing back a dict read that long ago would risk
+    silently reverting a genuine self-report (a status/blocker/summary change)
+    that landed on disk in the meantime, since write_json is a full-file
+    replace, not a merge. Instead this re-reads the status file itself, fresh,
+    inside a with_locked(...) critical section immediately before writing, and
+    merges in only long_shell_pid/long_shell_elapsed - never touching
+    `status`/`summary`/`blocker`/`updated`/`announced`, so it can never itself
+    fire the watcher/Stop-hook wake or clobber a concurrent self-report made
+    by the member's own `crew-set` (which takes the identical lock). Clears
+    both fields the instant no qualifying descendant is found - a legitimately
+    finished command, or the watcher's own next poll simply catching the
+    process tree between two different qualifying descendants - so a stale
+    annotation never lingers past the process it described. A no-op once the
+    member is no longer 'working' by the time the lock is acquired (a self-
+    report to blocked/review/done raced this same call) - rendering already
+    gates on that, so there's nothing left to track.
+    """
+    found = _longest_running_descendant(pane_pid, root_grace)
+    path = status_path(cid)
+    with with_locked(path):
+        current = read_json(path, None)
+        if not isinstance(current, dict) or current.get("status") != "working":
+            return
+        if found is None:
+            if "long_shell_pid" in current or "long_shell_elapsed" in current:
+                current.pop("long_shell_pid", None)
+                current.pop("long_shell_elapsed", None)
+                write_json(path, current)
+            return
+        pid, elapsed = found
+        if current.get("long_shell_pid") == pid and current.get("long_shell_elapsed") == elapsed:
+            return  # unchanged since the last poll - nothing new to persist
+        current["long_shell_pid"] = pid
+        current["long_shell_elapsed"] = elapsed
+        write_json(path, current)
+
+
 def cmd_stall_check(args):
     """Flag a WORKING crew member as 'stalled' iff it shows no external sign of life:
     BOTH staleness gates (pane_idle from the watcher, status_idle computed here) at
@@ -1264,7 +1415,12 @@ def cmd_stall_check(args):
 
     --api-error only changes which reason template a genuine stall is written with
     (an 'api-error:' prefix instead of the default) - it never changes the gates or
-    the probe above, and does not by itself cause a flip."""
+    the probe above, and does not by itself cause a flip.
+
+    --just-nudged and the long-shell duration tracking below (#155 fixes 1/2) are
+    unconditional side effects that run on every call regardless of the gates
+    above - see their own inline comments for why - and never change whether or
+    when a flip happens."""
     ensure_home()
     live = read_json(status_path(args.id), None)
     if not isinstance(live, dict) or live.get("status") != "working":
@@ -1272,6 +1428,18 @@ def cmd_stall_check(args):
     updated = _parse_updated(live.get("updated"))
     if updated is None:
         return
+
+    # #155 fix 1: see _stamp_nudged_at's own docstring for why this reads
+    # fresh under a lock rather than reusing `live` from just above.
+    if getattr(args, "just_nudged", 0):
+        _stamp_nudged_at(args.id)
+
+    # #155 fix 2: long-shell duration tracking runs unconditionally for every
+    # 'working' member with a resolvable pid, independent of the idle-
+    # nomination gates just below - see _track_long_running's docstring for
+    # why it cannot wait for those gates to pass first.
+    _track_long_running(args.id, args.pane_pid, args.root_grace)
+
     status_idle = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds()
     if args.pane_idle < args.threshold or status_idle < args.threshold:
         return
@@ -1279,44 +1447,55 @@ def cmd_stall_check(args):
         return
     # The probe slept for the sampling gap; a member that self-reported during it
     # (a flip to review with an artifact, a real blocker) must win over the
-    # pre-gap snapshot. Re-read and bail unless nothing changed.
-    current = read_json(status_path(args.id), None)
-    if (not isinstance(current, dict) or current.get("status") != "working"
-            or current.get("updated") != live.get("updated")):
-        return
-    live = current
+    # pre-gap snapshot. Re-read and bail unless nothing changed - and hold the
+    # SAME per-member lock the other writers of this file take (#155 review
+    # fix) across that re-read and the eventual write below, closing the
+    # remaining TOCTOU window a bare re-read-then-write-later still leaves
+    # open for a self-report landing in between.
+    status_file = status_path(args.id)
+    with with_locked(status_file):
+        current = read_json(status_file, None)
+        if (not isinstance(current, dict) or current.get("status") != "working"
+                or current.get("updated") != live.get("updated")):
+            return
+        live = current
 
-    # #61: a genuine stall only flips once a check-in nudge has already had a full
-    # cooldown window to produce activity - not on the very poll that first detects
-    # it. No marker yet (-1) or too young (< threshold) means the watcher's nudge
-    # hasn't had time to work yet; defer without mutating anything.
-    nudge_age = getattr(args, "nudge_age", -1)
-    if nudge_age < 0 or nudge_age < args.threshold:
-        return
+        # #61: a genuine stall only flips once a check-in nudge has already had a
+        # full cooldown window to produce activity - not on the very poll that
+        # first detects it. No marker yet (-1) or too young (< threshold) means
+        # the watcher's nudge hasn't had time to work yet; defer without
+        # mutating anything.
+        nudge_age = getattr(args, "nudge_age", -1)
+        if nudge_age < 0 or nudge_age < args.threshold:
+            return
 
-    prior = (live.get("summary") or "").split("\n")[0][:80]
-    if getattr(args, "api_error", 0):
-        reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
-                  "limit, connection error, 5xx, overloaded_error, or similar) and then "
-                  "went quiet for >%ds while status was 'working' - the CLI's own retry/"
-                  "backoff appears exhausted. Likely a local network blip or an Anthropic-"
-                  "side outage, not a broken agent. Already nudged once; if it does not "
-                  "recover, resume it with `bin/crew-resume %s`."
-                  % (int(args.threshold), args.id))
-    else:
-        reason = ("no pane output, status update, running child process, or CPU activity "
-                  "for >%ds while status was 'working', even after a check-in nudge - the "
-                  "agent likely errored or went idle. Inspect with `bin/crew-takeover %s` "
-                  "or stand down with `bin/crew-standdown %s`."
-                  % (int(args.threshold), args.id, args.id))
-    if prior:
-        reason += " (last summary: %s)" % prior
+        prior = (live.get("summary") or "").split("\n")[0][:80]
+        if getattr(args, "api_error", 0):
+            reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
+                      "limit, connection error, 5xx, overloaded_error, or similar) and then "
+                      "went quiet for >%ds while status was 'working' - the CLI's own retry/"
+                      "backoff appears exhausted. Likely a local network blip or an Anthropic-"
+                      "side outage, not a broken agent. Already nudged once; if it does not "
+                      "recover, resume it with `bin/crew-resume %s`."
+                      % (int(args.threshold), args.id))
+        else:
+            reason = ("no pane output, status update, running child process, or CPU activity "
+                      "for >%ds while status was 'working', even after a check-in nudge - the "
+                      "agent likely errored or went idle. Inspect with `bin/crew-takeover %s` "
+                      "or stand down with `bin/crew-standdown %s`."
+                      % (int(args.threshold), args.id, args.id))
+        if prior:
+            reason += " (last summary: %s)" % prior
 
-    live["status"] = "stalled"
-    live["summary"] = reason
-    live["updated"] = now()
-    live["announced"] = live["updated"]  # a stall flip always announces
-    write_json(status_path(args.id), live)
+        live["status"] = "stalled"
+        live["summary"] = reason
+        live["updated"] = now()
+        live["announced"] = live["updated"]  # a stall flip always announces
+        # #155 fix 1: a genuine stall confirms the nudge did not work - clear the
+        # nudge-in-progress annotation along with the flip itself, since `stalled`
+        # (not a still-'working' render) is now the accurate signal to show.
+        live.pop("nudged_at", None)
+        write_json(status_file, live)
 
     # Mirror into the roster, as crew-set does, so a later loss of the status
     # file still tells the truth.
@@ -2095,13 +2274,66 @@ def _git_suffix(r):
     return ""
 
 
+def _long_shell_warn_seconds():
+    """WM_LONG_SHELL_WARN (seconds, default 1200 = 20 minutes) - the generous,
+    configurable ceiling past which a single outstanding tool call/background
+    shell earns a 'longer than usual' annotation (#155 fix 2). Purely a
+    render-time threshold, read fresh on every render call so retuning it
+    needs no watcher restart; it never gates a blocked/stalled flip."""
+    try:
+        return int(os.environ.get("WM_LONG_SHELL_WARN", "1200"))
+    except ValueError:
+        return 1200
+
+
+def _human_duration(seconds):
+    """'47s' / '22m' / '1h5m' - short, human-scale duration for the nudge and
+    long-shell annotations."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds" % seconds
+    minutes = seconds // 60
+    if minutes < 60:
+        return "%dm" % minutes
+    hours, minutes = divmod(minutes, 60)
+    return "%dh%dm" % (hours, minutes) if minutes else "%dh" % hours
+
+
+def _stall_annotation(r):
+    """Short parenthetical suffix for a 'working' member's status cell (#155):
+    a self-heal nudge already sent and still within its cooldown window (fix
+    1), and/or a single outstanding tool call/background shell that has been
+    running far longer than usual (fix 2). Both are purely informational -
+    they never change the status value itself - and both apply only while
+    status is still 'working' (nudged_at/long_shell_* can briefly outlive that
+    in the record, e.g. between a stalled flip and the next render, but a
+    non-'working' status is never annotated). Returns "" when neither
+    applies."""
+    if r.get("status") != "working":
+        return ""
+    parts = []
+    nudged_at = r.get("nudged_at")
+    if nudged_at:
+        parsed = _parse_updated(nudged_at)
+        if parsed is not None:
+            age = (datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()
+            if age >= 0:
+                parts.append("self-heal nudge sent %s ago" % _human_duration(age))
+    elapsed = r.get("long_shell_elapsed")
+    if elapsed is not None and elapsed >= _long_shell_warn_seconds():
+        parts.append("1 shell running %s, longer than usual" % _human_duration(elapsed))
+    if not parts:
+        return ""
+    return " (%s)" % "; ".join(parts)
+
+
 def render_roster_text(rows):
     if not rows:
         return "(no crew)"
     lines = []
     for r in rows:
         line = "  [%-10s] %-22s %-9s %s%s" % (
-            r.get("type", "?"), r.get("id", "?"), r.get("status", "?"),
+            r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r),
             (r.get("summary") or "").split("\n")[0][:60], _git_suffix(r),
         )
         lines.append(line)
@@ -2127,7 +2359,7 @@ def render_tree_text(rows):
     for r, depth in ordered:
         indent = "  " * depth
         line = "%s[%s] %s %s %s" % (
-            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?"),
+            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r),
             (r.get("summary") or "").split("\n")[0][:50],
         )
         lines.append(line.rstrip())
@@ -2165,7 +2397,7 @@ def render_board():
                 + _git_suffix(r)
             )
             out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s |" % (
-                r.get("type", ""), marker, id_cell, r.get("status", ""),
+                r.get("type", ""), marker, id_cell, r.get("status", "") + _stall_annotation(r),
                 r.get("window", ""), repo_cell,
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
                 _cell(r.get("artifact_url")),
@@ -2395,6 +2627,14 @@ def build_parser():
     # marker exists yet (#61). Required to be >= 0 and >= --threshold before a
     # genuine stall is allowed to flip - see cmd_stall_check's docstring.
     a.add_argument("--nudge-age", type=int, default=-1, dest="nudge_age")
+    # #155 fix 1: 1 iff bin/watch-fleet's check-in nudge was just sent to this
+    # candidate THIS poll - stamps nudged_at (see cmd_stall_check) so a
+    # render step can annotate a still-'working' member as mid-self-heal.
+    # Rides this same per-poll call rather than a second subprocess spawned
+    # just to persist a timestamp (that extra uv/python startup per nudged
+    # member per poll was enough to visibly skew the tight multi-member
+    # timing the outage-detection tests depend on).
+    a.add_argument("--just-nudged", type=int, default=0, dest="just_nudged")
     a.set_defaults(fn=cmd_stall_check)
 
     a = sub.add_parser("needs-attention")

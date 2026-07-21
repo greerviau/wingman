@@ -405,6 +405,45 @@ else
   fi
 fi
 
+# --- Interactive-prompt guard (crew sessions, any repo), user scope ---------
+# hooks/no-interactive-prompt-guard.sh (PreToolUse) denies AskUserQuestion,
+# EnterPlanMode, and ExitPlanMode outright for every crew session (issue
+# #155): only the top-level wingman session is ever actually watched by a
+# human in real time, so a worker or lead calling one of these would hang
+# waiting for a choice nobody is present to make - or worse, have a
+# later-arriving keystroke misread as input to an unrelated pending dialog.
+# Must fire inside crew sessions whose project root is some other repo
+# entirely, so like the other crew-facing hooks it needs user-level
+# registration - a project-level entry in this repo's settings never loads
+# there.
+INTERACTIVE_PROMPT_HOOK="$WM_REPO/hooks/no-interactive-prompt-guard.sh"
+INTERACTIVE_PROMPT_MATCHER="AskUserQuestion|EnterPlanMode|ExitPlanMode"
+if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$INTERACTIVE_PROMPT_HOOK" --event PreToolUse --matcher "$INTERACTIVE_PROMPT_MATCHER" --check >/dev/null 2>&1; then
+  wm_ok "interactive-prompt guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "interactive-prompt guard hook (issue #155) not registered in $GUARD_SETTINGS"
+  printf '    denies AskUserQuestion/EnterPlanMode/ExitPlanMode from every crew session,\n'
+  printf '    for crew sessions in any repo, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $INTERACTIVE_PROMPT_HOOK --matcher '$INTERACTIVE_PROMPT_MATCHER'"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$INTERACTIVE_PROMPT_HOOK" --event PreToolUse --matcher "$INTERACTIVE_PROMPT_MATCHER"; then
+      wm_ok "registered interactive-prompt guard hook"
+    else
+      wm_err "failed to register interactive-prompt guard hook"
+    fi
+  fi
+fi
+
 # --- Outage-detection guard hook (crew sessions, any repo), user scope ------
 # hooks/api-outage-spawn-guard.sh (PreToolUse) denies bin/spawn-crew while the
 # fleet outage-state ($WM_HOME/api-outage-state.json) reads "active" (issue

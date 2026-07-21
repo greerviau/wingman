@@ -21,7 +21,11 @@
 # stalled; a member that resumes on its own or in response to the nudge never
 # flips at all. This keeps a transient spend-limit episode, network blip, or
 # brief Anthropic-side outage from escalating straight to the pilot before the
-# member has had a chance to recover unassisted.
+# member has had a chance to recover unassisted. The nudge also stamps
+# nudged_at onto the member's own status JSON (#155), so a still-'working'
+# member mid-self-heal is visibly distinguishable in crew-list/board.md from
+# one that is simply healthy and busy, instead of looking identical to both a
+# human and to the owning lead's own watcher.
 #
 # Fleet-wide outage detection (#23): wingman's own top-level cycle (owner "")
 # also tracks a persisted outage-state machine ($WM_HOME/api-outage-state.json,
@@ -183,6 +187,12 @@ STALL_IDLE="${WM_STALL_IDLE:-180}"
 STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
 STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
+# WM_LONG_SHELL_WARN (#155 fix 2, seconds, default 1200 = 20 minutes) is not
+# read here at all - it is a render-time-only ceiling `wm-state.py`'s own
+# rendering reads straight from the environment (inherited by every `wm_state`
+# subprocess this script spawns) the moment it annotates a roster row, so
+# retuning it needs no watcher restart. See _long_shell_warn_seconds() in
+# bin/lib/wm-state.py.
 # Fleet-wide correlated event grouping (wm_state group-attention, #22/#23): a
 # batch collapses into one bullet only at or above this count AND this ratio of
 # the relevant live population - see group-attention's own docstring for the
@@ -949,6 +959,7 @@ for r in data:
       # that impossible: once sent, the marker's age can only grow.
       _api=0
       _nudge_age=-1
+      _just_nudged=0
       if [ "$_idle" -ge "$STALL_IDLE" ]; then
         if [ "$PANE_STABLE" != 1 ]; then
           continue   # first sighting or still changing; one more poll before acting
@@ -976,12 +987,27 @@ for r in data:
           # as delivered.
           if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"; then
             : > "$_nudgefile"
+            _just_nudged=1
           fi
         fi
       fi
 
+      # Surface the nudge on the crew record itself (#155 fix 1): the marker
+      # file above is a private sidecar the watcher alone reads, so nothing on
+      # the board or in crew-list ever showed that this 'working' member had
+      # already been nominated and nudged - a member quietly mid-self-heal
+      # looked identical to one that was simply healthy and busy. --just-
+      # nudged rides on the SAME stall-check call this poll already makes for
+      # every candidate (never a second subprocess spawned just to persist a
+      # timestamp - that extra uv/python startup per nudged member per poll
+      # was enough to visibly skew the tight multi-member timing the outage-
+      # detection tests depend on). stall-check stamps nudged_at onto the
+      # member's own status JSON without touching its summary/status;
+      # cmd_crew_set clears it again the moment the member's own next self-
+      # report comes in, and stall-check clears it itself on a genuine stall
+      # flip (see wm-state.py).
       [ -n "$_pid" ] && wm_state stall-check --id "$_id" \
-        --nudge-age "$_nudge_age" \
+        --nudge-age "$_nudge_age" --just-nudged "$_just_nudged" \
         --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
         --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
