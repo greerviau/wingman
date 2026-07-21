@@ -274,7 +274,14 @@ EOF
   # issue #135: a resumed reviewer's review-signing token was just
   # regenerated above, invalidating any pre-crash comment-fallback proof.
   [ "$_type" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
-  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge"
+  # WM_CLEAR_KEYS="" (issue #157): same reasoning as bin/spawn-crew's own opening
+  # delivery - this window was just relaunched, so there is no pre-existing
+  # composed text to clear, and it can still be mid-startup here even after
+  # wm_tmux_pane_ready settles stable (a splash screen can sit static for a
+  # beat before the CLI claims raw-mode input handling). Skip the defensive
+  # Ctrl-C, which would otherwise risk killing a not-yet-raw-mode process
+  # outright instead of clearing anything it hasn't composed yet.
+  WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge"
   if [ $? -eq 2 ]; then
     wm_warn "'$_rid': resume nudge NOT delivered - its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $_rid)"
   fi

@@ -161,10 +161,14 @@ run_and_capture() {
     true-false) wm_state crew-set --id "$_id" --remote-control-connected false >/dev/null ;;
     legacy) strip_remote_control_fields "$WINGMAN_HOME/crew.json" "$_id" ;;
   esac
+  # trap '' INT: wm_tmux_send_message now sends a defensive Ctrl-C before typing
+  # (issue #157) - harmless against a real Claude Code composer (its own
+  # raw-mode input handling never lets the tty's SIGINT disposition fire), but
+  # fatal to this bare `sleep` stand-in without the same immunity.
   if [ -n "$_banner" ]; then
-    tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$_id" "printf '%s\n' '$_banner'; sleep 120"
+    tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$_id" "trap '' INT; printf '%s\n' '$_banner'; sleep 120"
   else
-    tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$_id" "sleep 120"
+    tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$_id" "trap '' INT; sleep 120"
   fi
   sleep 1
   _log="$(wm_mktemp_file)"

@@ -92,7 +92,14 @@ assert_false "lead wake file excludes the top-level member" "grep -q t1 '$WINGMA
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z1 --type developer --objective e --repo /tmp --window wm-z1 --session-id s8 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z1 'sleep 600'
+# trap '' INT: wm_tmux_send_message now sends a defensive Ctrl-C before typing
+# (clears a composer's stray unsubmitted text - issue #157), which a real
+# Claude Code composer absorbs harmlessly since its own raw-mode input handling
+# never lets the tty's SIGINT disposition fire. This bare `sleep` stand-in has
+# no such handling, so without the trap a real SIGINT would kill it outright;
+# the trap (inherited across exec by a child process, same as a real
+# composer's own immunity) keeps it alive to receive the nudge/retry text.
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z1 'trap "" INT; sleep 600'
 wm_age_status z1
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/stall.log" 2>&1 &
@@ -463,7 +470,7 @@ assert_contains "the wake file also shows the collapsed bullet" "$wakem" "correl
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id ae1 --type developer --objective h --repo /tmp --window wm-ae1 --session-id sae1 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae1 'echo "Error: rate limit exceeded (429 Too Many Requests)"; while :; do :; done'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae1 'trap "" INT; echo "Error: rate limit exceeded (429 Too Many Requests)"; while :; do :; done'
 wm_age_status ae1
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >/dev/null 2>&1 &
@@ -491,7 +498,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id ae2 --type developer --objective i --repo /tmp --window wm-ae2 --session-id sae2 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae2 'echo "Error: connection error (ECONNRESET)"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae2 'trap "" INT; echo "Error: connection error (ECONNRESET)"; sleep 600'
 wm_age_status ae2
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/apierr.log" 2>&1 &
@@ -519,7 +526,7 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id rc1 --type developer --objective rc --repo /tmp --window wm-rc1 --session-id src1 >/dev/null
 wm_state crew-set --id rc1 --status working --summary "building" >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc1 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc1 'trap "" INT; printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 rcpid=$!
 wm_track "$rcpid"
@@ -560,7 +567,7 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id rc3 --type developer --objective rc --repo /tmp --window wm-rc3 --session-id src3 >/dev/null
 wm_state crew-set --id rc3 --status working --summary "building" >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc3 'printf "Transport recovery exhausted (code 1006)\n"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rc3 'trap "" INT; printf "Transport recovery exhausted (code 1006)\n"; sleep 600'
 WM_RC_DROPPED_COOLDOWN=60 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 rc3pid=$!
 wm_track "$rc3pid"

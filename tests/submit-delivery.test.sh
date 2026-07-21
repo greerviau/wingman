@@ -32,7 +32,11 @@ cat > "$STUB" <<'STUBEOF'
 # Raw mode: the terminal never echoes, so the pane advances only when this stub
 # prints. Characters accumulate silently in an "input box" buffer that survives a
 # swallowed Enter, exactly as a real TUI holds unsent text across a startup race.
-stty -echo -icanon min 1 time 0 2>/dev/null
+# "intr undef" keeps a raw Ctrl-C byte flowing to this loop as ordinary input
+# instead of raising SIGINT against the stub itself (plain "-isig" alone was not
+# enough to suppress it under tmux in testing), matching a real composer that
+# treats Ctrl-C as "clear the box" rather than killing the process.
+stty -echo -icanon intr undef min 1 time 0 2>/dev/null
 swallow="${WM_TEST_SWALLOW:-0}"
 printf 'PROMPT READY\n'
 buf=""
@@ -41,6 +45,7 @@ while IFS= read -r -n1 ch; do
     ""|$'\r'|$'\n')
       if [ "$swallow" -gt 0 ]; then swallow=$((swallow-1)); continue; fi
       printf 'SUBMITTED:%s\n' "$buf"; buf="" ;;
+    $'\003') buf="" ;;
     *) buf="$buf$ch" ;;
   esac
 done
@@ -68,6 +73,24 @@ assert_contains "message submits on a ready session" "$pane2" "SUBMITTED:ready-o
 # Exactly one submission - the retry never double-submits a message that already took.
 count="$(printf '%s\n' "$pane2" | grep -c 'SUBMITTED:')"
 assert_eq "a successful submit is not repeated" "$count" "1"
+tmux kill-session -t "$SESS" 2>/dev/null
+
+# --- pre-existing unsubmitted text in the composer is cleared, not appended ---
+# The composer can already hold unsubmitted text (e.g. left over from a direct
+# Remote Control interaction, or any other stray typing) before
+# wm_tmux_send_message ever runs. Without a defensive clear, the -l keystroke
+# below would land after that stray text and submit one concatenated, garbled
+# message instead of replacing it (issue #157's secondary observation).
+tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
+sleep 0.5
+tmux send-keys -t "$SESS:box" -l "pre-existing stray text"
+sleep 0.3
+wm_tmux_send_message "$SESS:box" "fresh-objective"
+pane3="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_contains "the new message submits cleanly" "$pane3" "SUBMITTED:fresh-objective"
+assert_not_contains "the stray pre-existing text is not concatenated into the submit" "$pane3" "pre-existing stray textfresh-objective"
+count3="$(printf '%s\n' "$pane3" | grep -c 'SUBMITTED:')"
+assert_eq "exactly one submission" "$count3" "1"
 tmux kill-session -t "$SESS" 2>/dev/null
 
 # --- a target pane showing a permission/confirmation dialog is refused --------

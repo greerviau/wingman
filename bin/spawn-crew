@@ -456,7 +456,18 @@ fi
 sleep "${WM_SPAWN_DELAY:-2}"
 OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
-wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$OPENING"
+# WM_CLEAR_KEYS="" (issue #157): this window was just created, so there is no
+# pre-existing composed text to clear, and unlike every other
+# wm_tmux_send_message caller (crew-say/crew-ask/watch-fleet/crew-standdown,
+# all aimed at a session that has been up and idle for a while) it can still be
+# mid-startup here even after wm_tmux_pane_ready settles stable - a splash
+# screen can sit static for a beat before the CLI actually claims raw-mode
+# input handling. A real composer already in raw mode absorbs the defensive
+# Ctrl-C harmlessly (verified live), but a not-yet-raw-mode terminal would
+# still honor the tty's default SIGINT disposition and the keystroke would
+# kill the freshly spawned process outright instead of clearing anything -
+# skip it here, where it has nothing to do anyway.
+WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$OPENING"
 _opening_rc=$?
 # A fresh window can be sitting on the one-time Bypass-Permissions/workspace-trust
 # gate (the two interactive dialogs no flag can bypass) rather than an idle chat

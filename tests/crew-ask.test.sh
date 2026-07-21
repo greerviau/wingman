@@ -27,7 +27,11 @@ start_session() {
   tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 }
 add_delegate_window() {
-  tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$1" 'sleep 300'
+  # trap '' INT: wm_tmux_send_message now sends a defensive Ctrl-C before
+  # typing a delegate's question (issue #157) - harmless against a real
+  # Claude Code composer, but fatal to this bare `sleep` stand-in without the
+  # same immunity a real (already-raw-mode) composer has.
+  tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$1" "trap '' INT; sleep 300"
 }
 
 # --- happy path: await blocks while pending, fires answered on the reply --------
