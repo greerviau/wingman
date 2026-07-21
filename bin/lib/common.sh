@@ -524,10 +524,30 @@ wm_tmux_pane_ready() {
 # submitting), and refuses - sending nothing further - the instant one matches.
 # Returns 0 on a confirmed (or best-effort, unconfirmed-but-not-refused) delivery,
 # 2 if refused because the pane looks dialog-shaped rather than a chat input.
+#
+# A fourth failure mode motivates the defensive clear below: the target's chat
+# input can already hold unsubmitted composed text (left over from a direct
+# Remote Control interaction, or any other stray typing) when this function
+# types into it - the input box only ever appends, so the new text would land
+# after the old and submit as one garbled, concatenated message instead of
+# replacing it. WM_CLEAR_KEYS (default C-c) is sent once, before typing,
+# specifically to clear that box: verified against a live Claude Code pane, a
+# single Ctrl-C clears the composer's current text without exiting (exiting
+# needs a second Ctrl-C within a short grace window, which one press never
+# reaches, and a lone Ctrl-C against an already-empty box is a harmless no-op).
+# This runs only after the dialog check above has already cleared the pane as
+# non-dialog-shaped, so it never fires a keystroke into a permission/trust
+# prompt. Set WM_CLEAR_KEYS empty to skip this for a harness whose composer
+# does not clear on Ctrl-C.
 wm_tmux_send_message() {
   _target="$1"; _text="$2"
   wm_tmux_pane_ready "$_target"
   [ $? -eq 2 ] && return 2
+  _sm_clear_keys="${WM_CLEAR_KEYS-C-c}"
+  if [ -n "$_sm_clear_keys" ]; then
+    wm_tmux send-keys -t "$_target" $_sm_clear_keys
+    sleep "${WM_CLEAR_DELAY:-0.3}"
+  fi
   wm_tmux send-keys -t "$_target" -l "$_text"
   sleep "${WM_SUBMIT_DELAY:-1}"
   # Snapshot the pane with the text composed in the input box, then submit -
