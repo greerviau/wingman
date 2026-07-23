@@ -3,7 +3,10 @@
 # WM_GH) so no real gh/GitHub is needed, and proves it fires the right single event
 # per class, suppresses an already-handled event via its on-disk cursor, and never
 # wakes on the crew's own replies. Uses --once (a single poll) so the blocking loop
-# is not exercised here.
+# is not exercised here. Also proves pr-watch reads its own crew.json record fresh
+# every poll (via `wm_state crew-get`) so merge-ready fires instead of
+# checks-passed once allow_merge is granted - both when it is already granted at
+# settle time, and when the grant lands after the PR already settled.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -167,5 +170,35 @@ cat > "$FAKE_PR" <<'JSON'
 JSON
 assert_contains "resolving fires checks-passed, not a second conflict event" "$(run)" "checks-passed: #42"
 assert_eq "no further event once settled" "$(run)" ""
+
+# 9. allow_merge already granted at spawn time -> settling fires merge-ready,
+#    not checks-passed (pr-watch reads its own crew.json record via crew-get).
+test_new_home
+export WINGMAN_CREW_ID=pw4
+wm_state crew-add --id pw4 --type developer --repo /tmp --window wm-pw4 \
+  --session-id sess-pw4 --allow-merge >/dev/null
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+assert_contains "allow_merge already granted: settling fires merge-ready" "$(run)" "merge-ready: #42"
+assert_eq "a settled merge-ready PR does not re-fire" "$(run)" ""
+
+# 10. a mid-flight allow_merge grant, arriving AFTER the PR already settled
+#     (checks-passed already fired), fires merge-ready on the very next poll -
+#     no PR-side change at all. This is the exact gap the investigation into
+#     the silent-parking incident identified.
+test_new_home
+export WINGMAN_CREW_ID=pw5
+wm_state crew-add --id pw5 --type developer --repo /tmp --window wm-pw5 \
+  --session-id sess-pw5 >/dev/null
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+assert_contains "not yet granted: settling fires ordinary checks-passed" "$(run)" "checks-passed: #42"
+wm_state crew-set --id pw5 --allow-merge true >/dev/null
+assert_contains "granting allow_merge afterward fires merge-ready, no PR change needed" "$(run)" "merge-ready: #42"
+assert_eq "merge-ready does not re-fire while still settled" "$(run)" ""
 
 test_summary

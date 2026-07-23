@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# E2E: pr-eval's checks-passed decision. Drives bin/lib/pr-eval.py directly with
-# canned PR JSON and a persistent cursor, proving checks-passed fires once when the
-# PR settles (green or no-CI), stays quiet while nothing changes, re-arms after the
-# rollup goes pending/failing and settles anew, and yields to a fresh comment.
+# E2E: pr-eval's checks-passed/merge-ready decision. Drives bin/lib/pr-eval.py
+# directly with canned PR JSON and a persistent cursor, proving checks-passed
+# fires once when the PR settles (green or no-CI), stays quiet while nothing
+# changes, re-arms after the rollup goes pending/failing and settles anew, and
+# yields to a fresh comment - and that merge-ready fires instead of
+# checks-passed at that same slot whenever --crew-record reports
+# allow_merge:true, including the case a grant lands on an already-settled PR
+# with no PR-side change at all.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -134,6 +138,63 @@ echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments"
 ev_as reviewer-9 >/dev/null  # seed: baseline, nothing fires yet
 echo '{"number":12,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-15T12:00:00Z","author":{"login":"me"},"body":"<!-- wingman-crew:dev1 --> Merged by wingman crew `dev1` (type: `developer`), not by the human - see issue #46."}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
 assert_contains "a different watching session (e.g. a reviewer) still surfaces the same comment (issue #59)" "$(ev_as reviewer-9)" "comment: #12"
+
+# --- merge-ready: allow_merge layered on the same "ready" condition ----------
+# --crew-record points at a file shaped like a crew.json record (only
+# `allow_merge` is read); ev_cr() is ev() plus that flag.
+CRJ="$D/crew.json"
+ev_cr() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --crew-record "$CRJ" --me me --my-crew-id dev-1 2>/dev/null; }
+
+# settling with allow_merge already granted fires merge-ready, not checks-passed
+rm -f "$CUR"
+echo '{"allow_merge":true}' > "$CRJ"
+echo '{"number":20,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "settling with allow_merge already granted fires merge-ready" "$(ev_cr)" "merge-ready: #20"
+assert_eq "a settled merge-ready PR does not re-fire" "$(ev_cr)" ""
+
+# a mid-flight allow_merge grant landing on an ALREADY-settled PR (checks-passed
+# already fired under no grant) fires merge-ready on the very next poll with no
+# PR-side change at all - the exact gap the investigation identified.
+rm -f "$CUR"
+echo '{"allow_merge":false}' > "$CRJ"
+echo '{"number":21,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "not yet granted: settling fires ordinary checks-passed" "$(ev_cr)" "checks-passed: #21"
+echo '{"allow_merge":true}' > "$CRJ"
+assert_contains "granting allow_merge afterward fires merge-ready next poll, no PR change needed" "$(ev_cr)" "merge-ready: #21"
+assert_eq "merge-ready does not re-fire while still settled" "$(ev_cr)" ""
+
+# revoking allow_merge after merge-ready already fired does not produce a stray
+# checks-passed for a PR the member already knows is ready
+echo '{"allow_merge":false}' > "$CRJ"
+assert_eq "revoking allow_merge (ready unchanged) does not fire a stray checks-passed" "$(ev_cr)" ""
+
+# re-granting (still no PR-side change) re-fires merge-ready - either side of the
+# combined (ready AND allow_merge) condition flipping independently re-arms it
+echo '{"allow_merge":true}' > "$CRJ"
+assert_contains "re-granting allow_merge re-fires merge-ready with no PR-side change" "$(ev_cr)" "merge-ready: #21"
+
+# resettling (ready False, then True) with allow_merge held throughout re-fires
+# merge-ready, mirroring checks-passed's own re-arm behavior
+echo '{"number":21,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_eq "a pending rollup withholds merge-ready" "$(ev_cr)" ""
+echo '{"number":21,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "resettling with allow_merge still granted re-fires merge-ready" "$(ev_cr)" "merge-ready: #21"
+
+# a fresh comment still beats merge-ready - same priority slot as checks-passed
+rm -f "$CUR"
+echo '{"allow_merge":true}' > "$CRJ"
+echo '{"number":22,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+ev_cr >/dev/null  # seed: settles and fires merge-ready once, consumed
+echo '{"number":22,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-10T12:00:00Z","author":{"login":"rev"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "a fresh comment wins over merge-ready" "$(ev_cr)" "comment: #22"
+
+# a missing --crew-record (never passed, or pointing at a nonexistent file) is
+# treated as allow_merge:false, the safe default, not an error
+rm -f "$CUR"
+echo '{"number":23,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+assert_contains "omitting --crew-record behaves exactly as before (checks-passed)" "$(ev)" "checks-passed: #23"
+rm -f "$CUR"
+assert_contains "a nonexistent --crew-record file falls back to allow_merge:false" "$(uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --crew-record "$D/does-not-exist.json" --me me --my-crew-id dev-1 2>/dev/null)" "checks-passed: #23"
 
 # --- omitting --my-crew-id is a hard argument error, not a silent fallback ---
 rm -f "$CUR"
