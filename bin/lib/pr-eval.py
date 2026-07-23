@@ -15,6 +15,17 @@ canned JSON. It reads:
   --review-comments <path>  a JSON array of inline review-thread comments
                             (`gh api repos/{owner}/{repo}/pulls/{n}/comments`), optional
   --cursor <path>           the on-disk cursor of what has already been surfaced
+  --crew-record <path>      OPTIONAL: this session's own crew.json record (or a
+                            file shaped like one), e.g. `wm-state crew-get --id
+                            $WINGMAN_CREW_ID` written to a file the same way
+                            --pr-json/--review-comments already are. Only the
+                            `allow_merge` field is read; a missing/unreadable
+                            file (no grant, or the record predates this flag)
+                            is treated as `allow_merge: false` - the safe
+                            default. `review_gate_waived` is deliberately NOT
+                            consulted here: it decides whether a merge ATTEMPT
+                            succeeds (hooks/no-merge-guard.sh's job), not
+                            whether attempting is worth waking the crew for.
   --me <login>              the authenticated forge login. Combined with
                             --my-crew-id (below), identifies THIS session's own
                             comments/reviews so a reply never wakes its own
@@ -45,7 +56,8 @@ canned JSON. It reads:
 It prints ONE reason line and advances the cursor for exactly that dimension, or
 prints nothing when there is no new event. Priority (highest first):
 
-  merged > closed > changes-requested > ci-failed > conflict > comment > checks-passed
+  merged > closed > changes-requested > ci-failed > conflict > comment
+    > merge-ready (if allow_merge) / checks-passed (otherwise)
 
 Only the fired dimension's cursor advances, so a co-occurring event of lower
 priority still surfaces on the next poll instead of being skipped. A CI rollup
@@ -62,6 +74,18 @@ to move into `review` the moment it settles. It sits below `comment` so
 unaddressed feedback is handled before the member parks, and it re-arms (fires
 again) once checks or mergeability go back to pending/failing/conflicting and
 settle anew.
+
+`merge-ready` occupies the exact same slot as `checks-passed` but fires instead
+of it when `--crew-record` reports `allow_merge: true`: the PR being green and
+mergeable is no longer just a cue to park in `review`, it is a cue to attempt the
+merge (see playbooks/_delivery.md's "Merge authorization"). It is tracked by its
+own cursor (`merge_ready_fired`), independent of `ready_fired`, so it re-fires
+whenever the combined condition (ready AND allow_merge) transitions back to true
+from either side: the PR resettling after a new commit, or `allow_merge` being
+newly granted while the PR was already sitting ready (the case a mid-flight grant
+on an already-settled PR would otherwise never wake anyone for). Firing
+merge-ready also marks `ready_fired`, so a later `allow_merge` revoke does not
+cause a redundant `checks-passed` for a PR the member already knows is ready.
 """
 import argparse
 import json
@@ -200,7 +224,7 @@ def conversation(pr, review_comments, me, my_crew_id):
     ]
 
 
-def evaluate(pr, review_comments, cursor, me, my_crew_id):
+def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False):
     """Return (reason_or_None, new_cursor)."""
     cur = dict(cursor) if isinstance(cursor, dict) else {}
     cur.setdefault("ci", "")
@@ -252,18 +276,41 @@ def evaluate(pr, review_comments, cursor, me, my_crew_id):
         cur["conv_hwm"] = convo_max
         return ("comment: %s %d new" % (_pr_ref(pr), len(fresh)), cur)
 
-    # checks-passed: the PR has settled with nothing failing, nothing pending, and
-    # mergeable (all-green, or no CI at all - and no open conflict). Fire once per
-    # settle so the member moves into `review`; a later pending/failing/conflicting
-    # reading re-arms it for the next recovery.
+    # checks-passed / merge-ready: the PR has settled with nothing failing,
+    # nothing pending, and mergeable (all-green, or no CI at all - and no open
+    # conflict). `ready` is the same settle condition as always; `merge_ready`
+    # layers `allow_merge` on top of it, tracked by its OWN cursor so the two
+    # fire independently:
+    #   - allow_merge is False (the common case): unchanged from before -
+    #     checks-passed fires once per settle, re-arming after the next
+    #     pending/failing/conflicting reading.
+    #   - allow_merge is True: merge-ready fires once per settle INSTEAD (the
+    #     member should attempt the merge, not just park) and also marks
+    #     ready_fired, so a later allow_merge revoke never produces a stray
+    #     checks-passed for a PR the member already knows is ready.
+    # Either side flipping independently re-arms it: the PR resettling (ready
+    # goes False then True again) resets both cursors via the `not ready`
+    # branch below; allow_merge being newly granted while the PR was ALREADY
+    # sitting ready resets only merge_ready_fired (via `not merge_ready`), so
+    # merge-ready still fires on the very next poll with no dependency on any
+    # further PR-side event - closing the gap where a mid-flight allow_merge
+    # grant lands on an already-settled PR.
     ready = (not fail) and (not checks_pending(pr)) and mergeability == "MERGEABLE"
+    merge_ready = ready and allow_merge
     if mergeability == "UNKNOWN":
-        pass  # not yet resolved - leave ready_fired exactly as it was
-    elif not ready:
-        cur["ready_fired"] = False
-    elif not cur.get("ready_fired"):
-        cur["ready_fired"] = True
-        return ("checks-passed: %s" % _pr_ref(pr), cur)
+        pass  # not yet resolved - leave both cursors exactly as they were
+    else:
+        if not ready:
+            cur["ready_fired"] = False
+        if not merge_ready:
+            cur["merge_ready_fired"] = False
+        if merge_ready and not cur.get("merge_ready_fired"):
+            cur["merge_ready_fired"] = True
+            cur["ready_fired"] = True
+            return ("merge-ready: %s" % _pr_ref(pr), cur)
+        if ready and not allow_merge and not cur.get("ready_fired"):
+            cur["ready_fired"] = True
+            return ("checks-passed: %s" % _pr_ref(pr), cur)
 
     return (None, cur)
 
@@ -280,6 +327,7 @@ def main():
     ap.add_argument("--pr-json", required=True)
     ap.add_argument("--review-comments", default="")
     ap.add_argument("--cursor", required=True)
+    ap.add_argument("--crew-record", default="")
     ap.add_argument("--me", default="")
     ap.add_argument("--my-crew-id", required=True)
     args = ap.parse_args()
@@ -289,8 +337,10 @@ def main():
         return  # no usable PR data (e.g. a transient gh failure) - not an event
     review_comments = read_json(args.review_comments, []) if args.review_comments else []
     cursor = read_json(args.cursor, {})
+    crew_record = read_json(args.crew_record, {}) if args.crew_record else {}
+    allow_merge = bool(crew_record.get("allow_merge"))
 
-    reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id)
+    reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id, allow_merge)
     write_json(args.cursor, new_cursor)
     if reason:
         print(reason)

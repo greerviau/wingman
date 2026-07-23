@@ -63,7 +63,7 @@ When it is `off`, unanswered, or unaskable, write nothing to the PR; all feedbac
 
 ## Shepherding a PR (when there is one)
 
-After the PR is up you shepherd it toward merge or close - fix CI, resolve conflicts, address review feedback - but **you do not press the merge button yourself** (see Merge authorization).
+After the PR is up you shepherd it toward merge or close - fix CI, resolve conflicts, address review feedback - but **you press the merge button yourself only when this effort has been explicitly granted `allow_merge`** (see Merge authorization).
 
 Watching the PR is optional and forge-specific.
 `bin/pr-watch` is one available dependency-watcher for PR-shaped delivery; arm it as a harness-tracked background task per the wake loop in `playbooks/_status-contract.md` when you want to be woken on forge state:
@@ -76,7 +76,8 @@ It blocks and exits with one reason line the instant something actionable happen
 
 - **`ci-failed: <pr> <checks>`** - read the failing job's logs, fix the cause, push.
 - **`conflict: <pr>`** - the base moved; rebase or merge the default branch into your branch, resolve, and push. This is yours to fix like a failing check, never reported upward.
-- **`checks-passed: <pr>`** - the PR has settled green (or the repo has no CI); ready for human eyes.
+- **`checks-passed: <pr>`** - the PR has settled green (or the repo has no CI) and you do **not** currently hold `allow_merge` for this effort; ready for human eyes.
+- **`merge-ready: <pr>`** - the identical settle, but you **do** hold `allow_merge`: attempt `gh pr merge` immediately as your next action (see "Merge authorization" below) - this is not something to wait for a human or lead to prompt. It also fires on the next poll if `allow_merge` is granted *after* the PR already settled (the ordinary way autonomy actually gets granted), with no dependency on any further PR-side change.
 - **`merged: <pr>`** / **`closed: <pr>`** - terminal; clean up (below), the engagement is over.
 - **`changes-requested: <pr>`** / **`comment: <pr> …`** - these only occur when review is happening *on* the PR (`pr_comments=on`); in the default flow review feedback arrives via `bin/crew-say` instead, and you are woken by that message rather than by pr-watch. Handle a PR-thread event the same way: address it in your workspace, push, and (only under `pr_comments=on`) reply on the thread.
 
@@ -87,6 +88,8 @@ A developer whose delivery has no forge signal to watch (no remote, or a workflo
 By default you **cannot** merge this PR - a `PreToolUse` hook (`hooks/no-merge-guard.sh`) denies `gh pr merge`, a `gh api` call hitting the merge endpoint, and a direct push to the default branch, from every session.
 This is deliberate: you never merge without the human's explicit, per-effort authorization, because your session acts under the human's own GitHub credentials, and an unauthorized agent merge would be indistinguishable from the human's own.
 Once the PR is green, `review` is where you stop and wait; the human merges it directly, or grants **this specific effort** merge autonomy (`allow_merge: true` on your record - set only by the human or your owner, never by you on yourself).
+
+**Once granted, attempting the merge is your own next action, not something you wait to be prompted for.** `pr-watch` re-reads your own crew record on every poll, so the moment the PR is green/mergeable and `allow_merge` is true it fires `merge-ready` (see "Shepherding a PR" above) instead of `checks-passed` - on that event, run `gh pr merge` immediately. If `allow_merge` is already true at the moment you first settle into `review`, the same `merge-ready` event fires right then, so there is no separate "settle first, merge later" step to remember.
 
 **Merging requires more than `allow_merge: true`.** Once autonomy is granted, the same hook also requires verifiable evidence of a genuinely separate approving review before a merge succeeds: a real, distinct-account `APPROVED` GitHub review, or the documented comment-fallback verdict from a **different**, real `reviewer` whose own `--delivery` names this PR.
 That evidence lives on the forge, so **auto-merge requires `pr_comments=on` for this effort** - the reviewer must record its verdict on GitHub for the gate to see it.
@@ -99,6 +102,7 @@ If you believe this PR needs your own merge and autonomy hasn't been granted, or
 While you are writing code, fixing CI, or waiting for checks you triggered, there is active work in flight, so you are **`working`**.
 Once the PR is green and it is on the humans to review, you are delivered-and-waiting, so you park in **`review`**.
 A review comment or requested change (via `bin/crew-say`, or a PR thread under `pr_comments=on`) pulls you back to **`working`**; when you settle green again you return to **`review`**.
+A `merge-ready` event is the same shape: it pulls you back to **`working`** while you attempt the merge, and either resolves to **`done`** (the merge succeeds, `merged` fires) or drops you into **`blocked`** (the evidence gate denies it - see Merge authorization) - never straight back to a silent `review`.
 The PR merging or closing is your terminal condition - **`done`**, and your owner closes you out.
 Raise `blocked` only for a genuine decision you cannot make; routine CI fixes and feedback replies are yours to handle.
 

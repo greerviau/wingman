@@ -17,8 +17,12 @@
 #   ci-failed: <pr> <checks>      a required check concluded failure
 #   conflict: <pr>                the base branch moved and the PR now conflicts
 #   comment: <pr> <n> new         new review/issue comment(s) since last handled
-#   checks-passed: <pr>           PR settled green and mergeable (or no CI) -> crew
-#                                 moves to review
+#   merge-ready: <pr>             PR settled green and mergeable (or no CI) AND
+#                                 this session's own crew record carries
+#                                 allow_merge:true -> attempt the merge now (see
+#                                 playbooks/_delivery.md, "Merge authorization")
+#   checks-passed: <pr>           the same settle, but WITHOUT allow_merge -> crew
+#                                 moves to review instead
 #
 # A cursor at $WINGMAN_HOME/pr/<crew-id>.json records what has already been
 # surfaced, so a persistently-red build or an already-seen comment does not
@@ -29,6 +33,12 @@
 # comments, issue #118, and a different crew member's own genuine review,
 # issue #59). Firing advances only the fired dimension, so a co-occurring
 # lower-priority event still surfaces next cycle.
+#
+# Each poll also re-reads this session's OWN crew.json record (`wm_state
+# crew-get`) for its live `allow_merge` value, so a mid-flight grant (the
+# ordinary way merge autonomy actually gets granted - after a human or lead
+# already sees the PR sitting green and approved) is picked up on the very
+# next poll, with no dependency on any further PR-side event ever occurring.
 #
 # Forge boundary: everything forge-specific is the `gh` calls below, isolated here
 # exactly as the agent launch line is isolated in spawn-crew. Point WM_GH at another
@@ -51,7 +61,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --pr)    PR="$2"; shift 2 ;;
     --once)  ONCE=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,53p' "$0"; exit 0 ;;
     *)       wm_die "unknown arg: $1" ;;
   esac
 done
@@ -95,8 +105,24 @@ poll_once() {
 
   _pr_file="$CURDIR/$WINGMAN_CREW_ID.pr.json"
   printf '%s' "$_pr_json" > "$_pr_file"
+
+  # This session's OWN crew.json record, read fresh every poll so a mid-flight
+  # allow_merge grant (the ordinary way it actually gets granted - after the PR
+  # is already sitting green) is picked up on the very next cycle, not just at
+  # arm time. Best effort: a lookup failure (record not found, e.g. the very
+  # first poll of a fresh spawn racing crew-add) just means no grant is visible
+  # yet - pr-eval.py already treats a missing/unreadable --crew-record as
+  # allow_merge:false, the safe default.
+  _crew_file=""
+  _crew_json="$(wm_state crew-get --id "$WINGMAN_CREW_ID" 2>/dev/null || true)"
+  if [ -n "$_crew_json" ]; then
+    _crew_file="$CURDIR/$WINGMAN_CREW_ID.crew.json"
+    printf '%s' "$_crew_json" > "$_crew_file"
+  fi
+
   _reason="$(wm_py "$PR_EVAL" --pr-json "$_pr_file" \
     ${_rc_file:+--review-comments "$_rc_file"} \
+    ${_crew_file:+--crew-record "$_crew_file"} \
     --cursor "$CURSOR" --me "$ME" --my-crew-id "$WINGMAN_CREW_ID" 2>/dev/null)"
   [ -n "$_reason" ] || return 1
   printf '%s\n' "$_reason"
