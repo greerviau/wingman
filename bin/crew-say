@@ -36,19 +36,61 @@ ID="${1:-}"; MSG="${2:-}"
 if [ "$FORCE" != 1 ] && [ -z "${WM_TEAM_FORCE:-}" ] && [ -z "${WM_CREW_SAY_FORCE:-}" ]; then
   CALLER="${WINGMAN_CREW_ID:-}"
   verdict="$(wm_team_guardrail "$CALLER" "$ID")"
-  if [ "$verdict" = deny ]; then
-    who="${CALLER:-wingman}"
-    wm_die "team guardrail: '$who' may only message its own reports, a sibling under the same lead, or its lead (refused '$ID'). Find siblings with crew-list --owner <your-parent>; pass --force to override."
-  fi
+  who="${CALLER:-wingman}"
+  case "$verdict" in
+    deny)
+      wm_die "team guardrail: '$who' may only message its own reports, a sibling under the same lead, or its lead (refused '$ID'). Find siblings with crew-list --owner <your-parent>; pass --force to override." ;;
+    ok|no-target) ;;
+    *)
+      # `error` or empty: the roster could not be read, so the policy could
+      # not run. Refuse loudly (fail closed) rather than silently skipping
+      # the guardrail; a human can still override with --force.
+      wm_die "team guardrail could not run: the roster is unreadable (state engine or crew.json broken), so '$who' -> '$ID' cannot be checked. Fix the state engine (try: \$WINGMAN_STATE crew-list), or pass --force to override as a human." ;;
+  esac
 fi
 
 WINDOW="wm-$ID"
 wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null \
   | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (see: bin/crew-takeover $ID)"
 
-wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$MSG"
-_rc=$?
-if [ "$_rc" -eq 2 ]; then
-  wm_die "refused: '$ID's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the message (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. Resolve it first (bin/crew-takeover $ID), then retry."
+# Pointer, not payload: a multi-line message, or one past WM_SAY_INLINE_MAX
+# chars, is written to a file and only a single-line pointer is typed into the
+# pane. tmux typing is the least reliable channel here - embedded newlines
+# depend on the CLI's paste heuristics to not submit early, and a partial
+# submit silently truncates the message with no way to detect it. A one-line
+# pointer has no such failure mode, and the payload file survives for
+# re-reading. (This is wingman's own "relay the pointer, not the payload"
+# principle applied to its own messaging.)
+DELIVER="$MSG"
+case "$MSG" in
+  *$'\n'*) _needs_file=1 ;;
+  *) [ "${#MSG}" -gt "${WM_SAY_INLINE_MAX:-500}" ] && _needs_file=1 || _needs_file=0 ;;
+esac
+if [ "${_needs_file:-0}" = 1 ]; then
+  mkdir -p "$WM_HOME/say"
+  _msgfile="$WM_HOME/say/$ID-$(date +%s)-$$.md"
+  printf '%s\n' "$MSG" > "$_msgfile"
+  DELIVER="Message from ${WINGMAN_CREW_ID:-wingman}: read $_msgfile and act on it now - it is a direct message to you, not background material."
 fi
-wm_ok "delivered to $ID"
+
+wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$DELIVER"
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+  wm_ok "delivered to $ID"
+  exit 0
+fi
+
+# Delivery did not confirm (2 = dialog-shaped refusal, 3 = typed but never
+# confirmed, 4 = another delivery held the pane's send lock too long). Queue
+# the message so it is not simply dropped: bin/watch-fleet retries the oldest
+# queued message per member each poll once the pane looks deliverable again,
+# so a pilot answer relayed into a briefly-blocked pane arrives without anyone
+# having to remember to retry.
+mkdir -p "$WM_HOME/outbox/$ID"
+_qfile="$WM_HOME/outbox/$ID/$(date +%s)-$$.msg"
+printf '%s\n' "$MSG" > "$_qfile"
+case "$_rc" in
+  2) wm_die "refused: '$ID's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the message (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. The message is QUEUED at $_qfile; the watcher will retry it automatically once the pane clears (or resolve the dialog yourself first: bin/crew-takeover $ID)." ;;
+  3) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered - treat it as NOT delivered. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
+  *) wm_die "not sent: another delivery is holding '$ID's pane. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
+esac

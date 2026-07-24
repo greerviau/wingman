@@ -14,13 +14,15 @@
 #
 #   crew-ask [--force] <id> "<question>"        (caller -> delegate)  SEND
 #     Runs the team guardrail (same policy as crew-say), mints a request id,
-#     records the pending request, and delivers a FRAMED question into the
-#     delegate's live session over the same tmux primitive crew-say uses. Prints
-#     the request id and the exact `await` command to arm. Foreground; happens once.
-#     If the delegate's pane looks like a permission/confirmation dialog rather
-#     than an idle chat input, delivery is refused rather than guessed: the
-#     request is immediately resolved undeliverable and SEND exits nonzero - there
-#     is nothing to `await`.
+#     writes the FRAMED question (question + reply protocol) to
+#     ~/.wingman/ask/<req>.prompt.md, and delivers a ONE-LINE pointer to it
+#     into the delegate's live session over the same tmux primitive crew-say
+#     uses (pointer, not payload: a single line cannot partially submit the
+#     way the old multi-line frame could). Prints the request id and the exact
+#     `await` command to arm. If the delivery cannot be confirmed (a
+#     dialog-shaped pane, an unconfirmed submit, a contended send lock), the
+#     pointer is queued in ~/.wingman/outbox/<id>/ for bin/watch-fleet's
+#     automatic retry and the request stays pending - arm the await as usual.
 #
 #   crew-ask reply --id <req> --answer "<distilled>" [--answer-file <path>]
 #                                               (delegate -> caller)  REPLY
@@ -225,7 +227,7 @@ except Exception:
       if [ "$(ask_field "$_req" status)" = answered ]; then
         reason="$(eval_once)"; fire "$reason"
       fi
-      fire "unanswered: $_req no reply within ${_timeout}s"
+      fire "unanswered: $_req no reply within ${_timeout}s (a late reply is still recorded on the request if one lands - re-read $WM_HOME/ask/$_req.json before re-asking)"
     fi
     sleep "$_interval"
   done
@@ -239,14 +241,22 @@ cmd_send() {
   [ -n "$_id" ] || wm_die "usage: crew-ask [--force] <id> \"<question>\""
   [ -n "$_q" ] || wm_die "usage: crew-ask [--force] <id> \"<question>\""
 
-  # Team guardrail: identical policy to crew-say, via the shared helper.
-  if [ "$_force" != 1 ] && [ -z "${WM_TEAM_FORCE:-}" ]; then
+  # Team guardrail: identical policy to crew-say, via the shared helper -
+  # including the legacy WM_CREW_SAY_FORCE override, so the two commands'
+  # escape hatches cannot drift apart.
+  if [ "$_force" != 1 ] && [ -z "${WM_TEAM_FORCE:-}" ] && [ -z "${WM_CREW_SAY_FORCE:-}" ]; then
     _caller="${WINGMAN_CREW_ID:-}"
     _verdict="$(wm_team_guardrail "$_caller" "$_id")"
-    if [ "$_verdict" = deny ]; then
-      _who="${_caller:-wingman}"
-      wm_die "team guardrail: '$_who' may only ask its own reports, a sibling under the same lead, or its lead (refused '$_id'). Find siblings with crew-list --owner <your-parent>; pass --force to override."
-    fi
+    _who="${_caller:-wingman}"
+    case "$_verdict" in
+      deny)
+        wm_die "team guardrail: '$_who' may only ask its own reports, a sibling under the same lead, or its lead (refused '$_id'). Find siblings with crew-list --owner <your-parent>; pass --force to override." ;;
+      ok|no-target) ;;
+      *)
+        # `error` or empty: the roster could not be read - refuse loudly
+        # (fail closed) rather than silently skipping the policy.
+        wm_die "team guardrail could not run: the roster is unreadable (state engine or crew.json broken), so '$_who' -> '$_id' cannot be checked. Fix the state engine (try: \$WINGMAN_STATE crew-list), or pass --force to override as a human." ;;
+    esac
   fi
 
   # Refuse fast for a dead delegate: no point minting a request nobody can answer.
@@ -265,22 +275,36 @@ cmd_send() {
   _caller_label="${WINGMAN_CREW_ID:-wingman}"
   _max="${WM_ASK_MAX_CHARS:-4000}"
   _bin="${WINGMAN_BIN:-$WM_BIN}"
-  _framed="[crew-ask $_req] $_q
+  # Pointer, not payload: the framed question (multi-line - the question plus
+  # the reply-command protocol) goes to a file, and only a single line is ever
+  # typed into the pane. Typing the multi-line frame directly depended on the
+  # CLI's paste heuristics to keep embedded newlines from submitting early; a
+  # partial submit delivered the question but silently dropped the reply
+  # instructions, so the delegate answered in chat and the ask timed out
+  # undetectably. A one-line pointer has no partial-submit failure mode.
+  _promptfile="$WM_HOME/ask/$_req.prompt.md"
+  {
+    printf '# crew-ask %s\n\n' "$_req"
+    printf '%s\n\n' "$_q"
+    printf 'This is a direct question from %s. Answer it now, before resuming your\n' "$_caller_label"
+    printf 'own work, by running:\n'
+    printf '  %s/crew-ask reply --id %s --answer "<your distilled answer, <=%s chars>"\n' "$_bin" "$_req" "$_max"
+    printf '(add --answer-file <path> if you need to point at fuller detail). Keep the answer\n'
+    printf 'bounded; it is captured verbatim into the asker'"'"'s context. Answering does not\n'
+    printf 'change your own status - continue what you were doing afterward.\n'
+  } > "$_promptfile"
+  _pointer="[crew-ask $_req from $_caller_label] Read $_promptfile and answer it now, before resuming your own work - it contains a direct question and the exact reply command."
 
-This is a direct question from $_caller_label. Answer it now, before resuming your
-own work, by running:
-  $_bin/crew-ask reply --id $_req --answer \"<your distilled answer, <=$_max chars>\"
-(add --answer-file <path> if you need to point at fuller detail). Keep the answer
-bounded; it is captured verbatim into the asker's context. Answering does not
-change your own status - continue what you were doing afterward."
-
-  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_framed"
+  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_pointer"
   _send_rc=$?
-  if [ "$_send_rc" -eq 2 ]; then
-    wm_state ask-resolve --id "$_req" --status undeliverable \
-      --note "delegate $_id's pane looks like a permission/confirmation dialog, not the chat input" \
-      >/dev/null 2>&1
-    wm_die "refused: '$_id's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the question (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. Request $_req marked undeliverable. Resolve it first (bin/crew-takeover $_id), then retry."
+  if [ "$_send_rc" -ne 0 ]; then
+    # Not confirmed delivered (dialog-shaped pane, unconfirmed submit, or a
+    # contended send lock). The request stays pending and the pointer is
+    # queued: bin/watch-fleet retries the member's outbox each poll, so the
+    # question still arrives once the pane clears - arm the await as usual.
+    mkdir -p "$WM_HOME/outbox/$_id"
+    printf '%s\n' "$_pointer" > "$WM_HOME/outbox/$_id/$(date +%s)-$$.msg"
+    wm_warn "the question could not be confirmed delivered to '$_id' right now (its pane may be showing a dialog, or another delivery held it). It is QUEUED for automatic retry by the watcher; request $_req stays pending - arm the await as usual, and consider a longer --timeout."
   fi
 
   wm_ok "asked $_id (request $_req)"
