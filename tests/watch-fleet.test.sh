@@ -1156,4 +1156,43 @@ assert_true "the fresh in-window file survives" \
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 rm -f "$WINGMAN_HOME"/watch.pid "$WINGMAN_HOME"/watch.beat
 
+# --- run-id ownership (#162): healthy is run-scoped, a foreign cycle is
+# --- replaced rather than adopted --------------------------------------------
+test_new_home
+wm_state crew-add --id r1 --type analyst --objective e --repo /tmp --window wm-r1 --session-id s20 >/dev/null
+wm_state crew-set --id r1 --status working --summary "busy" >/dev/null
+WINGMAN_RUN_ID=run-old "$WF" >"$WINGMAN_HOME/old.log" 2>&1 &
+oldpid=$!
+wm_track "$oldpid"
+sleep 3
+assert_true "run-old's cycle is live and blocking" "kill -0 $oldpid"
+assert_eq "cycle stamps its arming run id" "$(cat "$WINGMAN_HOME/watch.run")" "run-old"
+
+# Same run id: healthy, nothing replaced.
+outsame="$(WINGMAN_RUN_ID=run-old wm_timeout 45 "$WF" 2>&1)"
+assert_contains "same-run re-arm reports healthy" "$outsame" "healthy"
+assert_true "same-run re-arm leaves the cycle running" "kill -0 $oldpid"
+
+# No run id on the arming side: ownership cannot be certified, legacy healthy.
+outnone="$(wm_timeout 45 "$WF" 2>&1)"
+assert_contains "run-id-less arm keeps legacy healthy" "$outnone" "healthy"
+assert_true "run-id-less arm leaves the cycle running" "kill -0 $oldpid"
+
+# Different run id: the live foreign cycle is stopped and replaced in place.
+WINGMAN_RUN_ID=run-new "$WF" >"$WINGMAN_HOME/new.log" 2>&1 &
+newpid=$!
+wm_track "$newpid"
+sleep 3
+assert_false "the foreign cycle was stopped by the new run's arm" "kill -0 $oldpid"
+assert_true "the new run's own cycle is live and blocking" "kill -0 $newpid"
+assert_contains "the arm announced the replacement" "$(cat "$WINGMAN_HOME/new.log")" "Replacing it with a cycle this run tracks"
+assert_contains "the arm printed armed, never healthy" "$(cat "$WINGMAN_HOME/new.log")" "watcher: armed"
+assert_eq "the run stamp now names the new run" "$(cat "$WINGMAN_HOME/watch.run")" "run-new"
+
+# The replacement cycle is a fully functional watcher: it still fires.
+wm_state crew-set --id r1 --status done --summary "done e" >/dev/null
+sleep 3
+assert_false "the replacement cycle fires normally" "kill -0 $newpid"
+assert_contains "the replacement cycle printed the fire reason" "$(cat "$WINGMAN_HOME/new.log")" "done: r1"
+
 test_summary
