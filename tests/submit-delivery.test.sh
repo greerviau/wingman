@@ -148,7 +148,13 @@ tmux kill-session -t "$SESS" 2>/dev/null
 # and delivery proceeds.
 tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
 sleep 0.5
-_lock="$WINGMAN_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').lock"
+# wm_tmux_send_message keys its lock off common.sh's $WM_HOME, which was
+# snapshotted from $WINGMAN_HOME when common.sh was sourced above - BEFORE
+# test_new_home re-pointed $WINGMAN_HOME at this test's isolated home. Realign
+# the in-shell variable so the lock we pre-create is the one the helper sees,
+# and so nothing here touches a real ~/.wingman.
+WM_HOME="$WINGMAN_HOME"
+_lock="$WM_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').lock"
 mkdir -p "$_lock"   # a live holder's lock, fresh mtime
 out_lock="$(WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send" 2>&1)"
 lock_rc=$?

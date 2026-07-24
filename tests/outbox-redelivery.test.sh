@@ -42,7 +42,7 @@ sleep 0.5
 out="$("$SAY" ml1 "line one
 line two with the real payload" 2>&1)"
 assert_contains "the multi-line say reports delivered" "$out" "delivered"
-pane="$(wm_tmux capture-pane -p -t "$(wm_tmux_win_target wm-ml1)")"
+pane="$(wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-ml1)")"
 assert_contains "the pane received a one-line pointer, not the raw payload" \
   "$pane" "read $WINGMAN_HOME/say/"
 assert_not_contains "the raw multi-line payload was never typed" "$pane" "line two with the real payload"
@@ -61,7 +61,7 @@ assert_eq "a second payload file was written" "$say_count" "2"
 # --- a short single-line message is still typed directly ----------------------
 out="$("$SAY" ml1 "short direct message" 2>&1)"
 assert_contains "the short say reports delivered" "$out" "delivered"
-pane="$(wm_tmux capture-pane -p -t "$(wm_tmux_win_target wm-ml1)")"
+pane="$(wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-ml1)")"
 assert_contains "the short message was typed raw" "$pane" "SUBMITTED:short direct message"
 
 # --- the watcher redelivers a queued outbox message ---------------------------
@@ -80,22 +80,26 @@ done
 "$WATCH" --stop >/dev/null 2>&1
 assert_true "the queued file moved to sent- after redelivery" \
   "[ -f '$WINGMAN_HOME/outbox/ml1/sent-1-queued.msg' ]"
-pane="$(wm_tmux capture-pane -p -t "$(wm_tmux_win_target wm-ml1)")"
+pane="$(wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-ml1)")"
 assert_contains "the queued message reached the pane" "$pane" "SUBMITTED:queued answer from the human"
 
 # --- a multi-line queued message is redelivered as a pointer to its sent path -
 printf 'first\nsecond line payload\n' > "$WINGMAN_HOME/outbox/ml1/2-multi.msg"
 WM_WATCH_INTERVAL=1 "$WATCH" --owner "" >/dev/null 2>&1 &
 wm_track $!
+# The multi-line path renames to sent- BEFORE typing the pointer (so the
+# pointer names the file's final path), so wait for the pointer to actually
+# land in the pane, not merely for the rename.
 _i=0
-while [ "$_i" -lt 20 ]; do
-  [ -f "$WINGMAN_HOME/outbox/ml1/sent-2-multi.msg" ] && break
+while [ "$_i" -lt 30 ]; do
+  wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-ml1)" 2>/dev/null \
+    | grep -q "sent-2-multi.msg" && break
   sleep 0.5; _i=$((_i+1))
 done
 "$WATCH" --stop >/dev/null 2>&1
 assert_true "the multi-line queued file moved to sent-" \
   "[ -f '$WINGMAN_HOME/outbox/ml1/sent-2-multi.msg' ]"
-pane="$(wm_tmux capture-pane -p -t "$(wm_tmux_win_target wm-ml1)")"
+pane="$(wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-ml1)")"
 assert_contains "the redelivery pointed at the sent- path, not the raw payload" \
   "$pane" "sent-2-multi.msg"
 assert_not_contains "the raw multi-line payload was never typed by the watcher" \

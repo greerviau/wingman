@@ -571,6 +571,9 @@ wm_tmux_pane_ready() {
 # reclaims a lock older than WM_SEND_LOCK_STALE (a crashed holder) or gives
 # up with a refusal-style message on stderr and rc 4 (nothing was typed).
 wm_tmux_send_message() {
+  # The lock's parent must exist or every mkdir below fails and reads as
+  # permanent contention; callers can legitimately run before wm_state init.
+  mkdir -p "$WM_HOME" 2>/dev/null
   _sm_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
   _sm_wait="${WM_SEND_LOCK_WAIT:-45}"
   _sm_stale="${WM_SEND_LOCK_STALE:-120}"
