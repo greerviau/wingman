@@ -105,9 +105,9 @@ Your status is watched by your **owner** (the party that spawned you). Its watch
 
 ## Answering a direct question (`crew-ask`)
 
-Occasionally a message arrives framed as `[crew-ask <req-id>] <question>`.
+Occasionally a message arrives framed as `[crew-ask <req-id> from <asker>] Read <path> and answer it now ...` - a one-line pointer to a prompt file holding a direct question and the exact reply command (older senders may instead inline the question as `[crew-ask <req-id>] <question>`).
 This is a direct question from your owner or a sibling, and it expects a captured answer, not a status update.
-Answer it promptly, before resuming your own work, by running:
+Read the pointed-at file if there is one, then answer promptly, before resuming your own work, by running:
 
 ```
 $WINGMAN_BIN/crew-ask reply --id <req-id> --answer "<distilled answer>"

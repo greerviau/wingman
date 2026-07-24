@@ -10,4 +10,7 @@ Run `bin/crew-say "<id>" "<message>"`.
 reports, a sibling under the same lead, or my own lead) and the dialog-freeze
 refusal (it declines to send if the target's pane looks like a permission
 dialog rather than an idle chat input) - relay either refusal verbatim if it
-happens, do not retry with `--force` on my own judgment.
+happens, do not retry with `--force` on my own judgment. A refused or
+unconfirmed message is QUEUED automatically (`~/.wingman/outbox/<id>/`) and
+the watcher retries it once the pane clears, so a refusal needs no manual
+re-send - just relay it.

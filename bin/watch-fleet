@@ -852,6 +852,39 @@ for r in data:
       printf '%s\n' "$PANE_TEXT" | tail -n "$WM_APIERR_TAIL" \
         > "$WM_HOME/pane-tail-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').txt"
 
+      # Outbox redelivery: bin/crew-say queues a message it could not confirm
+      # delivered (a dialog-shaped pane, an unconfirmed submit, a contended
+      # send lock) under outbox/<id>/, so a relayed answer is never simply
+      # dropped. Retry the OLDEST queued message once per poll per member -
+      # wm_tmux_send_message itself still refuses a dialog-shaped pane, so a
+      # still-blocked pane just leaves the queue intact for a later poll. A
+      # multi-line payload is redelivered as a one-line pointer to the queued
+      # file (the same pointer-not-payload rule crew-say applies on send);
+      # a single-line one is retyped directly. Delivered files move to
+      # outbox/<id>/sent- so the queue holds only what is still owed.
+      _obdir="$WM_HOME/outbox/$_id"
+      if [ -d "$_obdir" ]; then
+        _obfile="$(ls "$_obdir" 2>/dev/null | grep -v '^sent-' | sort | head -1)"
+        if [ -n "$_obfile" ]; then
+          _obpath="$_obdir/$_obfile"
+          _obsent="$_obdir/sent-$_obfile"
+          if [ "$(grep -c '' "$_obpath" 2>/dev/null)" -gt 1 ]; then
+            # Rename BEFORE sending so the pointer names the path the file
+            # will actually live at; a failed send renames it back into the
+            # queue for the next poll.
+            mv "$_obpath" "$_obsent" 2>/dev/null
+            _obmsg="Queued message for you: read $_obsent and act on it now - it is a direct message to you, not background material."
+            wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_obmsg" \
+              || mv "$_obsent" "$_obpath" 2>/dev/null
+          else
+            _obmsg="$(cat "$_obpath" 2>/dev/null)"
+            if [ -n "$_obmsg" ] && wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_obmsg"; then
+              mv "$_obpath" "$_obsent" 2>/dev/null || rm -f "$_obpath"
+            fi
+          fi
+        fi
+      fi
+
       # Stability-gated drop detection, computed once and shared by the
       # connection-state persistence below and the working-only reconnect
       # attempt beneath it - the same "one more poll before acting" rule

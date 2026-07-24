@@ -129,4 +129,42 @@ typed_count="$(printf '%s\n' "$dialog_pane" | grep -c 'do not reboot')"
 assert_eq "the message text never landed in the pane" "$typed_count" "0"
 tmux kill-session -t "$SESS" 2>/dev/null
 
+# --- an exhausted, never-confirmed submit returns 3, not 0 --------------------
+# A stub that swallows EVERY Enter: the text types, Enter never registers, the
+# pane never advances past its composed snapshot. Previously this best-effort
+# path returned 0, indistinguishable from a confirmed delivery, so callers
+# reported "delivered" for a submit that probably never landed (robustness
+# audit finding 7).
+tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=99 bash '$STUB'"
+wm_tmux_send_message "$SESS:box" "never-confirms"
+unconfirmed_rc=$?
+assert_eq "an exhausted unconfirmed submit returns 3" "$unconfirmed_rc" "3"
+tmux kill-session -t "$SESS" 2>/dev/null
+
+# --- deliveries to one pane are serialized by a per-pane send lock ------------
+# (Robustness audit finding 4.) A held lock makes a second sender wait; one
+# held past WM_SEND_LOCK_WAIT makes it give up with rc 4 and send NOTHING; a
+# stale lock (older than WM_SEND_LOCK_STALE - a crashed holder) is reclaimed
+# and delivery proceeds.
+tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
+sleep 0.5
+_lock="$WINGMAN_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').lock"
+mkdir -p "$_lock"   # a live holder's lock, fresh mtime
+out_lock="$(WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send" 2>&1)"
+lock_rc=$?
+assert_eq "a contended send lock makes the sender give up with rc 4" "$lock_rc" "4"
+pane_lock="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_not_contains "nothing was typed while the lock was held" "$pane_lock" "should-not-send"
+
+# Stale-holder reclaim: age the same lock past WM_SEND_LOCK_STALE and the next
+# delivery reclaims it and goes through.
+wm_age_path "$_lock" 300
+WM_SEND_LOCK_STALE=120 wm_tmux_send_message "$SESS:box" "after-reclaim"
+reclaim_rc=$?
+assert_eq "a stale lock is reclaimed and delivery proceeds" "$reclaim_rc" "0"
+pane_reclaim="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_contains "the message submitted after the reclaim" "$pane_reclaim" "SUBMITTED:after-reclaim"
+assert_true "the lock is released after delivery" "[ ! -d '$_lock' ]"
+tmux kill-session -t "$SESS" 2>/dev/null
+
 test_summary
