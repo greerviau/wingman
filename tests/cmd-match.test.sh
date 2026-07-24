@@ -17,7 +17,12 @@
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-RESULTS="$(PYTHONPATH="$TEST_REPO/hooks/lib" uv run --no-project --quiet python3 <<'PYEOF'
+# The Python body is written to a file first, NOT fed as a heredoc inside the
+# $(...) capture: bash 3.2 (stock macOS) does not parse a command substitution
+# recursively, so a heredoc body containing unmatched quotes - which this one
+# embeds on purpose as test inputs - breaks the parse of the whole file there.
+_wm_py="$(wm_mktemp_file)"
+cat > "$_wm_py" <<'PYEOF'
 import sys
 from cmd_match import command_segments, resolved_segments
 
@@ -251,7 +256,7 @@ for ok, label, expect, got in results:
 
 sys.exit(0 if all(r[0] for r in results) else 1)
 PYEOF
-)"
+RESULTS="$(PYTHONPATH="$TEST_REPO/hooks/lib" uv run --no-project --quiet python3 "$_wm_py")"
 
 while IFS=$'\t' read -r status rest; do
   case "$status" in

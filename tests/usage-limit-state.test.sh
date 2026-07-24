@@ -15,8 +15,10 @@ print(d.get(sys.argv[2]))
 ' "$WINGMAN_HOME/usage-limit-state.json" "$1"
 }
 
-future_epoch() { echo $(( $(date +%s) + "${1:-3600}" )); }
-past_epoch()   { echo $(( $(date +%s) - "${1:-10}" )); }
+# No quotes inside $((...)): bash 3.2 (stock macOS) rejects a quoted operand
+# in arithmetic ("syntax error: operand expected"); newer bash accepts it.
+future_epoch() { echo $(( $(date +%s) + ${1:-3600} )); }
+past_epoch()   { echo $(( $(date +%s) - ${1:-10} )); }
 
 # --- a fresh install has no state file: usage-update seeds one as clear ------
 test_new_home
