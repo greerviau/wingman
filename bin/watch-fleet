@@ -75,7 +75,12 @@
 # `watcher: healthy` and exit without starting a rival loop, so wingman can re-arm
 # defensively without spawning duplicates. Read the printed status line - `armed`,
 # `healthy`, or a `blocked:/review:/done:/died:/stalled:` reason - as the source
-# of truth.
+# of truth. `healthy` is run-scoped (#162): each cycle stamps its arming
+# session's $WINGMAN_RUN_ID, and an arm from a different run replaces a live
+# foreign cycle (an orphan from a prior, ended run cannot wake the current
+# session) instead of adopting it - it prints `armed`, never `healthy`, in
+# that case. Only when the arming session has no run id at all is a live
+# cycle accepted as healthy without an ownership check.
 #
 # Owner scope: each cycle watches exactly one owner's direct reports. Wingman arms
 # its own cycle (--owner "" - it has no $WINGMAN_CREW_ID) and never sees a lead's
@@ -154,12 +159,14 @@ if [ -n "$OWNER" ]; then
   BEATFILE="$WM_HOME/watch-$_key.beat"
   EXITFILE="$WM_HOME/watch-exit-$_key"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count-$_key"
+  RUNFILE="$WM_HOME/watch-$_key.run"
 else
   PIDFILE="$WM_HOME/watch.pid"
   WAKEFILE="$WM_HOME/wake"
   BEATFILE="$WM_HOME/watch.beat"
   EXITFILE="$WM_HOME/watch-exit"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
+  RUNFILE="$WM_HOME/watch.run"
 fi
 # The claim-lock path is needed both by --classify's stale-claim-lock check
 # (dispatched before claim-lock acquisition) and by the claim loop itself
@@ -441,7 +448,7 @@ case "$MODE" in
       pid="$(cat "$PIDFILE" 2>/dev/null)"
       printf 'stopped\n' > "$EXITFILE"
       [ -n "$pid" ] && kill "$pid" 2>/dev/null
-      rm -f "$PIDFILE"
+      rm -f "$PIDFILE" "$RUNFILE"
       wm_ok "watch-fleet stopped"
     else
       printf 'stopped\n' > "$EXITFILE"
@@ -589,7 +596,39 @@ done
 # arm reporting a bare "healthy pid=N" is what got misread as something to stop
 # in the incident this closes. The `watcher: healthy` token prefix is unchanged
 # so CLAUDE.md's documented arm-status parsing contract still holds.
-if cycle_live; then
+#
+# Run-id ownership check (#162): `healthy` must certify not just "a cycle is
+# alive" but "a cycle whose exit can wake THIS session". A cycle armed by a
+# previous, now-ended wingman run can outlive its session (a child of
+# systemd --user, not of any tracked harness task); adopting it as healthy
+# leaves the current run permanently unwakeable while board.md looks fine.
+# Each claim below stamps its arming session's $WINGMAN_RUN_ID into $RUNFILE;
+# an arm whose own run id differs from the live cycle's stamp is looking at a
+# foreign cycle and replaces it - stops it (waiting for the pid to actually
+# exit, so the dying cycle's own TERM trap cannot clobber the fresh claim),
+# then falls through to claim its own tracked cycle. With no run id on the
+# arming side ($WINGMAN_RUN_ID unset - e.g. `claude` started directly, not via
+# bin/wingman) ownership cannot be certified either way, so legacy behavior
+# stands: a live cycle reads as healthy.
+if cycle_live && [ -n "${WINGMAN_RUN_ID:-}" ] \
+  && [ "$(cat "$RUNFILE" 2>/dev/null)" != "$WINGMAN_RUN_ID" ]; then
+  _old_pid="$(cat "$PIDFILE" 2>/dev/null)"
+  _old_run="$(cat "$RUNFILE" 2>/dev/null)"
+  wm_warn "watcher: live cycle (pid ${_old_pid:-unknown}) was armed by run '${_old_run:-unknown}', not this run - its exit cannot wake this session. Replacing it with a cycle this run tracks."
+  [ -n "$_old_pid" ] && kill "$_old_pid" 2>/dev/null
+  _takeover_tries=0
+  while [ -n "$_old_pid" ] && kill -0 "$_old_pid" 2>/dev/null; do
+    _takeover_tries=$((_takeover_tries+1))
+    [ "$_takeover_tries" -ge 50 ] \
+      && wm_die "watcher: the foreign cycle (pid $_old_pid) did not exit within 5s of SIGTERM - stop it manually (bin/watch-fleet --stop) and re-arm"
+    sleep 0.1
+  done
+  # The dead cycle's TERM trap already removed $PIDFILE; sweep the rest of its
+  # residue so the fresh claim below starts clean. Its unclassified death is
+  # deliberate replacement, never a spurious failure, so no exit record is
+  # written for it.
+  rm -f "$PIDFILE" "$BEATFILE" "$RUNFILE"
+elif cycle_live; then
   wm_ok "watcher: already armed and healthy - one cycle is live (pid $(cat "$PIDFILE"), beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
   # Non-clobbering: a `fire`/`remote-control-dropped` record from the live
   # cycle this redundant arm just raced against outranks a `healthy` write -
@@ -604,6 +643,10 @@ fi
 
 # --- claim the cycle --------------------------------------------------------
 echo $$ > "$PIDFILE"
+# Stamp the arming session's run id (possibly empty) so a later arm from a
+# different run can recognize this cycle as foreign - see the singleton
+# guard's run-id ownership check above (#162).
+printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$RUNFILE"
 # Loud, not silent: the only way a record can still be present at a fresh
 # claim is that a wake was never classified - i.e. the record is the last
 # remaining trace of an event `fire()` already acked. Append it to the
