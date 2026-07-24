@@ -474,9 +474,14 @@ _opening_rc=$?
 # prompt; wm_tmux_send_message refuses rather than risk the objective's Enter being
 # consumed as an answer to that dialog. This is the same known startup-gate freeze
 # the watcher already flags as blocked - non-fatal here, but the objective was NOT
-# delivered, so it needs a manual crew-say once the gate is cleared.
-if [ "$_opening_rc" -eq 2 ]; then
-  wm_warn "opening objective NOT delivered to '$ID': its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $ID). Once resolved, deliver it manually: bin/crew-say $ID \"$OPENING\""
+# confirmed delivered (rc 2 = dialog refusal, 3 = unconfirmed submit, 4 = send
+# lock contention), so queue it: bin/watch-fleet retries the member's outbox
+# each poll once the pane is deliverable, with a manual crew-say as the
+# fallback remedy.
+if [ "$_opening_rc" -ne 0 ]; then
+  mkdir -p "$WM_HOME/outbox/$ID"
+  printf '%s\n' "$OPENING" > "$WM_HOME/outbox/$ID/$(date +%s)-$$.msg"
+  wm_warn "opening objective NOT confirmed delivered to '$ID' (its pane may be sitting on a permission/trust dialog - see: bin/crew-takeover $ID). It is QUEUED for automatic retry by the watcher; to deliver manually instead: bin/crew-say $ID \"$OPENING\""
 fi
 
 if [ "$SCOPE" = global ]; then

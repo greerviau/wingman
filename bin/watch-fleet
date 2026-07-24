@@ -852,6 +852,43 @@ for r in data:
       printf '%s\n' "$PANE_TEXT" | tail -n "$WM_APIERR_TAIL" \
         > "$WM_HOME/pane-tail-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').txt"
 
+      # Outbox redelivery: bin/crew-say queues a message it could not confirm
+      # delivered (a dialog-shaped pane, an unconfirmed submit, a contended
+      # send lock) under outbox/<id>/, so a relayed answer is never simply
+      # dropped. Retry the OLDEST queued message once per poll per member -
+      # wm_tmux_send_message itself still refuses a dialog-shaped pane, so a
+      # still-blocked pane just leaves the queue intact for a later poll. A
+      # multi-line payload is redelivered as a one-line pointer to the queued
+      # file (the same pointer-not-payload rule crew-say applies on send);
+      # a single-line one is retyped directly. Delivered files move to
+      # outbox/<id>/sent- so the queue holds only what is still owed.
+      # Only attempted on a stability-confirmed pane (two identical consecutive
+      # polls - the same rule every other acting check here uses): a pane
+      # mid-repaint is a member mid-turn, and typing into it both risks
+      # interleaving with its own output and can't be confirmed anyway.
+      _obdir="$WM_HOME/outbox/$_id"
+      if [ "$PANE_STABLE" = 1 ] && [ -d "$_obdir" ]; then
+        _obfile="$(ls "$_obdir" 2>/dev/null | grep -v '^sent-' | sort | head -1)"
+        if [ -n "$_obfile" ]; then
+          _obpath="$_obdir/$_obfile"
+          _obsent="$_obdir/sent-$_obfile"
+          if [ "$(grep -c '' "$_obpath" 2>/dev/null)" -gt 1 ]; then
+            # Rename BEFORE sending so the pointer names the path the file
+            # will actually live at; a failed send renames it back into the
+            # queue for the next poll.
+            mv "$_obpath" "$_obsent" 2>/dev/null
+            _obmsg="Queued message for you: read $_obsent and act on it now - it is a direct message to you, not background material."
+            wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_obmsg" \
+              || mv "$_obsent" "$_obpath" 2>/dev/null
+          else
+            _obmsg="$(cat "$_obpath" 2>/dev/null)"
+            if [ -n "$_obmsg" ] && wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_obmsg"; then
+              mv "$_obpath" "$_obsent" 2>/dev/null || rm -f "$_obpath"
+            fi
+          fi
+        fi
+      fi
+
       # Stability-gated drop detection, computed once and shared by the
       # connection-state persistence below and the working-only reconnect
       # attempt beneath it - the same "one more poll before acting" rule
@@ -884,11 +921,16 @@ for r in data:
         _rcfile="$WM_HOME/rcdrop-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').sent"
         _rc_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_rcfile" 2>/dev/null || echo 0) ))
         if [ ! -f "$_rcfile" ] || [ "$_rc_age" -ge "$RC_DROPPED_COOLDOWN" ]; then
-          # Only mark the cooldown when the retry actually sent: a refusal (the
-          # pane looks dialog-shaped, not the chat input) means nothing went out,
-          # so the next cycle should try again rather than sit out a cooldown for
-          # a retry that never happened.
-          if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"; then
+          # Only mark the cooldown when the retry actually went out: a refusal
+          # (rc 2, dialog-shaped pane) or a contended send lock (rc 4) means
+          # nothing was typed, so the next cycle should try again rather than
+          # sit out a cooldown for a retry that never happened. rc 3 (typed,
+          # submit unconfirmed) marks the cooldown like a success - the
+          # keystrokes landed, and hammering /remote-control every poll into a
+          # pane that doesn't repaint adds nothing.
+          wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"
+          _rcretry_rc=$?
+          if [ "$_rcretry_rc" -eq 0 ] || [ "$_rcretry_rc" -eq 3 ]; then
             : > "$_rcfile"
             # Reflect the self-heal back into the persisted field the same way
             # a detected drop is (issue #96).
@@ -981,11 +1023,17 @@ for r in data:
         if [ -f "$_nudgefile" ]; then
           _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || date +%s) ))
         else
-          # Only mark the episode nudged when the nudge actually sent, not when
-          # wm_tmux_send_message refused because the pane looks dialog-shaped
-          # rather than the chat input - a refusal must be retried, not treated
-          # as delivered.
-          if wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"; then
+          # Only mark the episode nudged when the nudge actually went out, not
+          # when wm_tmux_send_message refused because the pane looks
+          # dialog-shaped (rc 2) or the send lock was contended (rc 4) - those
+          # must be retried, not treated as delivered. rc 3 (typed but the
+          # submit never visibly confirmed) DOES mark: the keystrokes landed,
+          # and an idle-stalled pane not repainting on them is exactly the
+          # shape under diagnosis here - resending every poll would spam the
+          # composer without adding signal.
+          wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
+          _nudge_rc=$?
+          if [ "$_nudge_rc" -eq 0 ] || [ "$_nudge_rc" -eq 3 ]; then
             : > "$_nudgefile"
             _just_nudged=1
           fi

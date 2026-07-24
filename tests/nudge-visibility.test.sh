@@ -109,7 +109,12 @@ assert_not_contains "a blocked member is never annotated even with nudged_at pre
 # it and re-verify against a fresh, lock-protected read immediately before
 # writing. ---------------------------------------------------------------
 test_new_home
-OUT="$(uv run --no-project --quiet python - "$TEST_REPO/bin/lib/wm-state.py" "$WINGMAN_HOME" <<'PYEOF'
+# Written to a file first, NOT fed as a heredoc inside the $(...) capture:
+# bash 3.2 (stock macOS) does not parse a command substitution recursively,
+# so a heredoc body with an odd number of apostrophes breaks the whole file's
+# parse there.
+_wm_py="$(wm_mktemp_file)"
+cat > "$_wm_py" <<'PYEOF'
 import os, sys, importlib.util
 
 wm_state_path, home = sys.argv[1], sys.argv[2]
@@ -189,7 +194,7 @@ check("long_shell_pid" not in final,
 
 sys.exit(1 if fail else 0)
 PYEOF
-)"
+OUT="$(uv run --no-project --quiet python "$_wm_py" "$TEST_REPO/bin/lib/wm-state.py" "$WINGMAN_HOME")"
 rc=$?
 assert_true "the white-box repro script ran to completion" "[ $rc -eq 0 ]"
 assert_contains "pre-fix pattern reverts the blocked transition (proves the bug shape is real)" \

@@ -194,18 +194,31 @@ wm_resolve_playbook() {
 #               lead, or the caller's own lead
 #   deny      - target exists but is outside the caller's team
 #   no-target - no roster record for target
+#   error     - the roster could not be read at all (state engine broken,
+#               crew.json unreadable): the policy could not run. Callers must
+#               refuse loudly on this - distinctly from `deny` - rather than
+#               silently skipping the guardrail (fail closed, never open;
+#               --force remains the human override). An empty verdict (the
+#               python itself failing) is treated identically by callers.
 # Shared by crew-say (one-way inject) and crew-ask (ask-and-capture) so both
 # honour one policy. The caller id is "" for wingman (the top orchestrator, which
 # has no roster record); a member passes its own $WINGMAN_CREW_ID.
 wm_team_guardrail() {
   _tg_caller="$1"; _tg_target="$2"
-  wm_state crew-list --all --json 2>/dev/null | wm_py -c '
+  # The roster read's success is captured separately from its output: a failed
+  # read must yield `error`, never be silently parsed as an empty roster
+  # (which would resolve to `no-target` and let a broken install skip the
+  # policy with no signal at all).
+  _tg_roster="$(wm_state crew-list --all --json 2>/dev/null)" || { echo error; return; }
+  printf '%s' "$_tg_roster" | wm_py -c '
 import sys, json
 caller, target = sys.argv[1], sys.argv[2]
 try:
     roster = json.load(sys.stdin)
 except Exception:
-    roster = []
+    print("error"); sys.exit(0)
+if not isinstance(roster, list):
+    print("error"); sys.exit(0)
 by_id = dict((r.get("id"), r) for r in roster)
 def parent(cid):
     r = by_id.get(cid)
@@ -539,7 +552,51 @@ wm_tmux_pane_ready() {
 # non-dialog-shaped, so it never fires a keystroke into a permission/trust
 # prompt. Set WM_CLEAR_KEYS empty to skip this for a harness whose composer
 # does not clear on Ctrl-C.
+#
+# Returns: 0 on a CONFIRMED delivery (the pane advanced past its composed
+# snapshot), 2 if refused because the pane looks dialog-shaped, 3 if the
+# submit could never be confirmed within WM_SUBMIT_TRIES (typed, Enter sent,
+# but the pane never visibly advanced - probably-not-delivered, previously
+# indistinguishable from success). Callers treating only "nonzero" as failure
+# keep working; callers that care report 3 as unconfirmed, not delivered.
+#
+# Concurrency: the whole type-and-submit sequence holds an mkdir-based
+# per-pane lock (send-<target>.lock under $WM_HOME). Multiple writers
+# genuinely target one pane at once - crew-say from wingman, a sibling's
+# crew-say, a crew-ask send, watch-fleet's stall nudge and /remote-control
+# retry - and unserialized send-keys bursts can interleave into one garbled
+# submission, or let one sender's pane-advanced confirm read another sender's
+# typing as its own success. The lock is held for the duration of one
+# delivery (seconds); a waiter polls up to WM_SEND_LOCK_WAIT seconds, then
+# reclaims a lock older than WM_SEND_LOCK_STALE (a crashed holder) or gives
+# up with a refusal-style message on stderr and rc 4 (nothing was typed).
 wm_tmux_send_message() {
+  # The lock's parent must exist or every mkdir below fails and reads as
+  # permanent contention; callers can legitimately run before wm_state init.
+  mkdir -p "$WM_HOME" 2>/dev/null
+  _sm_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
+  _sm_wait="${WM_SEND_LOCK_WAIT:-45}"
+  _sm_stale="${WM_SEND_LOCK_STALE:-120}"
+  _sm_t0="$(date +%s)"
+  while ! mkdir "$_sm_lock" 2>/dev/null; do
+    _sm_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_sm_lock" 2>/dev/null || date +%s) ))
+    if [ "$_sm_age" -ge "$_sm_stale" ]; then
+      rmdir "$_sm_lock" 2>/dev/null   # crashed holder; reclaim and retry
+      continue
+    fi
+    if [ $(( $(date +%s) - _sm_t0 )) -ge "$_sm_wait" ]; then
+      wm_err "send lock for pane '$1' held by another delivery for ${_sm_wait}s+ - nothing was sent; retry shortly"
+      return 4
+    fi
+    sleep 1
+  done
+  _wm_tmux_send_message_locked "$1" "$2"
+  _sm_lrc=$?
+  rmdir "$_sm_lock" 2>/dev/null
+  return "$_sm_lrc"
+}
+
+_wm_tmux_send_message_locked() {
   _target="$1"; _text="$2"
   wm_tmux_pane_ready "$_target"
   [ $? -eq 2 ] && return 2
@@ -574,7 +631,11 @@ wm_tmux_send_message() {
     wm_tmux send-keys -t "$_target" Enter
     _sm_i=$((_sm_i+1))
   done
-  return 0
+  # Exhausted every confirm retry without the pane ever advancing: the text
+  # was typed and Enter pressed, but delivery cannot be confirmed. Distinct
+  # from 0 so a caller never reports "delivered" for a submit that probably
+  # never registered.
+  return 3
 }
 
 # Ensure the shared tmux server + crew session exist (detached). The check is

@@ -25,7 +25,17 @@ _TESTS_FAIL=0
 # glob needs nothing to survive a subshell boundary because nothing has to
 # propagate out of one - the template is reconstructible from
 # $WM_TEST_RUN_ID and $$, both already known in the parent shell.
-_wm_tmpl() { printf '%s/wm-test.%s.%s.' "${TMPDIR:-/tmp}" "${WM_TEST_RUN_ID:-x}" "$$"; }
+# The base is physically normalized (cd -P) once: macOS's $TMPDIR is a
+# symlink under /var -> /private/var (often with a trailing slash), while the
+# product code normalizes every path it echoes back (spawn-crew's `cd -P`,
+# wm-state's abspath) - an unnormalized template here makes assert_contains
+# compare /var/...//... against /private/var/..., failing on macOS only.
+_WM_TMP_BASE="$(cd -P "${TMPDIR:-/tmp}" && pwd -P)"
+# Exported so every consumer of $TMPDIR in the code under test (e.g.
+# wm_guard_test_fixture_agent's case match in bin/lib/common.sh) sees the same
+# normalized base the temp dirs are actually created under.
+export TMPDIR="$_WM_TMP_BASE"
+_wm_tmpl() { printf '%s/wm-test.%s.%s.' "$_WM_TMP_BASE" "${WM_TEST_RUN_ID:-x}" "$$"; }
 wm_mktemp_dir()  { mktemp -d "$(_wm_tmpl)XXXXXXXX"; }
 wm_mktemp_file() { mktemp    "$(_wm_tmpl)XXXXXXXX"; }
 

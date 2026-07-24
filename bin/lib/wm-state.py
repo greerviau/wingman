@@ -1755,6 +1755,12 @@ def cmd_outage_update(args):
     wingman's own top-level cycle (--owner "") - outage detection is
     fleet-wide, never per-lead-team.
 
+    SINGLE WRITER by design: the owner-"" watcher's singleton guard makes it
+    the only process advancing this state file, which is why the
+    read-modify-write below carries no with_locked(). Adding a second caller
+    (another owner scope, a manual CLI invocation in automation) requires
+    adding the lock first.
+
     This poll's own signal count = --signal-working (members currently
     `working` whose pane tail matched the API-error signature THIS poll,
     counted by the caller) + however many of --died (a comma-separated list of
@@ -1848,6 +1854,12 @@ def cmd_usage_update(args):
     from wingman's own top-level cycle (--owner "") - the account's usage
     quota is fleet-wide, shared by every session under the same login, never
     per-lead-team.
+
+    SINGLE WRITER by design: the owner-"" watcher's singleton guard makes it
+    the only process advancing this state file (usage-decide, the one other
+    writer, is a pilot-driven CLI call against a settled state, not a per-poll
+    racer), which is why there is no with_locked() here. A second automated
+    caller requires adding the lock first.
 
     The caller (bin/watch-fleet) scans $WM_HOME/usage/<session-id>.json for
     each of the five_hour/seven_day windows, discards any reading whose
@@ -2143,18 +2155,22 @@ def cmd_ask_reply(args):
     responder that is not the addressed delegate (anti-spoof), and an answer over
     the cap (reject, never silently truncate - forces a real distillation). An
     --answer-file is stored as an absolute-path pointer; its bytes never enter
-    state."""
+    state.
+
+    The whole read-check-write runs under with_locked(ask_path(...)): a reply
+    and an await watcher's ask-resolve (timeout/undeliverable) genuinely race,
+    and without the lock a resolve that read `pending` could write its stale
+    record back over a just-landed answer, destroying it. Same store-locking
+    pattern as every other shared store here.
+
+    A late reply to a request already resolved `timeout` is still accepted
+    (recorded as answered with `late: true`): the delegate has already spent
+    the turn authoring the answer, and refusing it would discard that work
+    with no recovery path. The asker's await has already fired `unanswered`
+    by then, so the refusal path below tells the delegate to also surface the
+    answer over the ordinary channel."""
     ensure_home()
-    record = read_json(ask_path(args.id), None)
-    if not isinstance(record, dict):
-        sys.exit("wm-state: no ask '%s'" % args.id)
-    if record.get("status") != "pending":
-        sys.exit("wm-state: ask '%s' is already %s, not open for a reply"
-                 % (args.id, record.get("status")))
-    if args.responder != record.get("to"):
-        sys.exit("wm-state: responder '%s' is not the addressed delegate '%s' "
-                 "for ask '%s' (a reply must come from the delegate that was asked)"
-                 % (args.responder, record.get("to"), args.id))
+    path = ask_path(args.id)
     max_chars = args.max_chars
     if max_chars is None:
         try:
@@ -2170,13 +2186,37 @@ def cmd_ask_reply(args):
         if not os.path.exists(args.answer_file):
             sys.exit("wm-state: --answer-file '%s' does not exist" % args.answer_file)
         answer_file = os.path.abspath(args.answer_file)
-    record["status"] = "answered"
-    record["answer"] = args.answer
-    record["answer_file"] = answer_file
-    record["responder"] = args.responder
-    record["answered"] = now()
-    write_json(ask_path(args.id), record)
-    print(args.id)
+    with with_locked(path):
+        record = read_json(path, None)
+        if not isinstance(record, dict):
+            sys.exit("wm-state: no ask '%s'" % args.id)
+        status = record.get("status")
+        late = False
+        if status == "timeout":
+            late = True
+        elif status != "pending":
+            sys.exit("wm-state: ask '%s' is already %s, not open for a reply. "
+                     "Your answer was NOT recorded - surface it to the asker over "
+                     "the ordinary channel instead (e.g. crew-say '%s')."
+                     % (args.id, status, record.get("from") or "wingman"))
+        if args.responder != record.get("to"):
+            sys.exit("wm-state: responder '%s' is not the addressed delegate '%s' "
+                     "for ask '%s' (a reply must come from the delegate that was asked)"
+                     % (args.responder, record.get("to"), args.id))
+        record["status"] = "answered"
+        record["answer"] = args.answer
+        record["answer_file"] = answer_file
+        record["responder"] = args.responder
+        record["answered"] = now()
+        if late:
+            record["late"] = True
+        write_json(path, record)
+    if late:
+        print("%s (late: the asker's wait already timed out - also surface this "
+              "answer to '%s' over the ordinary channel, e.g. crew-say, so it is "
+              "actually seen)" % (args.id, record.get("from") or "wingman"))
+    else:
+        print(args.id)
 
 
 def cmd_ask_get(args):
@@ -2190,17 +2230,23 @@ def cmd_ask_resolve(args):
     """Terminal non-answer transition set by the await watcher (timeout or
     undeliverable). Compare-and-set on `pending`: an answer that landed in the
     same tick wins, so a resolve never clobbers a real reply. Prints the resulting
-    status (the request's current status if it was already closed)."""
+    status (the request's current status if it was already closed).
+
+    The compare-and-set is made real by with_locked(ask_path(...)): without the
+    lock, a resolve that read `pending` could race a landing reply and write
+    `timeout` over the answered record, destroying the answer."""
     ensure_home()
-    record = read_json(ask_path(args.id), None)
-    if not isinstance(record, dict):
-        sys.exit("wm-state: no ask '%s'" % args.id)
-    if record.get("status") == "pending":
-        record["status"] = args.status
-        record["answered"] = now()
-        if args.note:
-            record["note"] = args.note
-        write_json(ask_path(args.id), record)
+    path = ask_path(args.id)
+    with with_locked(path):
+        record = read_json(path, None)
+        if not isinstance(record, dict):
+            sys.exit("wm-state: no ask '%s'" % args.id)
+        if record.get("status") == "pending":
+            record["status"] = args.status
+            record["answered"] = now()
+            if args.note:
+                record["note"] = args.note
+            write_json(path, record)
     print(record.get("status"))
 
 
