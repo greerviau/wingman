@@ -18,6 +18,15 @@ The rules stated in prose across these docs and `CLAUDE.md` are also enforced me
 
 Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
 
+### Which identities are claims and which are proofs
+
+Two different strengths of identity coexist in these guards, deliberately:
+
+- **Claimed:** `$WINGMAN_CREW_ID` is set by `bin/spawn-crew` into each member's own environment and then self-reported - the team guardrail's caller id (`crew-say`/`crew-ask`), a `crew-ask reply`'s `--responder`, and every `crew-set` are all trusted at face value. Any process could export another member's id; the threat model here is cooperative agents making mistakes, not adversaries, and the guardrails exist to catch confusion, not forgery.
+- **Proven:** the merge review gate (issue #135) is the one place identity is load-bearing for an irreversible action, so it does not rest on a claim - a reviewer's comment-fallback approve must carry a `review-sign` proof bound to a spawn-time hash commitment only that reviewer's own process environment can produce.
+
+Anything promoted in the future from "advisory" to "gating an irreversible action" should move from the claimed column to the proven one the same way.
+
 The two spawn-pause guards (outage, usage-limit) react to the fleet-wide state machines described in [fleet resilience](fleet-resilience.md).
 
 ## Checkout freshness (advisory, not a hook)
