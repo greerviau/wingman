@@ -195,8 +195,10 @@ EOF
   # security hole (fails closed). Stdout is redirected: the caller running
   # this script has no legitimate need to see the raw token, and printing it
   # would put it in that orchestrator session's own transcript for no reason.
+  # Match the bare role name so a category-namespaced reviewer
+  # (e.g. software-development/reviewer) regenerates its token too (issue #166).
   _review_token=""
-  if [ "$_type" = reviewer ]; then
+  if [ "${_type##*/}" = reviewer ]; then
     _review_token="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
     wm_state crew-set --id "$_rid" --regenerate-review-token "$_review_token" >/dev/null
   fi
@@ -273,7 +275,7 @@ EOF
   _resume_nudge="Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
   # issue #135: a resumed reviewer's review-signing token was just
   # regenerated above, invalidating any pre-crash comment-fallback proof.
-  [ "$_type" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
+  [ "${_type##*/}" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
   # WM_CLEAR_KEYS="" (issue #157): same reasoning as bin/spawn-crew's own opening
   # delivery - this window was just relaunched, so there is no pre-existing
   # composed text to clear, and it can still be mid-startup here even after

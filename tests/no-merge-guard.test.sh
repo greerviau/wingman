@@ -505,6 +505,27 @@ JSON
 out="$(run_hook "gh pr merge 46")"
 assert_eq "review gate: a genuine reviewer's comment-fallback approve is allowed (no output)" "$out" ""
 
+# --- a category-namespaced reviewer type (issue #166) -----------------------
+# A reviewer registered under a category directory is stored as
+# `software-development/reviewer`; its verdict must count as evidence exactly
+# like a bare `reviewer`'s, keyed off the base role name.
+wm_state crew-add --id rev-ns --type software-development/reviewer --repo "$TEST_REPO" \
+  --window wrns --session-id srns >/dev/null
+wm_state crew-set --id rev-ns --delivery "https://github.com/acme/widgets/pull/46" >/dev/null
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-ns --> VERDICT: approve - lgtm"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "review gate: a namespaced reviewer's comment-fallback approve is allowed (no output)" "$out" ""
+# Restore the bare-reviewer marker state the following cases build on.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"}
+]}
+JSON
+
 # --- same reviewer record, but its delivery points at a DIFFERENT PR -------
 # mismatched delivery, denied.
 wm_state crew-set --id rev1 --delivery "https://github.com/acme/widgets/pull/999" >/dev/null

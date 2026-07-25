@@ -390,6 +390,21 @@ def cmd_init(_args):
     print(home())
 
 
+def type_base(type_name):
+    """The bare role name of a (possibly category-namespaced) crew type.
+
+    A crew type may be registered under a category directory and referenced as
+    `<category>/<role>` (e.g. `software-development/reviewer` for
+    playbooks/software-development/reviewer.md). Everything that keys off a
+    role by name - the review-token machinery here, the merge-evidence gate in
+    hooks/no-merge-guard.sh - must match the base name, not the full namespaced
+    string (issue #166), so a namespaced reviewer's verdict counts as evidence
+    exactly like a bare `reviewer`'s. Returns the part after the last `/`, or
+    the whole string when there is no `/`.
+    """
+    return (type_name or "").rsplit("/", 1)[-1]
+
+
 # ---------------------------------------------------------------------------
 # Spawn-time per-verdict hash commitments for a `reviewer` member's
 # comment-fallback verdict (issue #135). A random 32-byte token, generated at
@@ -567,7 +582,7 @@ def cmd_crew_add(args):
         "spawned_at": stamp,
         "updated": stamp,
     }
-    if args.type == "reviewer" and getattr(args, "review_token", None):
+    if type_base(args.type) == "reviewer" and getattr(args, "review_token", None):
         _apply_review_token(record, args.review_token)
     with with_locked(crew_json_path()):
         roster = load_roster()
@@ -758,7 +773,7 @@ def cmd_crew_set(args):
                 # first-ever delivery set (review_delivery_bound still None)
                 # regenerates nothing - the commitment was never PR-specific
                 # to begin with.
-                if args.delivery is not None and r.get("type") == "reviewer" \
+                if args.delivery is not None and type_base(r.get("type")) == "reviewer" \
                         and r.get("review_commit_approve"):
                     bound = r.get("review_delivery_bound")
                     if args.delivery and bound and bound != args.delivery:

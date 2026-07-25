@@ -284,7 +284,11 @@ fi
 # crew-add derives and stores only the one-way hash commitments of this value
 # (never the raw token itself) - see bin/lib/wm-state.py's _apply_review_token.
 REVIEW_TOKEN=""
-[ "$TYPE" = reviewer ] && REVIEW_TOKEN="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
+# Matched on the playbook's bare name (like the _delivery.md inclusion above),
+# so a category-qualified spawn (--type software-development/reviewer) still
+# mints a token and its comment-fallback verdict counts as merge evidence
+# (issue #166).
+[ "$ROLE_NAME" = reviewer ] && REVIEW_TOKEN="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
 
 # --- compose the crew member's appended system prompt ------------------------
 wm_state init >/dev/null

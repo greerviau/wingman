@@ -550,10 +550,16 @@ def verify_reviewer_approval(pr_json):
                 "crew `%s` posted VERDICT: approve but no matching roster "
                 "record exists (unrecognized reviewer id)" % rid)
             continue
-        if record.get("type") != "reviewer":
+        # Match the base role name, not the full type string: a crew type
+        # registered under a category directory is referenced as
+        # `<category>/reviewer` (e.g. software-development/reviewer), and its
+        # verdict must count as evidence exactly like a bare `reviewer`'"'"'s
+        # (issue #166).
+        rtype = record.get("type") or ""
+        if rtype.rsplit("/", 1)[-1] != "reviewer":
             issues.append(
                 "crew `%s` posted VERDICT: approve but its roster record is "
-                "type `%s`, not `reviewer`" % (rid, record.get("type") or "?"))
+                "type `%s`, not `reviewer`" % (rid, rtype or "?"))
             continue
         if not delivery_matches_pr(record.get("delivery"), pr_number, pr_url):
             issues.append(
