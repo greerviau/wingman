@@ -23,7 +23,7 @@ Every crew member is an independent, interactive `claude` session in its own tmu
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   --objective "<one-line task>" [--input <plan-path>] \
-  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>]
+  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--allow-merge]
 ```
 
 The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
@@ -31,6 +31,8 @@ It prints the crew `id`.
 
 Pass `--scope global` (instead of `--repo`) to ground a crew member at the global project scope: it launches at the workspace root with every discovered repo added, so it can read and work across all of them and choose the target repo(s) itself.
 Use it for cross-repo work or when the repo is genuinely unclear.
+
+**Merge authorization.** `--allow-merge` is per-spawn and never a default: a crew member cannot merge its own PR unless the human explicitly granted it for that one effort (see [guards.md](guards.md)'s `hooks/no-merge-guard.sh`). It is visible in `bin/crew-list`/`board.md` as `allow_merge`. To grant it to a member that is already running, use `$WINGMAN_STATE crew-set --id <id> --allow-merge true` rather than respawning; it takes effect on the next merge attempt.
 
 **Model selection.** An explicit `--model` on a spawn always wins; otherwise `$WM_MODEL` (settable in `config.local.sh`, see [`config.example.sh`](../config.example.sh)) is the default for every spawn; with neither set, the agent CLI's own default applies. `--model`/`--effort` are per-spawn - they affect only that one session, never wingman's own model or any other member's.
 

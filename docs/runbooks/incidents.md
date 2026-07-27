@@ -1,0 +1,108 @@
+# Incident runbooks: what to do on a specific fire reason
+
+The per-reason response procedures for a `watch-fleet` fire. `/watch` routes
+here by reason; everything else about handling a fire (read the wake file,
+report per your own contract, then arm the next cycle) lives in `/watch`
+itself and is unchanged by anything below.
+
+Reasons marked **wingman-only** are produced by wingman's own top-level cycle
+(owner `""`) alone - the outage and usage-limit state machines are tracked
+there and nowhere else - so a lead never sees them. The detection mechanics
+behind these events are documented in
+[fleet-resilience.md](../fleet-resilience.md); this file is only the response.
+
+### `stalled`
+
+The mechanical layer has already sent that member one check-in nudge and
+waited a full cooldown window for activity before this fire ever reached you -
+a `stalled` fire is **always post-nudge, never a first response**. Do not send
+your own nudge and do not wait again; the self-heal window already ran.
+
+Relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or
+`bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked`
+and `review`, the pilot decides its disposition. Lead with the plain-language
+state ("the `<repo>` effort has gone quiet") before the command, not the id;
+keep relaying the exact `bin/crew-takeover <id>` command regardless - the
+pilot may need to run it themselves, and that is the actionable pointer, not
+narration.
+
+An invalid `--model` value is one cause: the agent CLI accepts it at startup,
+so the window stays alive, but every turn comes back as an in-chat model error
+instead of doing any work - the member never self-reports, so it surfaces as
+`stalled`, not `died`. `bin/crew-takeover <id>` attaches to the live window,
+where the model error is directly visible in the transcript.
+
+This is distinct from `died` (the session/window is confirmed gone, so no
+nudge was ever possible) - a `died` member is always relayed immediately, with
+no wait of any kind.
+
+### `correlated:mass-death` (no outage tag)
+
+Relay it plainly ("N crew members died together around \<time\>, looks like a
+host/tmux crash") and **confirm with the pilot before running
+`bin/crew-resume --all-died`** - resuming sessions is the same costly act as
+any other spawn - unless the pilot has separately pre-authorized auto-recovery
+for this specific effort.
+
+### `correlated:api-outage` / `correlated:api-outage-death` / `outage-detected` — wingman-only
+
+Relay it plainly ("N crew members hit API errors together / died together
+during a detected outage - looks like an Anthropic-side burst"). **Do not run
+`bin/crew-resume` for any outage-tagged death yet.** New spawns are already
+mechanically paused (`hooks/api-outage-spawn-guard.sh` denies `bin/spawn-crew`
+while the outage state is `active`), and `bin/crew-resume` itself refuses
+outage-tagged resumes without `--force` while `active`. Wait for the
+`outage-cleared` fire instead of polling or asking the pilot to confirm on the
+spot.
+
+### `outage-cleared` — wingman-only
+
+**This is the one pre-authorized auto-recovery case.** If it names any
+outage-tagged died member(s), run `bin/crew-resume --all-died` immediately,
+**without asking the pilot first**, then relay the outcome ("the outage
+cleared; resumed N previously-died member(s): \<ids\>" or naming any that
+failed to come back). If it names no died members, there is nothing to resume -
+just relay that new spawns are unpaused again.
+
+This is the only case where `crew-resume` runs without a fresh pilot
+confirmation, because the recovery is reversible (a resumed session that fails
+is simply `died` again), low-risk, and the pilot's own standing instruction for
+this exact case.
+
+### `usage-limit-approaching` — wingman-only
+
+New spawns are already mechanically paused
+(`hooks/usage-limit-spawn-guard.sh` denies `bin/spawn-crew` while the state is
+`approaching`/`paused`). **Already-running crew are never touched by this
+pause and keep working and keep consuming quota** - this only stops the fleet
+from *growing*.
+
+Relay it plainly with the concrete numbers ("usage is at N% of the 5-hour
+window, resets at \<time\>") and ask, via `AskUserQuestion`, whether to wait
+for the reset or continue anyway and accept the risk of hitting the hard limit
+mid-task - and say plainly that **"wait" only holds new spawns; it does not
+stop crew already running, which can still hit the hard limit on their own
+before the window resets.**
+
+Record the answer immediately with
+`$WINGMAN_STATE usage-decide --decision wait|continue`.
+
+- On **continue**, tell the pilot new spawns are unpaused. If the fleet does
+  hit the hard limit later, that surfaces reactively as an "API outage" rather
+  than distinctly as quota exhaustion - mention that mislabel if it comes up.
+- On **wait**, tell the pilot new spawns stay paused until the window resets on
+  its own - nothing further to do; your own watcher already wakes you on the
+  `usage-limit-reset` fire the moment `resets_at` passes.
+
+If the window resets before the pilot ever answers, the state clears itself
+automatically and the ask is moot - if you get a late answer to an ask you
+already relayed, tell the pilot the window already reset and no decision is
+needed.
+
+### `usage-limit-reset` — wingman-only
+
+Relay it plainly ("the usage window reset; new spawns are unpaused again")
+and, **only** if the prior decision was "wait" (or the reset arrived before the
+pilot answered at all), note that the fleet can resume normal spawning - no
+manual restart needed, this is fully automatic. A "continue anyway" decision
+resets silently with no fire at all, so there is nothing to announce there.

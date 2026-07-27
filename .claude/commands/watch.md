@@ -20,8 +20,22 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
      wingman's own top-level session reports a compact status to the pilot
      exactly as CLAUDE.md's "Report" step specifies; a lead instead rolls the
      event into its own `summary` and escalates only a genuine decision, per
-     `playbooks/common/lead.md`'s absorb-and-roll-up discipline to its owner -
-     then proceed to step 2.
+     `playbooks/common/lead.md`'s absorb-and-roll-up discipline to its owner.
+     **If the reason line contains any of these, read
+     `docs/runbooks/incidents.md` and follow that reason's procedure before
+     reporting anything** - each has a specific response the generic roster
+     report gets wrong:
+     `stalled` · `correlated:mass-death` · `correlated:api-outage` ·
+     `correlated:api-outage-death` · `outage-detected` · `outage-cleared` ·
+     `usage-limit-approaching` · `usage-limit-reset`.
+     Every other reason needs no extra read. (The last five are produced by
+     wingman's own top-level cycle only, so a lead never sees them.)
+     Then proceed to step 2.
+
+     Under `direct_spawn_visibility=summary-only`, the roster report is itself
+     an instance of wingman's Report step, not a separate mandate: a wake
+     caused solely by an absorbable round of a direct revise loop produces no
+     roster report at all - just proceed to step 2 and end the turn silently.
    - `remote-control-dropped` - **wingman's own top-level session's** Remote
      Control connection dropped. This outcome is only ever produced for the
      owner `""` cycle: `self_pane_check()` in `bin/watch-fleet` gates on
@@ -29,8 +43,12 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
      so a lead's own cycle (non-empty `$WINGMAN_CREW_ID`) can never see this
      outcome - if you are a lead, this case does not apply to you and needs no
      action. If you are wingman's own top-level session, relay the wake
-     file's message to the pilot immediately (run `/remote-control` to
-     restore it), then proceed to step 2.
+     file's message to the pilot immediately and explicitly - e.g. "Remote
+     Control disconnected on this session; run `/remote-control` to restore
+     it" - then proceed to step 2. A *crew member's* own dropped connection
+     is different and needs no pilot action: `bin/watch-fleet` recovers it
+     automatically and never surfaces it unless the automatic retry is
+     itself failing.
    - `stopped` - the last cycle ended via a deliberate `bin/watch-fleet
      --stop` (manual/testing use only), not a failure. Report this once,
      plainly ("the watcher was intentionally stopped and is not currently
