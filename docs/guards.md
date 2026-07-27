@@ -14,7 +14,7 @@ The rules stated in prose across these docs and `CLAUDE.md` are also enforced me
 - `hooks/api-outage-spawn-guard.sh` denies new crew spawns while a fleet-wide API outage is detected as active.
 - `hooks/usage-limit-spawn-guard.sh` denies new crew spawns while a fleet-wide usage-quota window is approaching its cap or the pilot chose to wait for it to reset; both this and the outage guard share their `PreToolUse` machinery (`hooks/lib/spawn_pause_guard.py`) rather than duplicating it.
 - `hooks/artifact-link-guard.sh` and `hooks/artifact-publish-tracker.sh` enforce the Artifact-publish contract - a markdown deliverable is published as a hosted link only when the pilot asked for that and a content scan passes.
-- `hooks/pilot-preferences-guard.sh` denies every other tool call in a fresh run until the onboarding-preference questions are answered.
+- `hooks/pilot-preferences-guard.sh` denies every other tool call in a fresh run until the onboarding-preference questions are answered (see "The preferences gate" below).
 
 Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
 
@@ -28,6 +28,26 @@ Two different strengths of identity coexist in these guards, deliberately:
 Anything promoted in the future from "advisory" to "gating an irreversible action" should move from the claimed column to the proven one the same way.
 
 The two spawn-pause guards (outage, usage-limit) react to the fleet-wide state machines described in [fleet resilience](fleet-resilience.md).
+
+## The preferences gate
+
+`hooks/pilot-preferences-guard.sh` (a `PreToolUse` hook registered project-level via this repo's checked-in `.claude/settings.json`, so it needs no `bin/doctor` step) denies every other tool call while any required preference is unanswered. A session that skips the onboarding ask is blocked rather than silently proceeding on defaults. The five keys and their prompts are defined once in `hooks/lib/pilot-prefs.sh` (`WM_PREF_KEYS`); `/prefs` renders the ask.
+
+**Every denial names its own way out.** The guard quotes a complete, absolute `pref-set` command with the run id already filled in, and verifies through its own allowlist that it will accept that command before printing it. Running what the denial prints clears the gate regardless of how the environment is set up — nothing depends on `$WINGMAN_STATE` being exported.
+
+**It fails open rather than stranding the run.** If the guard cannot name a way out at all — the state engine is missing or broken, or its own escape command stops resolving — it stops gating, says so through a `systemMessage`, and records the reason in `$WINGMAN_HOME/prefs-guard-failopen-<session_id>`. Preferences then stay unanswered and every consumer applies its conservative default, so a broken install degrades loudly instead of deadlocking.
+
+**An unattended launch needs no special handling.** With no directive there is nothing to act on; on the first directive the batched ask simply pends until a human attaches and answers, with fleet supervision still available through the guard's allowlist. This is measured behavior — see [`docs/analysis/2026-07-13-unattended-boot-launch-behavior.md`](analysis/2026-07-13-unattended-boot-launch-behavior.md).
+
+## Hooks that need user-level settings
+
+Most guards ship with this repo, but several must be registered in the user-level `~/.claude/settings.json` because they fire inside crew sessions whose project root is some other repo entirely. `bin/doctor` offers to register them during onboarding:
+
+- `hooks/no-direct-edit-guard.sh` — the delegation guard, for wingman's own top-level session and any lead, regardless of which repo it launches in.
+- `hooks/artifact-publish-tracker.sh` + `hooks/artifact-link-guard.sh` — the Artifact-publish contract pair.
+- `hooks/api-outage-spawn-guard.sh` — pauses new spawns during a fleet-wide outage.
+- `bin/lib/usage-statusline.py` (as the `statusLine` capture command) + `hooks/usage-limit-spawn-guard.sh` — the usage-limit-quota detection pair.
+- `hooks/no-merge-guard.sh` + `hooks/merge-attribution-tracker.sh` — the merge-authorization pair.
 
 ## Checkout freshness (advisory, not a hook)
 
