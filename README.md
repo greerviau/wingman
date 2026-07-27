@@ -114,6 +114,8 @@ GitHub Actions runs the same suite on every push and PR to `main`.
 
 - [architecture.md](docs/architecture.md) - the core model: the wake loop, the deliverable lifecycle, and the crew hierarchy.
 - [configuration.md](docs/configuration.md) - the launcher, the spawn recipe, model selection, and state in `~/.wingman/`.
-- [guards.md](docs/guards.md) - the mechanical guards, checkout freshness, and autonomous mode.
+- [reporting.md](docs/reporting.md) - report altitude, self-report vs verified state, and the visibility preferences.
+- [guards.md](docs/guards.md) - the mechanical guards, the preferences gate, checkout freshness, and autonomous mode.
+- [runbooks/incidents.md](docs/runbooks/incidents.md) - what to do on a stalled, mass-death, outage, or usage-limit fire.
 - [fleet-resilience.md](docs/fleet-resilience.md) - correlated fleet events, API-outage and usage-limit detection.
 - [playbooks.md](docs/playbooks.md) - crew types, categories, and local overrides.

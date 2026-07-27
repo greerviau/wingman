@@ -194,9 +194,10 @@ The inventory is walked twice — once by the implementer, once fresh against th
   | Path | Frequency | Consequence if the pointer is not followed |
   | --- | --- | --- |
   | An ambiguous `summary-only` judgment call → `docs/reporting.md` | occasional | Over- or under-reports one round. Self-correcting; the pilot sees it. |
-  | A `died` member's stale Remote Control entry → `docs/architecture.md` | rare | Wingman trusts Remote Control's display over `crew-list`. Visible and correctable. |
 
-  Everything else either stays inline or arrives mechanically via `/watch` or `/prefs`. If any specific rule turns out to sit awkwardly on the line, it stays inline and the file lands above 19KB — behavior preservation outranks the byte target every time.
+  **Outcome: one row, not the two anticipated.** The `died`-member stale-Remote-Control rule was kept inline as a one-liner (`bin/crew-list` is always the source of truth for liveness), with only its explanation moved. Everything else stays inline or arrives mechanically via `/watch` or `/prefs`.
+
+- **The 19KB ceiling was not met: the file landed at 27,306 bytes (59% reduction).** Applying the move criterion honestly left more inline than the per-section budget assumed — that budget was estimated before the criterion was tightened, and the two rules pulled back inline were not its only effect. What remains is 148 rules stated tersely, not prose padding; every further KB would have come from dropping or weakening a rule. The plan states behavior preservation outranks the byte target, so the target was the thing that gave. A second pass could plausibly reach ~24KB through wording alone, with diminishing returns and rising risk.
 - **`/watch` reloads on every wake, so growth there is multiplied.** Resolved during implementation by routing rather than inlining (see Approach): `/watch` grows 1,171 bytes and `docs/runbooks/incidents.md` carries the 5.7KB of procedure, read only on the wakes that need it. Re-check this ratio if the runbook ever moves back inline.
 - **`playbooks/_status-contract.md` is 34KB and appended to every crew brief** — a larger version of this same problem, and out of scope here. It should get its own spec.
 - **Open:** should `CLAUDE.md` eventually become a skill so it loads on demand rather than at session start? That would change wingman's activation model (today: "you are running because the pilot started `claude` from the wingman repo"), so it is a design question well beyond this cut. Noted, not proposed.

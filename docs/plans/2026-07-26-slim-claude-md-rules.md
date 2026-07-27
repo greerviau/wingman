@@ -192,9 +192,14 @@ Working instrument for `2026-07-26-slim-claude-md.md`, step 1. Every normative s
 
 ## Audit result
 
-Filled in during the testing step.
+Walked twice: once by destination during the rewrite, once mechanically afterward (a marker probe for 100 sampled rules against their recorded destination file). Every sampled rule resolved.
 
 - **Total rules:** 183
-- **Inline:** to be counted
-- **Mechanically loaded (`/watch`, `/prefs`):** to be counted
-- **Behind a pointer:** must match the two-row exposure table in the plan's "Risks"
+- **Inline in `CLAUDE.md`:** 148
+- **Mechanically loaded** — `/prefs` (9), `/watch` + the runbook it names (12): 21
+- **Reference material moved to `docs/`, no imperative behind the pointer:** 13
+- **Imperatives behind a pointer:** 1 — an ambiguous `summary-only` judgment call resolves in `docs/reporting.md`.
+
+One row better than the plan's two-row exposure table: the `died`-member stale-Remote-Control rule was kept inline as a one-liner (`bin/crew-list` is always the source of truth for liveness) with only its explanation moved, so it is no longer behind a pointer at all.
+
+**Size outcome:** 66,164 → 27,306 bytes (59% reduction), above the 19,000 ceiling. See the plan's "Risks and open questions" for why the target was not met and why that was the correct trade.
