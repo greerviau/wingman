@@ -40,7 +40,8 @@ Single repo: `wingman`. Files touched:
 | File | Change |
 | --- | --- |
 | `CLAUDE.md` | Rewritten; 66KB → ~17KB |
-| `.claude/commands/watch.md` | Gains the per-fire-reason incident runbooks |
+| `.claude/commands/watch.md` | Gains the per-fire-reason routing list (+1.2KB) |
+| `docs/runbooks/incidents.md` | **New.** The per-fire-reason response procedures |
 | `.claude/commands/prefs.md` | Gains the missing `pr_comments` question |
 | `docs/reporting.md` | **New.** The reporting contract's full rules and rationale |
 | `docs/architecture.md` | Absorbs the handful of mechanism paragraphs CLAUDE.md holds that it does not |
@@ -78,7 +79,11 @@ A pointer is only as good as the certainty that it gets followed, and the failur
 
 Reference material — case analysis, mechanism description, rationale — is not an imperative and moves freely.
 
-**Why the incident runbooks go into `/watch` rather than a `docs/runbooks/` file.** CLAUDE.md already mandates running `/watch` on every wake, and every incident this plan moves is reachable *only* through a watcher fire. Putting the response procedure in `/watch`'s own `fire` branch means it loads mechanically at exactly the moment it applies, with no dependence on wingman noticing a pointer while handling an outage. A `docs/runbooks/incidents.md` pointed to from CLAUDE.md was the alternative; rejected because it keeps the failure mode the current design already has (a rule that only works if it is read) while adding a file to keep in sync.
+**Why the incident runbooks route through `/watch`.** CLAUDE.md already mandates running `/watch` on every wake, and every incident this plan moves is reachable *only* through a watcher fire — so `/watch` is where the routing belongs.
+
+The procedures themselves live in `docs/runbooks/incidents.md` rather than inline in `/watch`. Inlining them was the original design and was measured during implementation: it took `/watch` from 6,433 to 12,715 bytes, and **`/watch` reloads on every wake**, so +6.3KB × ~15 wakes in a busy session comfortably exceeds the ~48KB saved once from CLAUDE.md. That inverts the whole point of the change. Routing instead — `/watch` carries a one-line list of the eight reason strings that have a specific procedure, plus the file to read — costs 1,171 bytes per wake and loads the 5.7KB of procedure only on the wakes that actually need it.
+
+This still satisfies the move criterion's second clause: the moment is rare, and `/watch` names the exact reason strings, so it is unmissable rather than merely pointed at.
 
 `/watch` is shared with leads (it self-scopes via `$WINGMAN_CREW_ID`), so each moved runbook must be marked wingman-only where it is. This is factually safe: outage and usage-limit state are tracked for owner `""` only, so a lead can never see those reasons — the same restriction `remote-control-dropped` already documents in that file.
 
@@ -192,7 +197,7 @@ The inventory is walked twice — once by the implementer, once fresh against th
   | A `died` member's stale Remote Control entry → `docs/architecture.md` | rare | Wingman trusts Remote Control's display over `crew-list`. Visible and correctable. |
 
   Everything else either stays inline or arrives mechanically via `/watch` or `/prefs`. If any specific rule turns out to sit awkwardly on the line, it stays inline and the file lands above 19KB — behavior preservation outranks the byte target every time.
-- **`/watch` grows from 6.4KB toward ~11KB, and it is loaded on every wake** — many times per session, unlike CLAUDE.md's once. Net token effect is favorable only if the per-wake growth stays modest against the per-session 49KB saved. Two spot checks during step 2: keep the added block tight, and confirm `/watch` stays under ~12KB. If it overruns, the outage and usage-limit entries (the largest and rarest) move to `docs/runbooks/incidents.md` with `/watch` carrying a one-line pointer per reason — the "Both" arrangement, as a fallback, not the default.
+- **`/watch` reloads on every wake, so growth there is multiplied.** Resolved during implementation by routing rather than inlining (see Approach): `/watch` grows 1,171 bytes and `docs/runbooks/incidents.md` carries the 5.7KB of procedure, read only on the wakes that need it. Re-check this ratio if the runbook ever moves back inline.
 - **`playbooks/_status-contract.md` is 34KB and appended to every crew brief** — a larger version of this same problem, and out of scope here. It should get its own spec.
 - **Open:** should `CLAUDE.md` eventually become a skill so it loads on demand rather than at session start? That would change wingman's activation model (today: "you are running because the pilot started `claude` from the wingman repo"), so it is a design question well beyond this cut. Noted, not proposed.
 
