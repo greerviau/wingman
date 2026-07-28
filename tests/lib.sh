@@ -31,6 +31,12 @@ _TESTS_FAIL=0
 # wm-state's abspath) - an unnormalized template here makes assert_contains
 # compare /var/...//... against /private/var/..., failing on macOS only.
 _WM_TMP_BASE="$(cd -P "${TMPDIR:-/tmp}" && pwd -P)"
+# Floor for settings-file isolation, in force from the moment this file is
+# sourced and regardless of whether a test ever calls test_new_home (which
+# re-points it at that test's own home). Unconditional, not `:-`: a developer
+# with WM_CONFIG_TOML already exported, or with a config.local.toml at the repo
+# root, must not have it read by the suite.
+export WM_CONFIG_TOML="$_WM_TMP_BASE/wm-test-absent-config.toml"
 # Exported so every consumer of $TMPDIR in the code under test (e.g.
 # wm_guard_test_fixture_agent's case match in bin/lib/common.sh) sees the same
 # normalized base the temp dirs are actually created under.
@@ -76,8 +82,27 @@ test_new_home() {
   WM_CLAUDE_USER_CONFIG="$_wm_home_parent/claude-config.json"
   export WM_CLAUDE_USER_CONFIG
   printf '{"projects": {}}\n' > "$WM_CLAUDE_USER_CONFIG"
+  # Isolated settings file, pointed at a path that does not exist yet. Without
+  # this the suite would read whatever config.local.toml the developer running
+  # it happens to keep at the repo root: their own [prefs] answers would make
+  # every "preferences are unanswered" assertion pass vacuously, and their
+  # [models] entries would rewrite the model a test spawn resolves. A test that
+  # WANTS a settings file writes one here (see wm_write_config below).
+  WM_CONFIG_TOML="$_wm_home_parent/config.local.toml"
+  export WM_CONFIG_TOML
   wm_state init >/dev/null
 }
+
+# Write the current test's isolated settings file (see test_new_home) from
+# stdin, so a test exercises config.local.toml exactly as a pilot would keep it:
+#   wm_write_config <<'EOF'
+#   [models]
+#   default = "opus"
+#   EOF
+wm_write_config() { cat > "$WM_CONFIG_TOML"; }
+
+# Remove the current test's settings file, back to the no-file baseline.
+wm_rm_config() { rm -f "$WM_CONFIG_TOML"; }
 
 # Grant workspace trust for one repo path in the current test's isolated
 # WM_CLAUDE_USER_CONFIG fixture (see test_new_home above) - the test-fixture

@@ -1,0 +1,104 @@
+# config.example.toml - template for wingman's settings file.
+#
+# Copy this to config.local.toml (gitignored) and uncomment what you want:
+#   cp config.example.toml config.local.toml
+#
+# Everything here is optional. With no file at all wingman behaves exactly as it
+# always has: it asks the onboarding-preference questions once per run, and
+# every spawn falls through to the agent CLI's own model.
+#
+# Precedence, most specific first:
+#   an explicit flag (--model, --effort, ...)
+#     > the matching $WM_* environment variable
+#     > this file
+#     > wingman's built-in default
+# config.local.sh is a raw shell escape hatch sourced before this file is
+# applied, so anything it sets behaves exactly like an environment variable.
+# `bin/config` prints every resolved setting with the source it came from.
+#
+# Validate the file with `bin/doctor` (or `bin/config --check`).
+
+
+# --- Onboarding preferences --------------------------------------------------
+# The questions wingman would otherwise ask at the start of every run. Answer a
+# key here and it is never asked again; leave one out and wingman asks that one
+# (only that one) as usual. An answer given interactively during a run - via
+# /prefs - wins over this file for the rest of that run.
+#
+# The keys and their accepted values are defined in hooks/lib/pilot-prefs.sh.
+[prefs]
+# Are you watching the session locally, or over Remote Control? `true` also
+# switches every URL wingman surfaces to a markdown link.
+# remote = false
+
+# Should markdown deliverables (plans, reports) also be published as a hosted
+# Artifact link, or is the local file path enough?  "artifact" | "local"
+# artifact_linking = "local"
+
+# How much should wingman narrate its own reasoning and routing?
+#   "concise" | "detailed"
+# verbosity = "concise"
+
+# For work you spawn directly (not through a lead), see each round of a revise
+# loop, or just the terminal outcome?  "each-round" | "summary-only"
+# direct_spawn_visibility = "each-round"
+
+# May crew write to GitHub PRs (reviews, thread replies, provenance markers), or
+# does all inter-agent review feedback stay on wingman's own channel?
+#   "on" | "off"
+# pr_comments = "off"
+
+
+# --- Models ------------------------------------------------------------------
+# `default` applies to every spawn. Any other key names a crew type and applies
+# to that type only - more specific wins. Use the bare role name
+# ("developer") or the category-qualified one ("software-development/developer")
+# to break a collision; see `bin/spawn-crew --list-types`.
+# An explicit `--model` on a spawn always wins over both.
+[models]
+# default = "opus"
+# developer = "sonnet"
+# research = "haiku"
+# "software-development/reviewer" = "opus"
+
+
+# --- Reasoning effort --------------------------------------------------------
+# Same shape and same precedence as [models], for --effort.
+#   "low" | "medium" | "high" | "xhigh" | "max"
+[effort]
+# default = "high"
+# research = "low"
+
+
+# --- Project discovery -------------------------------------------------------
+# What bin/discover-projects scans. ~ and $VARs are expanded.
+[projects]
+# Extra roots to scan, beyond wingman's own parent directory.
+# roots = ["~/dev", "~/code"]
+
+# Project names to skip.
+# ignore = ["some-repo-to-skip"]
+
+# Pin a project name to an explicit path, overriding anything the scan finds.
+# [projects.pins]
+# my-app = "~/dev/my-app"
+
+
+# --- Harness -----------------------------------------------------------------
+# The agent-CLI-specific knobs. Change these to point the crew layer at a
+# different harness, or to loosen/tighten how crew sessions launch.
+[harness]
+# The agent CLI a crew session execs.
+# agent = "claude"
+
+# --permission-mode for a crew session. Crew run unattended, so the default
+# keeps a gated tool call from hanging forever on a prompt nobody will answer.
+# Set to "" to disable and fall back to interactive prompting.
+# permission_mode = "bypassPermissions"
+
+# Launch crew Remote-Control-visible, so you can reach a member from
+# claude.ai/code and not only via tmux attach.
+# remote_control = true
+
+# The tmux session that hosts crew windows.
+# tmux_session = "wingman"

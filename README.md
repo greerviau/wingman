@@ -73,7 +73,32 @@ It stops early only if you `/standdown` it.
 Crew launch with `--permission-mode bypassPermissions`, so gated tool calls auto-approve instead of hanging with no human at the terminal.
 Two one-time gates (Claude Code's Bypass-Permissions acceptance and each repo's first-time trust dialog) are detected before a window opens, refusing the spawn with the exact remedy rather than freezing; once cleared, crew in that repo run unattended.
 
-**Model:** an explicit `--model` on a spawn wins; otherwise `$WM_MODEL` (see [`config.example.sh`](config.example.sh)); otherwise the agent CLI's default.
+**Model:** most specific wins - an explicit `--model` on the spawn, then a per-crew-type entry in the [settings file](#settings-configlocaltoml), then its `default`, then the agent CLI's own.
+
+## Settings: `config.local.toml`
+
+Optional, and gitignored so a `git pull` never touches it. Copy the template and edit what you want:
+
+```bash
+cp config.example.toml config.local.toml
+```
+
+```toml
+[prefs]                       # answered here = never asked again
+remote = false
+verbosity = "detailed"
+
+[models]
+default = "opus"
+developer = "sonnet"          # per crew type
+
+[projects]
+roots = ["~/dev"]             # where to look for your repos
+```
+
+It also holds `[effort]` (same shape as `[models]`), `[projects.pins]`/`ignore`, and `[harness]` (agent, permission mode, Remote Control, tmux session).
+
+An explicit flag beats the file, and the file beats wingman's defaults. `bin/config` prints every setting as resolved **with the source it came from**; `bin/config --check` (and `bin/doctor`) rejects a typo rather than ignoring it. Full details in [configuration.md](docs/configuration.md#the-settings-file---configlocaltoml).
 
 ## Playbooks: customize the crew
 
@@ -113,7 +138,7 @@ GitHub Actions runs the same suite on every push and PR to `main`.
 ## Learn more
 
 - [architecture.md](docs/architecture.md) - the core model: the wake loop, the deliverable lifecycle, and the crew hierarchy.
-- [configuration.md](docs/configuration.md) - the launcher, the spawn recipe, model selection, and state in `~/.wingman/`.
+- [configuration.md](docs/configuration.md) - the settings file, the launcher, the spawn recipe, model selection, and state in `~/.wingman/`.
 - [reporting.md](docs/reporting.md) - report altitude, self-report vs verified state, and the visibility preferences.
 - [guards.md](docs/guards.md) - the mechanical guards, the preferences gate, checkout freshness, and autonomous mode.
 - [runbooks/incidents.md](docs/runbooks/incidents.md) - what to do on a stalled, mass-death, outage, or usage-limit fire.

@@ -34,7 +34,11 @@ The two spawn-pause guards (outage, usage-limit) react to the fleet-wide state m
 
 ## The preferences gate
 
-`hooks/pilot-preferences-guard.sh` (a `PreToolUse` hook registered project-level via this repo's checked-in `.claude/settings.json`, so it needs no `bin/doctor` step) denies every other tool call while any required preference is unanswered. A session that skips the onboarding ask is blocked rather than silently proceeding on defaults. The five keys and their prompts are defined once in `hooks/lib/pilot-prefs.sh` (`WM_PREF_KEYS`); `/prefs` renders the ask.
+`hooks/pilot-preferences-guard.sh` (a `PreToolUse` hook registered project-level via this repo's checked-in `.claude/settings.json`, so it needs no `bin/doctor` step) denies every other tool call while any required preference is unanswered. A session that skips the onboarding ask is blocked rather than silently proceeding on defaults. The five keys, their prompts, and their accepted values are defined once in `hooks/lib/pilot-prefs.sh` (`WM_PREF_KEYS`); `/prefs` renders the ask.
+
+**A preference answered in the [settings file](configuration.md#the-settings-file---configlocaltoml) is answered.** The guard reads preferences through `wm-state.py prefs-list`, which merges `config.local.toml`'s `[prefs]` table underneath the per-run answer store, so a fully-configured file means the gate is already satisfied on the first tool call and the guard never fires. Nothing in the guard changed to make that true.
+
+**A file-provided value is validated; a pilot-given one is not.** The settings file is hand-edited, so a value outside its key's vocabulary counts as *unanswered* and the question line names the offending value — a typo surfaces as a question instead of propagating as though the pilot had chosen it. A value cached during the run is taken as-is whatever it says: it came from an `AskUserQuestion` whose "Other" option can legitimately produce free text, and rejecting that would strand the guard in a deny loop no answer could clear.
 
 **Every denial names its own way out.** The guard quotes a complete, absolute `pref-set` command with the run id already filled in, and verifies through its own allowlist that it will accept that command before printing it. Running what the denial prints clears the gate regardless of how the environment is set up — nothing depends on `$WINGMAN_STATE` being exported.
 

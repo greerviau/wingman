@@ -1,15 +1,55 @@
 # Configuration and invocation
 
-How wingman is launched, how crew are spawned, and the machine-local state that results.
+How wingman is configured, how it is launched, how crew are spawned, and the machine-local state that results.
 Part of the [architecture reference](architecture.md); for day-to-day use see the [README](../README.md).
+
+## The settings file - `config.local.toml`
+
+`config.local.toml` at the repo root is where a pilot persists settings across runs.
+It is gitignored, so a `git pull` updates the shipped defaults without touching it; [`config.example.toml`](../config.example.toml) is the documented template (`cp config.example.toml config.local.toml`).
+Everything in it is optional - with no file at all, wingman behaves exactly as it does with no configuration: it asks the onboarding-preference questions once per run, and every spawn falls through to the agent CLI's own model.
+
+`bin/lib/wm_config.py` is its single reader. Two consumers use it: `bin/lib/common.sh` exports the environment-backed settings so every `bin/` script picks them up, and `bin/lib/wm-state.py` layers the `[prefs]` table underneath its own per-run answer store.
+
+### Precedence
+
+Most specific wins:
+
+| | |
+|---|---|
+| an explicit flag | `--model`, `--effort`, … on one spawn |
+| a per-crew-type entry | `[models].developer` - more specific than any global default |
+| the `$WM_*` environment | including anything `config.local.sh` set, since sourcing it *is* setting the environment |
+| the settings file's own default | `[models].default`, which is exported *as* `$WM_MODEL` |
+| wingman's built-in default | or the agent CLI's own |
+
+The one place this is not a straight top-to-bottom list is a per-type entry versus `$WM_MODEL`: the entry wins, because `[models].default` is exactly what `$WM_MODEL` carries by the time a spawn reads it, so specificity - not layer - has to decide for a per-type entry to mean anything.
+
+`bin/config` prints every setting as actually resolved, with the source each value came from (`env` / `config.local.toml` / `run` / `default`), which is the answer to "why is this spawn using that model?".
+`bin/config --check` validates the file, and `bin/doctor` runs the same check: an unknown key would otherwise fail silently, since a setting wingman does not recognize simply never applies.
+
+### What it holds
+
+- **`[prefs]`** - the onboarding preferences (see below). A key answered here is never asked again.
+- **`[models]` / `[effort]`** - `default` for every spawn, plus a per-crew-type entry under the bare role name (`developer`) or the category-qualified one (`software-development/developer`).
+- **`[projects]`** - `roots`, `ignore`, and a `[projects.pins]` name→path table for `bin/discover-projects`. `~` and `$VAR` are expanded.
+- **`[harness]`** - `agent`, `permission_mode`, `remote_control`, `tmux_session`: the agent-CLI-specific knobs, previously environment-only.
+
+### `config.local.sh`
+
+`config.local.sh` remains as the raw shell escape hatch, sourced before the settings file is applied.
+It is arbitrary shell, so it reaches the many undocumented `WM_*` tuning knobs (`WM_STALL_IDLE`, `WM_SUBMIT_DELAY`, the detector regexes, …) that the declarative file deliberately does not model.
+Anything it sets behaves exactly like an environment variable and therefore wins over `config.local.toml`.
+For the everyday settings, prefer the TOML file - it is validated, and `bin/config` can explain it.
 
 ## The wingman launcher
 
 `bin/wingman` is a thin wrapper around the real `claude` binary: it wires up a few things, then execs `claude` so the rest of the session is an ordinary Claude Code session.
 
 - It mints and exports a fresh `WINGMAN_RUN_ID`, inherited by every crew member spawned during that run.
-  This is the cache key the onboarding-preference questions (remote vs. local, whether markdown deliverables also get published as Artifact links, verbosity, direct-spawn visibility) are asked and cached against exactly once per run rather than once per crew member.
+  This is the cache key the onboarding-preference questions (remote vs. local, whether markdown deliverables also get published as Artifact links, verbosity, direct-spawn visibility, whether crew may write to GitHub PRs) are asked and cached against exactly once per run rather than once per crew member.
   Every consumer of a missing run id treats it as "unanswered, apply the conservative default" rather than asking - skipping the launcher does not error, it just means the whole session runs on defaults with nothing cached.
+  A preference answered in the settings file's `[prefs]` table is never asked at all, on any run; an answer given during a run (`/prefs`) is cached against that run id and outranks the file for the rest of it.
 - It resolves every discovered sibling project root (`bin/discover-projects`) and passes `--add-dir` for each, so a global-scope spawn, or wingman's own occasional cross-project read, never blocks on a first-time directory-permission prompt.
 - It registers this session's own tmux pane path at `$WM_HOME/self-pane` (only when running inside tmux) - the read-only signal `bin/watch-fleet`'s `self_pane_check` uses to detect wingman's own dropped Remote Control connection (see [Remote Control](architecture.md#remote-control)).
 - It refreshes `~/.wingman/` state and the project-discovery cache unconditionally on every launch, so the roster and project list are never stale from a previous run.
@@ -34,7 +74,7 @@ Use it for cross-repo work or when the repo is genuinely unclear.
 
 **Merge authorization.** `--allow-merge` is per-spawn and never a default: a crew member cannot merge its own PR unless the human explicitly granted it for that one effort (see [guards.md](guards.md)'s `hooks/no-merge-guard.sh`). It is visible in `bin/crew-list`/`board.md` as `allow_merge`. To grant it to a member that is already running, use `$WINGMAN_STATE crew-set --id <id> --allow-merge true` rather than respawning; it takes effect on the next merge attempt.
 
-**Model selection.** An explicit `--model` on a spawn always wins; otherwise `$WM_MODEL` (settable in `config.local.sh`, see [`config.example.sh`](../config.example.sh)) is the default for every spawn; with neither set, the agent CLI's own default applies. `--model`/`--effort` are per-spawn - they affect only that one session, never wingman's own model or any other member's.
+**Model and effort selection.** Most specific wins: an explicit `--model`/`--effort` on the spawn, then the settings file's `[models]`/`[effort]` entry for *that crew type*, then `$WM_MODEL`/`$WM_EFFORT` (where the file's own `default` lands), then the agent CLI's own default. See [the settings file](#the-settings-file---configlocaltoml) for the full chain. `--model`/`--effort` are per-spawn - they affect only that one session, never wingman's own model or any other member's.
 
 The git/branch/PR workflow (worktrees, branches, opening a PR, the no-merge guard) is conditional on git-ness, not universal: it applies whenever the crew type is a `software-development` role (`bin/spawn-crew` refuses to spawn one against a target that isn't a confirmed git repo), or whenever the target project happens to be a confirmed git repo regardless of category.
 `bin/spawn-crew` detects this mechanically at spawn time - for `--repo` targets, `git -C "$REPO" rev-parse --show-toplevel` compared (physically, symlink-resolved) against `$REPO` itself, so a directory merely nested inside a repo reads as non-git - and exports the result as two roster-scoped env vars: `WINGMAN_IS_GIT=true|false` and, only when a repo, `WINGMAN_HAS_REMOTE=true|false` (whether `origin` is configured, i.e. whether there's anywhere to open a PR against).
@@ -62,5 +102,5 @@ Machine-local runtime state, created on first run, never committed:
   Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.
 - `orphan-candidates.json` - `{window_name: first_seen_iso_stamp}` for a live `wm-*` tmux window with no matching `crew.json` record, tracked by `wm_state reconcile`'s grace-period-gated orphan-window adoption (owner `""` only) - see [Survival & reconciliation](architecture.md#survival--reconciliation).
 
-All *user-editable* customization lives in the repo as gitignored `*.local.md` / `config.local.*`, not here.
+All *user-editable* customization lives in the repo as gitignored `*.local.md` / `config.local.*` (see [the settings file](#the-settings-file---configlocaltoml)), not here.
 `~/.wingman/` is pure runtime state you never hand-edit.

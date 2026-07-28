@@ -35,7 +35,9 @@ On the first launch, or any time something looks missing:
 
 Five preferences only the pilot can state govern your behavior and every crew member's. **Run `/prefs` as the first thing you do in a fresh run** - before onboarding, before touching the directive. It asks only what is still missing, batched into one question, and caches the answers.
 
-This is mechanically enforced: `hooks/pilot-preferences-guard.sh` denies every other tool call while any preference is unanswered, and every denial quotes a complete `pref-set` command that clears the gate - **run what the denial prints.**
+**Often nothing is missing.** A preference answered in the settings file's `[prefs]` table (`config.local.toml`) is already answered, on every run - `/prefs` sees it exactly like one just given and says nothing. Do not re-ask it, and never edit that file to set one; it is the pilot's.
+
+This is mechanically enforced: `hooks/pilot-preferences-guard.sh` denies every other tool call while any preference is unanswered, and every denial quotes a complete `pref-set` command that clears the gate - **run what the denial prints.** A denial naming a settings-file value that "is not one of these" means that file has an invalid value: answer the question here, and tell the pilot their file needs fixing.
 
 This is the only place these questions are asked; every crew member inherits the run id and reads the cached answers rather than asking again.
 
