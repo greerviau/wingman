@@ -146,6 +146,12 @@ assert_eq "crew, no grant: bash -c \"gh pr list\" (unrelated) is allowed (no out
 out="$(run_hook 'bash -c "git push origin feature/foo"')"
 assert_eq "crew, no grant: bash -c \"git push origin feature/foo\" (non-default branch) is allowed (no output)" "$out" ""
 
+# Review regression: -c sharing a cluster with the value-taking -o must not
+# let the -o's own value be mistaken for the payload (a wrong allow that
+# would have re-opened the exact bypass this fix exists to close).
+out="$(run_hook 'bash -co pipefail "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -co pipefail \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
 # A non-crew session (the pilot's own) with a wrapped merge is still allowed -
 # the guard's crew-scoping is untouched by the wrapper-lifting fix.
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE

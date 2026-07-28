@@ -30,12 +30,8 @@ that must never be resolved into whatever it happens to mention.
 
 False-negative-only caveats (a non-standard shape may dodge a deny rule but
 can never slip past a gate, because it resolves to nothing, or to the
-interpreter/wrapper itself, matching no allowlist):
+interpreter itself, matching no allowlist):
 
-- The uv flag-skipping treats every leading `-`-token as value-free. That is
-  exactly right for `$WINGMAN_STATE`'s own flags (--no-project --quiet), but a
-  value-taking flag (`uv run -p 3.12 pytest`) misparses - `3.12` is taken as the
-  command, so the segment fails to resolve.
 - The interpreter unwrap requires the script token to end in `.py`, keeping it
   to the one shape it is meant for; a non-`.py` first argument leaves the
   segment resolving to the interpreter.
@@ -48,9 +44,17 @@ pr merge 5 | bash`), a substitution in command position (`$(which gh) pr
 merge ...`), or a remote/re-entrant wrapper (`ssh <host> "<cmd>"`, `su -c`,
 `timeout 30 bash -c ...`) - is not recognized as that command at all: the
 segment resolves to `xargs`/`find`/`bash`/`ssh`/the inert placeholder,
-matching no guard predicate for the command actually being run. Against a
-deny-style gate this is a wrong allow, not a harmless miss (issue #168); see
-docs/guards.md for the guard-facing summary.
+matching no guard predicate for the command actually being run. The uv
+flag-skipping belongs in this list too, not the false-negative one above: it
+treats every leading `-`-token as value-free, which is exactly right for
+`$WINGMAN_STATE`'s own flags (--no-project --quiet), but a value-taking flag
+misparses (`uv run -p 3.12 gh pr merge 46` resolves argv[0] to `3.12`, the
+flag's own value, not `gh`) - the segment resolves to a junk basename that
+matches no guard predicate for the command actually being invoked, a wrong
+allow, not a harmless miss, even though the real command's tokens remain
+present later in argv rather than being carried as another program's data.
+Against a deny-style gate every shape above is a wrong allow, not a harmless
+miss (issue #168); see docs/guards.md for the guard-facing summary.
 
 Wrapper-shell and eval payloads: `bash`/`sh`/`zsh`/`dash`/`ksh` invoked with a
 `-c` payload (including a combined flag cluster like `-lc`) and `eval`
@@ -603,6 +607,9 @@ def _payload_list(payload):
     return [] if payload in _INERT_PLACEHOLDERS else [payload]
 
 
+_VALUE_TAKING_LONG_OPTS = ("--rcfile", "--init-file")
+
+
 def wrapper_payloads(tokens):
     """Return the shell-code payload strings the segment `tokens` will
     execute: a wrapper shell's (`bash`/`sh`/`zsh`/`dash`/`ksh`) `-c` payload,
@@ -612,7 +619,17 @@ def wrapper_payloads(tokens):
     `tokens` need not be pre-normalized - this applies the same prefix
     normalization as resolve_command() (see _strip_prefixes()) internally,
     so a caller can pass either a raw top-level segment or already-stripped
-    tokens with identical results."""
+    tokens with identical results.
+
+    Models bash's OWN option-parsing grammar, not "the token adjacent to the
+    -c flag": `-c` selects command-string mode, but the payload is the first
+    non-option OPERAND once option scanning is done, wherever that lands
+    relative to `-c` itself. `-c` sharing a cluster with a value-taking `-o`/
+    `-O` (`-co pipefail`, `-oc pipefail`), a `--` between `-c` and its
+    payload (`-c -- "<cmd>"`), an unrelated value-taking option before `-c`
+    (`-O extglob -c "<cmd>"`, `--rcfile FILE -c "<cmd>"`) all still resolve to
+    the correct payload under this model, where "the next token after the
+    cluster containing c" gets each of these wrong."""
     tokens = _strip_prefixes(tokens)
     if not tokens:
         return []
@@ -620,32 +637,38 @@ def wrapper_payloads(tokens):
     if b in _SHELL_WRAPPER_NAMES:
         i = 1
         n = len(tokens)
+        saw_c = False
         while i < n:
             tok = tokens[i]
             if tok == "--":
-                # Ends option parsing; the next token is a script path, not
-                # a payload.
-                return []
+                # End of options; the next token (if any) is the operand,
+                # regardless of what it looks like.
+                i += 1
+                break
             if len(tok) > 1 and tok[0] in "-+":
                 if tok.startswith("--"):
-                    # A long option (--norc, --login): skipped as one token.
-                    i += 1
+                    # A long option: value-taking ones (--rcfile FILE,
+                    # --init-file FILE) consume the following token too;
+                    # every other long option (--norc, --login, ...) is
+                    # boolean and is skipped as one token.
+                    i += 2 if tok in _VALUE_TAKING_LONG_OPTS else 1
                     continue
                 letters = tok[1:]
                 if "c" in letters:
-                    if i + 1 >= n:
-                        return []
-                    return _payload_list(tokens[i + 1])
-                if "o" in letters:
-                    # -o pipefail / +o posix: the following value token is
-                    # also consumed.
-                    i += 2
-                    continue
-                i += 1
+                    saw_c = True
+                # -o/-O (or +o/+O) take a value; the following token is
+                # consumed too, regardless of whether `c` shares the cluster.
+                i += 2 if ("o" in letters or "O" in letters) else 1
                 continue
-            # The first non-option token ends the scan: this is the
-            # `bash script.sh` script-path form, which has no -c payload.
-            return []
+            # The first non-option token ends option scanning.
+            break
+        # Once option scanning ends, the first remaining operand is the -c
+        # payload IF -c was seen anywhere among the options scanned;
+        # otherwise it is a script path (the `bash script.sh` form), which
+        # has no -c payload to lift. No operand at all (only options, or `--`
+        # with nothing after it) also has no payload.
+        if i < n and saw_c:
+            return _payload_list(tokens[i])
         return []
     if b == "eval" and len(tokens) > 1:
         return _payload_list(" ".join(tokens[1:]))

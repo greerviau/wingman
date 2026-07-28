@@ -18,7 +18,8 @@ The rules stated in prose across these docs and `CLAUDE.md` are also enforced me
 
 Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
 
-Every Bash-inspecting guard above matches the *resolved* command of each `;`/`&&`/`||`/pipe segment via the shared recognizer in `hooks/lib/cmd_match.py`, which sees through `env`/`sudo`/`uv run`/wrapper-shell `-c`/`eval` wrappers before matching - so `bash -c "gh pr merge 5"` and `eval "gh pr merge 5"` are caught the same as the unwrapped form (issue #168). A shape that carries the real command as data for another program to execute instead of typing it directly (`xargs <cmd>`, `find ... -exec <cmd> ;`, a command piped into a shell) remains out of its reach; see the module's own docstring for the full list of documented gaps.
+Every Bash-inspecting guard above matches the *resolved* command of each `;`/`&&`/`||`/pipe segment via the shared recognizer in `hooks/lib/cmd_match.py`, which sees through `env`/`sudo`/`uv run`/wrapper-shell `-c`/`eval` wrappers before matching - so `bash -c "gh pr merge 5"` and `eval "gh pr merge 5"` are caught the same as the unwrapped form (issue #168).
+A shape that carries the real command as data for another program to execute instead of typing it directly (`xargs <cmd>`, `find ... -exec <cmd> ;`, a command piped into a shell) remains out of its reach; see the module's own docstring for the full list of documented gaps.
 
 ### Which identities are claims and which are proofs
 

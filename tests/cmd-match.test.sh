@@ -308,6 +308,36 @@ check("bash --norc -c lifts the payload (the long option is skipped as one token
       'bash --norc -c "gh pr merge 5"',
       [["bash", "--norc", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
 
+# --- bash's real option grammar: the payload is the first operand once
+# option scanning ends, not "the token adjacent to the c letter" - five
+# shapes a naive adjacency rule gets wrong (found in review) ----------------
+
+check("bash -co pipefail lifts the payload (c sharing a cluster with the "
+      "value-taking o - the o's own value must not be mistaken for the payload)",
+      'bash -co pipefail "gh pr merge 5"',
+      [["bash", "-co", "pipefail", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -oc pipefail lifts the payload (flag order within the cluster "
+      "does not matter)",
+      'bash -oc pipefail "gh pr merge 5"',
+      [["bash", "-oc", "pipefail", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -c -- lifts the payload (-- between -c and its payload ends "
+      "option scanning; the next token is still the operand)",
+      'bash -c -- "gh pr merge 5"',
+      [["bash", "-c", "--", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -O extglob -c lifts the payload (an unrelated value-taking "
+      "short option before -c)",
+      'bash -O extglob -c "gh pr merge 5"',
+      [["bash", "-O", "extglob", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash --rcfile FILE -c lifts the payload (a value-taking long option "
+      "before -c)",
+      'bash --rcfile /dev/null -c "gh pr merge 5"',
+      [["bash", "--rcfile", "/dev/null", "-c", "gh pr merge 5"],
+       ["gh", "pr", "merge", "5"]])
+
 check("positional parameters after the payload are not lifted",
       'bash -c "echo hi" arg0 arg1',
       [["bash", "-c", "echo hi", "arg0", "arg1"], ["echo", "hi"]])
