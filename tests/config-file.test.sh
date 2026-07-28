@@ -179,6 +179,12 @@ q2id="$("$SPAWN" --type software-development/reviewer --repo "$WS/repoA" --objec
 assert_eq "a qualified --type resolves the same per-type entry" \
   "$(launch_flag "$q2id" model)" "--model 'cfg-reviewer-model'"
 
+# The member itself must read the SAME settings file the spawn resolved from, or
+# its own pref-get would consult a different [prefs] layer than everything else
+# in the run.
+assert_contains "the launch script hands the settings file path to the member" \
+  "$(grep 'WM_CONFIG_TOML' "$WINGMAN_HOME/crew/$q2id.launch.sh")" "$WM_CONFIG_TOML"
+
 # --- precedence --------------------------------------------------------------
 fid="$("$SPAWN" --type developer --repo "$WS/repoA" --objective "explicit flag" --model flag-model --effort max 2>/dev/null | tail -1)"
 assert_eq "an explicit --model beats a per-type entry" \
@@ -319,6 +325,32 @@ EOF
 assert_false "a wrong-typed setting fails --check" "'$CONFIG' --check"
 assert_contains "the type error is named" \
   "$("$CONFIG" --check 2>&1)" "projects.roots must be an array of strings"
+
+# --- bin/doctor runs the same check -----------------------------------------
+# Asserted on doctor's OUTPUT rather than its exit code: a machine without
+# `claude` installed (CI is one) already exits non-zero for that reason, which
+# would make an exit-code assertion pass vacuously.
+DOCTOR="$TEST_REPO/bin/doctor"
+wm_write_config <<'EOF'
+[harness]
+agnt = "claude"
+EOF
+doctor_bad="$("$DOCTOR" 2>&1)"
+assert_contains "bin/doctor validates the settings file" "$doctor_bad" "unknown setting harness.agnt"
+assert_contains "bin/doctor says how to resolve it" "$doctor_bad" "fix the settings file above"
+assert_not_contains "bin/doctor does not blame dependencies for a settings problem" \
+  "$doctor_bad" "required dependencies missing"
+
+wm_write_config <<'EOF'
+[models]
+default = "opus"
+EOF
+assert_contains "bin/doctor reports a valid settings file as valid" \
+  "$("$DOCTOR" 2>&1)" "config.local.toml is valid"
+
+wm_rm_config
+assert_contains "bin/doctor reports an absent settings file as all-defaults" \
+  "$("$DOCTOR" 2>&1)" "no config.local.toml"
 
 # --- a malformed file is announced, and applies nothing ---------------------
 wm_write_config <<'EOF'

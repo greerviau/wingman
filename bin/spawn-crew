@@ -370,6 +370,13 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # The wingman bin/ dir, so a crew grounded in another repo can still invoke the
   # crew-level tools it needs by absolute path (e.g. $WINGMAN_BIN/pr-watch).
   echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
+  # The settings file this spawn resolved its own configuration from, so the
+  # member's `$WINGMAN_STATE pref-get` reads the identical [prefs] layer. Passed
+  # explicitly rather than left to wm_config.py's own repo-root default: those
+  # agree in normal operation, but a test (or any run pointing WM_CONFIG_TOML at
+  # a fixture) would otherwise have the member silently read the real file
+  # instead of the one everything else in that run is using.
+  echo "export WM_CONFIG_TOML=$(quote "$WM_CONFIG_TOML")"
   # The deterministic worktree path (repo scope): the developer playbook creates the
   # worktree at exactly this path, so teardown needs only the path. Absent for global
   # scope, whose member self-registers the path after it creates the worktree.

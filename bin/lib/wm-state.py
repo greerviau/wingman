@@ -88,13 +88,14 @@ except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
     fcntl = None
 
 # wingman's settings file reader, for the [prefs] layer under the per-run
-# preference store (see _config_prefs). Imported by path from this script's own
-# directory rather than relied on being importable: `uv run --no-project` puts
-# the script's directory on sys.path, but the hooks that invoke this file set
-# their own PYTHONPATH, so the insert makes the import independent of both. A
-# missing module leaves the settings layer simply absent - it must never stop
-# the state engine from running.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# preference store (see _config_prefs). This script's own directory is added to
+# sys.path rather than relied on already being there: `uv run --no-project` does
+# put it first, but the hooks that invoke this file set their own PYTHONPATH, so
+# saying it explicitly makes the import independent of both. APPENDED, not
+# inserted at 0 - a sibling helper here must never be able to shadow a stdlib
+# module for this script. A missing module leaves the settings layer simply
+# absent; it must never stop the state engine from running.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     import wm_config
 except ImportError:

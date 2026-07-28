@@ -582,6 +582,8 @@ if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_state init >/dev/null
   exit 0
 else
-  wm_err "required dependencies missing - resolve the items above, then re-run: bin/doctor"
+  # Deliberately not "required dependencies missing": an invalid settings file
+  # trips this same exit with every dependency present.
+  wm_err "wingman is not ready - resolve the items above, then re-run: bin/doctor"
   exit 1
 fi
