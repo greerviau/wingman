@@ -5,7 +5,7 @@ Part of the [architecture reference](architecture.md); for day-to-day use see th
 
 ## The settings file - `config.local.toml`
 
-`config.local.toml` at the repo root is wingman's **only** configuration file, and where a pilot persists settings across runs.
+`config.local.toml` at the repo root is where a pilot persists settings across runs.
 It is gitignored, so a `git pull` updates the shipped defaults without touching it; [`config.example.toml`](../config.example.toml) is the documented template (`cp config.example.toml config.local.toml`).
 Everything in it is optional - with no file at all, wingman behaves exactly as it does with no configuration: it asks the onboarding-preference questions once per run, and every spawn falls through to the agent CLI's own model.
 
@@ -51,7 +51,7 @@ Two rules, both enforced by `bin/config --check`:
 - **`WM_`-prefixed names only.** This is wingman's configuration, not a general environment injector; a config file that can set `PATH` or `LD_PRELOAD` is a footgun rather than a feature.
 - **No name a typed setting already owns.** `[env].WM_MODEL` and `[models].default` write the same variable, so setting both would leave the reader unable to say which is in force. The error names the setting to use instead.
 
-This is what makes `config.local.toml` the only configuration file: needing an unmodeled knob has never been a reason to reach for a second file in a second format. To find one, grep the source for `${WM_`.
+To find a knob, grep the source for `${WM_`.
 
 ## The wingman launcher
 

@@ -7,8 +7,6 @@
 # always has: it asks the onboarding-preference questions once per run, and
 # every spawn falls through to the agent CLI's own model.
 #
-# This is wingman's only configuration file.
-#
 # Precedence, most specific first:
 #   an explicit flag (--model, --effort, ...)
 #     > the matching $WM_* environment variable

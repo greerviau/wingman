@@ -11,12 +11,6 @@ place for the settings a pilot wants to persist across runs, so wingman stops
 asking the onboarding-preference questions on every run and every spawn stops
 falling through to the agent CLI's own model.
 
-It is the ONLY configuration file. Wingman has around a hundred `WM_*` variables
-beyond the ones this file gives typed homes to - internal timings, thresholds,
-and detector regexes, each documented at its point of use - and the `[env]` table
-carries those verbatim, so needing one has never been a reason to reach for a
-second file in a second format.
-
 Two consumers, one reader:
 
   - `bin/lib/common.sh` runs `env-exports` and evals its output, so every bin/
@@ -86,10 +80,10 @@ SCHEMA = (
 PER_TYPE_TABLES = ("models", "effort")
 # The raw passthrough table: any WM_* variable, exported verbatim. This is what
 # reaches the ~100 knobs SCHEMA deliberately does not model - internal timings,
-# thresholds, detector regexes - so tuning one never needs a second config file
-# in a second format. Restricted to the WM_ prefix on purpose: this is wingman's
-# configuration, not a general environment injector, and a config file that can
-# set PATH or LD_PRELOAD is a footgun rather than a feature.
+# thresholds, detector regexes, each documented at its point of use rather than
+# worth a typed home here. Restricted to the WM_ prefix on purpose: this is
+# wingman's configuration, not a general environment injector, and a config file
+# that can set PATH or LD_PRELOAD is a footgun rather than a feature.
 ENV_TABLE = "env"
 ENV_PREFIX = "WM_"
 # Every table the file may contain. `prefs` carries no schema here on purpose -

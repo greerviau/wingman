@@ -4,7 +4,7 @@ The words wingman's docs, prose, and code use for its domain concepts. Use these
 
 ## Configuration
 
-- **Settings file** — `config.local.toml` at the repo root: wingman's only configuration file. Gitignored, declarative, templated by `config.example.toml`, read by `bin/lib/wm_config.py`. "The settings file" and "the config file" are the same thing; there is no second one.
+- **Settings file** — `config.local.toml` at the repo root: the gitignored, declarative file where a pilot persists settings across runs. Templated by `config.example.toml`, read by `bin/lib/wm_config.py`. "The settings file" and "the config file" both name it.
 - **Onboarding preference** — one of the answers only the pilot can give (`remote`, `artifact_linking`, `verbosity`, `direct_spawn_visibility`, `pr_comments`), governing wingman's and every crew member's behavior. The required key set and each key's vocabulary live in `hooks/lib/pilot-prefs.sh`, which is what the guard enforces.
 - **Setting** — any other configurable value (a model, an effort, a project root, a harness knob). A setting is never asked for; an unanswered *preference* is.
 - **Typed setting** — a setting with its own key and schema in `wm_config.py`'s `SCHEMA`, validated by shape. As opposed to an **`[env]` passthrough**: a raw `WM_*` variable carried verbatim, for the ~100 internal knobs no typed home is worth adding for.
