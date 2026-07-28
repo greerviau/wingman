@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.8"
+# requires-python = ">=3.11"
 # dependencies = []
 # ///
 """wm-state: the single reader/writer for wingman's machine-local state home.
@@ -24,8 +24,9 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     id ({run_id: {key: value}}) so multiple concurrently-alive
                     runs each keep their own answers without clobbering each
                     other. Each answer is asked once via AskUserQuestion and
-                    reused for the rest of its run - see
-                    cmd_pref_get/cmd_pref_set/cmd_prefs_list
+                    reused for the rest of its run. Read through the settings
+                    file's persistent `[prefs]` layer underneath it (see
+                    _pref_layers) - cmd_pref_get/cmd_pref_set/cmd_prefs_list
   api-outage-state.json  the persisted fleet-wide outage-state machine (issue
                     #23), written only by wingman's own top-level watch cycle
                     every poll: {"state": "clear"|"active", "since": <ts>,
@@ -85,6 +86,19 @@ try:
     import fcntl
 except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
     fcntl = None
+
+# wingman's settings file reader, for the [prefs] layer under the per-run
+# preference store (see _config_prefs). Imported by path from this script's own
+# directory rather than relied on being importable: `uv run --no-project` puts
+# the script's directory on sys.path, but the hooks that invoke this file set
+# their own PYTHONPATH, so the insert makes the import independent of both. A
+# missing module leaves the settings layer simply absent - it must never stop
+# the state engine from running.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import wm_config
+except ImportError:
+    wm_config = None
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "delivery", "updated", "announced")
 # Display-only live-status fields (#155): never part of a member's own reported
@@ -2070,20 +2084,64 @@ def cmd_projects_lookup(args):
 # clobbering each other. A run_id with no entry means "not yet answered for
 # this run" - the caller must ask again. Values are plain strings; the store
 # is agnostic to what any given preference means.
-def _load_prefs(run_id):
-    """The prefs dict for run_id, or None if unanswered (missing entry, or the
-    file/entry is malformed). Falls back to the pre-#85 legacy shape
-    ({"wingman_run_id": ..., "prefs": {...}}) so a file not yet migrated by a
-    pref-set call still answers correctly for the run id it names."""
+#
+# Underneath that per-run store sits a second, persistent layer: the `[prefs]`
+# table of wingman's settings file (config.local.toml, read by
+# bin/lib/wm_config.py). A pilot who has answered a preference there is never
+# asked it again, on this run or any future one, because every reader below sees
+# a file-provided answer exactly as if it had just been cached - which is what
+# makes the preferences guard stop gating, the nudge stop nudging, and /prefs
+# stop asking, with no change to any of them. The per-run store still wins on
+# top, so an answer given interactively mid-run (/prefs) overrides the file for
+# the rest of that run without editing it.
+def _config_prefs():
+    """The settings file's `[prefs]` table, or {} when there is no file, no
+    table, or the file is unusable.
+
+    A broken settings file must never brick the state engine, so it degrades to
+    "no file-provided answers" - which leaves those preferences unanswered and
+    makes wingman ask, the conservative direction. `bin/config` and `bin/doctor`
+    are where a malformed file gets reported loudly.
+    """
+    if wm_config is None:
+        return {}
+    try:
+        return wm_config.prefs()
+    except Exception:
+        return {}
+
+
+def _pref_layers(run_id):
+    """`(file_prefs, run_prefs)` - the two layers _load_prefs merges, kept apart
+    for the callers that must report WHICH one an answer came from (prefs-list
+    --with-source, and through it hooks/lib/pilot-prefs.sh and bin/config).
+
+    run_prefs falls back to the pre-#85 legacy shape ({"wingman_run_id": ...,
+    "prefs": {...}}) so a file not yet migrated by a pref-set call still answers
+    correctly for the run id it names.
+    """
     data = read_json(preferences_path(), None)
-    if not isinstance(data, dict):
+    run_prefs = {}
+    if isinstance(data, dict):
+        if run_id in data:
+            slot = data.get(run_id)
+            run_prefs = slot if isinstance(slot, dict) else {}
+        elif (data.get("wingman_run_id") == run_id
+              and isinstance(data.get("prefs"), dict)):
+            run_prefs = data["prefs"]
+    return _config_prefs(), run_prefs
+
+
+def _load_prefs(run_id):
+    """The effective preference answers for run_id - the settings file's
+    `[prefs]` table with this run's own cached answers layered on top - or None
+    when neither layer has answered anything at all."""
+    file_prefs, run_prefs = _pref_layers(run_id)
+    if not file_prefs and not run_prefs:
         return None
-    if run_id in data:
-        prefs = data.get(run_id)
-        return prefs if isinstance(prefs, dict) else {}
-    if data.get("wingman_run_id") == run_id and isinstance(data.get("prefs"), dict):
-        return data["prefs"]
-    return None
+    merged = dict(file_prefs)
+    merged.update(run_prefs)
+    return merged
 
 
 def cmd_pref_get(args):
@@ -2121,12 +2179,23 @@ def cmd_pref_set(args):
 def cmd_prefs_list(args):
     """Every currently-set key<TAB>value pair for this run, one per line (nothing
     if unanswered). One call answers "are all N required preferences set" for the
-    guard and nudge hooks - one subprocess, one file read, not N."""
-    prefs = _load_prefs(args.run_id)
-    if not prefs:
-        return
-    for key in sorted(prefs):
-        print("%s\t%s" % (key, prefs[key]))
+    guard and nudge hooks - one subprocess, one file read, not N.
+
+    --with-source appends a third column naming the layer each value came from:
+    `run` for an answer cached during this run, `config.local.toml` for one the
+    settings file supplied. hooks/lib/pilot-prefs.sh needs the distinction to
+    validate a file-provided value against its key's vocabulary while leaving a
+    pilot-given one alone (see its wm_prefs_missing); bin/config renders it.
+    """
+    file_prefs, run_prefs = _pref_layers(args.run_id)
+    merged = dict(file_prefs)
+    merged.update(run_prefs)
+    for key in sorted(merged):
+        if args.with_source:
+            source = "run" if key in run_prefs else "config.local.toml"
+            print("%s\t%s\t%s" % (key, merged[key], source))
+        else:
+            print("%s\t%s" % (key, merged[key]))
 
 
 # ---------------------------------------------------------------- ask channel
@@ -2782,6 +2851,9 @@ def build_parser():
 
     a = sub.add_parser("prefs-list")
     a.add_argument("--run-id", required=True, dest="run_id")
+    a.add_argument("--with-source", action="store_true", dest="with_source",
+                   help="append the layer each value came from "
+                        "(run | config.local.toml)")
     a.set_defaults(fn=cmd_prefs_list)
 
     # --- ask channel: request/response between a caller and its delegate -------
