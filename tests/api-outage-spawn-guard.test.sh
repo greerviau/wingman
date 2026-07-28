@@ -72,6 +72,16 @@ out="$(run_hook "bin/spawn-crew --type developer --repo x --objective y --force-
 assert_eq "state active, --force-during-outage: spawn-crew is allowed (no output)" "$out" ""
 
 # ============================================================================
+# issue #168: a bash -c wrapped spawn-crew call is caught exactly like the
+# unwrapped form, and the in-payload override flag is still honored.
+# ============================================================================
+out="$(run_hook 'bash -c "bin/spawn-crew --type developer --repo x --objective y"')"
+assert_contains "state active: bash -c wrapped spawn-crew is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'bash -c "bin/spawn-crew --type developer --repo x --objective y --force-during-outage"')"
+assert_eq "state active: bash -c wrapped spawn-crew with --force-during-outage is allowed (no output)" "$out" ""
+
+# ============================================================================
 # State active: an unrelated command is untouched by this guard.
 # ============================================================================
 out="$(run_hook "gh pr list")"

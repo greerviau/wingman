@@ -97,6 +97,21 @@ assert_contains "top-level: python3 -m pytest is denied" "$out" '"permissionDeci
 out="$(run_hook Bash "uv run --no-project python -m pytest")"
 assert_contains "top-level: uv run --no-project python -m pytest is denied" "$out" '"permissionDecision": "deny"'
 
+# issue #168: a bash -c/eval wrapped test-runner invocation is caught exactly
+# like the unwrapped form, including the bash -c tests/run.sh regression case
+# this hook's own script-path resolution depends on (§4.4).
+out="$(run_bash_command 'bash -c "pytest"')"
+assert_contains "top-level: bash -c \"pytest\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash_command 'bash -c "npm test"')"
+assert_contains "top-level: bash -c \"npm test\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash_command 'bash -c tests/run.sh')"
+assert_contains "top-level: bash -c tests/run.sh is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_bash_command 'bash -c "gh pr list"')"
+assert_eq "top-level: bash -c \"gh pr list\" (unrelated) is allowed (no output)" "$out" ""
+
 # Generic Bash - the orchestration wingman itself depends on - must stay open.
 for cmd in "gh pr view 26" "git status" "ls -la" "grep -rn foo ." "cat README.md" \
            "bin/crew-list" "bin/spawn-crew --list-types"; do

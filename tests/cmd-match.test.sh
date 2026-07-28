@@ -4,7 +4,11 @@
 # heredocs together, so a segment that cannot be lexed - anywhere in the
 # command, including inside a nested substitution or heredoc body - makes the
 # WHOLE command resolve to None (fail closed), never a partial list with the
-# bad piece silently dropped.
+# bad piece silently dropped. Also covers issue #168: a `bash`/`sh`/`zsh`/
+# `dash`/`ksh -c` payload or an `eval` payload is lifted and re-checked as
+# its own segment(s), inserted in source order right after the wrapper
+# segment - never resolved as a literal command name (a wrong ALLOW against
+# a deny-style gate, the bug this closes).
 #
 # All the actual test commands and expected values are constructed and
 # compared in Python (below) rather than in bash: several of them embed
@@ -24,7 +28,7 @@ set -u
 _wm_py="$(wm_mktemp_file)"
 cat > "$_wm_py" <<'PYEOF'
 import sys
-from cmd_match import command_segments, resolved_segments
+from cmd_match import command_segments, resolved_segments, resolve_command
 
 results = []
 
@@ -243,6 +247,183 @@ check_true("resolved_segments() propagates None on a lex failure",
 
 check("a blank command returns []", "", [])
 check("a whitespace-only command returns []", "   ", [])
+
+# ============================================================================
+# Issue #168: bash -c / sh -c / eval wrapper payloads are lifted, not
+# resolved as a literal command name.
+# ============================================================================
+
+# --- the bypass itself, per the issue's own repro table ---------------------
+
+check("bash -c lifts its payload as a separate segment, wrapper first",
+      'bash -c "gh pr merge 5 --squash"',
+      [["bash", "-c", "gh pr merge 5 --squash"],
+       ["gh", "pr", "merge", "5", "--squash"]])
+
+check("sh -c lifts its payload",
+      "sh -c 'gh pr merge 5'",
+      [["sh", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("zsh -c lifts its payload",
+      "zsh -c 'gh pr merge 5'",
+      [["zsh", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("dash -c lifts its payload",
+      "dash -c 'gh pr merge 5'",
+      [["dash", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("ksh -c lifts its payload",
+      "ksh -c 'gh pr merge 5'",
+      [["ksh", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("eval lifts its payload",
+      'eval "gh pr merge 5 --squash"',
+      [["eval", "gh pr merge 5 --squash"],
+       ["gh", "pr", "merge", "5", "--squash"]])
+
+check("eval joins multiple arguments with a space before re-parsing",
+      'eval "gh pr" "merge 5"',
+      [["eval", "gh pr", "merge 5"], ["gh", "pr", "merge", "5"]])
+
+# --- flag shapes -------------------------------------------------------
+
+check("bash -lc (combined flag cluster) lifts the payload",
+      'bash -lc "gh pr merge 5"',
+      [["bash", "-lc", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -ec (combined flag cluster) lifts the payload",
+      'bash -ec "gh pr merge 5"',
+      [["bash", "-ec", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -xc (combined flag cluster) lifts the payload",
+      'bash -xc "gh pr merge 5"',
+      [["bash", "-xc", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -o pipefail -c lifts the payload (the -o value token is skipped)",
+      'bash -o pipefail -c "gh pr merge 5"',
+      [["bash", "-o", "pipefail", "-c", "gh pr merge 5"],
+       ["gh", "pr", "merge", "5"]])
+
+check("bash --norc -c lifts the payload (the long option is skipped as one token)",
+      'bash --norc -c "gh pr merge 5"',
+      [["bash", "--norc", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+# --- bash's real option grammar: the payload is the first operand once
+# option scanning ends, not "the token adjacent to the c letter" - five
+# shapes a naive adjacency rule gets wrong (found in review) ----------------
+
+check("bash -co pipefail lifts the payload (c sharing a cluster with the "
+      "value-taking o - the o's own value must not be mistaken for the payload)",
+      'bash -co pipefail "gh pr merge 5"',
+      [["bash", "-co", "pipefail", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -oc pipefail lifts the payload (flag order within the cluster "
+      "does not matter)",
+      'bash -oc pipefail "gh pr merge 5"',
+      [["bash", "-oc", "pipefail", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -c -- lifts the payload (-- between -c and its payload ends "
+      "option scanning; the next token is still the operand)",
+      'bash -c -- "gh pr merge 5"',
+      [["bash", "-c", "--", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash -O extglob -c lifts the payload (an unrelated value-taking "
+      "short option before -c)",
+      'bash -O extglob -c "gh pr merge 5"',
+      [["bash", "-O", "extglob", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("bash --rcfile FILE -c lifts the payload (a value-taking long option "
+      "before -c)",
+      'bash --rcfile /dev/null -c "gh pr merge 5"',
+      [["bash", "--rcfile", "/dev/null", "-c", "gh pr merge 5"],
+       ["gh", "pr", "merge", "5"]])
+
+check("positional parameters after the payload are not lifted",
+      'bash -c "echo hi" arg0 arg1',
+      [["bash", "-c", "echo hi", "arg0", "arg1"], ["echo", "hi"]])
+
+# --- multi-command payloads: order preserved, since no-merge-guard.sh's own
+# cd-tracking depends on a lifted segment appearing right after its wrapper --
+
+check("a payload joined with && lifts two segments in source order",
+      'bash -c "cd /w && gh pr merge 5"',
+      [["bash", "-c", "cd /w && gh pr merge 5"],
+       ["cd", "/w"], ["gh", "pr", "merge", "5"]])
+
+check("a payload joined with ; lifts two segments in source order",
+      'bash -c "echo hi; gh pr merge 5"',
+      [["bash", "-c", "echo hi; gh pr merge 5"],
+       ["echo", "hi"], ["gh", "pr", "merge", "5"]])
+
+check("a nested bash -c lifts through both levels",
+      "bash -c \"bash -c 'gh pr merge 5'\"",
+      [["bash", "-c", "bash -c 'gh pr merge 5'"],
+       ["bash", "-c", "gh pr merge 5"],
+       ["gh", "pr", "merge", "5"]])
+
+# --- prefix normalization: sudo/env/a bare assignment before the wrapper ----
+
+check("sudo bash -c lifts the payload",
+      'sudo bash -c "gh pr merge 5"',
+      [["sudo", "bash", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+check("env FOO=1 bash -c lifts the payload",
+      'env FOO=1 bash -c "gh pr merge 5"',
+      [["env", "FOO=1", "bash", "-c", "gh pr merge 5"],
+       ["gh", "pr", "merge", "5"]])
+
+check("a bare VAR=val assignment before bash -c lifts the payload",
+      'FOO=1 bash -c "gh pr merge 5"',
+      [["FOO=1", "bash", "-c", "gh pr merge 5"], ["gh", "pr", "merge", "5"]])
+
+# --- resolution of the wrapper segment: the direct regression assertion for
+# this bug - the segment must resolve to the shell, never a basename() of
+# the payload string -----------------------------------------------------
+
+check_true("resolve_command() on a -c wrapper segment resolves to the shell "
+           "itself, not a basename of the payload string",
+           resolve_command(["bash", "-c", "gh pr merge 5 --squash"])
+           == ("bash", ["bash", "-c", "gh pr merge 5 --squash"]))
+
+# --- preserved behavior --------------------------------------------------
+
+check("bash script.sh (no -c) still resolves to the script path, unaffected",
+      "bash script.sh", [["bash", "script.sh"]])
+check_true("bash script.sh resolves to the script, not the shell",
+           resolve_command(["bash", "script.sh"]) == ("script.sh", ["script.sh"]))
+
+check("bash -c tests/run.sh yields a segment resolving to tests/run.sh "
+      "(the no-direct-edit-guard.sh regression case)",
+      "bash -c tests/run.sh",
+      [["bash", "-c", "tests/run.sh"], ["tests/run.sh"]])
+check_true("bash -c tests/run.sh's lifted segment resolves with argv[0] tests/run.sh",
+           resolve_command(["tests/run.sh"])[1] == ["tests/run.sh"])
+
+_py_segs = command_segments("python3 -c \"import os; os.system('gh pr merge 5')\"")
+check_true("a Python -c payload lifts nothing (stays a single segment)",
+           _py_segs is not None and len(_py_segs) == 1)
+check_true("a Python -c payload resolves to python3, not a lifted command",
+           _py_segs is not None and resolve_command(_py_segs[0])[0] == "python3")
+check_true("a Python -c payload never surfaces a separate lifted 'gh pr merge' segment",
+           _py_segs is not None
+           and not any(seg[:3] == ["gh", "pr", "merge"] for seg in _py_segs))
+
+check("python3 -m pytest is still un-unwrapped (unchanged by this fix)",
+      "python3 -m pytest", [["python3", "-m", "pytest"]])
+
+check("eval \"$(ssh-agent -s)\" still yields exactly the substitution's own "
+      "lifted segment, with no re-lexed placeholder noise",
+      'eval "$(ssh-agent -s)"',
+      [["eval", "$(...)"], ["ssh-agent", "-s"]])
+
+# --- fail-closed: an unlexable payload denies the WHOLE command, matching
+# bash's own rejection of the same string ------------------------------------
+
+check_none("bash -c with an unlexable payload (bash itself rejects this string)",
+           "bash -c \"echo it's fine\"")
+
+check_none("eval with an unlexable payload",
+           "eval \"echo 'oops\"")
 
 # ============================================================================
 # Report

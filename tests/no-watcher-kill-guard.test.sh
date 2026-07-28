@@ -126,6 +126,21 @@ assert_eq "pkill -f <unrelated pattern> is allowed (no output)" "$out" ""
 out="$(run_hook "bin/watch-fleet --stop")"
 assert_eq "bin/watch-fleet --stop is allowed (no output)" "$out" ""
 
+# --- scenario 10 (issue #168): a wrapped kill is caught exactly like the
+# unwrapped form, and a wrapped liveness probe / the sanctioned stop command
+# stay allowed -----------------------------------------------------------
+out="$(run_hook "bash -c \"kill $pid\"")"
+assert_contains "bash -c \"kill <pid>\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "eval \"kill $pid\"")"
+assert_contains "eval \"kill <pid>\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "bash -c \"kill -0 $pid\"")"
+assert_eq "bash -c \"kill -0 <pid>\" is allowed (no output)" "$out" ""
+
+out="$(run_hook 'bash -c "bin/watch-fleet --stop"')"
+assert_eq "bash -c \"bin/watch-fleet --stop\" is allowed (no output)" "$out" ""
+
 # --- clean up this cycle before moving on ------------------------------------
 "$WF" --stop >/dev/null 2>&1
 

@@ -228,6 +228,19 @@ $1"; }
 # removal already ran first. Waiting here for the cycle to be provably dead
 # before removing anything closes the race outright, rather than merely
 # narrowing its window via ordering alone.
+#
+# The pids waited on here are the UNION of _wm_live_watch_pids() (read from
+# each home's watch.pid/watch-*.pid) and WM_TRACKED_PIDS (raw pids from
+# wm_track "$!"), not just the former: a watch-fleet cycle deletes its own
+# pidfile as part of its OWN graceful shutdown, which can complete well
+# BEFORE the underlying process has actually exited - so by the time this
+# function reads _wm_live_watch_pids() the pidfile may already be gone (an
+# empty result) while WM_TRACKED_PIDS still names the real, live pid.
+# Waiting on the pidfile-derived set alone missed exactly that window
+# (confirmed on a real CI run: wait_pids=[] while tracked_pids=[<two real
+# still-alive pids>] at cleanup time, for tests/outbox-redelivery.test.sh's
+# own `"$WATCH" --stop` shutdown), so both sets get the identical
+# wait-then-force-kill treatment below.
 wm_cleanup_all() {
   _rc=$?
   if [ -n "$WM_ON_EXIT_CMDS" ]; then
@@ -238,7 +251,7 @@ wm_cleanup_all() {
       eval "$_cmd"
     done <<<"$_cmds"
   fi
-  _wait_pids="$(_wm_live_watch_pids)"
+  _wait_pids="$(_wm_live_watch_pids) $WM_TRACKED_PIDS"
   [ -n "$WM_TRACKED_PIDS" ] && kill $WM_TRACKED_PIDS 2>/dev/null
   WM_TRACKED_PIDS=""
   if [ -n "$WM_TRACKED_TMUX" ]; then
@@ -256,6 +269,21 @@ wm_cleanup_all() {
       done
       [ "$_still_alive" -eq 0 ] && break
       sleep 0.05
+    done
+    # A pid that has not exited within the grace window above is force-
+    # killed here, rather than left to possibly complete one more poll
+    # iteration afterward - under load (many concurrent test files, or a
+    # busy CI runner), a graceful TERM can take longer than the window to be
+    # noticed, and that one extra iteration's own wm_state call recreates
+    # $WINGMAN_HOME's whole directory tree (ensure_home() runs os.makedirs
+    # exist_ok=True on every invocation) right after the rm -rf below already
+    # removed it - a leaked, orphaned wm-test.* directory the next run's
+    # sweep has to clean up after the fact. SIGKILL is safe here: everything
+    # this cycle could still be mid-write to lives under the very path about
+    # to be removed anyway, so there is nothing graceful left worth waiting
+    # for - it only needs to be reliably dead before rm -rf runs.
+    for _p in $_wait_pids; do
+      kill -0 "$_p" 2>/dev/null && kill -9 "$_p" 2>/dev/null
     done
   fi
   WM_TRACKED_HOMES=""

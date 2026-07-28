@@ -225,7 +225,8 @@ def deny(reason):
 PARSE_FAIL_REASON = (
     "This command could not be fully parsed - an unterminated quote, an "
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
-    "terminator line was never found - so it is denied rather than "
+    "terminator line was never found, including inside a `bash -c`/`eval` "
+    "payload - so it is denied rather than "
     "partially checked (issue #56). If this command embeds a heredoc to "
     "build up an argument (for example a PR body), quote its delimiter "
     "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "

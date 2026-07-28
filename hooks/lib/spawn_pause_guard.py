@@ -34,7 +34,8 @@ from cmd_match import command_segments, resolve_command
 PARSE_FAIL_REASON = (
     "This command could not be fully parsed - an unterminated quote, an "
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
-    "terminator line was never found - so it is denied rather than "
+    "terminator line was never found, including inside a `bash -c`/`eval` "
+    "payload - so it is denied rather than "
     "partially checked (issue #56, the same posture hooks/no-merge-guard.sh "
     "takes on this shape). Reformat it into well-formed shell syntax and "
     "retry."
