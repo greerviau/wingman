@@ -113,7 +113,9 @@ _WM_NL=$'\n'
 wm_split_list() {
   case "$1" in
     *"$_WM_NL"*) printf '%s\n' "$1" ;;
-    *) printf '%s\n' $1 ;;   # deliberately unquoted: word-split the legacy shape
+    # Deliberately unquoted: word-splitting IS the legacy shape's parse.
+    # shellcheck disable=SC2086
+    *) printf '%s\n' $1 ;;
   esac
 }
 

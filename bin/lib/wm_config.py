@@ -191,6 +191,22 @@ def for_type(table_name, crew_type, data=None):
 
 
 # --- the environment layer ---------------------------------------------------
+def _newline_list(items):
+    """A multi-valued setting as its WM_* variable carries it: newline-separated,
+    and ALWAYS newline-terminated when non-empty.
+
+    The terminator is load-bearing, not cosmetic. Consumers accept both this
+    shape and the whitespace-separated one config.local.sh has always used, and
+    they tell the two apart by looking for a newline (bin/lib/common.sh's
+    wm_split_list). A single-entry array would otherwise carry no newline at
+    all, so `roots = ["~/two words"]` would read as the legacy shape and split
+    into two bogus roots. The trailing empty field every consumer already skips
+    is the cheap price of making the shape unambiguous.
+    """
+    items = list(items)
+    return "".join(item + "\n" for item in items)
+
+
 def _env_value(table, key, kind, raw):
     """One setting coerced to the string shape its WM_* variable carries."""
     where = "%s.%s" % (table, key)
@@ -203,7 +219,7 @@ def _env_value(table, key, kind, raw):
     if kind in (LIST, PATHLIST):
         if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
             raise ConfigError("%s must be an array of strings" % where)
-        return "\n".join(_expand(x) if kind == PATHLIST else x for x in raw)
+        return _newline_list(_expand(x) if kind == PATHLIST else x for x in raw)
     if kind == TABLE:
         if not isinstance(raw, dict):
             raise ConfigError(
@@ -211,7 +227,7 @@ def _env_value(table, key, kind, raw):
         for name, path in raw.items():
             if not isinstance(path, str):
                 raise ConfigError('%s.%s must be a path string' % (where, name))
-        return "\n".join("%s|%s" % (n, _expand(p)) for n, p in raw.items())
+        return _newline_list("%s|%s" % (n, _expand(p)) for n, p in raw.items())
     if isinstance(raw, (dict, list)):
         raise ConfigError("%s must be a single value" % where)
     return _stringify(raw)
@@ -326,7 +342,10 @@ def _display(kind, value):
     """
     if kind == FLAG:
         return "true" if value else "false"
-    return ", ".join(value.split("\n")) if "\n" in value else value
+    if "\n" in value:
+        # Drops the trailing empty field _newline_list deliberately leaves.
+        return ", ".join(part for part in value.split("\n") if part)
+    return value
 
 
 def resolved(data=None, environ=None):
