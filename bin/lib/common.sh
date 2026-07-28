@@ -12,13 +12,6 @@ WM_BIN="$(dirname "$WM_LIB")"
 WM_REPO="$(dirname "$WM_BIN")"
 export WM_REPO WM_BIN WM_LIB
 
-# Raw shell escape hatch (gitignored): arbitrary shell, so it can set any of the
-# WM_* variables - including the many undocumented tuning knobs the declarative
-# settings file below deliberately does not model. Sourced first and never
-# overwritten by that file, so anything set here wins; see config.example.sh.
-# For the everyday settings, prefer config.local.toml (config.example.toml).
-[ -f "$WM_REPO/config.local.sh" ] && . "$WM_REPO/config.local.sh"
-
 # Machine-local state home. Overridable for tests.
 WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 export WINGMAN_HOME="$WM_HOME"
@@ -68,17 +61,19 @@ wm_err()   { printf '%s\xe2\x9c\x97 %s%s\n' "$_WM_R" "$*" "$_WM_0" >&2; }
 wm_die()   { wm_err "$*"; exit 1; }
 
 # --- the settings file ------------------------------------------------------
-# config.local.toml: the declarative, gitignored settings file (templated by
-# config.example.toml, read by bin/lib/wm_config.py). Overridable so tests point
-# at a fixture instead of a developer's real file.
+# config.local.toml: wingman's one configuration file - declarative, gitignored,
+# templated by config.example.toml, read by bin/lib/wm_config.py. Overridable so
+# tests point at a fixture instead of a developer's real file.
 WM_CONFIG_TOML="${WM_CONFIG_TOML:-$WM_REPO/config.local.toml}"
 export WM_CONFIG_TOML
 
-# Apply the file's environment-backed settings (models/effort defaults, project
-# discovery, harness knobs) to this process, so every bin/ script picks them up.
+# Apply the file's environment-backed settings to this process, so every bin/
+# script picks them up: the typed settings (models/effort defaults, project
+# discovery, harness knobs) plus the [env] table's raw WM_* passthrough, which is
+# what reaches the tuning knobs the typed schema does not model.
 # wm_config.py emits an `export` line only for a variable the environment does
-# not already carry - which is what places the file BELOW both an explicit
-# `WM_MODEL=x bin/spawn-crew ...` and anything config.local.sh set above.
+# not already carry - which is what places the file BELOW an explicit
+# `WM_MODEL=x bin/spawn-crew ...`.
 #
 # Skipped entirely when there is no file, so the common case costs no subprocess.
 # A file that exists but cannot be parsed is announced rather than silently
@@ -108,13 +103,18 @@ wm_config_for_type() {
 # Print each entry of a WM_ROOTS/WM_IGNORE-style list on its own line.
 # Newline-separated when the value contains a newline - the shape the settings
 # file's TOML arrays export, where an entry may legitimately contain spaces -
-# else whitespace-separated, the shape config.local.sh has always used.
+# else whitespace-separated, the shape these variables have always used when set
+# straight in the environment (WM_ROOTS="$HOME/dev $HOME/code"), which stays
+# supported.
 _WM_NL=$'\n'
 wm_split_list() {
+  # The unquoted $1 in the second branch is deliberate: word-splitting IS the
+  # whitespace shape's parse. The directive below must sit in front of the whole
+  # `case` - attached to an individual branch it is rejected (SC1124) as a parse
+  # error, which silently stops the linter analyzing the rest of this file.
+  # shellcheck disable=SC2086
   case "$1" in
     *"$_WM_NL"*) printf '%s\n' "$1" ;;
-    # Deliberately unquoted: word-splitting IS the legacy shape's parse.
-    # shellcheck disable=SC2086
     *) printf '%s\n' $1 ;;
   esac
 }

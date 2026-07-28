@@ -3,7 +3,7 @@
 # and cache a name -> path map to $WINGMAN_HOME/projects.json.
 #
 # Resolution order for candidate roots:
-#   1. Extra roots from the settings file's [projects] table (WM_ROOTS).
+#   1. Extra roots from config.local.toml's [projects] table (WM_ROOTS).
 #   2. Wingman's parent directory (the common case: cloned alongside your repos).
 #   3. A short list of common dev roots, if the parent yielded nothing.
 # Repos are found depth-limited and pruned; the basename is the project name.
@@ -22,11 +22,11 @@ COMMON_ROOTS="$HOME/dev $HOME/src $HOME/code $HOME/projects $HOME/git $HOME/work
 PRUNE_NAMES="node_modules .venv venv vendor dist build target .next .cache Pods"
 
 # Optional user hints: WM_ROOTS / WM_IGNORE / WM_PINS, from config.local.toml's
-# [projects] table or config.local.sh (lib/common.sh above applies both; default
-# here only for `set -u` safety when neither sets them). WM_ROOTS and WM_IGNORE
-# are read through wm_split_list, so a value from either shape works - the TOML
-# arrays export newline-separated (an entry may contain spaces), config.local.sh
-# has always been whitespace-separated.
+# [projects] table (lib/common.sh above applies it; the defaults here are only
+# for `set -u` safety when it does not). WM_ROOTS and WM_IGNORE are read through
+# wm_split_list, so either shape works - the TOML arrays export
+# newline-separated (an entry may contain spaces), while setting one straight in
+# the environment has always been whitespace-separated.
 WM_ROOTS="${WM_ROOTS:-}"; WM_IGNORE="${WM_IGNORE:-}"; WM_PINS="${WM_PINS:-}"
 
 # The ignored basenames as a "|name|name|" delimited set, built once here rather

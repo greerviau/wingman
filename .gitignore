@@ -5,7 +5,7 @@
 # Per-crew-type playbook overrides (playbooks/<category>/build.local.md, ...)
 *.local.md
 
-# Project-discovery hints (config.local.sh, config.local.json, ...)
+# The settings file (config.local.toml) - see config.example.toml
 config.local.*
 
 # Local Claude Code settings, if you keep any

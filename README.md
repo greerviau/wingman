@@ -96,7 +96,7 @@ developer = "sonnet"          # per crew type
 roots = ["~/dev"]             # where to look for your repos
 ```
 
-It also holds `[effort]` (same shape as `[models]`), `[projects.pins]`/`ignore`, and `[harness]` (agent, permission mode, Remote Control, tmux session).
+It also holds `[effort]` (same shape as `[models]`), `[projects.pins]`/`ignore`, `[harness]` (agent, permission mode, Remote Control, tmux session), and `[env]` — a raw `WM_*` passthrough for the ~100 internal tuning knobs the typed settings don't model.
 
 An explicit flag beats the file, and the file beats wingman's defaults. `bin/config` prints every setting as resolved **with the source it came from**; `bin/config --check` (and `bin/doctor`) rejects a typo rather than ignoring it. Full details in [configuration.md](docs/configuration.md#the-settings-file---configlocaltoml).
 

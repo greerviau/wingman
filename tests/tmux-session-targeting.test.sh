@@ -21,13 +21,16 @@ mkdir -p "$WS/repoA"
 git -C "$WS/repoA" init -q
 printf '#!/usr/bin/env bash\nexec sleep 120\n' > "$WS/stub.sh"; chmod +x "$WS/stub.sh"
 
-CFG="$TEST_REPO/config.local.sh"
-if [ -e "$CFG" ]; then echo "SKIP: $CFG exists; not overwriting"; exit 0; fi
-printf 'WM_ROOTS=%q\n' "$WS" > "$CFG"
-
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
-wm_on_exit "rm -f '$CFG'"
+# Point discovery at the workspace through this test's own isolated settings
+# file (test_new_home creates the path), not the repo root's - so the suite
+# neither writes into the checkout nor skips itself when a developer keeps a
+# settings file of their own.
+wm_write_config <<EOF
+[projects]
+roots = ["$WS"]
+EOF
 wm_trust_repo "$WS/repoA"
 
 # The decoy: a session whose name has the crew session's name as a PREFIX,

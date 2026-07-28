@@ -182,29 +182,30 @@ assert_true "WM_PERMISSION_MODE= with bypass unaccepted: roster record exists" "
 WS="$(wm_mktemp_dir)/workspace"
 mkdir -p "$WS/subrepo"
 git -C "$WS/subrepo" init -q
-CFG="$TEST_REPO/config.local.sh"
-if [ -e "$CFG" ]; then
-  echo "SKIP: $CFG exists; not overwriting - global-scope cases skipped"
-else
-  printf 'WM_ROOTS=%q\n' "$WS" > "$CFG"
-  wm_on_exit "rm -f '$CFG'"
+# Discovery is pointed at the workspace through this test's own isolated settings
+# file (test_new_home creates the path), not the repo root's - so these cases
+# neither write into the checkout nor skip themselves, as they used to, when a
+# developer keeps a settings file of their own.
+wm_write_config <<EOF
+[projects]
+roots = ["$WS"]
+EOF
 
-  GID5="global-untrusted"
-  out5="$("$SPAWN" --type software-analyst --scope global --id "$GID5" --objective "global untrusted" 2>&1)"
-  rc5=$?
-  assert_true "global scope, workspace root not trusted: spawn-crew exits non-zero" "[ $rc5 -ne 0 ]"
-  assert_contains "global scope, not trusted: message names the workspace root" "$out5" "$WS"
-  assert_eq "global scope, not trusted: no window and no roster record" "$(no_window_or_record "$GID5")" "ok"
-  assert_false "global scope, not trusted: the check never treats subrepo as the target" \
-    "printf '%s' '$out5' | grep -q '$WS/subrepo'"
+GID5="global-untrusted"
+out5="$("$SPAWN" --type software-analyst --scope global --id "$GID5" --objective "global untrusted" 2>&1)"
+rc5=$?
+assert_true "global scope, workspace root not trusted: spawn-crew exits non-zero" "[ $rc5 -ne 0 ]"
+assert_contains "global scope, not trusted: message names the workspace root" "$out5" "$WS"
+assert_eq "global scope, not trusted: no window and no roster record" "$(no_window_or_record "$GID5")" "ok"
+assert_false "global scope, not trusted: the check never treats subrepo as the target" \
+  "printf '%s' '$out5' | grep -q '$WS/subrepo'"
 
-  wm_trust_repo "$WS"
-  GID6="global-trusted"
-  "$SPAWN" --type software-analyst --scope global --id "$GID6" --objective "global trusted" >/dev/null 2>&1
-  rc6=$?
-  assert_true "global scope, workspace root trusted: spawn succeeds" "[ $rc6 -eq 0 ]"
-  assert_true "global scope, workspace root trusted: roster record exists" "wm_state crew-get --id '$GID6' >/dev/null 2>&1"
-fi
+wm_trust_repo "$WS"
+GID6="global-trusted"
+"$SPAWN" --type software-analyst --scope global --id "$GID6" --objective "global trusted" >/dev/null 2>&1
+rc6=$?
+assert_true "global scope, workspace root trusted: spawn succeeds" "[ $rc6 -eq 0 ]"
+assert_true "global scope, workspace root trusted: roster record exists" "wm_state crew-get --id '$GID6' >/dev/null 2>&1"
 
 # --- worktree-adjacent regression: the preflight check reads $REPO only -----
 # (there is no worktree path to check yet at this point in spawn-crew - a

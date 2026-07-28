@@ -13,11 +13,8 @@
 #   config --path          print the settings file path
 #
 # Sources:
-#   env                    the environment already carried the WM_* variable.
-#                          Also where anything config.local.sh set has landed by
-#                          the time this runs - the two are indistinguishable
-#                          here by design, since sourcing that file IS setting
-#                          the environment.
+#   env                    the environment already carried the WM_* variable, so
+#                          it outranks the file.
 #   config.local.toml      the settings file supplied it.
 #   run                    (preferences only) answered during THIS wingman run
 #                          via /prefs, which outranks the settings file for the

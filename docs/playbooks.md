@@ -23,7 +23,7 @@ There is no hardcoded list of types; a type exists iff its playbook does.
 `*.local.md` is gitignored, following the same pattern as Claude Code's `settings.json` / `settings.local.json`: customizations and private crew types can't be accidentally committed and survive `git pull` of new defaults.
 Example: to make the software-analyst crew follow your own planning skill or checklist, write `playbooks/software-development/software-analyst.local.md` saying so.
 
-Project-discovery hints follow the same story: an optional gitignored `config.local.sh` in this repo can set extra roots, pinned paths, or an ignore list (`WM_ROOTS`, `WM_PINS` as newline `name|path` entries, `WM_IGNORE`).
+Project-discovery hints follow the same story: the optional gitignored [settings file](configuration.md#the-settings-file---configlocaltoml) (`config.local.toml`) can set extra roots, pinned paths, or an ignore list under `[projects]`.
 It is absent by default; the defaults cover the common case.
 
 The state model every playbook reports through - `working`/`blocked`/`review`/`done` and the wake-loop mechanics - is defined once in the shared status contract (`playbooks/_status-contract.md`), appended to every crew brief, so a playbook describes only the work. See [the deliverable lifecycle](architecture.md#the-deliverable-lifecycle-and-review).

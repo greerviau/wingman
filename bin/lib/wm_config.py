@@ -16,8 +16,7 @@ Two consumers, one reader:
   - `bin/lib/common.sh` runs `env-exports` and evals its output, so every bin/
     script picks up the environment-backed settings. It only ever exports a
     variable the environment does not already carry - which is exactly what
-    makes an explicit `WM_MODEL=x bin/spawn-crew ...` (and anything
-    config.local.sh set, since common.sh sources that first) win over the file.
+    makes an explicit `WM_MODEL=x bin/spawn-crew ...` win over the file.
   - `bin/lib/wm-state.py` imports this module and layers the `[prefs]` table
     underneath its own per-run answer store, so `pref-get`/`prefs-list` - and
     therefore the preferences guard, the nudge, `/prefs`, and every crew member
@@ -79,9 +78,24 @@ SCHEMA = (
 # Tables that additionally accept arbitrary crew-type keys alongside `default`
 # (see for_type below), so unknown-key detection must not flag them.
 PER_TYPE_TABLES = ("models", "effort")
+# The raw passthrough table: any WM_* variable, exported verbatim. This is what
+# reaches the ~100 knobs SCHEMA deliberately does not model - internal timings,
+# thresholds, detector regexes, each documented at its point of use rather than
+# worth a typed home here. Restricted to the WM_ prefix on purpose: this is
+# wingman's configuration, not a general environment injector, and a config file
+# that can set PATH or LD_PRELOAD is a footgun rather than a feature.
+ENV_TABLE = "env"
+ENV_PREFIX = "WM_"
 # Every table the file may contain. `prefs` carries no schema here on purpose -
 # hooks/lib/pilot-prefs.sh owns its key set.
-KNOWN_TABLES = ("prefs",) + PER_TYPE_TABLES + ("projects", "harness")
+KNOWN_TABLES = ("prefs",) + PER_TYPE_TABLES + ("projects", "harness", ENV_TABLE)
+
+# The WM_* variables SCHEMA already owns, mapped back to the typed setting that
+# owns each. An `[env]` entry for one of these is rejected rather than silently
+# racing it: `[env].WM_MODEL` and `[models].default` are the same variable, and a
+# file setting both leaves the reader guessing which one is in force.
+SCHEMA_VARS = dict((var, "%s.%s" % (table, key))
+                   for table, key, _kind, var, _desc in SCHEMA)
 
 
 class ConfigError(Exception):
@@ -196,9 +210,10 @@ def _newline_list(items):
     and ALWAYS newline-terminated when non-empty.
 
     The terminator is load-bearing, not cosmetic. Consumers accept both this
-    shape and the whitespace-separated one config.local.sh has always used, and
-    they tell the two apart by looking for a newline (bin/lib/common.sh's
-    wm_split_list). A single-entry array would otherwise carry no newline at
+    shape and the whitespace-separated one these variables have always used when
+    set straight in the environment, and they tell the two apart by looking for a
+    newline (bin/lib/common.sh's wm_split_list). A single-entry array would
+    otherwise carry no newline at
     all, so `roots = ["~/two words"]` would read as the legacy shape and split
     into two bogus roots. The trailing empty field every consumer already skips
     is the cheap price of making the shape unambiguous.
@@ -233,9 +248,45 @@ def _env_value(table, key, kind, raw):
     return _stringify(raw)
 
 
+def env_table(data=None):
+    """The `[env]` passthrough table as {WM_VAR: string value}.
+
+    Validated here rather than trusted: a non-WM_ name is refused (see
+    ENV_PREFIX), as is a name SCHEMA already owns - `[env].WM_MODEL` and
+    `[models].default` are the same variable, and a file setting both would
+    leave the reader guessing.
+    """
+    data = load() if data is None else data
+    table = data.get(ENV_TABLE)
+    if table is None:
+        return {}
+    if not isinstance(table, dict):
+        raise ConfigError("[%s] must be a table of `WM_NAME = \"value\"` pairs"
+                          % ENV_TABLE)
+    out = {}
+    for var, value in table.items():
+        if not var.startswith(ENV_PREFIX):
+            raise ConfigError(
+                "%s.%s is not a %s* variable - [%s] carries wingman's own knobs "
+                "only, never arbitrary environment variables"
+                % (ENV_TABLE, var, ENV_PREFIX, ENV_TABLE))
+        if var in SCHEMA_VARS:
+            raise ConfigError(
+                "%s.%s duplicates the %s setting, which owns that variable - "
+                "set it there instead"
+                % (ENV_TABLE, var, SCHEMA_VARS[var]))
+        if isinstance(value, (dict, list)):
+            raise ConfigError(
+                "%s.%s must be a single value, not a table or array"
+                % (ENV_TABLE, var))
+        out[var] = _stringify(value)
+    return out
+
+
 def env_exports(data=None, environ=None):
     """`export WM_X=<quoted>` lines for every environment-backed setting the
-    file sets and the environment does not already carry.
+    file sets and the environment does not already carry - the typed settings of
+    SCHEMA, then the raw `[env]` passthrough.
 
     Membership, not truthiness: an explicitly-empty $WM_REMOTE_CONTROL or
     $WM_PERMISSION_MODE means "disabled" (both are read as `${VAR-default}`), so
@@ -254,6 +305,11 @@ def env_exports(data=None, environ=None):
             continue
         lines.append("export %s=%s" % (
             var, shlex.quote(_env_value(table, key, kind, section[key]))))
+        applied.append(var)
+    for var, value in sorted(env_table(data).items()):
+        if var in environ:
+            continue
+        lines.append("export %s=%s" % (var, shlex.quote(value)))
         applied.append(var)
     # Which variables this layer set, for any later reader that must tell a
     # file-provided value apart from one the environment carried in. Once these
@@ -308,6 +364,15 @@ def problems(data=None, known_types=()):
             except ConfigError as exc:
                 found.append(str(exc))
             continue
+        if table == ENV_TABLE:
+            # Reported per entry rather than bailing on the first, so a pilot
+            # fixing a hand-edited table sees every problem in one pass.
+            for var in section:
+                try:
+                    env_table({ENV_TABLE: {var: section[var]}})
+                except ConfigError as exc:
+                    found.append(str(exc))
+            continue
         for key, raw in section.items():
             if table in PER_TYPE_TABLES:
                 if key != "default" and known_types and key not in bare_types:
@@ -353,11 +418,9 @@ def resolved(data=None, environ=None):
     the way a bin/ script actually sees it, with each value rendered as one
     readable line (see _display).
 
-    `source` is `env` when the environment already carries the variable - which
-    is also where anything config.local.sh set has landed by the time this runs,
-    so the two are genuinely indistinguishable here and are reported as one -
-    `config.local.toml` when the file supplied it, and `default` when neither
-    did and the consumer falls through to its own built-in.
+    `source` is `env` when the environment already carries the variable,
+    `config.local.toml` when the file supplied it, and `default` when neither did
+    and the consumer falls through to its own built-in.
 
     $WM_CONFIG_APPLIED is what keeps that first case honest. A caller that has
     sourced bin/lib/common.sh has ALREADY had this file's settings exported into
@@ -393,6 +456,20 @@ def resolved(data=None, environ=None):
             if key == "default":
                 continue
             rows.append(("%s.%s" % (table, key), _stringify(section[key]),
+                         "config.local.toml"))
+    # The raw passthrough, likewise open-ended. An entry the environment already
+    # overrides is shown with the environment's value, so the rendering never
+    # claims a knob is at the file's value when it is not.
+    try:
+        raw_env = env_table(data)
+    except ConfigError as exc:
+        rows.append(("%s.<invalid>" % ENV_TABLE, str(exc), "config.local.toml"))
+        raw_env = {}
+    for var in sorted(raw_env):
+        if var in environ and var not in applied:
+            rows.append(("%s.%s" % (ENV_TABLE, var), environ[var], "env"))
+        else:
+            rows.append(("%s.%s" % (ENV_TABLE, var), raw_env[var],
                          "config.local.toml"))
     return rows
 

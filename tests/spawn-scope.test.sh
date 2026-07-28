@@ -74,20 +74,21 @@ SYMWS2="$(wm_mktemp_dir)/symws2-link"
 mkdir -p "$(dirname "$SYMWS2")"
 ln -s "$WS2" "$SYMWS2"
 
-# WM_ROOTS (the documented root hint) points discovery at the workspace; WM_PINS
-# registers the symlinked-path repo by name (see the comment above WS2). Guard
-# against clobbering a real config.local.sh.
-CFG="$TEST_REPO/config.local.sh"
-if [ -e "$CFG" ]; then echo "SKIP: $CFG exists; not overwriting"; exit 0; fi
-{
-  printf 'WM_ROOTS=%q\n' "$WS"
-  printf 'WM_PINS=%q\n' "repoSymName|$SYMWS2/repoSymName"
-} > "$CFG"
-
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=1 WM_READY_POLL=0 \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
-wm_on_exit "rm -f '$CFG'"
+# [projects].roots points discovery at the workspace; [projects.pins] registers
+# the symlinked-path repo by name (see the comment above WS2). Written to this
+# test's own isolated settings file (test_new_home creates the path), not the
+# repo root's - so the suite neither writes into the checkout nor skips itself
+# when a developer keeps a settings file of their own.
+wm_write_config <<EOF
+[projects]
+roots = ["$WS"]
+
+[projects.pins]
+repoSymName = "$SYMWS2/repoSymName"
+EOF
 wm_trust_repo "$WS"
 wm_trust_repo "$WS/repoA"
 wm_trust_repo "$WS/repoC"
@@ -237,17 +238,9 @@ xid="$(WM_MODEL=opus "$SPAWN" --type software-analyst --repo repoA --objective "
 assert_contains "an explicit --model wins over WM_MODEL" \
   "$(grep -- '--model' "$WINGMAN_HOME/crew/$xid.launch.sh")" "--model 'sonnet'"
 
-# --- config.local.sh wiring (issue #13): WM_MODEL sourced via lib/common.sh --
-# Previously only WM_ROOTS/WM_IGNORE/WM_PINS were sourced from config.local.sh,
-# and only by discover-projects - a WM_MODEL set there had no effect anywhere.
-# Appended to the shared $CFG only now, after every test above that depends on
-# WM_MODEL being otherwise unset has already run.
-printf 'WM_MODEL=%q\n' "config-local-test-model" >> "$CFG"
-unset WM_MODEL
-cfgmid="$("$SPAWN" --type software-analyst --repo repoA --objective "config.local.sh model" 2>/dev/null | tail -1)"
-assert_true "spawn with config.local.sh WM_MODEL succeeds" "[ -n '$cfgmid' ]"
-assert_contains "config.local.sh WM_MODEL is picked up absent --model/env WM_MODEL" \
-  "$(grep -- '--model' "$WINGMAN_HOME/crew/$cfgmid.launch.sh")" "--model 'config-local-test-model'"
+# The settings file's own effect on the resolved model (issue #13's successor:
+# [models].default and the per-crew-type entries) is covered in
+# tests/config-file.test.sh, against every precedence tier at once.
 
 # --- argument guards ---------------------------------------------------------
 if "$SPAWN" --type software-analyst --scope bogus --objective x >/dev/null 2>&1; then rc=0; else rc=$?; fi
