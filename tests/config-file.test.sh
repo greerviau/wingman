@@ -326,6 +326,18 @@ assert_false "a wrong-typed setting fails --check" "'$CONFIG' --check"
 assert_contains "the type error is named" \
   "$("$CONFIG" --check 2>&1)" "projects.roots must be an array of strings"
 
+# --- config.example.toml is not allowed to drift from the schema -------------
+# The template ships every setting commented out, so nothing in it is ever
+# exercised by simply having it on disk - a key renamed in the schema, or an
+# example value outside a preference's vocabulary, would sit wrong in the file
+# a pilot copies with nothing to catch it. Uncommenting every setting line and
+# validating the result is what catches it.
+sed -E 's/^# (\[[a-z.]+\]|([a-z_-]+|"[^"]+") = )/\1/' "$TEST_REPO/config.example.toml" \
+  > "$WM_CONFIG_TOML"
+assert_contains "the uncommenting actually produced settings (guards this test)" \
+  "$(cat "$WM_CONFIG_TOML")" "default = "
+assert_true "config.example.toml validates with every setting enabled" "'$CONFIG' --check"
+
 # --- bin/doctor runs the same check -----------------------------------------
 # Asserted on doctor's OUTPUT rather than its exit code: a machine without
 # `claude` installed (CI is one) already exits non-zero for that reason, which
