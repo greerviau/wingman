@@ -139,6 +139,14 @@ assert_contains "an unrelated Bash command is denied" "$out" '"permissionDecisio
 out="$(run_bash "bin/lib/wm-state.py pref-set --run-id run-guard --key remote --value true && rm -rf /tmp/x")"
 assert_contains "a chained pref-set does not qualify (mixed segments denied)" "$out" '"permissionDecision": "deny"'
 
+# --- issue #168: a wrapped allowlisted command stays denied - the guard's
+# allowlist matches on the resolved shape of each segment, and a bash -c
+# wrapper resolves to `bash` (not an allowlisted shape), never to its
+# payload's own command, exactly like pilot-preferences-guard.sh's existing
+# posture on an unwrapped `bash` invocation. -----------------------------
+out="$(run_bash_json 'bash -c "$WINGMAN_STATE prefs-list --run-id run-guard"')"
+assert_contains "a wrapped allowlisted command (bash -c) stays denied" "$out" '"permissionDecision": "deny"'
+
 # --- fleet supervision stays possible while the gate is unsatisfied ------------
 out="$(run_bash "bin/crew-list")"
 assert_eq "bin/crew-list is allowed" "$out" ""

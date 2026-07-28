@@ -21,9 +21,16 @@ same way, so the script - not the interpreter - is what resolves. `-c` (inline
 code) and `-m` (module) are deliberately NOT unwrapped: they are not script
 invocations, inline code must never be resolved into whatever it happens to
 mention, and hooks/no-direct-edit-guard.sh detects a test runner on exactly the
-un-unwrapped shape (basename `python`/`python3` with `-m` in argv).
+un-unwrapped shape (basename `python`/`python3` with `-m` in argv). A wrapper
+SHELL's own `-c` payload is a different thing entirely, and IS unwrapped (see
+"Wrapper-shell and eval payloads" below): it is shell code handed to that
+shell to execute, exactly the kind of thing every guard built on this module
+already expects to see through, where a Python `-c` payload is Python source
+that must never be resolved into whatever it happens to mention.
 
-Known caveats, both false-negative-only:
+False-negative-only caveats (a non-standard shape may dodge a deny rule but
+can never slip past a gate, because it resolves to nothing, or to the
+interpreter/wrapper itself, matching no allowlist):
 
 - The uv flag-skipping treats every leading `-`-token as value-free. That is
   exactly right for `$WINGMAN_STATE`'s own flags (--no-project --quiet), but a
@@ -33,9 +40,42 @@ Known caveats, both false-negative-only:
   to the one shape it is meant for; a non-`.py` first argument leaves the
   segment resolving to the interpreter.
 
-Neither ever causes a wrong allow: an unresolved segment (or one resolving to
-the interpreter) matches no allowlist, so a non-standard shape may dodge a deny
-rule but can never slip past a gate.
+Recognition gaps that are wrong ALLOWS, not false negatives: this module
+recognizes a command by resolving argv[0] of each segment, so a shape that
+carries the real command as DATA for another program to execute - `xargs
+<cmd> ...`, `find ... -exec <cmd> ;`, a command piped into a shell (`echo gh
+pr merge 5 | bash`), a substitution in command position (`$(which gh) pr
+merge ...`), or a remote/re-entrant wrapper (`ssh <host> "<cmd>"`, `su -c`,
+`timeout 30 bash -c ...`) - is not recognized as that command at all: the
+segment resolves to `xargs`/`find`/`bash`/`ssh`/the inert placeholder,
+matching no guard predicate for the command actually being run. Against a
+deny-style gate this is a wrong allow, not a harmless miss (issue #168); see
+docs/guards.md for the guard-facing summary.
+
+Wrapper-shell and eval payloads: `bash`/`sh`/`zsh`/`dash`/`ksh` invoked with a
+`-c` payload (including a combined flag cluster like `-lc`) and `eval`
+(whose arguments are joined with a single space each, matching bash's own
+re-parse semantics, before being treated as one payload) both hand a string
+of further shell code to the wrapper. command_segments() re-lexes that
+string through itself and inserts the resulting segments immediately after
+the wrapper's own segment, in source order - never treating the whole
+payload string as a command name, which was issue #168's bug (a payload like
+`gh pr merge 5 --squash` used to resolve as a literal command named "gh pr
+merge 5 --squash", matching no guard's denylist). The wrapper segment itself
+stays in the segment list and resolves to the shell (or to `eval`) - never to
+a basename() of the payload - so no consumer sees one real invocation
+reported twice, and an allowlist-style guard (pilot-preferences-guard.sh)
+keeps denying a wrapped form exactly as it denies an unwrapped `bash`
+invocation. A payload that cannot itself be lexed fails the WHOLE command
+closed, the same as a substitution's or heredoc's inner text (see the
+fail-closed contract below). Order matters: lifting a `cd` inside a payload
+inline, immediately after its wrapper segment rather than appended at the
+end, is what lets no-merge-guard.sh's linear `cd`-tracker see it in the same
+relative position a later top-level `cd` would occupy - the tracker still
+treats it as if it persisted past the wrapper's own subshell scope (real bash
+does not), a deliberate, documented approximation rather than a soundness
+gap, and strictly better than the alternative of a later top-level `cd`
+being misapplied to an earlier wrapped merge.
 
 Fail-closed contract for command_segments()/resolved_segments(): a command
 that cannot be fully lexed - a genuinely unterminated quote, an unbalanced
@@ -114,6 +154,8 @@ import shlex
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _VAR_TOKEN_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 _PY_RE = re.compile(r"^python[0-9.]*$")
+_SHELL_WRAPPER_NAMES = ("bash", "sh", "zsh", "dash", "ksh")
+_INERT_PLACEHOLDERS = frozenset(("$(...)", "`...`", "<(...)", ">(...)"))
 
 
 def basename(tok):
@@ -479,6 +521,24 @@ def command_segments(cmd_str):
         if current:
             segments.append(current)
 
+    # Wrapper-shell (`bash -c ...`) and `eval` payloads are shell code, not a
+    # command name: lift each one, re-lexed through this same function, into
+    # additional segments inserted immediately after their wrapper segment -
+    # BEFORE the pending (substitution/heredoc) loop below, so a segment
+    # produced by a recursive call here (which already ran its own wrapper
+    # pass) is never re-scanned for wrappers a second time. Inserting inline
+    # rather than appending at the end preserves source order, which
+    # no-merge-guard.sh's `cd`-tracking depends on (see module docstring).
+    expanded = []
+    for seg in segments:
+        expanded.append(seg)
+        for payload in wrapper_payloads(seg):
+            sub = command_segments(payload)
+            if sub is None:
+                return None
+            expanded.extend(sub)
+    segments = expanded
+
     for kind, text in pending:
         if kind == "code":
             sub = command_segments(text)
@@ -499,38 +559,118 @@ def command_segments(cmd_str):
     return segments
 
 
-def resolve_command(tokens):
-    """Resolve the command one segment actually invokes: skip leading VAR=val
-    assignments, unwrap `env`/`sudo`, wrapper shells (`bash -c ...`), and
-    `uv run [flags]`, and return (basename, argv) where argv[0] is the resolved
-    command token and argv[1:] its arguments. ("", []) when nothing resolves."""
+def _strip_prefixes(tokens):
+    """Normalize the head of a token list before recognizing what it
+    invokes: skip leading VAR=val assignments, expand a leading $VAR/${VAR}
+    token from this hook's own environment (a hook sees the command string
+    BEFORE shell expansion, so the literal `$WINGMAN_STATE ...` shape
+    CLAUDE.md instructs arrives as a `$WINGMAN_STATE` token, not as the uv
+    invocation it expands to), and unwrap `env`/`sudo`. This is the shared
+    normalization both resolve_command() and wrapper_payloads() need - so
+    `sudo bash -c ...`, `env FOO=1 bash -c ...`, and a leading `$VAR` shell
+    token are recognized identically by both - factored out once so they can
+    never drift apart. Returns [] (never raises) when a leading $VAR is unset
+    or fails to expand: a false negative only, never a wrong allow."""
     i = 0
     while i < len(tokens) and _ASSIGNMENT_RE.match(tokens[i]):
         i += 1
     tokens = tokens[i:]
     if not tokens:
-        return ("", [])
-    # A hook sees the command string BEFORE shell expansion, so the literal
-    # `$WINGMAN_STATE prefs-list ...` shape CLAUDE.md instructs arrives as a
-    # `$WINGMAN_STATE` token, not as the uv invocation it expands to. Expand a
-    # leading variable token from this hook's own environment - the same
-    # environment the tool's shell will expand it from - and resolve the
-    # result. An unset variable stays unresolved (("", [])): a false negative
-    # only, never a wrong allow.
+        return tokens
     m = _VAR_TOKEN_RE.match(tokens[0])
     if m:
         val = os.environ.get(m.group(1), "")
         if not val:
-            return ("", [])
+            return []
         try:
             expanded = shlex.split(val)
         except ValueError:
-            return ("", [])
-        return resolve_command(expanded + tokens[1:])
+            return []
+        return _strip_prefixes(expanded + tokens[1:])
     b = basename(tokens[0])
     if b in ("sudo", "env"):
-        return resolve_command(tokens[1:])
-    if b in ("bash", "sh", "zsh") and len(tokens) > 1:
+        return _strip_prefixes(tokens[1:])
+    return tokens
+
+
+def _payload_list(payload):
+    """A payload consisting SOLELY of one of _walk()'s inert substitution
+    placeholders is skipped: the real content of that span is already lifted
+    separately by _walk()'s own `pending` list, so re-lexing the placeholder
+    text would only add a noise segment (e.g. `eval "$(ssh-agent -s)"` must
+    keep producing exactly [['eval', '$(...)'], ['ssh-agent', '-s']], not a
+    third junk segment from re-lexing the literal text "$(...)")."""
+    return [] if payload in _INERT_PLACEHOLDERS else [payload]
+
+
+def wrapper_payloads(tokens):
+    """Return the shell-code payload strings the segment `tokens` will
+    execute: a wrapper shell's (`bash`/`sh`/`zsh`/`dash`/`ksh`) `-c` payload,
+    or `eval`'s arguments (bash joins them with single spaces and re-parses
+    the result, so this does too). Empty list for an ordinary segment, or
+    for the `bash script.sh` script-path form (no `-c` payload to lift).
+    `tokens` need not be pre-normalized - this applies the same prefix
+    normalization as resolve_command() (see _strip_prefixes()) internally,
+    so a caller can pass either a raw top-level segment or already-stripped
+    tokens with identical results."""
+    tokens = _strip_prefixes(tokens)
+    if not tokens:
+        return []
+    b = basename(tokens[0])
+    if b in _SHELL_WRAPPER_NAMES:
+        i = 1
+        n = len(tokens)
+        while i < n:
+            tok = tokens[i]
+            if tok == "--":
+                # Ends option parsing; the next token is a script path, not
+                # a payload.
+                return []
+            if len(tok) > 1 and tok[0] in "-+":
+                if tok.startswith("--"):
+                    # A long option (--norc, --login): skipped as one token.
+                    i += 1
+                    continue
+                letters = tok[1:]
+                if "c" in letters:
+                    if i + 1 >= n:
+                        return []
+                    return _payload_list(tokens[i + 1])
+                if "o" in letters:
+                    # -o pipefail / +o posix: the following value token is
+                    # also consumed.
+                    i += 2
+                    continue
+                i += 1
+                continue
+            # The first non-option token ends the scan: this is the
+            # `bash script.sh` script-path form, which has no -c payload.
+            return []
+        return []
+    if b == "eval" and len(tokens) > 1:
+        return _payload_list(" ".join(tokens[1:]))
+    return []
+
+
+def resolve_command(tokens):
+    """Resolve the command one segment actually invokes: skip leading VAR=val
+    assignments, unwrap `env`/`sudo`, wrapper shells (`bash -c ...`), and
+    `uv run [flags]`, and return (basename, argv) where argv[0] is the resolved
+    command token and argv[1:] its arguments. ("", []) when nothing resolves."""
+    tokens = _strip_prefixes(tokens)
+    if not tokens:
+        return ("", [])
+    b = basename(tokens[0])
+    if b in _SHELL_WRAPPER_NAMES and len(tokens) > 1:
+        # A `-c` payload resolves the segment to the shell ITSELF, never to
+        # a basename() of the payload string: the payload's real commands
+        # are lifted as separate segments by command_segments() already, so
+        # resolving the wrapper to its first payload command would
+        # double-report the same invocation to every consumer (see module
+        # docstring). The script-path form (no -c payload) keeps today's
+        # behavior: drop option tokens and resolve the first remaining one.
+        if wrapper_payloads(tokens):
+            return (b, tokens)
         rest = [t for t in tokens[1:] if not t.startswith("-")]
         if not rest:
             return ("", [])

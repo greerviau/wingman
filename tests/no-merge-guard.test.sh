@@ -122,6 +122,39 @@ out="$(run_hook "cd /tmp && gh pr merge 46")"
 assert_contains "crew, no grant: gh pr merge mid-chain is still denied" "$out" '"permissionDecision": "deny"'
 
 # ============================================================================
+# issue #168: bash -c / sh -c / eval wrapper payloads are lifted and caught
+# by this guard exactly like the unwrapped form - a wrapped merge/push must
+# not slip past a deny-style gate just because it is spelled through a
+# wrapper shell.
+# ============================================================================
+out="$(run_hook 'bash -c "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -c \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "sh -c 'gh pr merge 46'")"
+assert_contains "crew, no grant: sh -c 'gh pr merge 46' is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'eval "gh pr merge 46 --squash"')"
+assert_contains "crew, no grant: eval \"gh pr merge 46 --squash\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook "bash -c \"cd $CLONE && git push origin main\"")"
+assert_contains "crew, no grant: bash -c \"cd \$CLONE && git push origin main\" is denied" \
+  "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'bash -c "gh pr list"')"
+assert_eq "crew, no grant: bash -c \"gh pr list\" (unrelated) is allowed (no output)" "$out" ""
+
+out="$(run_hook 'bash -c "git push origin feature/foo"')"
+assert_eq "crew, no grant: bash -c \"git push origin feature/foo\" (non-default branch) is allowed (no output)" "$out" ""
+
+# A non-crew session (the pilot's own) with a wrapped merge is still allowed -
+# the guard's crew-scoping is untouched by the wrapper-lifting fix.
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+out="$(run_hook 'bash -c "gh pr merge 46"')"
+assert_eq "non-crew: bash -c \"gh pr merge 46\" is allowed (no output)" "$out" ""
+export WINGMAN_CREW_ID=dev1
+export WINGMAN_CREW_TYPE=developer
+
+# ============================================================================
 # issue #117: a `git push` whose enclosing command starts with `cd <path>`
 # must resolve the destination against the directory the git invocation
 # actually executes in - not the hook payload's own cwd, which may be an
@@ -300,6 +333,11 @@ unset WINGMAN_CREW_TYPE
 out="$(run_hook '$WINGMAN_STATE crew-set --id dev1 --allow-merge true')"
 assert_contains "a developer cannot grant itself merge autonomy" "$out" '"permissionDecision": "deny"'
 assert_contains "self-grant denial cites issue #46" "$out" "issue #46"
+
+# issue #168: the identical self-grant, but wrapped in bash -c - the lifted
+# segment must be caught exactly like the unwrapped form.
+out="$(run_hook "bash -c '\$WINGMAN_STATE crew-set --id \$WINGMAN_CREW_ID --allow-merge true'")"
+assert_contains "a wrapped self-grant (bash -c) is denied" "$out" '"permissionDecision": "deny"'
 
 # A plain (non-lead) crew member granting autonomy to some OTHER id - denied too.
 out="$(run_hook '$WINGMAN_STATE crew-set --id someone-else --allow-merge true')"
