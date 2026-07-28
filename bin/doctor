@@ -556,6 +556,25 @@ else
   fi
 fi
 
+# --- the settings file ------------------------------------------------------
+# A hand-edited config.local.toml is the one part of an install a pull cannot
+# keep correct, and a typo there fails quietly by nature: an unknown key simply
+# never applies, so a pilot who set `verbostiy = "detailed"` believes it is in
+# force and only ever sees the default. Doctor is where that surfaces. It is a
+# hard failure, not a warning: `bin/config --check` exits non-zero, and a
+# settings file wingman is silently ignoring is not a green install.
+echo
+wm_info "settings file"
+if [ ! -f "$WM_CONFIG_TOML" ]; then
+  wm_ok "no config.local.toml - every setting is on its default (see config.example.toml)"
+elif "$WM_BIN/config" --check >/dev/null 2>&1; then
+  wm_ok "config.local.toml is valid"
+else
+  "$WM_BIN/config" --check || true
+  wm_err "fix the settings file above (or delete it), then re-run: bin/doctor"
+  MISSING_REQUIRED=1
+fi
+
 echo
 if [ "$MISSING_REQUIRED" = 0 ]; then
   wm_ok "all required dependencies present"

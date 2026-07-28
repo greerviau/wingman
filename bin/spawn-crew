@@ -16,8 +16,10 @@
 # repo). Prints the crew id on success. All tmux calls are confined to this file and
 # lib/common.sh so a future session backend is a localized change.
 #
-# Model selection: an explicit --model always wins; otherwise $WM_MODEL (if set)
-# is the default for every spawn; with neither, the agent CLI's own default stands.
+# Model and effort selection, most specific first: an explicit --model/--effort
+# always wins; then config.local.toml's [models]/[effort] entry for this crew
+# type; then $WM_MODEL/$WM_EFFORT (where that file's own `default` also lands);
+# with none of them, the agent CLI's own default stands.
 #
 # --allow-merge (issue #46): grants THIS member merge autonomy for its own effort
 # from the moment it spawns - hooks/no-merge-guard.sh otherwise denies `gh pr
@@ -200,6 +202,16 @@ case "$ROLE_NAME" in
   *.local.md) ROLE_NAME="${ROLE_NAME%.local.md}" ;;
   *.md)       ROLE_NAME="${ROLE_NAME%.md}" ;;
 esac
+
+# The crew type in its category-qualified form ("software-development/developer",
+# and the full nested path for a sub-domain like
+# "scientific-research/biological-research/assay-designer") - byte-identical to
+# what `--list-types` prints, so it is also the key config.local.toml's
+# [models]/[effort] tables are written against. Derived from the RESOLVED
+# playbook rather than from $TYPE, so a bare --type and a qualified one, and a
+# .local.md override or not, all land on the same key.
+QUALIFIED_TYPE="$(dirname "$PLAYBOOK")"
+QUALIFIED_TYPE="${QUALIFIED_TYPE#"$WM_PLAYBOOKS"/}/$ROLE_NAME"
 INCLUDE_PR_DELIVERY=0
 case " developer ml-engineer data-engineer " in
   *" $ROLE_NAME "*) INCLUDE_PR_DELIVERY=1 ;;
@@ -245,10 +257,17 @@ if [ "$PERM_MODE" = bypassPermissions ] && \
   wm_die "Bypass-Permissions mode has not been accepted yet. Run 'bin/doctor -y', or accept it manually (see bin/doctor's own message), then retry this spawn."
 fi
 
-# Model for the crew session, alongside the other harness-specific knobs
-# (WM_AGENT, WM_PERMISSION_MODE). An explicit --model wins; else $WM_MODEL if
-# set; else no --model flag is passed and the agent CLI's own default applies.
-[ -n "$MODEL" ] || MODEL="${WM_MODEL:-}"
+# Model and reasoning effort for the crew session, alongside the other
+# harness-specific knobs (WM_AGENT, WM_PERMISSION_MODE). Most specific wins:
+#   --model/--effort on this call
+#     > config.local.toml's [models]/[effort] entry for THIS crew type
+#     > $WM_MODEL/$WM_EFFORT (which is also where the file's own `default`
+#       lands, exported by bin/lib/common.sh's settings layer)
+#     > no flag at all, and the agent CLI's own default applies.
+[ -n "$MODEL" ]  || MODEL="$(wm_config_for_type models "$QUALIFIED_TYPE")"
+[ -n "$MODEL" ]  || MODEL="${WM_MODEL:-}"
+[ -n "$EFFORT" ] || EFFORT="$(wm_config_for_type effort "$QUALIFIED_TYPE")"
+[ -n "$EFFORT" ] || EFFORT="${WM_EFFORT:-}"
 
 # Remote Control visibility, on by default (empty to disable), mirroring
 # WM_PERMISSION_MODE's convention exactly so there is only one pattern to learn.

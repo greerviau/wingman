@@ -12,9 +12,11 @@ WM_BIN="$(dirname "$WM_LIB")"
 WM_REPO="$(dirname "$WM_BIN")"
 export WM_REPO WM_BIN WM_LIB
 
-# Optional machine-local overrides (gitignored). See config.example.sh for the
-# knobs it can set (WM_MODEL, WM_ROOTS, WM_IGNORE, WM_PINS). Sourced here so
-# every bin/ script picks up these overrides, not just discover-projects.
+# Raw shell escape hatch (gitignored): arbitrary shell, so it can set any of the
+# WM_* variables - including the many undocumented tuning knobs the declarative
+# settings file below deliberately does not model. Sourced first and never
+# overwritten by that file, so anything set here wins; see config.example.sh.
+# For the everyday settings, prefer config.local.toml (config.example.toml).
 [ -f "$WM_REPO/config.local.sh" ] && . "$WM_REPO/config.local.sh"
 
 # Machine-local state home. Overridable for tests.
@@ -64,6 +66,56 @@ wm_ok()    { printf '%s\xe2\x9c\x93 %s%s\n' "$_WM_G" "$*" "$_WM_0"; }
 wm_warn()  { printf '%s! %s%s\n' "$_WM_Y" "$*" "$_WM_0" >&2; }
 wm_err()   { printf '%s\xe2\x9c\x97 %s%s\n' "$_WM_R" "$*" "$_WM_0" >&2; }
 wm_die()   { wm_err "$*"; exit 1; }
+
+# --- the settings file ------------------------------------------------------
+# config.local.toml: the declarative, gitignored settings file (templated by
+# config.example.toml, read by bin/lib/wm_config.py). Overridable so tests point
+# at a fixture instead of a developer's real file.
+WM_CONFIG_TOML="${WM_CONFIG_TOML:-$WM_REPO/config.local.toml}"
+export WM_CONFIG_TOML
+
+# Apply the file's environment-backed settings (models/effort defaults, project
+# discovery, harness knobs) to this process, so every bin/ script picks them up.
+# wm_config.py emits an `export` line only for a variable the environment does
+# not already carry - which is what places the file BELOW both an explicit
+# `WM_MODEL=x bin/spawn-crew ...` and anything config.local.sh set above.
+#
+# Skipped entirely when there is no file, so the common case costs no subprocess.
+# A file that exists but cannot be parsed is announced rather than silently
+# ignored: its own error goes to stderr from wm_config.py, and none of its
+# settings take effect - a typo must never quietly drop a setting the pilot
+# believes is in force.
+if [ -f "$WM_CONFIG_TOML" ]; then
+  if _wm_cfg_env="$($WM_UV "$WM_LIB/wm_config.py" env-exports)"; then
+    eval "$_wm_cfg_env"
+  else
+    wm_warn "$WM_CONFIG_TOML is unusable (see the error above), so NONE of its settings are in effect - check it with 'bin/config --check'"
+  fi
+  unset _wm_cfg_env
+fi
+
+# The [models]/[effort] value the settings file names for one crew type, or
+# empty when it names none (no file, no table, no matching key). A per-type
+# entry is consulted BEFORE $WM_MODEL/$WM_EFFORT on purpose: the file's own
+# `default` is exactly what those variables carry by the time this runs, so it
+# is specificity that decides, not which layer a value came from.
+# Usage: wm_config_for_type <models|effort> <category-qualified-crew-type>
+wm_config_for_type() {
+  [ -f "$WM_CONFIG_TOML" ] || return 0
+  $WM_UV "$WM_LIB/wm_config.py" for-type --table "$1" --type "$2" 2>/dev/null || return 0
+}
+
+# Print each entry of a WM_ROOTS/WM_IGNORE-style list on its own line.
+# Newline-separated when the value contains a newline - the shape the settings
+# file's TOML arrays export, where an entry may legitimately contain spaces -
+# else whitespace-separated, the shape config.local.sh has always used.
+_WM_NL=$'\n'
+wm_split_list() {
+  case "$1" in
+    *"$_WM_NL"*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' $1 ;;   # deliberately unquoted: word-split the legacy shape
+  esac
+}
 
 # --- platform ---------------------------------------------------------------
 wm_platform() {

@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# config - show every wingman setting as it is actually resolved right now, and
+# where each value came from.
+#
+# Precedence is layered (an explicit flag, then the WM_* environment, then
+# config.local.toml, then wingman's built-in default), which makes "why is this
+# spawn using that model?" an unanswerable question from the file alone. This
+# prints the answer: one line per setting, with its source named.
+#
+# Usage:
+#   config                 the resolved settings, with sources
+#   config --check         validate the settings file; exit 1 if anything is wrong
+#   config --path          print the settings file path
+#
+# Sources:
+#   env                    the environment already carried the WM_* variable.
+#                          Also where anything config.local.sh set has landed by
+#                          the time this runs - the two are indistinguishable
+#                          here by design, since sourcing that file IS setting
+#                          the environment.
+#   config.local.toml      the settings file supplied it.
+#   run                    (preferences only) answered during THIS wingman run
+#                          via /prefs, which outranks the settings file for the
+#                          rest of the run.
+#   unanswered             (preferences only) neither layer has an answer, so
+#                          wingman will ask - or, with no run id to scope an
+#                          answer to, the consumer applies its own conservative
+#                          default.
+#   default                neither layer set it; the consumer's built-in applies.
+# bash-3.2-safe.
+set -u
+. "$(dirname "$0")/lib/common.sh"
+
+# The preference vocabulary, so an out-of-vocabulary value in the settings file
+# is flagged here exactly as hooks/lib/pilot-prefs.sh flags it (that file is the
+# authority on both the required key set and each key's accepted values).
+. "$WM_REPO/hooks/lib/pilot-prefs.sh"
+
+MODE=show
+for arg in "$@"; do
+  case "$arg" in
+    --check)   MODE=check ;;
+    --path)    MODE=path ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *)         wm_die "unknown flag: $arg" ;;
+  esac
+done
+
+WM_CONFIG="$WM_UV $WM_LIB/wm_config.py"
+
+case "$MODE" in
+  path) $WM_CONFIG path; exit 0 ;;
+esac
+
+# --- validation --------------------------------------------------------------
+# Structural problems (unknown table/key, wrong type, a per-type entry naming a
+# crew type with no playbook) come from wm_config.py, which is where the
+# non-pref schema lives. Preference-value problems are checked here, against the
+# vocabulary sourced above.
+check_problems() {
+  PROBLEMS=""
+  if [ ! -f "$WM_CONFIG_TOML" ]; then
+    return 0
+  fi
+  _cp_structural="$($WM_CONFIG check --known-types "$(wm_crew_types | tr '\n' ',')" 2>&1)"
+  [ -n "$_cp_structural" ] && PROBLEMS="$_cp_structural
+"
+  # An unknown [prefs] key is a typo that would otherwise sit inert forever -
+  # wingman would keep asking the real key and never mention the dead one.
+  _cp_tab="$(printf '\t')"
+  _cp_prefs="$($WM_CONFIG prefs 2>/dev/null)"
+  while IFS= read -r _cp_line; do
+    [ -n "$_cp_line" ] || continue
+    _cp_k="${_cp_line%%"$_cp_tab"*}"
+    _cp_v="${_cp_line#*"$_cp_tab"}"
+    case " $WM_PREF_KEYS " in
+      *" $_cp_k "*)
+        if ! wm_pref_value_ok "$_cp_k" "$_cp_v"; then
+          PROBLEMS="${PROBLEMS}prefs.$_cp_k is '$_cp_v'; accepted values are $(wm_pref_values "$_cp_k")
+"
+        fi
+        ;;
+      *)
+        PROBLEMS="${PROBLEMS}unknown preference prefs.$_cp_k (known: $(printf '%s' "$WM_PREF_KEYS" | tr ' ' ','))
+"
+        ;;
+    esac
+  done <<EOF
+$_cp_prefs
+EOF
+  [ -z "$PROBLEMS" ]
+}
+
+if [ "$MODE" = check ]; then
+  if [ ! -f "$WM_CONFIG_TOML" ]; then
+    wm_ok "no settings file at $WM_CONFIG_TOML - every setting is on its default"
+    exit 0
+  fi
+  if check_problems; then
+    wm_ok "$WM_CONFIG_TOML is valid"
+    exit 0
+  fi
+  wm_err "$WM_CONFIG_TOML has problems:"
+  printf '%s' "$PROBLEMS" | while IFS= read -r line; do
+    [ -n "$line" ] && printf '  - %s\n' "$line"
+  done
+  exit 1
+fi
+
+# --- the resolved view -------------------------------------------------------
+row() { printf '  %-38s %-14s %s\n' "$1" "$2" "$3"; }
+
+if [ -f "$WM_CONFIG_TOML" ]; then
+  wm_info "settings file: $WM_CONFIG_TOML"
+else
+  wm_info "settings file: $WM_CONFIG_TOML (absent - copy config.example.toml to create it)"
+fi
+echo
+
+# Preferences resolve through the state engine, not wm_config.py: the run-scoped
+# answer store lives in ~/.wingman and only wm-state.py reads it. Without a run
+# id there is no run layer to consult, so only the settings file can answer.
+echo "onboarding preferences"
+_tab="$(printf '\t')"
+if [ -n "${WINGMAN_RUN_ID:-}" ]; then
+  PREF_ROWS="$(wm_state prefs-list --run-id "$WINGMAN_RUN_ID" --with-source 2>/dev/null)"
+else
+  PREF_ROWS="$($WM_CONFIG prefs 2>/dev/null | sed "s/\$/${_tab}config.local.toml/")"
+  row "(no WINGMAN_RUN_ID)" "" "not launched via bin/wingman, so no run-scoped answers"
+fi
+for k in $WM_PREF_KEYS; do
+  line="$(printf '%s\n' "$PREF_ROWS" | awk -F"$_tab" -v key="$k" '$1==key {print $2 "\t" $3; exit}')"
+  if [ -z "$line" ]; then
+    row "prefs.$k" "" "unanswered ($(wm_pref_values "$k"))"
+    continue
+  fi
+  v="${line%%"$_tab"*}"; s="${line#*"$_tab"}"
+  if [ "$s" = "config.local.toml" ] && ! wm_pref_value_ok "$k" "$v"; then
+    row "prefs.$k" "$v" "$s - INVALID, accepted: $(wm_pref_values "$k")"
+  else
+    row "prefs.$k" "$v" "$s"
+  fi
+done
+echo
+
+echo "settings"
+# Split on tabs by parameter expansion, not `IFS=<tab> read`: tab is an IFS
+# whitespace character, so read would collapse the two adjacent tabs of an
+# empty-valued row and shift the source into the value column.
+$WM_CONFIG show 2>/dev/null | while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  name="${line%%"$_tab"*}"
+  rest="${line#*"$_tab"}"
+  value="${rest%%"$_tab"*}"
+  source="${rest#*"$_tab"}"
+  [ -n "$value" ] || value="(unset)"
+  row "$name" "$value" "$source"
+done
+
+if [ -f "$WM_CONFIG_TOML" ] && ! check_problems >/dev/null 2>&1; then
+  echo
+  wm_warn "this settings file has problems - run 'bin/config --check' for the list"
+fi
