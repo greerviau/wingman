@@ -23,25 +23,26 @@ mkdir -p "$WS/repoA"
 git -C "$WS/repoA" init -q
 printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$WS/stub.sh"; chmod +x "$WS/stub.sh"
 
-# WM_ROOTS points global-scope discovery at this unrelated workspace (so its
-# workspace root, not the wingman repo, becomes cwd for the global-scope
-# case). WM_PINS pins the wingman repo itself (TEST_REPO - this very checkout,
-# since $SPAWN is invoked from it and bin/lib/common.sh derives WM_REPO from
-# the invoked script's own location) into the discovered set under a
-# collision-free name, so the global-scope case genuinely exercises "wingman
-# repo is among the discovered/added repos" rather than trivially never
-# encountering it. Guard against clobbering a real config.local.sh.
-CFG="$TEST_REPO/config.local.sh"
-if [ -e "$CFG" ]; then echo "SKIP: $CFG exists; not overwriting"; exit 0; fi
-{
-  printf 'WM_ROOTS=%q\n' "$WS"
-  printf 'WM_PINS=%q\n' "wingman-pinned|$TEST_REPO"
-} > "$CFG"
-
 export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=1 WM_READY_POLL=0 \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
-wm_on_exit "rm -f '$CFG'"
+# [projects].roots points global-scope discovery at this unrelated workspace (so
+# its workspace root, not the wingman repo, becomes cwd for the global-scope
+# case). [projects.pins] pins the wingman repo itself (TEST_REPO - this very
+# checkout, since $SPAWN is invoked from it and bin/lib/common.sh derives WM_REPO
+# from the invoked script's own location) into the discovered set under a
+# collision-free name, so the global-scope case genuinely exercises "wingman repo
+# is among the discovered/added repos" rather than trivially never encountering
+# it. Written to this test's own isolated settings file (test_new_home creates
+# the path), not the repo root's - so the suite neither writes into the checkout
+# nor skips itself when a developer keeps a settings file of their own.
+wm_write_config <<EOF
+[projects]
+roots = ["$WS"]
+
+[projects.pins]
+wingman-pinned = "$TEST_REPO"
+EOF
 wm_trust_repo "$TEST_REPO"
 wm_trust_repo "$WS/repoA"
 wm_trust_repo "$WS"

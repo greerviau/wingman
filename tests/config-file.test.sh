@@ -326,6 +326,47 @@ assert_false "a wrong-typed setting fails --check" "'$CONFIG' --check"
 assert_contains "the type error is named" \
   "$("$CONFIG" --check 2>&1)" "projects.roots must be an array of strings"
 
+# --- [env]: the raw passthrough for the unmodeled knobs ----------------------
+# Wingman has ~100 WM_* variables with no typed home. Carrying them here is what
+# makes config.local.toml the ONLY config file rather than one of two.
+wm_write_config <<'EOF'
+[env]
+WM_STALL_IDLE = "600"
+WM_WATCH_INTERVAL = "30"
+EOF
+raw="$(unset WM_STALL_IDLE WM_WATCH_INTERVAL; wm_cfg env-exports)"
+assert_contains "[env] exports an unmodeled knob verbatim" "$raw" "WM_STALL_IDLE=600"
+assert_contains "[env] exports every entry" "$raw" "WM_WATCH_INTERVAL=30"
+assert_contains "[env] entries are recorded as applied" "$raw" "WM_STALL_IDLE"
+assert_true "[env] passes --check" "'$CONFIG' --check"
+assert_contains "bin/config shows an [env] entry" "$("$CONFIG" 2>&1)" "env.WM_STALL_IDLE"
+
+# The environment still outranks it, like every other setting.
+overridden="$(WM_STALL_IDLE=7 wm_cfg env-exports)"
+assert_not_contains "an [env] entry does not overwrite the environment" \
+  "$overridden" "WM_STALL_IDLE=600"
+
+# A knob a typed setting already owns is refused, not silently raced: both would
+# write the same variable and the reader could not say which won.
+wm_write_config <<'EOF'
+[env]
+WM_MODEL = "sneaky"
+EOF
+assert_false "an [env] key a typed setting owns fails --check" "'$CONFIG' --check"
+assert_contains "the error names the setting that owns it" \
+  "$("$CONFIG" --check 2>&1)" "models.default"
+
+# [env] is wingman's own knobs, not a general environment injector: a config file
+# that can set PATH is a footgun, not a feature.
+wm_write_config <<'EOF'
+[env]
+PATH = "/tmp/evil"
+EOF
+assert_false "a non-WM_ [env] key fails --check" "'$CONFIG' --check"
+assert_contains "the error says why" "$("$CONFIG" --check 2>&1)" "never arbitrary environment variables"
+assert_not_contains "a refused [env] key is never exported" \
+  "$(wm_cfg env-exports 2>/dev/null)" "PATH="
+
 # --- config.example.toml is not allowed to drift from the schema -------------
 # The template ships every setting commented out, so nothing in it is ever
 # exercised by simply having it on disk - a key renamed in the schema, or an

@@ -7,13 +7,13 @@
 # always has: it asks the onboarding-preference questions once per run, and
 # every spawn falls through to the agent CLI's own model.
 #
+# This is wingman's only configuration file.
+#
 # Precedence, most specific first:
 #   an explicit flag (--model, --effort, ...)
 #     > the matching $WM_* environment variable
 #     > this file
 #     > wingman's built-in default
-# config.local.sh is a raw shell escape hatch sourced before this file is
-# applied, so anything it sets behaves exactly like an environment variable.
 # `bin/config` prints every resolved setting with the source it came from.
 #
 # Validate the file with `bin/doctor` (or `bin/config --check`).
@@ -102,3 +102,25 @@
 
 # The tmux session that hosts crew windows.
 # tmux_session = "wingman"
+
+
+# --- Everything else ---------------------------------------------------------
+# Wingman has around a hundred more WM_* variables - internal timings,
+# thresholds, and the pane-detector regexes - each documented at its point of
+# use. They are for the rare case of tuning wingman's own internals, so they get
+# no typed home above; set one here and it is exported verbatim.
+#
+# Values are strings. Only WM_-prefixed names are accepted, and a name one of the
+# settings above already owns is rejected (set `models.default`, not
+# `env.WM_MODEL`) - `bin/config --check` says which. Grep the source for '${WM_'
+# to find them all.
+[env]
+# Seconds between watcher polls.
+# WM_WATCH_INTERVAL = "5"
+
+# Seconds an apparently-idle crew member goes unheard before the watcher nudges
+# it, and then flips it to `stalled`.
+# WM_STALL_IDLE = "180"
+
+# Seconds between a crew window opening and its first message being delivered.
+# WM_SPAWN_DELAY = "2"

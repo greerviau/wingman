@@ -34,6 +34,24 @@ jobs:
           # -e SC1091: do not fail on unfollowable `source` of sibling libs.
           shellcheck -S error -e SC1091 "${files[@]}"
 
+      - name: Lint sourced bash libraries (errors only)
+        run: |
+          # A library meant to be sourced carries no shebang, so the discovery
+          # above cannot see it - which silently exempted bin/lib/common.sh, the
+          # most widely shared file in the repo, and let a malformed shellcheck
+          # directive in it go unnoticed (a parse error there stops the linter
+          # analyzing everything after it). Linted explicitly, with the dialect
+          # stated since there is no shebang to infer it from.
+          mapfile -t libs < <(
+            for f in bin/lib/*.sh hooks/lib/*.sh; do
+              [ -e "$f" ] || continue
+              head -1 "$f" | grep -q '^#!' || printf '%s\n' "$f"
+            done | sort -u
+          )
+          printf 'Linting %d sourced lib(s):\n' "${#libs[@]}"
+          printf '  %s\n' "${libs[@]}"
+          shellcheck -S error -e SC1091 -s bash "${libs[@]}"
+
   test:
     name: test
     runs-on: ubuntu-latest

@@ -5,7 +5,7 @@ Part of the [architecture reference](architecture.md); for day-to-day use see th
 
 ## The settings file - `config.local.toml`
 
-`config.local.toml` at the repo root is where a pilot persists settings across runs.
+`config.local.toml` at the repo root is wingman's **only** configuration file, and where a pilot persists settings across runs.
 It is gitignored, so a `git pull` updates the shipped defaults without touching it; [`config.example.toml`](../config.example.toml) is the documented template (`cp config.example.toml config.local.toml`).
 Everything in it is optional - with no file at all, wingman behaves exactly as it does with no configuration: it asks the onboarding-preference questions once per run, and every spawn falls through to the agent CLI's own model.
 
@@ -19,7 +19,7 @@ Most specific wins:
 |---|---|
 | an explicit flag | `--model`, `--effort`, … on one spawn |
 | a per-crew-type entry | `[models].developer` - more specific than any global default |
-| the `$WM_*` environment | including anything `config.local.sh` set, since sourcing it *is* setting the environment |
+| the `$WM_*` environment | an explicitly-set variable always outranks the file |
 | the settings file's own default | `[models].default`, which is exported *as* `$WM_MODEL` |
 | wingman's built-in default | or the agent CLI's own |
 
@@ -34,13 +34,24 @@ The one place this is not a straight top-to-bottom list is a per-type entry vers
 - **`[models]` / `[effort]`** - `default` for every spawn, plus a per-crew-type entry under the bare role name (`developer`) or the category-qualified one (`software-development/developer`).
 - **`[projects]`** - `roots`, `ignore`, and a `[projects.pins]` name→path table for `bin/discover-projects`. `~` and `$VAR` are expanded.
 - **`[harness]`** - `agent`, `permission_mode`, `remote_control`, `tmux_session`: the agent-CLI-specific knobs, previously environment-only.
+- **`[env]`** - a raw `WM_*` passthrough for everything above does not model (see below).
 
-### `config.local.sh`
+### `[env]`: the rest of the knobs
 
-`config.local.sh` remains as the raw shell escape hatch, sourced before the settings file is applied.
-It is arbitrary shell, so it reaches the many undocumented `WM_*` tuning knobs (`WM_STALL_IDLE`, `WM_SUBMIT_DELAY`, the detector regexes, …) that the declarative file deliberately does not model.
-Anything it sets behaves exactly like an environment variable and therefore wins over `config.local.toml`.
-For the everyday settings, prefer the TOML file - it is validated, and `bin/config` can explain it.
+Wingman has around a hundred `WM_*` variables beyond the typed settings - internal timings, thresholds, the pane-detector regexes - each documented at its point of use rather than in a central list. They exist for the rare case of tuning wingman's own internals, which is not worth a schema entry each, so `[env]` carries them verbatim:
+
+```toml
+[env]
+WM_WATCH_INTERVAL = "5"
+WM_STALL_IDLE = "180"
+```
+
+Two rules, both enforced by `bin/config --check`:
+
+- **`WM_`-prefixed names only.** This is wingman's configuration, not a general environment injector; a config file that can set `PATH` or `LD_PRELOAD` is a footgun rather than a feature.
+- **No name a typed setting already owns.** `[env].WM_MODEL` and `[models].default` write the same variable, so setting both would leave the reader unable to say which is in force. The error names the setting to use instead.
+
+This is what makes `config.local.toml` the only configuration file: needing an unmodeled knob has never been a reason to reach for a second file in a second format. To find one, grep the source for `${WM_`.
 
 ## The wingman launcher
 
