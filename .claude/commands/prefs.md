@@ -11,7 +11,11 @@ allowed-tools: AskUserQuestion, Bash(uv run --no-project --quiet bin/lib/wm-stat
    `pr_comments`. These are the same keys `WM_PREF_KEYS` lists in
    `hooks/lib/pilot-prefs.sh`, which is what the guard enforces - if the two
    ever disagree, that file is authoritative and this one is stale.
-3. If nothing is missing, do nothing.
+   Its output already includes anything the settings file's `[prefs]` table
+   answers (`config.local.toml`), which is exactly why it is what you diff
+   against: those keys are answered and must not be asked again.
+3. If nothing is missing, do nothing. A fully-configured settings file makes
+   this the normal outcome.
 4. Otherwise, say "Before I start working, I need to ask you some preference
    questions:" and call `AskUserQuestion` **once**, batching only the
    still-missing questions into that single call - never split across
@@ -47,3 +51,8 @@ allowed-tools: AskUserQuestion, Bash(uv run --no-project --quiet bin/lib/wm-stat
 
    Then cache each answer:
    `uv run --no-project --quiet bin/lib/wm-state.py pref-set --run-id "$WINGMAN_RUN_ID" --key <key> --value <value>`
+
+   An answer cached this way outranks the settings file for the rest of the
+   run, so it is also how the pilot changes their mind mid-run. Never write to
+   `config.local.toml` yourself - it is the pilot's file. If they want an answer
+   to persist across runs, point them at it and let them edit it.
