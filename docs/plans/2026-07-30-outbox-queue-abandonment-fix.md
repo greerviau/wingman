@@ -1,21 +1,29 @@
 # Fix: queued crew messages are silently abandoned when the target member ends
 
-**Date:** 2026-07-30 (revised after five review rounds)
+**Date:** 2026-07-30 (revised after six review rounds)
 **Issue:** [greerviau/wingman#169](https://github.com/greerviau/wingman/issues/169)
 **Mode:** plan (no developer handoff yet - awaiting disposition)
-**Revision note:** reviewed five times
+**Revision note:** reviewed six times
 (`docs/analysis/2026-07-30-review-outbox-queue-abandonment-plan.md`,
 `.../review-round2-...md`, `.../review-round3-...md`, `.../review-round4-...md`,
-`.../review-round5-...md`). Round 4's four must-fix items (the sweep trigger,
-the parent-chain keying, the notice-as-fire-condition, the `set -u` crash) are
-now confirmed closed - three by direct execution, not reading. Round 5 found
-two further must-fix items (both spec-level, both make phase 1 smaller rather
-than larger) and four should-fix items, all addressed below. Round 5's own
-assessment: this plan does not need a sixth full adversarial round - the
-remaining items are localized specification edits, and the fact that nothing
-outside the two mechanisms round 4 scoped this round to (the sweep trigger,
-the notice channel) regressed is itself evidence of convergence. The
-architecture has been independently confirmed correct across all five rounds.
+`.../review-round5-...md`, `.../review-round6-...md`). Round 5's own six
+items (two must-fix, four should-fix) are all confirmed closed by round 6 -
+four of them by direct execution. Round 5 also predicted the plan would not
+need a further full adversarial round; round 6 found two more must-fix items
+anyway, both narrowly confined to the *same* mechanism round 5's own M-1 fix
+touched (the terminal predicate governing the sender check, the scan's target
+test, and the parent-chain walk) - stated plainly here rather than silently
+revising away round 5's prediction, since round 6's own findings show the
+prediction was reasonable but not quite right: round 5 broadened the walk's
+predicate correctly but made it identical to the delivery predicate rather
+than appropriately similar, and round 6 supplied the one data source (a tmux
+window snapshot) the scan's own predicate needed but was never given. Round
+6's own assessment concurs with round 5's: no seventh full round is
+warranted, both findings are one-clause specification edits, and every other
+mechanism this plan has hardened across six rounds - the claim protocol,
+pointer stability, `crew-standdown`, `crew-prune`'s ordering, the sidecars,
+the `#214` prose - held with no regression. The architecture has been
+independently confirmed correct across all six rounds.
 
 ## Problem
 
@@ -161,14 +169,14 @@ keeps the "no `bin/lib/wm-state.py` changes required" property intact, since
 
 **Round 5, finding S-1: where the scan sits in the loop was unspecified, and
 `fire()` itself exits the process.** `fire()` ends in `exit 0`
-(`bin/watch-fleet:803`), so anything placed *after* the `needs-attention`
+(`bin/watch-fleet:802`), so anything placed *after* the `needs-attention`
 check never runs on a poll that fires - and the poll that detects a death is,
 by construction, exactly such a poll. Appending the scan next to the
 `NOTICEFILE` change (the natural place, since that block is also being
 edited) would defer every death-path sweep to the *next* armed cycle, which
 itself depends on the owning session being woken and taking a turn - the same
 shape of gap N-1 was raised to close, one placement decision later. Also,
-placement inside the `wm_tmux has-session` gate (`:844`) would go dead
+placement inside the `wm_tmux has-session` gate (`:838`) would go dead
 exactly when the whole tmux server is unavailable. **Fixed:** the scan sits
 **near the top of the loop body, immediately after the beacon touch, before
 the `wm_tmux has-session` block, and unconditionally on `$OWNER`** - so it
@@ -192,17 +200,53 @@ for _od in "$WM_HOME"/outbox/*/; do
 done
 if [ "$_any_pending" = 1 ]; then
   if _roster_json="$(wm_state crew-list --all --json 2>/dev/null)"; then
+    _live_windows_csv="$(wm_tmux_windows_csv)"   # one tmux snapshot per poll,
+                                                  # taken alongside the roster read
     for _od in "$WM_HOME"/outbox/*/; do
       [ -d "$_od" ] || continue
       _oid="$(basename "$_od")"
-      # ... derive _ostatus and window-liveness for $_oid from $_roster_json ...
-      # ... apply the unified terminal predicate (see below) and sweep if terminal ...
+      # ... derive _ostatus for $_oid from $_roster_json; derive window
+      # liveness by matching that record's own `window` field against
+      # $_live_windows_csv (never from $_roster_json, which carries the
+      # window NAME, not its live/dead state) ...
+      # ... apply the DELIVERY-reachability predicate (see below) and sweep
+      # if terminal ...
     done
   fi
   # a failed roster read skips the scan for this poll - fail closed, never
   # dangerous - rather than treating "couldn't tell" as "terminal"
 fi
 ```
+
+**Round 6, finding 1: the scan's own pseudocode named a data source
+(`$_roster_json`) that cannot answer the "is this member's window live"
+question, which is one whole limb of the terminal predicate it needs to
+apply.** A roster record carries the tmux window's *name*, never its
+live/dead state, and `LIVE_STATES`
+(`bin/lib/wm-state.py:127`, `("working", "blocked", "review", "stalled")`)
+excludes `done` - so `cmd_reconcile` never flips a `done` member to `died`
+when its window disappears, meaning a `done` member's roster status reads
+identically whether its window is alive or gone. The only source of window
+liveness is a tmux query, and the limb is load-bearing in two places that are
+both reachable in the ordinary course of an effort ending: the scan's own
+target test (a `done` member with a live pane must not be swept - the
+`done`-loop still owns it - while one whose window died must be) and step 2's
+sender check (queueing to a `done` sender is fine while its pane is live, not
+once its window is gone). Left unspecified, the path of least resistance -
+dropping the limb because the named source does not contain it - sweeps a
+live `done` member's outbox and tells its sender the message was abandoned
+while the target was alive and the `done`-loop would have delivered it: the
+exact fail-dangerous direction the `crew-list --all --json` fix (S-3) was
+raised to close, re-entered through a different door. **Fixed:** the scan
+takes one `wm_tmux_windows_csv` snapshot per poll, alongside the single
+roster read (shown in the pseudocode above), and derives each pending id's
+window liveness by matching its record's own `window` field against that
+snapshot - never by inferring it from status. The tmux-dead policy is stated
+explicitly rather than fallen into: an unavailable tmux server yields an
+empty window set, so every `done` member reads as having no live window in
+that scenario - a defensible, deliberately-chosen policy (no tmux server
+means no live panes, by definition), not an accidental side effect of the
+data source being unavailable.
 
 **Related limitation, stated rather than left as an unqualified claim (round
 5, should-fix, part of S-1): the scan inherits a pre-existing blind spot and
@@ -220,6 +264,15 @@ spot is out of scope here (it is a separate, already-documented defect); this
 plan's own "robust backstop" language for the scan is qualified with this
 inherited limitation rather than stated unconditionally.
 
+**Round 6 refines one clause of the disclosure just above:** the
+`stood-down`/`died` limbs of the predicate are frozen exactly as stated in a
+whole-tmux-server-death scenario (their status never updates without a
+live-tmux reconcile), but the `done` limb is **not** blind in that
+scenario - per the tmux-dead policy just stated, an empty window set is
+itself an unambiguous answer for that one limb, so every `done` member
+correctly reads as terminal (no live window is even possible) rather than
+being silently skipped along with the frozen `stood-down`/`died` members.
+
 **Nice-to-have (round 5): a fork-free emptiness test**, since this scan is
 now a hot path (an `outbox/<id>/` directory persists indefinitely once
 created - `sent-`/durable-copy entries are never removed, so a directory with
@@ -229,29 +282,48 @@ already reflects this: a plain shell glob loop with a `case` match, zero
 subprocess forks, rather than `ls ... | grep -v '^sent-'`'s two forks per
 directory per poll per watcher.
 
-### The unified reachability predicate (round 5, finding M-1 - collapses two definitions that had drifted apart back into one)
+### Two related predicates, deliberately not one (round 5's finding M-1 unified them; round 6's finding 2 found unifying them all the way was itself wrong)
 
-The plan previously stated two different definitions of "this member cannot
-receive anything": the sweep's own sender-liveness check (missing record,
-`stood-down`, `died`, or `done` with no live window) and the parent-chain
-walk's own terminal test (`status in (stood-down, died)` only - narrower,
-missing both the "record missing" and the "`done`, no window" cases). Round 5
-reproduced both narrow gaps re-creating exactly N-2's original failure shape:
-a parent whose record is absent (reachable through a supported
-`crew-prune --owner ""`/`--older-than-days` invocation, which keep an
-out-of-scope descendant's own record while removing the ancestor's) or a
-parent that is `done` (never re-adopted away - the re-adopt pass only fires
-from `died`/`stood-down` - and, if wingman itself is not currently running to
-reap it, can persist indefinitely) both resolved the walk to the unreachable
-dead id instead of continuing past it.
+The plan previously stated two different, independently-drifting definitions
+of "this member cannot receive anything": the sweep's own sender-liveness
+check (missing record, `stood-down`, `died`, or `done` with no live window)
+and the parent-chain walk's own terminal test (`status in (stood-down,
+died)` only). Round 5 found the walk's version too narrow and fixed it by
+making the two *identical*. Round 6 found that overshot: **the sender/target
+check and the notice-routing walk are genuinely different questions, and
+collapsing them into one predicate reintroduces round 5's own failure mode
+in the *more common* shape of the `done` case.**
 
-**Fixed: one predicate, named once, used in both places.** A member (sender
-or ancestor) is **terminal** iff its roster record is missing, or its status
-is `stood-down`/`died`, or its status is `done` with no currently-live
-window. Both the sweep's step-2 sender check and `resolve_notice_owner`'s
-walk-up test membership in this exact predicate - stated as one shared
-definition specifically so the two cannot drift apart again, which is what
-produced this finding in the first place.
+- **The delivery-reachability predicate** answers "can this member still be
+  delivered to?" - used by the sweep's step 2 (is a known sender still
+  reachable) and the scan's own target test (is this member's outbox still
+  serviced by ordinary redelivery, or should it be swept). A member is
+  **delivery-terminal** iff its roster record is missing, its status is
+  `stood-down`/`died`, or its status is `done` **with no currently-live
+  window** - the window limb matters here because a `done` member with a
+  live pane is still exactly what the `done`-loop exists to service.
+- **The notice-routing predicate**, used only by `resolve_notice_owner`'s
+  walk-up, answers a different question: "will this member's own watcher
+  ever surface a notice?" A lead's own watcher is armed by that lead itself
+  (`playbooks/common/lead.md:42`); a member that has reported `done` has
+  finished its engagement and arms nothing further, and wingman reaps it to
+  `stood-down` - killing its window - in the same turn it observes the
+  `done`. So a `done` parent's watcher will not read a notice file
+  *regardless of whether its window happens to still be alive at the instant
+  the walk runs* - reproduced directly: a chain where the parent is `done`
+  with a **live** window resolved to that parent under the single, window-
+  qualified predicate, exactly reproducing round 5's original failure (a
+  notice written to a file no live watcher reads) - and in the *more common*
+  `done` shape, since a member that reports `done` ordinarily keeps its
+  window until reaped; "`done` with no live window" is the rarer variant
+  where the window died first. A member is **notice-routing-terminal** iff
+  its roster record is missing, or its status is `stood-down`, `died`, **or
+  `done`** - full stop, no window qualifier at all.
+
+Both predicates share the same `stood-down`/`died`/missing-record core;
+they differ in exactly one clause (whether `done` additionally requires a
+dead window), stated once each, here, so a future change to one is never
+mistaken for a change to the other:
 
 ```
 resolve_notice_owner(id):
@@ -260,17 +332,19 @@ resolve_notice_owner(id):
     rec = crew_get(id)
     if rec missing or rec.parent == "": return ""      # floor: wingman
     parent = rec.parent
-    if is_terminal(parent):     # the unified predicate, above
+    if is_notice_routing_terminal(parent):   # missing/stood-down/died/done - no window limb
       id = parent; guard += 1; continue
-    return parent               # first non-terminal ancestor
-  return ""                      # safety fallback
+    return parent                             # first non-terminal ancestor
+  return ""                                    # safety fallback
 ```
 
 The guard cap, the wingman floor, and the reasoning for why wingman is the
 correct floor (the one process guaranteed to outlive a tmux-server loss) are
-all confirmed correct by round 5's own 2-cycle reproduction (`A.parent=B`,
-`B.parent=A`, both terminal - the loop terminates on the cap, returns `""`, no
-crash, no infinite loop) and carried forward unchanged.
+all confirmed correct by round 5's own 2-cycle reproduction and carried
+forward unchanged - the walk's behavior for every shape already covered is
+unaffected by broadening its own predicate; only the `done`-with-live-window
+shape changes, from wrongly resolving to the dead-end parent to correctly
+flooring at wingman.
 
 ### `wm_outbox_sweep_abandoned <id> <reason> <notify-mode>` (piece 2)
 
@@ -278,7 +352,8 @@ For every file under `outbox/<id>/` that is not `sent-`:
 
 1. Look up the `outbox-meta/<id>/` sidecar via `wm_outbox_basename`. Sender is
    the sidecar's content (empty = wingman), or `unknown` (no sidecar).
-2. Test the sender against the **unified terminal predicate** (above). If
+2. Test the sender against the **delivery-reachability predicate** (above -
+   missing record, `stood-down`/`died`, or `done` with no live window). If
    terminal, treat as unreachable and route through `<notify-mode>` (below)
    instead of that sender's own outbox.
 3. **Round 5, finding S-2: the payload move is now the sweep's own atomic
@@ -347,8 +422,26 @@ For every file under `outbox/<id>/` that is not `sent-`:
      `<notify-mode>` - `stdout` (`bin/crew-standdown`/`bin/crew-prune`) or
      `wake` (the generic scan, redesigned below for the notice channel's own
      three fixes).
-7. Remove the now-empty original file and sidecar (for the winning process
-   only); `rmdir` if empty.
+7. Remove the sidecar (for the winning process only - the payload itself was
+   already claimed away by step 3's `mv`, so there is no separate "original
+   file" left to delete here); `rmdir` `outbox/<id>/`/`outbox-meta/<id>/` if
+   now empty. **Round 6, nice-to-have 2:** an earlier phrasing of this step
+   ("remove the now-empty original file and sidecar") read as though a
+   payload copy still remained after step 3's move, which invites
+   implementing step 3 as a `cp` with the delete deferred here - that would
+   destroy the very "the `mv`'s exit status is the claim" property S-2 (above)
+   depends on. Step 3's `mv` is the only place the payload ever moves; step 7
+   is sidecar-plus-`rmdir` only.
+
+**Round 6, mitigation stated for fairness (applies to both must-fix findings
+in "Two related predicates," above):** in every reachable failure shape this
+round or round 5 found, the durable payload (`outbox-abandoned/<id>/<stem>`)
+and the `outbox-abandoned.log` line are written *before* any notice is
+composed (step 3, then step 4/5) - so what was at risk in each of those
+findings was the *notification* reaching a live watcher, never the message or
+its audit trail. The same bar applied to round 4's original M-1/M-2/M-3
+findings (a lost notification is still must-fix, not a cosmetic gap) applies
+here too, for consistency.
 
 ### The `wake`-mode channel
 
@@ -358,7 +451,24 @@ exits are `[ -z "$OWNER" ]`-gated, so a lead's cycle reaches the
 `needs-attention` check unconditionally on every poll; `fire()` exits by
 construction, so no double-surfacing is possible when both a genuine
 attention event and a pending notice coincide) and found one defect in the
-mechanism itself:
+mechanism itself.
+
+`NOTICEFILE` is computed in **both** branches of `bin/watch-fleet`'s existing
+`if [ -n "$OWNER" ]; then ... else ... fi` block that already defines
+`PIDFILE`/`WAKEFILE`/etc. for exactly this reason (round 4's N-4 fix,
+avoiding a `set -u` crash in wingman's own scope): the bare name
+`pending-notices` for wingman (`OWNER=""`), `pending-notices-$_key` for a
+lead, matching the file's own existing `_key="$(printf '%s' "$OWNER" |
+tr -c 'A-Za-z0-9._-' '_')"` sanitization exactly. **Round 6, nice-to-have 3:**
+the writer side - `wm_outbox_sweep_abandoned`'s `wake` mode, deriving the
+filename from `resolve_notice_owner`'s resolved id rather than from
+`$OWNER` - must apply the **identical** `tr -c 'A-Za-z0-9._-' '_'` transform
+to that resolved id before use, not merely reuse it unfiltered: an explicit
+`--id` (as opposed to a generated one) is passed through `bin/spawn-crew`
+unslugified, so a resolved owner id containing a character outside
+`[A-Za-z0-9._-]` would otherwise produce a filename the reader-side
+computation, which always sanitizes, could never match. Stated once, here, so
+both sides agree by construction rather than by coincidence of id shape.
 
 **Round 5, finding S-4: `fire()`'s read-then-truncate of the notice file can
 lose a concurrently-appended notice.** Read literally
@@ -370,6 +480,26 @@ directly. **Fixed, one line:** rename-aside first -
 the renamed inode (read anyway, since the rename happens before the fold) or
 finds the original path gone and recreates a fresh file there (picked up
 whole on the next poll's `-s` check, never partially lost).
+
+**Round 6, nice-to-have 1: the rename-aside closes the dominant loss mode,
+not every one, and the plan's own wording should say so.** An appender whose
+file descriptor was opened *before* the `mv` but whose actual write lands
+*after* the fold has already read the renamed copy still writes into that
+now-removed inode, silently - reproduced directly across all five possible
+open/write/read interleavings. The window is the intersection of an
+appender's own open-to-write gap with the fire's `mv`-to-`rm` span - narrow
+for a single shell builtin redirect (the shape every writer in this plan
+uses), wider only for something that forks between opening the file and
+writing to it. Not blocking: per the fairness note above, the payload and the
+audit-log line are already durable by the time any notice is composed, so
+this residual risks losing a wake *announcement*, never the message itself.
+Softening the channel's own "never loses it" language to acknowledge this
+narrow residual is the fix; a fully race-free form exists if it is ever worth
+building (each appender writes its own file into a `pending-notices-<key>.d/`
+directory instead of appending to one shared file, and `fire()` folds and
+removes whatever files it finds - a file created at any instant is either
+folded now or found on the next poll) but is not warranted by this residual's
+size today.
 
 **Nice-to-have (round 5): a notice-only fire writes an empty `## New events`
 section in the wake file.** Harmless (the `## Abandoned messages` section
@@ -394,9 +524,11 @@ Unchanged: both sweep passes run before `wm_state prune` removes any record
 records, so a post-prune pass 1 would find nothing and fall through to the
 always-fleet-wide pass 2, nullifying `--owner` scoping); flag parsing for
 `--owner`/`--owner=value`/`--dry-run`; the `done`-plus-live-window skip
-condition. `crew-prune` pass 1 now uses the same unified terminal predicate
-(above) as the sweep and the parent-chain walk, rather than a fourth,
-separately-stated version of the same test.
+condition. `crew-prune` pass 1 tests membership in the **delivery-
+reachability predicate** (above - the same one the sweep's step 2 and the
+scan's target test use), never the notice-routing one, since a stood-down/
+died/windowless-`done` roster record with a non-empty outbox is exactly what
+pass 1 exists to sweep - it does not walk any parent chain.
 
 ### `bin/watch-fleet`'s top-level whole-fleet backstop (piece 1, phase 2 only)
 
@@ -405,39 +537,47 @@ Unchanged.
 ## Phased delivery
 
 **Phase 1**, smaller again this round (M-2 deletes a send site rather than
-adding one; M-1 collapses two liveness predicates into one; S-3 replaces N
-per-poll `crew-get` calls with at most one fleet-wide read): `bin/lib/common.sh`
-(`wm_outbox_basename`, `wm_outbox_sweep_abandoned`, and the shared unified
-terminal-predicate check), `bin/crew-say`/`bin/crew-ask`/`bin/spawn-crew`
-(sidecar-then-payload write order; the updated "watcher will retry"
-message), `bin/crew-standdown` (cascade sweep), `bin/watch-fleet` (claim
-protocol applied in place; the `done`-loop; the generic per-poll outbox scan
-- placed per S-1, reading via one fleet-wide `crew-list --all --json` per
-S-3; the `NOTICEFILE`/`fire()` extension with the S-4 rename-aside fix),
-`bin/crew-prune` (flag parsing; both sweep passes, run before
-`wm_state prune`, using the unified predicate). No `bin/lib/wm-state.py`
-changes required in either phase.
+adding one; S-3 replaces N per-poll `crew-get` calls with at most one
+fleet-wide read; round 6's finding 2 keeps the walk's own predicate a plain,
+window-free `in (missing, stood-down, died, done)` test, one clause simpler
+than the delivery-reachability predicate it is deliberately not identical
+to): `bin/lib/common.sh` (`wm_outbox_basename`, `wm_outbox_sweep_abandoned`,
+and the two related reachability-predicate checks), `bin/crew-say`/
+`bin/crew-ask`/`bin/spawn-crew` (sidecar-then-payload write order; the
+updated "watcher will retry" message), `bin/crew-standdown` (cascade sweep),
+`bin/watch-fleet` (claim protocol applied in place; the `done`-loop; the
+generic per-poll outbox scan - placed per S-1, reading via one fleet-wide
+`crew-list --all --json` plus one `wm_tmux_windows_csv` snapshot per S-3/
+round 6's finding 1; the `NOTICEFILE`/`fire()` extension with the S-4
+rename-aside fix), `bin/crew-prune` (flag parsing; both sweep passes, run
+before `wm_state prune`, using the delivery-reachability predicate). No
+`bin/lib/wm-state.py` changes required in either phase.
 
 **Phase 2:** extract `wm_outbox_try_redeliver` into `bin/lib/common.sh` with
 the namespaced `PANE_STABLE` capture; add the whole-fleet backstop block to
 `bin/watch-fleet`.
 
-Round 5's own assessment: phase 1 is independently mergeable once M-1 and M-2
-land - as specified before this revision, M-1 left two reachable chain shapes
-where a notice is written to a file nobody reads (the same "not a guarantee"
-condition round 4 blocked on), and M-2's direct send was a real, if latent,
-risk to the watcher's own liveness bookkeeping. With both applied, phase 1
-stands on its own; phase 2 remains a correctly-sequenced, separate follow-up.
+Round 5's own must-fix items (M-1, the predicate unification; M-2, deleting
+the sweep's direct send) and round 6's two further findings on top of them
+(the scan's missing window-liveness data source; splitting the unified
+predicate back into two, since M-1's unification overshot for the
+notice-routing walk) are all applied above. Round 6's own assessment: phase 1
+is independently mergeable once these are in place - each prior round's
+open item, as specified at the time, left some reachable shape where a
+notice is written to a file nobody reads (the same "not a guarantee"
+condition rounds 4 and 5 both blocked on); with round 6's two edits applied,
+no such shape remains open. Phase 2 stays a correctly-sequenced, separate
+follow-up.
 
 ## Files touched
 
 **Phase 1:** `bin/lib/common.sh` (new: `wm_outbox_basename`,
-`wm_outbox_sweep_abandoned`, the unified terminal-predicate helper),
-`bin/crew-say`, `bin/crew-ask`, `bin/spawn-crew`, `bin/crew-standdown`,
-`bin/watch-fleet` (in-place claim protocol hardening, `done`-loop, the
-generic outbox scan, `NOTICEFILE` in both owner branches, the `fire()`
-rename-aside fix), `bin/crew-prune`. No `bin/lib/wm-state.py` changes
-required in either phase.
+`wm_outbox_sweep_abandoned`, the delivery-reachability and notice-routing
+predicate checks), `bin/crew-say`, `bin/crew-ask`, `bin/spawn-crew`,
+`bin/crew-standdown`, `bin/watch-fleet` (in-place claim protocol hardening,
+`done`-loop, the generic outbox scan with its `crew-list`+`wm_tmux_windows_csv`
+read, `NOTICEFILE` in both owner branches, the `fire()` rename-aside fix),
+`bin/crew-prune`. No `bin/lib/wm-state.py` changes required in either phase.
 
 **Phase 2:** `bin/lib/common.sh` (`wm_outbox_try_redeliver` extraction,
 `wm_pane_snapshot` namespace argument), `bin/watch-fleet` (backstop block).
@@ -470,6 +610,18 @@ level by round 5. Four additions:
     concurrently-appended notice still survives and surfaces on the next
     poll rather than being silently destroyed by the read-then-truncate
     window.
+20. **Round 6, finding 1:** a `done` target with a **live** window and a
+    pending outbox message - assert the generic scan does **not** sweep it
+    (the `done`-loop still owns it); the same target with its window gone -
+    assert it **is** swept. This is the assertion that makes the window
+    limb's `wm_tmux_windows_csv` data source load-bearing in the suite
+    rather than only in prose.
+21. **Round 6, finding 2:** resolve the notice owner for a member whose
+    parent is `done` with a **live** window; assert it floors to wingman
+    rather than resolving to the `done` parent. Test 16 covers only the
+    dead-window variant (which already passes under the notice-routing
+    predicate); this is the shape that failed before the predicates were
+    split.
 
 **Phase 2:** unchanged - top-level backstop reaches an indirect descendant;
 `PANE_STABLE` namespace isolation; direct two-shell concurrency test.
