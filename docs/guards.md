@@ -16,6 +16,8 @@ The rules stated in prose across these docs and `CLAUDE.md` are also enforced me
 - `hooks/artifact-link-guard.sh` and `hooks/artifact-publish-tracker.sh` enforce the Artifact-publish contract - a markdown deliverable is published as a hosted link only when the pilot asked for that and a content scan passes.
 - `hooks/pilot-preferences-guard.sh` denies every other tool call in a fresh run until the onboarding-preference questions are answered (see "The preferences gate" below).
 
+Not a hook, but the same "mechanical, not prose" discipline: `bin/spawn-crew`, `bin/crew-takeover`, and `bin/crew-resume` all bake a `claudeMdExcludes` entry (via the shared `wm_claude_md_excludes()` helper) into every crew launch, unconditionally, so wingman's own root `CLAUDE.md` - the orchestrator's own first-person persona - never auto-loads into a crew session's context. This is the mechanical counterpart to the `TARGET_IS_WM_REPO`-gated prose disclaimer (issue #69) `bin/spawn-crew` also injects into a crew member's system prompt: the disclaimer tells a member to disregard the file if it sees it, while this exclusion stops it from being loaded at all (issue #213).
+
 Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
 
 Every Bash-inspecting guard above matches the *resolved* command of each `;`/`&&`/`||`/pipe segment via the shared recognizer in `hooks/lib/cmd_match.py`, which sees through `env`/`sudo`/`uv run`/wrapper-shell `-c`/`eval` wrappers before matching - so `bash -c "gh pr merge 5"` and `eval "gh pr merge 5"` are caught the same as the unwrapped form (issue #168).

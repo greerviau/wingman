@@ -40,6 +40,16 @@ assert_contains "the resume script exports the resuming session's run id" \
   "$launch" "export WINGMAN_RUN_ID='run-resume-test'"
 assert_contains "the resume script exports the record's crew type" \
   "$launch" "export WINGMAN_CREW_TYPE='developer'"
+# Issue #213: the unattended relaunch must carry the same claudeMdExcludes
+# payload as a fresh spawn, so wingman's own root CLAUDE.md never reloads for
+# a resumed member - this is the one of the three sites with no human in the
+# loop to catch a dropped exclusion.
+assert_contains "the resume script carries the claudeMdExcludes settings payload" \
+  "$launch" "claudeMdExcludes"
+assert_contains "the exclusion payload names the wingman repo root's CLAUDE.md" \
+  "$launch" "$TEST_REPO/CLAUDE.md"
+assert_contains "the exclusion payload also names the worktree-glob pattern" \
+  "$launch" "$TEST_REPO-*/CLAUDE.md"
 # Issue #30: defeat the CLI's own "resume from summary?" prompt on every
 # unattended relaunch by overriding both gating env vars to an absurdly high
 # value, so its size/age check can never be satisfied.

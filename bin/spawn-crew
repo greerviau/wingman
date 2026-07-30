@@ -331,7 +331,7 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
     printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$ID" "$TYPE" "$REPO"
   fi
   if [ "$TARGET_IS_WM_REPO" -eq 1 ]; then
-    printf '**About this repo'"'"'s CLAUDE.md:** the file `CLAUDE.md` at this repo'"'"'s root, which your harness just loaded automatically as project context, is written entirely in first person for the **wingman orchestrator** role - the top-level session the pilot starts directly, not this session. Nothing in it is a rule for you. You are a **%s** crew member: your role, permissions, and instructions are the playbook below and the objective above - follow those. Where CLAUDE.md says "you" (e.g. "you never edit playbooks yourself," "never do heavy work yourself"), it describes the orchestrator session'"'"'s own behavior, not a restriction on this one; treat CLAUDE.md only as optional background reading about how wingman is built, useful if it helps your actual task.\n\n' "$TYPE"
+    printf '**About this repo'"'"'s CLAUDE.md:** the file `CLAUDE.md` at this repo'"'"'s root - if it is anywhere in your context, whether your harness loaded it automatically or you opened it yourself - is written entirely in first person for the **wingman orchestrator** role - the top-level session the pilot starts directly, not this session. Nothing in it is a rule for you. You are a **%s** crew member: your role, permissions, and instructions are the playbook below and the objective above - follow those. Where CLAUDE.md says "you" (e.g. "you never edit playbooks yourself," "never do heavy work yourself"), it describes the orchestrator session'"'"'s own behavior, not a restriction on this one; treat CLAUDE.md only as optional background reading about how wingman is built, useful if it helps your actual task.\n\n' "$TYPE"
   fi
   if [ -n "$INPUT" ]; then
     printf 'Input handoff: read the plan/spec at `%s` and follow it.\n\n' "$INPUT"
@@ -423,6 +423,7 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   [ -n "$REMOTE_CONTROL" ] && printf ' --remote-control %s' "$(quote "wm-$ID")"
   printf ' --add-dir %s' "$(quote "$WM_HOME")"
   printf ' --add-dir %s' "$(quote "$WM_REPO")"
+  printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
   # Global scope: add every discovered repo so the member can work across all of
   # them (the cwd is the workspace root, which need not be a git checkout itself).
   if [ "$SCOPE" = global ]; then

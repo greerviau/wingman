@@ -34,7 +34,7 @@ git worktree add "$WINGMAN_WORKTREE" -b <feat|fix>/<short-description> origin/<d
 ```
 
 Do this every time you start, including on a resumed or re-taken-over session, so your base is always current with origin.
-If `$WINGMAN_WORKTREE` is unset (a global-scope session), pick a path yourself and register it (see above).
+If `$WINGMAN_WORKTREE` is unset (a global-scope session), pick a path yourself and register it (see above) - if the target happens to be the wingman repo itself, name it `<repo-path>-<crew-id>` (the same convention repo scope uses) so it stays covered by wingman's own CLAUDE.md exclusion (`bin/spawn-crew`, issue #213).
 
 ### Publish and open a PR
 
