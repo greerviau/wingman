@@ -252,6 +252,7 @@ EOF
     [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
     printf ' --add-dir %s' "$(quote "$WM_HOME")"
     printf ' --add-dir %s' "$(quote "$_repo")"
+    printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
     [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
     [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
     printf '\n'

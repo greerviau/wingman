@@ -35,8 +35,9 @@ if [ "$live" = 1 ]; then
 else
   wm_warn "'$ID' has no live window (it may have finished or died)."
   wm_info "If you want to resume it yourself, from its repo:"
-  printf '\n    cd %s && <your-agent-cli> --resume %s\n\n' "$(quote "$REPO")" "$SID"
-  echo "(e.g. with Claude Code: 'claude --resume $SID' - resume is refused if the session is still live.)"
+  printf '\n    cd %s && <your-agent-cli> --resume %s --settings %s\n\n' \
+    "$(quote "$REPO")" "$SID" "$(quote "$(wm_claude_md_excludes)")"
+  echo "(with Claude Code, that's <your-agent-cli> = claude - resume is refused if the session is still live.)"
   echo "On a large/old transcript, Claude Code may show a 'resume from summary?' menu that"
   echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
   echo "safe choice. To skip that prompt outright, export these first:"

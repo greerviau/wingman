@@ -172,6 +172,32 @@ quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+# The claudeMdExcludes payload every crew launch, every printed resume
+# command, and every unattended relaunch must carry so wingman's own root
+# CLAUDE.md never loads for anyone but the orchestrator (issue #213). A pure
+# function of $WM_REPO, so it needs no crew id or objective - one source of
+# truth for bin/spawn-crew's generated launch script, bin/crew-takeover's two
+# printed --resume commands, and bin/crew-resume's generated relaunch script
+# alike (all three source this file already; bin/wingman's own launch is the
+# one site that must NOT call this).
+# Excludes the repo root's own memory/rules files, and the same set again
+# under a $WM_REPO-* glob for a crew member's own worktree checkout (git
+# worktree add copies CLAUDE.md verbatim into that sibling directory; the
+# on-demand loader only reaches it when the sibling is itself a subdirectory
+# of the session's primary cwd - true for a global-scope spawn, never true
+# for a repo-scope one, whose primary cwd is $REPO exactly. See
+# docs/plans/2026-07-30-mechanical-claude-md-crew-exclusion.md for the full
+# grounding). claudeMdExcludes (confirmed in the shipped 2.1.220 settings
+# schema, not only in docs) is the one version-stable, memory-file-only
+# opt-out - unlike --bare/--safe-mode it never touches hooks, LSP, skills, or
+# plugins, and unlike --setting-sources (which also works, but drops
+# wingman's own project-level hooks AND every target repo's own legitimate
+# CLAUDE.md) it touches only the files named here.
+wm_claude_md_excludes() {
+  printf '{"claudeMdExcludes":["%s/CLAUDE.md","%s/CLAUDE.local.md","%s/.claude/CLAUDE.md","%s/.claude/rules/**","%s-*/CLAUDE.md","%s-*/CLAUDE.local.md","%s-*/.claude/CLAUDE.md","%s-*/.claude/rules/**"]}' \
+    "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO"
+}
+
 # Escape find(1) -name glob metacharacters (\, *, ?, [, ]) so a crew type
 # containing one of these is matched as a literal filename, not a pattern -
 # find -name treats its argument as a shell glob, and an unescaped --type
