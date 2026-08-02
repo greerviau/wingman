@@ -382,10 +382,18 @@ wm_tmux_pane_text() { wm_tmux capture-pane -p -t "$1" 2>/dev/null; }
 # Sets PANE_TEXT (the current capture) and PANE_STABLE (1 iff byte-identical to
 # the previous poll's capture for this id, else 0). The per-id hash lives in
 # $WM_HOME/pane-<id>.hash (the pidfile-naming pattern); a stale file is harmless.
+#
+# Optional $3 namespaces the hash file (pane-<id>-<ns>.hash) for a caller that
+# must never contend with the shared per-id capture above - the whole-fleet
+# outbox backstop (issue #169, piece 1): a nested member's own lead may be
+# polling the SAME id's shared pane-<id>.hash at a different phase of its own
+# interval, and two independent processes racing that one file would degrade
+# not just outbox retry but prompt_freeze_check/the RC-drop check/the stall
+# nudge for exactly the nested members the backstop exists to help.
 wm_pane_snapshot() {
-  _id="$1"; _win="$2"
+  _id="$1"; _win="$2"; _ns="${3:-}"
   PANE_TEXT="$(wm_tmux_pane_text "$(wm_tmux_win_target "$_win")")"
-  _hashfile="$WM_HOME/pane-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').hash"
+  _hashfile="$WM_HOME/pane-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_')${_ns:+-$_ns}.hash"
   _hash="$(printf '%s' "$PANE_TEXT" | cksum)"
   _prev="$(cat "$_hashfile" 2>/dev/null)"
   printf '%s\n' "$_hash" > "$_hashfile"
@@ -1013,4 +1021,326 @@ wm_tmux_reachable() {
     "error connecting to "*"No such file or directory"*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# --- outbox helpers (issue #169) ---------------------------------------------
+# bin/crew-say, bin/crew-ask, and bin/spawn-crew each queue a message under
+# outbox/<id>/ when a delivery cannot be confirmed. Historically that queue was
+# only ever serviced by a live owner-scoped watch-fleet loop for a member still
+# in a LIVE_STATE, so a member that went stood-down/died/done left its queue
+# permanently unreachable: nothing expired it, nothing surfaced it, and
+# nothing cleaned it up. The helpers below implement the fix (see
+# docs/plans/2026-08-02-issue-169-outbox-abandonment-plan.md): a metadata
+# sidecar tree recording each queued message's sender, two related-but-
+# distinct terminal predicates, a generic sweep that surfaces an abandoned
+# message to its sender (or a caller-supplied notify channel) and durably
+# archives it, and an extraction of the existing redelivery logic so both the
+# owner-scoped loop and the whole-fleet backstop share one implementation.
+
+# Recover the stable stem of an outbox/<id>/ entry across whatever claim-
+# protocol prefix it currently carries (today, only the redelivery path's own
+# "sent-" rename) - so a sidecar written under outbox-meta/<id>/ by base
+# filename can still be found once the entry has claimed itself.
+wm_outbox_basename() {
+  _ob_bn="$(basename "$1")"
+  case "$_ob_bn" in
+    sent-*) printf '%s' "${_ob_bn#sent-}" ;;
+    *) printf '%s' "$_ob_bn" ;;
+  esac
+}
+
+# True (rc 0) iff $1 must go through a pointer file rather than being typed (or
+# retyped) raw into a pane: an embedded newline, or longer than
+# WM_SAY_INLINE_MAX chars. Extracted from bin/crew-say's own send-path rule so
+# it and bin/watch-fleet's redelivery branch can never independently drift
+# again (issue #169, M5) - before this fix, the redelivery branch discriminated
+# on line count only, silently bypassing crew-say's own truncation-avoidance
+# rule for a long single-line message.
+wm_needs_pointer() {
+  case "$1" in
+    *$'\n'*) return 0 ;;
+  esac
+  [ "${#1}" -gt "${WM_SAY_INLINE_MAX:-500}" ]
+}
+
+# Two related predicates, deliberately not one (see the plan, "Two related
+# predicates"). Both take a pre-fetched `crew-list --all --json` payload
+# (never fetched here) so a caller testing many ids pays for exactly one
+# roster read, however many ids it tests.
+#
+# Delivery-reachability: "can this member still be delivered to?" - true (rc
+# 0, i.e. TERMINAL - cannot be delivered to) iff the record is missing, its
+# status is stood-down/died, or its status is done with no currently-live
+# window (a done member with a live pane is still exactly what the done-loop
+# exists to service). $3/$4 are a comma-joined live-window-name snapshot and
+# whether that snapshot should be trusted for the done-with-no-window clause
+# (1 = yes; 0 = the poll's own wm_tmux_reachable read was ambiguous - MF-1 -
+# so a pending done target's window judgment defers to the next poll rather
+# than guessing; the stood-down/died/missing-record clauses need no window
+# data and are unaffected). Defaults $4 to 1 for a caller with a trustworthy
+# one-shot snapshot (crew-prune, crew-standdown) that never checked
+# wm_tmux_reachable itself.
+wm_outbox_delivery_terminal() {
+  _dt_id="$1"; _dt_roster_json="$2"; _dt_windows_csv="$3"; _dt_windows_valid="${4:-1}"
+  printf '%s' "$_dt_roster_json" | wm_py -c '
+import json, sys
+target = sys.argv[1]
+windows = set(w for w in sys.argv[2].split(",") if w)
+windows_valid = sys.argv[3] == "1"
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+rec = None
+for r in roster if isinstance(roster, list) else []:
+    if r.get("id") == target:
+        rec = r
+        break
+if rec is None:
+    sys.exit(0)
+status = rec.get("status")
+if status in ("stood-down", "died"):
+    sys.exit(0)
+if status == "done":
+    if not windows_valid:
+        sys.exit(1)
+    win = rec.get("window") or ""
+    sys.exit(0 if win not in windows else 1)
+sys.exit(1)
+' "$_dt_id" "$_dt_windows_csv" "$_dt_windows_valid"
+}
+
+# Notice-routing: "will this member's own watcher ever surface a notice?" -
+# true (rc 0, TERMINAL) iff the record is missing, or its status is
+# stood-down, died, or done - no window qualifier at all, because a done
+# member's own watcher arms nothing further regardless of whether its window
+# happens to still be alive at the instant a notice-routing walk runs (and
+# wingman reaps a done member to stood-down in the same turn it observes the
+# done). Used only by wm_outbox_resolve_notice_owner's own parent-chain walk
+# below, which inlines the identical check itself (avoiding one subprocess
+# per hop); kept as its own callable predicate for direct testability and
+# because it names a genuinely distinct question from delivery-reachability.
+wm_outbox_notice_terminal() {
+  _nt_id="$1"; _nt_roster_json="$2"
+  printf '%s' "$_nt_roster_json" | wm_py -c '
+import json, sys
+target = sys.argv[1]
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+for r in roster if isinstance(roster, list) else []:
+    if r.get("id") == target:
+        sys.exit(0 if r.get("status") in ("stood-down", "died", "done") else 1)
+sys.exit(0)
+' "$_nt_id"
+}
+
+# Resolve who should be told about <id>'s outbox being swept: walk the parent
+# chain, skipping every notice-routing-terminal ancestor, floored at wingman
+# ("") - the one process guaranteed to outlive a tmux-server loss. Guarded at
+# 5 hops as a safety fallback against a corrupt/cyclic parent chain (the
+# architecture's own depth cap makes a real chain far shorter). Prints the
+# resolved owner id, or empty for wingman.
+wm_outbox_resolve_notice_owner() {
+  _rno_id="$1"; _rno_roster_json="$2"
+  printf '%s' "$_rno_roster_json" | wm_py -c '
+import json, sys
+cid = sys.argv[1]
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+by_id = dict((r.get("id"), r) for r in roster if isinstance(r, dict))
+def terminal(i):
+    rec = by_id.get(i)
+    if rec is None:
+        return True
+    return rec.get("status") in ("stood-down", "died", "done")
+guard = 0
+while guard < 5:
+    rec = by_id.get(cid)
+    if rec is None:
+        print("")
+        sys.exit(0)
+    parent = rec.get("parent") or ""
+    if parent == "":
+        print("")
+        sys.exit(0)
+    if terminal(parent):
+        cid = parent
+        guard += 1
+        continue
+    print(parent)
+    sys.exit(0)
+print("")
+' "$_rno_id"
+}
+
+# Sweep every pending (non-sent-) message under outbox/<id>/ as abandoned.
+# <id> is a member the caller has ALREADY determined is delivery-terminal (or,
+# for crew-standdown's cascade, one that was just stood down); this function
+# never re-tests <id> itself. <reason> is a short human-readable phrase for
+# the notice/log line. <notify-mode> is "stdout" (crew-standdown/crew-prune:
+# print the notice directly in the command's own output) or "wake" (the
+# per-poll scan: route it into the resolved notice owner's own wake channel).
+# <roster-json>/<windows-csv>/<windows-valid> are a pre-fetched snapshot (see
+# the predicates above) used only for the SENDER's own delivery-reachability
+# check below - never re-fetched here, so a caller iterating many ids pays for
+# one roster read/tmux snapshot regardless of how many ids it sweeps.
+#
+# Runs unconditionally in every watcher, so more than one process can reach
+# the same pending file in the same poll window: the move to
+# outbox-abandoned/<id>/ IS the claim (mirroring exactly how the existing
+# redelivery block resolves the analogous race for its own sent- rename) -
+# only the process whose mv succeeds composes a notice or writes a log line;
+# a losing process (source already gone) does nothing further for that file.
+wm_outbox_sweep_abandoned() {
+  _sw_id="$1"; _sw_reason="$2"; _sw_notify="$3"
+  _sw_roster_json="$4"; _sw_windows_csv="$5"; _sw_windows_valid="${6:-1}"
+  _sw_dir="$WM_HOME/outbox/$_sw_id"
+  _sw_metadir="$WM_HOME/outbox-meta/$_sw_id"
+  [ -d "$_sw_dir" ] || return 0
+  _sw_seq=0
+  for _sw_f in "$_sw_dir"/*; do
+    [ -e "$_sw_f" ] || continue
+    case "$_sw_f" in *"/sent-"*) continue ;; esac
+    _sw_stem="$(wm_outbox_basename "$_sw_f")"
+    _sw_sidecar="$_sw_metadir/$_sw_stem"
+
+    # 1. sender lookup via the sidecar: content (possibly empty = wingman) if
+    # the sidecar exists, else "no sidecar at all" (a pre-existing queued file
+    # from before this fix, or an unattributable write).
+    _sw_sender=""
+    _sw_sender_known=0
+    if [ -f "$_sw_sidecar" ]; then
+      _sw_sender="$(cat "$_sw_sidecar" 2>/dev/null)"
+      _sw_sender_known=1
+    fi
+    _sw_sender_label="unknown"
+    [ "$_sw_sender_known" = 1 ] && _sw_sender_label="${_sw_sender:-wingman}"
+
+    # 2/3. claim the file atomically - only the winning mv proceeds further.
+    mkdir -p "$WM_HOME/outbox-abandoned/$_sw_id" 2>/dev/null
+    _sw_claimed="$WM_HOME/outbox-abandoned/$_sw_id/$_sw_stem"
+    mv "$_sw_f" "$_sw_claimed" 2>/dev/null || continue
+
+    # 4. compose the notice: pointer, not payload, for anything crew-say's own
+    # rule would also route to a file.
+    _sw_queued_at="$(date -u -r "$_sw_claimed" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    _sw_body="$(cat "$_sw_claimed" 2>/dev/null)"
+    if wm_needs_pointer "$_sw_body"; then
+      _sw_content="(long/multi-line message - read $_sw_claimed)"
+    else
+      _sw_content="$_sw_body"
+    fi
+    _sw_notice="Abandoned outbox message for '$_sw_id' from $_sw_sender_label (queued ${_sw_queued_at:-at an unknown time}, swept because $_sw_reason): $_sw_content [durable copy: $_sw_claimed]"
+
+    # 5. durable audit trail - always, winning process only.
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sw_id" "$_sw_sender_label" "$_sw_reason" "$_sw_claimed" \
+      >> "$WM_HOME/outbox-abandoned.log"
+
+    # 6. notify: a sender that is itself still reachable (wingman, or a known,
+    # non-terminal sender) is always queued into its OWN outbox - never a
+    # direct send (no PANE_STABLE gate here, no per-poll bound on
+    # WM_SEND_LOCK_WAIT, and this scan is fleet-wide while every real send
+    # site is owner-scoped - see the plan for the full reasoning). Wingman,
+    # unknown, or a terminal sender routes through <notify-mode> instead.
+    _sw_sender_reachable=0
+    if [ "$_sw_sender_known" = 1 ]; then
+      if [ -z "$_sw_sender" ]; then
+        _sw_sender_reachable=1   # wingman: always reachable
+      elif ! wm_outbox_delivery_terminal "$_sw_sender" "$_sw_roster_json" "$_sw_windows_csv" "$_sw_windows_valid"; then
+        _sw_sender_reachable=1
+      fi
+    fi
+
+    if [ "$_sw_sender_reachable" = 1 ]; then
+      mkdir -p "$WM_HOME/outbox/$_sw_sender" "$WM_HOME/outbox-meta/$_sw_sender" 2>/dev/null
+      _sw_seq=$((_sw_seq+1))
+      _sw_outfile="$WM_HOME/outbox/$_sw_sender/$(date +%s)-$$-$_sw_seq.msg"
+      printf '' > "$WM_HOME/outbox-meta/$_sw_sender/$(basename "$_sw_outfile")"
+      printf '%s\n' "$_sw_notice" > "$_sw_outfile"
+    else
+      case "$_sw_notify" in
+        stdout)
+          printf '%s\n' "$_sw_notice"
+          ;;
+        wake)
+          _sw_owner="$(wm_outbox_resolve_notice_owner "$_sw_id" "$_sw_roster_json")"
+          if [ -n "$_sw_owner" ]; then
+            _sw_key="$(printf '%s' "$_sw_owner" | tr -c 'A-Za-z0-9._-' '_')"
+            _sw_noticefile="$WM_HOME/pending-notices-$_sw_key"
+          else
+            _sw_noticefile="$WM_HOME/pending-notices"
+          fi
+          printf '%s\n' "$_sw_notice" >> "$_sw_noticefile"
+          ;;
+      esac
+    fi
+
+    # 7. sidecar + rmdir cleanup - the payload itself already moved in step 3.
+    rm -f "$_sw_sidecar"
+  done
+  rmdir "$_sw_dir" 2>/dev/null
+  rmdir "$_sw_metadir" 2>/dev/null
+  return 0
+}
+
+# Attempt to redeliver the oldest pending (non-sent-) message under
+# outbox/<id>/ into a live pane. Extracted from bin/watch-fleet's own
+# per-member loop (piece 1) so both that owner-scoped loop and the top-level
+# whole-fleet backstop share one implementation; <pane-stable> is the
+# caller's own already-captured PANE_STABLE value for this id this poll
+# (never captured here), so a caller with the shared per-id hash file (the
+# owner-scoped loop) and one with a namespaced capture (the backstop) both
+# use this without contending over $WM_HOME/pane-<id>.hash.
+#
+# One line per attempt to $WM_HOME/outbox-retry.log (timestamp, id, outcome),
+# EXCEPT the no-pending-file case, which is never logged - it fires every poll
+# for every member regardless of whether anything is queued and would
+# otherwise flood the log (issue #169, M1). empty-file is checked before the
+# PANE_STABLE branch: it is the more specific diagnosis (a permanently wedged
+# queue, independent of pane state), so it wins over pane-unstable when both
+# apply.
+wm_outbox_try_redeliver() {
+  _tr_id="$1"; _tr_target="$2"; _tr_pane_stable="$3"
+  _tr_obdir="$WM_HOME/outbox/$_tr_id"
+  [ -d "$_tr_obdir" ] || return 0
+  _tr_obfile="$(ls "$_tr_obdir" 2>/dev/null | grep -v '^sent-' | sort | head -1)"
+  [ -n "$_tr_obfile" ] || return 0
+  _tr_obpath="$_tr_obdir/$_tr_obfile"
+  _tr_obsent="$_tr_obdir/sent-$_tr_obfile"
+  _tr_obmsg="$(cat "$_tr_obpath" 2>/dev/null)"
+  if [ -z "$_tr_obmsg" ]; then
+    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" empty-file >> "$WM_HOME/outbox-retry.log"
+    return 0
+  fi
+  if [ "$_tr_pane_stable" != 1 ]; then
+    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" pane-unstable >> "$WM_HOME/outbox-retry.log"
+    return 0
+  fi
+  if wm_needs_pointer "$_tr_obmsg"; then
+    # Rename BEFORE sending so the pointer names the path the file will
+    # actually live at; a failed send renames it back into the queue for the
+    # next poll.
+    mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null
+    wm_tmux_send_message "$_tr_target" \
+      "Queued message for you: read $_tr_obsent and act on it now - it is a direct message to you, not background material."
+    _tr_rc=$?
+    [ "$_tr_rc" -ne 0 ] && mv "$_tr_obsent" "$_tr_obpath" 2>/dev/null
+  else
+    wm_tmux_send_message "$_tr_target" "$_tr_obmsg"
+    _tr_rc=$?
+    [ "$_tr_rc" -eq 0 ] && { mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null || rm -f "$_tr_obpath"; }
+  fi
+  case "$_tr_rc" in
+    0) _tr_outcome=sent ;;
+    2) _tr_outcome=dialog-refused ;;
+    3|5) _tr_outcome=unconfirmed ;;
+    4) _tr_outcome=lock-contended ;;
+    *) _tr_outcome=unconfirmed ;;
+  esac
+  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" "$_tr_outcome" >> "$WM_HOME/outbox-retry.log"
 }
