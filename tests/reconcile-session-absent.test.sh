@@ -100,7 +100,14 @@ kill "$wpid" 2>/dev/null
 # actual boundary of the safety property so a future change to the scoping
 # doesn't silently narrow or widen it without a test noticing. ---------------
 test_new_home
-ARBITRARY="unrelated-session-$$-$RANDOM"
+# Textually derived from $WM_TMUX_SESSION (tests/run.sh's static invariant 2
+# requires every minted session name to be, so the identity-scoped teardown
+# sweep can find it if the trap-based cleanup below is ever skipped) while
+# still NOT a runtime prefix of it or vice versa: $WM_TMUX_SESSION appears
+# after a literal prefix of its own, so wm_tmux_prefix_windows_csv's
+# index($1, s) == 1 test is false for this session - the actual property
+# this block exists to pin.
+ARBITRARY="unrelated-${WM_TMUX_SESSION}"
 wm_track_tmux "$ARBITRARY"
 tmux new-session -d -s "$ARBITRARY" -n orchestrator "sleep 120"
 tmux new-window -d -t "=$ARBITRARY:" -n wm-s3 "sleep 120"
