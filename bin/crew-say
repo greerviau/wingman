@@ -62,11 +62,7 @@ wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null \
 # re-reading. (This is wingman's own "relay the pointer, not the payload"
 # principle applied to its own messaging.)
 DELIVER="$MSG"
-case "$MSG" in
-  *$'\n'*) _needs_file=1 ;;
-  *) [ "${#MSG}" -gt "${WM_SAY_INLINE_MAX:-500}" ] && _needs_file=1 || _needs_file=0 ;;
-esac
-if [ "${_needs_file:-0}" = 1 ]; then
+if wm_needs_pointer "$MSG"; then
   mkdir -p "$WM_HOME/say"
   _msgfile="$WM_HOME/say/$ID-$(date +%s)-$$.md"
   printf '%s\n' "$MSG" > "$_msgfile"
@@ -85,13 +81,17 @@ fi
 # the message so it is not simply dropped: bin/watch-fleet retries the oldest
 # queued message per member each poll once the pane looks deliverable again,
 # so a pilot answer relayed into a briefly-blocked pane arrives without anyone
-# having to remember to retry.
-mkdir -p "$WM_HOME/outbox/$ID"
+# having to remember to retry. The sidecar (sender id, empty for wingman) is
+# written BEFORE the payload so a sweep can never observe a payload with no
+# sender record (issue #169).
+mkdir -p "$WM_HOME/outbox/$ID" "$WM_HOME/outbox-meta/$ID"
 _qfile="$WM_HOME/outbox/$ID/$(date +%s)-$$.msg"
+printf '%s\n' "${WINGMAN_CREW_ID:-}" > "$WM_HOME/outbox-meta/$ID/$(basename "$_qfile")"
 printf '%s\n' "$MSG" > "$_qfile"
+_retry_note="the watcher will retry it automatically; if '$ID' ends before that happens, you'll be notified instead of the message silently vanishing."
 case "$_rc" in
-  2) wm_die "refused: '$ID's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the message (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. The message is QUEUED at $_qfile; the watcher will retry it automatically once the pane clears (or resolve the dialog yourself first: bin/crew-takeover $ID)." ;;
-  3) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered - treat it as NOT delivered. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
-  5) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered, and the pane was busy (still repainting on its own clock) - likely queued behind its current turn rather than lost outright. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
-  *) wm_die "not sent: another delivery is holding '$ID's pane. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
+  2) wm_die "refused: '$ID's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the message (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. The message is QUEUED at $_qfile; $_retry_note (or resolve the dialog yourself first: bin/crew-takeover $ID)." ;;
+  3) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered - treat it as NOT delivered. The message is QUEUED at $_qfile; $_retry_note" ;;
+  5) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered, and the pane was busy (still repainting on its own clock) - likely queued behind its current turn rather than lost outright. The message is QUEUED at $_qfile; $_retry_note" ;;
+  *) wm_die "not sent: another delivery is holding '$ID's pane. The message is QUEUED at $_qfile; $_retry_note" ;;
 esac

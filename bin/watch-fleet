@@ -57,6 +57,19 @@
 # WM_USAGE_SWEEP_SECS (default 24h), since its owning session has long since
 # ended (#125).
 #
+# Outbox abandonment (#169): bin/crew-say/crew-ask/spawn-crew each queue a
+# message under outbox/<id>/ when a delivery cannot be confirmed. Every
+# cycle - regardless of owner scope - also runs a generic scan that sweeps
+# any such message whose target has since gone stood-down/died/done-with-no-
+# live-window: the payload is archived under outbox-abandoned/<id>/, logged
+# to outbox-abandoned.log, and a notice is queued to the sender (or, if the
+# sender is itself unreachable, routed up the parent chain into
+# pending-notices[-<owner>], folded into this cycle's own wake file the next
+# time it fires). Wingman's own top-level cycle additionally runs a
+# whole-fleet backstop over every OTHER pending outbox with a live window, so
+# a still-reachable nested member is not left waiting solely on its own
+# lead's watcher. See lib/common.sh's wm_outbox_* helpers for the mechanism.
+#
 # On fire, stdout carries the reason lines plus a directive to report the full
 # roster; the wake file carries the new events plus the owner-scoped roster
 # snapshot to report from.
@@ -144,7 +157,7 @@ while [ $# -gt 0 ]; do
     --owner) OWNER="${2:-}"; shift 2 ;;
     --status|--stop|--start|--classify|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,73p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,86p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -160,6 +173,10 @@ if [ -n "$OWNER" ]; then
   EXITFILE="$WM_HOME/watch-exit-$_key"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count-$_key"
   RUNFILE="$WM_HOME/watch-$_key.run"
+  # The pending-notice channel the outbox scan's `wake` mode writes into
+  # (issue #169), keyed identically to the files above - a lead's own cycle
+  # reads its own notices here.
+  NOTICEFILE="$WM_HOME/pending-notices-$_key"
 else
   PIDFILE="$WM_HOME/watch.pid"
   WAKEFILE="$WM_HOME/wake"
@@ -167,6 +184,7 @@ else
   EXITFILE="$WM_HOME/watch-exit"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
   RUNFILE="$WM_HOME/watch.run"
+  NOTICEFILE="$WM_HOME/pending-notices"
 fi
 # The claim-lock path is needed both by --classify's stale-claim-lock check
 # (dispatched before claim-lock acquisition) and by the claim loop itself
@@ -764,6 +782,21 @@ fire() {
   # real `updated` stamps), never $_grouped (whose synthetic ids ack nothing).
   _grouped="$(printf '%s\n' "$_attention" | wm_state group-attention \
     --owner "$OWNER" --mass-min-count "$MASS_MIN_COUNT" --mass-min-ratio "$MASS_MIN_RATIO" 2>/dev/null)"
+  # Fold any pending outbox-abandonment notices (issue #169: the outbox
+  # scan's `wake` mode appends here) into this fire, rename-aside rather than
+  # read-then-truncate: a read-then-truncate loses any notice appended in the
+  # gap between the read and the truncate; the rename-aside closes the
+  # dominant loss mode (an appender's own fd, opened and written after the
+  # rename, either lands in the removed inode - a narrow window - or
+  # recreates a fresh file, picked up whole next poll). The payload and the
+  # outbox-abandoned.log line are already durable by the time any notice is
+  # composed, so what's at risk in that residual is a wake ANNOUNCEMENT
+  # delay, never the message or its record.
+  _notice_fold=""
+  if mv "$NOTICEFILE" "$NOTICEFILE.reading" 2>/dev/null; then
+    _notice_fold="$(cat "$NOTICEFILE.reading" 2>/dev/null)"
+    rm -f "$NOTICEFILE.reading"
+  fi
   {
     echo "# Crew need your attention"
     echo
@@ -773,6 +806,14 @@ fire() {
       [ -n "$id" ] && printf -- '- **%s** [%s] %s\n' "$id" "$st" "$note"
     done
     echo
+    echo "## Abandoned messages"
+    echo
+    if [ -n "$_notice_fold" ]; then
+      printf '%s\n' "$_notice_fold"
+    else
+      echo "(none this cycle)"
+    fi
+    echo
     echo "## Full roster (this owner's scope)"
     echo
     wm_state crew-list --owner "$OWNER" 2>/dev/null
@@ -780,6 +821,13 @@ fire() {
   printf '%s\n' "$_grouped" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && printf '%s: %s %s\n' "$st" "$id" "$note"
   done
+  # A notice-only fire (no genuine $_attention - see the needs-attention call
+  # site below) still needs a real stdout line of its own: stdout is the
+  # wake's own trigger channel, so without one a notice-only fire would
+  # otherwise emit nothing on it at all.
+  if [ -z "$_attention" ] && [ -n "$_notice_fold" ]; then
+    printf 'abandoned-message: an outbox message was swept as abandoned and queued a notice - see %s\n' "$WAKEFILE"
+  fi
   printf -- '--\n'
   printf 'The lines above are state-change deltas, not the full picture.\n'
   printf 'Read %s for the full roster (or run bin/crew-list), then report a compact\n' "$WAKEFILE"
@@ -813,6 +861,94 @@ while :; do
   # countdown advances in real time even on a poll with nothing to scan.
   _OUTAGE_API_SIGNALS=0
   _reconcile_died=""
+
+  # The generic per-poll outbox scan (issue #169): runs in EVERY watcher,
+  # unconditionally on $OWNER, every poll, before anything else can `exit 0`
+  # this poll - fire()'s own exit 0 is below (see the needs-attention check at
+  # the bottom of this loop), and there is a second exit 0 on the self-pane
+  # check just below this, so this scan sits ahead of BOTH: a member's outbox
+  # must not go unswept for however many polls those paths keep firing.
+  # Placed before wm_tmux_adopt_strays/wm_state reconcile below, so a member
+  # that dies during poll N first becomes visible to the scan on poll N+1 -
+  # one extra poll of latency, still within the ~5s bound this design claims
+  # throughout, but the scan never acts on the very poll that detects a death.
+  #
+  # A cheap glob-and-case check (no subprocess) runs first, collecting the
+  # ids with at least one pending (non-sent-) file; only if it finds one does
+  # the scan pay for one fleet-wide `wm_state crew-list --all --json` read
+  # plus one wm_tmux_windows_csv snapshot for the WHOLE poll, classifying
+  # every pending id's delivery-reachability in one python invocation rather
+  # than one subprocess per id (measured: one `crew-get` costs 140ms, one
+  # fleet-wide `crew-list --all --json` read costs 149ms constant regardless
+  # of outbox count - a per-directory read is strictly worse and gets worse
+  # with scale). A failed roster read skips the scan entirely for this poll -
+  # fail closed (defer to next poll), never fail dangerous (sweep a live
+  # member on a transient lookup failure).
+  _ob_pending_ids=""
+  for _ob_dir in "$WM_HOME"/outbox/*/; do
+    [ -d "$_ob_dir" ] || continue
+    for _ob_f in "$_ob_dir"*; do
+      [ -e "$_ob_f" ] || continue
+      case "$(basename "$_ob_f")" in sent-*) continue ;; esac
+      _ob_pending_ids="$_ob_pending_ids$(basename "$_ob_dir")
+"
+      break
+    done
+  done
+  if [ -n "$_ob_pending_ids" ] && _ob_roster_json="$(wm_state crew-list --all --json 2>/dev/null)"; then
+    # The window-liveness read needs the identical fail-closed treatment as
+    # the roster read (round-2 MF-1): wm_tmux_windows_csv carries no error
+    # signal of its own, so on a poll where the tmux connection is in the
+    # ambiguous-failure state, every done member would misread as having no
+    # live window and get swept. wm_tmux_reachable draws exactly this line
+    # (0 = a live server, or a definitively-absent one - either way trustable;
+    # 1 = an ambiguous connection error), mirroring the wm_tmux_adopt_strays/
+    # wm_state reconcile gate one screen below. _ob_windows_valid=0 defers
+    # every pending done target's window judgment to the next poll rather
+    # than guessing; the stood-down/died/missing-record clauses need no
+    # window data at all and are unaffected (see
+    # wm_outbox_delivery_terminal's own doc comment in lib/common.sh).
+    if wm_tmux_reachable; then
+      _ob_windows_csv="$(wm_tmux_windows_csv)"; _ob_windows_valid=1
+    else
+      _ob_windows_csv=""; _ob_windows_valid=0
+    fi
+    # Round-7 observation A: the window-liveness match is exact-field (a
+    # python set, never a bash substring/case test) - the live roster already
+    # contains a real collision shape for this (one id a strict prefix of
+    # another's window name), and a substring match would read a dead window
+    # as live for any such pair.
+    _ob_terminal="$(printf '%s' "$_ob_roster_json" | wm_py -c '
+import json, sys
+ids = [l for l in sys.argv[1].splitlines() if l]
+windows = set(w for w in sys.argv[2].split(",") if w)
+windows_valid = sys.argv[3] == "1"
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+by_id = dict((r.get("id"), r) for r in roster if isinstance(r, dict))
+for tid in ids:
+    rec = by_id.get(tid)
+    if rec is None:
+        print(tid + "\tits crew record is no longer in the roster")
+        continue
+    status = rec.get("status")
+    if status in ("stood-down", "died"):
+        print(tid + "\tits crew record is " + status)
+        continue
+    if status == "done" and windows_valid:
+        win = rec.get("window") or ""
+        if win not in windows:
+            print(tid + "\tit is done with no live window")
+' "$_ob_pending_ids" "$_ob_windows_csv" "$_ob_windows_valid")"
+    if [ -n "$_ob_terminal" ]; then
+      printf '%s\n' "$_ob_terminal" | while IFS=$'\t' read -r _ob_id _ob_reason; do
+        [ -n "$_ob_id" ] || continue
+        wm_outbox_sweep_abandoned "$_ob_id" "$_ob_reason" wake "$_ob_roster_json" "$_ob_windows_csv" "$_ob_windows_valid"
+      done
+    fi
+  fi
 
   # Wingman's own Remote Control disconnect (ask 2, detect-only - see
   # self_pane_check's own docstring for why this never injects). Checked first,
@@ -920,36 +1056,19 @@ for r in data:
       # dropped. Retry the OLDEST queued message once per poll per member -
       # wm_tmux_send_message itself still refuses a dialog-shaped pane, so a
       # still-blocked pane just leaves the queue intact for a later poll. A
-      # multi-line payload is redelivered as a one-line pointer to the queued
-      # file (the same pointer-not-payload rule crew-say applies on send);
-      # a single-line one is retyped directly. Delivered files move to
-      # outbox/<id>/sent- so the queue holds only what is still owed.
-      # Only attempted on a stability-confirmed pane (two identical consecutive
+      # multi-line (or long single-line - issue #169, M5) payload is
+      # redelivered as a one-line pointer to the queued file (the same
+      # pointer-not-payload rule crew-say applies on send); a short
+      # single-line one is retyped directly. Delivered files move to
+      # outbox/<id>/sent- so the queue holds only what is still owed. Only
+      # attempted on a stability-confirmed pane (two identical consecutive
       # polls - the same rule every other acting check here uses): a pane
       # mid-repaint is a member mid-turn, and typing into it both risks
       # interleaving with its own output and can't be confirmed anyway.
-      _obdir="$WM_HOME/outbox/$_id"
-      if [ "$PANE_STABLE" = 1 ] && [ -d "$_obdir" ]; then
-        _obfile="$(ls "$_obdir" 2>/dev/null | grep -v '^sent-' | sort | head -1)"
-        if [ -n "$_obfile" ]; then
-          _obpath="$_obdir/$_obfile"
-          _obsent="$_obdir/sent-$_obfile"
-          if [ "$(grep -c '' "$_obpath" 2>/dev/null)" -gt 1 ]; then
-            # Rename BEFORE sending so the pointer names the path the file
-            # will actually live at; a failed send renames it back into the
-            # queue for the next poll.
-            mv "$_obpath" "$_obsent" 2>/dev/null
-            _obmsg="Queued message for you: read $_obsent and act on it now - it is a direct message to you, not background material."
-            wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_obmsg" \
-              || mv "$_obsent" "$_obpath" 2>/dev/null
-          else
-            _obmsg="$(cat "$_obpath" 2>/dev/null)"
-            if [ -n "$_obmsg" ] && wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_obmsg"; then
-              mv "$_obpath" "$_obsent" 2>/dev/null || rm -f "$_obpath"
-            fi
-          fi
-        fi
-      fi
+      # Extracted to wm_outbox_try_redeliver (lib/common.sh) so this loop and
+      # the whole-fleet backstop below share one implementation, forensically
+      # logged to $WM_HOME/outbox-retry.log (issue #169, M1).
+      wm_outbox_try_redeliver "$_id" "$(wm_tmux_win_target "$_win")" "$PANE_STABLE"
 
       # Stability-gated drop detection, computed once and shared by the
       # connection-state persistence below and the working-only reconnect
@@ -1124,6 +1243,59 @@ for r in data:
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
         --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
     done
+  fi
+
+  # The whole-fleet outbox backstop (issue #169, piece 1): wingman's own
+  # top-level cycle only (owner "" - the one component the architecture
+  # guarantees stays alive). The per-member loop above is owner-scoped (only
+  # this cycle's own direct reports), so a nested member's outbox otherwise
+  # depends entirely on ITS OWN lead's watcher being armed and current - real
+  # latency hardening for the case where it is not. For every pending outbox
+  # id NOT already covered by the loop above (i.e. not a direct report of
+  # $OWNER) with a live wm-<id> window, take a separately NAMESPACED pane
+  # snapshot (never the shared $WM_HOME/pane-<id>.hash the owner-scoped loop
+  # above may also be reading for this same id at a different phase of its
+  # own interval - round-1's M4) and attempt redelivery through the same
+  # claim-protocol-governed helper. Concurrency is accepted, not engineered
+  # around: a lead's own cycle and this backstop can both attempt the same
+  # queued file's send within the same few seconds; the per-pane send lock
+  # still serializes the actual keystrokes, so the worst case is an
+  # occasional duplicate delivery, never a corruption (the same tradeoff
+  # issue #188's own plan already accepts for its rc 5 path).
+  if [ -z "$OWNER" ] && wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
+    _bs_any_pending=0
+    for _bs_dir in "$WM_HOME"/outbox/*/; do
+      [ -d "$_bs_dir" ] || continue
+      for _bs_f in "$_bs_dir"*; do
+        [ -e "$_bs_f" ] || continue
+        case "$(basename "$_bs_f")" in sent-*) continue ;; esac
+        _bs_any_pending=1; break 2
+      done
+    done
+    if [ "$_bs_any_pending" = 1 ] && _bs_roster_json="$(wm_state crew-list --all --json 2>/dev/null)"; then
+      _bs_live_windows="$(wm_tmux_windows)"
+      for _bs_dir in "$WM_HOME"/outbox/*/; do
+        [ -d "$_bs_dir" ] || continue
+        _bs_id="$(basename "$_bs_dir")"
+        _bs_parent="$(printf '%s' "$_bs_roster_json" | wm_py -c '
+import json, sys
+tid = sys.argv[1]
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+for r in roster if isinstance(roster, list) else []:
+    if r.get("id") == tid:
+        print(r.get("parent") or "")
+        sys.exit(0)
+' "$_bs_id")"
+        [ "$_bs_parent" = "$OWNER" ] && continue   # already serviced by the owner-scoped loop above
+        _bs_win="wm-$_bs_id"
+        printf '%s\n' "$_bs_live_windows" | grep -qx "$_bs_win" || continue
+        wm_pane_snapshot "$_bs_id" "$_bs_win" backstop
+        wm_outbox_try_redeliver "$_bs_id" "$(wm_tmux_win_target "$_bs_win")" "$PANE_STABLE"
+      done
+    fi
   fi
 
   # Fleet-wide outage-state machine (#23, item 0): advanced every iteration,
@@ -1353,7 +1525,10 @@ EOF_USAGE
   # a new (id, updated) still surfaces. The Stop hook uses --suppress-on handled so
   # an acked-but-unhandled event still blocks once (Fix A / #8).
   attention="$(wm_state needs-attention --owner "$OWNER" --suppress-on ack 2>/dev/null)"
-  [ -n "$attention" ] && fire "$attention"
+  # A pending outbox-abandonment notice (issue #169) fires this cycle too,
+  # even with no genuine attention event of its own - see fire()'s own
+  # notice-only handling above.
+  { [ -n "$attention" ] || [ -s "$NOTICEFILE" ]; } && fire "$attention"
 
   sleep "$INTERVAL"
 done

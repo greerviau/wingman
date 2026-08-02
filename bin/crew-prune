@@ -19,6 +19,72 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
+# Peek --owner/--owner=<value>/--dry-run out of "$@" WITHOUT consuming them -
+# every flag still passes through to `wm_state prune "$@"` unchanged below.
+_pr_owner=""; _pr_owner_set=0; _pr_dry_run=0
+_pr_prev=""
+for _pr_a in "$@"; do
+  case "$_pr_prev" in
+    --owner) _pr_owner="$_pr_a"; _pr_owner_set=1 ;;
+  esac
+  case "$_pr_a" in
+    --owner=*) _pr_owner="${_pr_a#--owner=}"; _pr_owner_set=1 ;;
+    --dry-run) _pr_dry_run=1 ;;
+  esac
+  _pr_prev="$_pr_a"
+done
+
+# Sweep every abandoned outbox message BEFORE wm_state prune can remove the
+# roster record that would otherwise identify it as delivery-terminal (issue
+# #169) - a post-prune sweep would find nothing, since a removed record can
+# no longer be tested for reachability at all. Skipped under --dry-run,
+# which promises to change nothing.
+if [ "$_pr_dry_run" -ne 1 ]; then
+  _pr_roster_json="$(wm_state crew-list --all --json 2>/dev/null)"
+  if [ -n "$_pr_roster_json" ]; then
+    if wm_tmux_reachable; then
+      _pr_windows_csv="$(wm_tmux_windows_csv)"; _pr_windows_valid=1
+    else
+      _pr_windows_csv=""; _pr_windows_valid=0
+    fi
+    # Pass 1: owner-scoped, mirroring wm_state prune's own --owner filter -
+    # every roster record whose parent matches (every record, when --owner
+    # was not given), tested for delivery-reachability and swept before its
+    # record can be removed out from under it.
+    printf '%s' "$_pr_roster_json" | wm_py -c '
+import json, sys
+try:
+    roster = json.load(sys.stdin)
+except Exception:
+    roster = []
+owner_set = sys.argv[1] == "1"
+owner = sys.argv[2]
+for r in roster if isinstance(roster, list) else []:
+    if owner_set and (r.get("parent") or "") != owner:
+        continue
+    print(r.get("id") or "")
+' "$_pr_owner_set" "$_pr_owner" | while IFS= read -r _pr_id; do
+      [ -n "$_pr_id" ] || continue
+      [ -d "$WM_HOME/outbox/$_pr_id" ] || continue
+      wm_outbox_delivery_terminal "$_pr_id" "$_pr_roster_json" "$_pr_windows_csv" "$_pr_windows_valid" || continue
+      wm_outbox_sweep_abandoned "$_pr_id" "its crew record is about to be pruned" stdout \
+        "$_pr_roster_json" "$_pr_windows_csv" "$_pr_windows_valid"
+    done
+    # Pass 2: always fleet-wide, regardless of --owner - pass 1 walks roster
+    # records, so it can never reach a stray outbox directory with no
+    # matching record at all, and this is also crew-prune's own opportunity
+    # to sweep anything outside pass 1's own scope, since crew-prune is a
+    # natural "make sure nothing was forgotten" checkpoint.
+    for _pr_dir in "$WM_HOME"/outbox/*/; do
+      [ -d "$_pr_dir" ] || continue
+      _pr_oid="$(basename "$_pr_dir")"
+      wm_outbox_delivery_terminal "$_pr_oid" "$_pr_roster_json" "$_pr_windows_csv" "$_pr_windows_valid" || continue
+      wm_outbox_sweep_abandoned "$_pr_oid" "its crew record is stood-down/died, or done with no live window" stdout \
+        "$_pr_roster_json" "$_pr_windows_csv" "$_pr_windows_valid"
+    done
+  fi
+fi
+
 out="$(wm_state prune "$@")" || exit 1
 case " $* " in
   *" --dry-run "*) printf '%s\n' "$out" ;;
