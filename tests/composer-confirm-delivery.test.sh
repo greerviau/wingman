@@ -248,11 +248,13 @@ sleep 1
 tmux send-keys -t "$SESS6A:box" -l "probe-text"
 sleep 0.3
 plain_pane="$(wm_tmux_pane_text "$SESS6A:box")"
-if wm_composer_text_in "$plain_pane" >/dev/null; then
-  fail "wm_composer_text_in does not recognize the plain, non-boxed stub's capture"
-else
-  ok "wm_composer_text_in does not recognize the plain, non-boxed stub's capture"
-fi
+# Asserts the exact documented rc (1), not merely "nonzero" - a bare `if
+# wm_composer_text_in ...; then fail; else ok; fi` would pass vacuously for
+# ANY nonzero exit, including the function not existing at all (a future
+# rename/typo would print "command not found", exit 127, and still read as
+# "correctly not recognized").
+wm_composer_text_in "$plain_pane" >/dev/null; _c6a_rc=$?
+assert_eq "wm_composer_text_in returns not-recognized (1) for the plain, non-boxed stub's capture" "$_c6a_rc" "1"
 tmux kill-session -t "$SESS6A" 2>/dev/null
 
 tmux new-session -d -s "$SESS6B" -n box "WM_TEST_SWALLOW=0 bash '$PLAIN_STUB'"

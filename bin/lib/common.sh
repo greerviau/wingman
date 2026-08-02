@@ -567,11 +567,21 @@ prompt_shape_in() {
 # not merely an idle fresh session, which can render a dim placeholder hint
 # that would otherwise be misread as pending) and a pending one (unsubmitted
 # text sitting in another crew member's composer), Claude Code v2.1.220,
-# 2026-08-02: an empty composer renders exactly the anchor glyph "❯" (U+276F
-# HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT) followed by one NBSP
-# (U+00A0) and nothing else, byte-exact e2 9d af c2 a0. There are no
-# vertical border glyphs at all - the region is bounded top and bottom by
-# horizontal rules only.
+# 2026-08-02: a mid-turn empty composer - the only state this detector's
+# confirm loop ever actually reads back as "empty" - renders exactly the
+# anchor glyph "❯" (U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK
+# ORNAMENT) followed by one NBSP (U+00A0) and nothing else, byte-exact
+# e2 9d af c2 a0. There are no vertical border glyphs at all - the region is
+# bounded top and bottom by horizontal rules only. This does NOT hold for an
+# idle, nothing-yet-typed composer: v2.1.220 can render a contextual
+# suggestion into it (e.g. "❯ Try 'edit <file>' to...", or a per-session hint
+# observed live as "❯ keep going"/"❯ check on CI status"), which
+# wm_composer_is_empty correctly classifies as pending, not empty - harmless
+# here since a misread only pushes a delivery toward rc 3/5, never toward a
+# false "confirmed" (see wm_composer_is_empty's own design-property note
+# below), but real enough that "empty renders as the bare anchor" must not be
+# read as an unconditional claim about every idle composer, only the
+# post-submit one.
 WM_COMPOSER_RULE_MIN="${WM_COMPOSER_RULE_MIN:-20}"
 WM_COMPOSER_TAIL="${WM_COMPOSER_TAIL:-15}"
 WM_COMPOSER_RULE_CHAR="─"
