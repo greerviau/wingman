@@ -519,9 +519,13 @@ _opening_rc=$?
 # each poll once the pane is deliverable, with a manual crew-say as the
 # fallback remedy.
 if [ "$_opening_rc" -ne 0 ]; then
-  mkdir -p "$WM_HOME/outbox/$ID"
-  printf '%s\n' "$OPENING" > "$WM_HOME/outbox/$ID/$(date +%s)-$$.msg"
-  wm_warn "opening objective NOT confirmed delivered to '$ID' (its pane may be sitting on a permission/trust dialog - see: bin/crew-takeover $ID). It is QUEUED for automatic retry by the watcher; to deliver manually instead: bin/crew-say $ID \"$OPENING\""
+  # The sidecar (sender id, empty for wingman) is written BEFORE the payload
+  # so a sweep can never observe a payload with no sender record (issue #169).
+  mkdir -p "$WM_HOME/outbox/$ID" "$WM_HOME/outbox-meta/$ID"
+  _openfile="$WM_HOME/outbox/$ID/$(date +%s)-$$.msg"
+  printf '%s\n' "${WINGMAN_CREW_ID:-}" > "$WM_HOME/outbox-meta/$ID/$(basename "$_openfile")"
+  printf '%s\n' "$OPENING" > "$_openfile"
+  wm_warn "opening objective NOT confirmed delivered to '$ID' (its pane may be sitting on a permission/trust dialog - see: bin/crew-takeover $ID). It is QUEUED for automatic retry by the watcher; if '$ID' ends before that happens, you'll be notified instead of the objective silently vanishing. To deliver manually instead: bin/crew-say $ID \"$OPENING\""
 fi
 
 if [ "$SCOPE" = global ]; then
