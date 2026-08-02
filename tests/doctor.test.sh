@@ -128,4 +128,58 @@ assert_eq "doctor's bypass check preserves unrelated pre-existing settings" "$do
 out2="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a second doctor run reports Bypass-Permissions mode already accepted" "$out2" "Bypass-Permissions mode already accepted"
 
+# --- fleet-continuity Stop hooks (issue #185), project scope -----------------
+# Report-only (no install/write attempted, since .claude/settings.json is
+# version-controlled) - all three fixtures are pointed at throwaway paths via
+# WM_PROJECT_SETTINGS/WM_STOP_GUARD_SCRIPT/WM_STOP_CONTINUITY_SCRIPT, never the
+# real checkout.
+PROJ_SETTINGS_OK="$WORK/proj-settings-ok.json"
+PROJ_GUARD_SH="$WORK/proj-stop-guard.sh"
+PROJ_CONTINUITY_SH="$WORK/proj-stop-continuity.sh"
+cat > "$PROJ_SETTINGS_OK" <<'JSON'
+{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-guard.sh\""}]},
+      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"", "asyncRewake": true}]}
+    ]
+  }
+}
+JSON
+printf '#!/usr/bin/env bash\n' > "$PROJ_GUARD_SH"; chmod +x "$PROJ_GUARD_SH"
+printf '#!/usr/bin/env bash\n' > "$PROJ_CONTINUITY_SH"; chmod +x "$PROJ_CONTINUITY_SH"
+
+out3="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_OK" \
+        WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "both entries present and executable: doctor reports registered" "$out3" "fleet-continuity Stop hooks registered"
+
+# One entry missing (stop-continuity.sh's own Stop entry absent) - warns, and
+# never attempts to write/install anything into the version-controlled file.
+PROJ_SETTINGS_MISSING="$WORK/proj-settings-missing.json"
+cat > "$PROJ_SETTINGS_MISSING" <<'JSON'
+{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-guard.sh\""}]}
+    ]
+  }
+}
+JSON
+before_missing="$(cat "$PROJ_SETTINGS_MISSING")"
+out4="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_MISSING" \
+        WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a missing Stop entry: doctor warns" "$out4" "fleet-continuity Stop hooks (issue #185) not registered"
+assert_eq "a missing entry never rewrites the settings file" "$(cat "$PROJ_SETTINGS_MISSING")" "$before_missing"
+
+# A script present in settings.json but not executable on disk - warns.
+PROJ_CONTINUITY_SH_NOEXEC="$WORK/proj-stop-continuity-noexec.sh"
+printf '#!/usr/bin/env bash\n' > "$PROJ_CONTINUITY_SH_NOEXEC"
+chmod -x "$PROJ_CONTINUITY_SH_NOEXEC"
+out5="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_OK" \
+        WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH_NOEXEC" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a non-executable script: doctor warns" "$out5" "fleet-continuity Stop hooks (issue #185) not registered"
+
 test_summary

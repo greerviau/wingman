@@ -8,6 +8,17 @@
             "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-guard.sh\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"",
+            "asyncRewake": true,
+            "timeout": 600,
+            "rewakeSummary": "Wingman fleet continuity"
+          }
+        ]
       }
     ],
     "PreToolUse": [

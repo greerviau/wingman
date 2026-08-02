@@ -91,16 +91,19 @@ That is the `verbosity=concise` behavior; a cached `verbosity=detailed` preferen
 
 Then return control.
 You do not keep talking or keep working; you wait for the next directive or a watcher wake.
-If crew are in flight, **arm exactly one watcher cycle before you stop** so that wake can reach you.
+Fleet continuity for your own top-level session is now automatic: `hooks/stop-continuity.sh` arms and re-arms `bin/watch-fleet` for you on every Stop event, tokenlessly, so you no longer need to arm a cycle yourself before you stop in ordinary operation (see "The wake loop"). A lead's own team is unaffected - a lead still arms its own cycle per `playbooks/common/lead.md`.
 
 ## The wake loop
 
 A file on disk cannot rouse an idle session, so the only reliable way you are woken is the **completion of a task the harness tracks for you**. `bin/watch-fleet` blocks, absorbing benign "still working" updates, and exits the instant a crew member needs attention - that exit **is** the wake. One run is one *cycle*. See [`docs/architecture.md`](docs/architecture.md#the-wake-loop) for how it works.
 
+For your own top-level session, `hooks/stop-continuity.sh` now drives this loop for you automatically on every Stop event - the rest of this section is the contract for the case you (or a lead) still arm a cycle manually (debugging, an explicit pilot request, or any lead's own team, whose continuity is unaffected and still fully model-driven per `playbooks/common/lead.md`).
+
 - **Arm it as a harness-tracked background task** (e.g. Bash `run_in_background`), on its own, never bundled onto the tail of another command.
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.
-- **On each wake, run `/watch`.** It classifies the completed cycle and tells you what to do with each outcome, including the fire reasons that have a specific procedure. Use it for your very first arm of a fresh run too.
+- **On each wake, run `/watch`** - but only if the wake is a background task you armed yourself. It classifies the completed cycle and tells you what to do with each outcome, including the fire reasons that have a specific procedure. Use it for your very first arm of a fresh run too.
   **Exception, while onboarding preferences are unanswered:** `/watch` is a `Skill` call the preferences guard does not allow. Use the raw `Bash` forms instead - `bin/watch-fleet` to arm, `bin/watch-fleet --classify` to process a wake - and switch to `/watch` once preferences resolve.
+  **A continuity rewake from `hooks/stop-continuity.sh` is different and self-describing** - it states directly whether any action is needed. Never run `/watch` or arm anything in response to one unless it explicitly asks you to.
 - **Read the arm's status line as truth:** `armed` (a fresh cycle is blocking), `healthy` (one already exists - do **not** start another), or a reason line (it fired - handle it, then re-arm).
 - **Never `kill` a watch-fleet process during normal operation** - the pid in a `healthy`/`armed` line is informational, never an instruction. The only legitimate stop is `bin/watch-fleet --stop`, a manual/testing action. A hook denies the rest.
 

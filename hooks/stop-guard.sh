@@ -15,6 +15,7 @@ WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 # Python via uv (matches the rest of the tool); --no-project so a surrounding
 # pyproject is ignored.
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
+. "$HERE/lib/watcher-liveness.sh"
 
 INPUT="$(cat)"
 
@@ -72,56 +73,17 @@ except Exception: print(0)')"
 # stale within the grace even if a stale pidfile lingers. Owner-scoped exactly like
 # SCRATCH above: a lead's own `bin/watch-fleet --owner <id>` writes watch-<_okey>.pid/
 # .beat, not the unscoped pair wingman's own top-level watcher writes - so this must
-# key off the same _okey or it checks the wrong watcher entirely.
-watcher_up=0
-if [ -n "$OWNER" ]; then
-  pidfile="$WM_HOME/watch-$_okey.pid"
-  beatfile="$WM_HOME/watch-$_okey.beat"
-else
-  pidfile="$WM_HOME/watch.pid"
-  beatfile="$WM_HOME/watch.beat"
-fi
-grace="${WM_WATCH_GRACE:-30}"
-if [ -f "$pidfile" ] && [ -f "$beatfile" ]; then
-  pid="$(cat "$pidfile" 2>/dev/null)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    beat_m="$($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$beatfile" 2>/dev/null)"
-    now_s="$(date +%s)"
-    if [ -n "$beat_m" ] && [ $(( now_s - beat_m )) -lt "$grace" ]; then watcher_up=1; fi
-  fi
-fi
+# key off the same _okey or it checks the wrong watcher entirely. wm_watcher_up also
+# leaves pidfile/beatfile/suppressedfile/etc set (see wm_owner_paths) for use below.
+wm_watcher_up "$OWNER" "$WM_HOME"
 
 # A pending ask with no live `await` waiter is the same failure shape as crew in
 # flight with no watcher: the caller asked, did not arm the wait, and would sleep
-# forever with the answer never waking it. Compute this layer's pending asks and
-# flag any that have no live waiter (its ask/<req>.pid names a live pid AND its
-# ask/<req>.beat is fresh within the grace - the same beacon-freshness test used
-# for the watcher above).
-ask_grace="${WM_ASK_WATCH_GRACE:-30}"
-unwaited=""
-pending_asks="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" ask-list --from "$OWNER" --status pending 2>/dev/null)"
-if [ -n "$pending_asks" ]; then
-  now_s="$(date +%s)"
-  while IFS=$'\t' read -r req st frm to created; do
-    [ -n "$req" ] || continue
-    live=0
-    apid_file="$WM_HOME/ask/$req.pid"
-    abeat_file="$WM_HOME/ask/$req.beat"
-    if [ -f "$apid_file" ] && [ -f "$abeat_file" ]; then
-      apid="$(cat "$apid_file" 2>/dev/null)"
-      if [ -n "$apid" ] && kill -0 "$apid" 2>/dev/null; then
-        abeat_m="$($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$abeat_file" 2>/dev/null)"
-        if [ -n "$abeat_m" ] && [ $(( now_s - abeat_m )) -lt "$ask_grace" ]; then live=1; fi
-      fi
-    fi
-    if [ "$live" = 0 ]; then
-      unwaited="$unwaited
-- ask $req to $to"
-    fi
-  done <<EOF
-$pending_asks
-EOF
-fi
+# forever with the answer never waking it. wm_unwaited_reason computes this
+# layer's pending asks and returns the composed reason (or nothing) - the exact
+# text this hook has always produced, now shared with stop-continuity.sh so the
+# two can never drift on what "unwaited" means.
+unwaited_reason="$(wm_unwaited_reason "$OWNER")"
 
 reason=""
 if [ -n "$attention" ]; then
@@ -149,11 +111,31 @@ else
   # Nothing unhandled this turn → discard any stale scratch from a prior turn, then
   # fall through to the no-waiter / no-watcher guards.
   rm -f "$SCRATCH"
-  if [ -n "$unwaited" ]; then
-    reason="You have a pending question with no live waiter:$unwaited
-Arm 'bin/crew-ask await --id <req>' as a harness-tracked background task for each so its exit wakes you when the answer lands, then you may stop."
+  if [ -n "$unwaited_reason" ]; then
+    reason="$unwaited_reason"
   elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
-    reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
+    # Fleet continuity (hooks/stop-continuity.sh) owns re-arming tokenlessly
+    # now; this branch is the fallback for the kill switch and the safety net
+    # while a spurious-repeated standdown holds (see the plan's "The gate
+    # condition is a bare, deterministic switch" and "The spurious-repeated
+    # standdown must still nag" sections, issue #185). Nested inside the
+    # unchanged active_crew/watcher_up precondition above - NOT a replacement
+    # for it - so WM_STOP_AUTOARM=0 and the standdown branch only ever apply
+    # to the one condition they've always applied to: crew in flight with no
+    # live cycle.
+    if [ "${WM_STOP_AUTOARM:-1}" = "0" ]; then
+      reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
+    elif wm_run_scoped_marker_active "$suppressedfile"; then
+      # Nag with the standdown's OWN composed remedy text (count/hint/log
+      # pointer), not the routine nudge above - the routine text would tell
+      # the model to arm a cycle, and the resulting arm would clear the
+      # standdown prematurely (see "The spurious-repeated standdown must nag
+      # with the correct text"). Falls back to the routine text only if the
+      # marker's own stored reason comes back empty (a pre-fix marker, or a
+      # truncated write) - a generic nag beats silence.
+      reason="$(tail -n +2 "$suppressedfile" 2>/dev/null)"
+      [ -n "$reason" ] || reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
+    fi
   fi
 fi
 
