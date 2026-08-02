@@ -298,13 +298,18 @@ cmd_send() {
   wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_pointer"
   _send_rc=$?
   if [ "$_send_rc" -ne 0 ]; then
-    # Not confirmed delivered (dialog-shaped pane, unconfirmed submit, or a
-    # contended send lock). The request stays pending and the pointer is
-    # queued: bin/watch-fleet retries the member's outbox each poll, so the
-    # question still arrives once the pane clears - arm the await as usual.
+    # Not confirmed delivered (dialog-shaped pane, unconfirmed submit - idle
+    # or busy, or a contended send lock). The request stays pending and the
+    # pointer is queued: bin/watch-fleet retries the member's outbox each
+    # poll, so the question still arrives once the pane clears - arm the
+    # await as usual.
     mkdir -p "$WM_HOME/outbox/$_id"
     printf '%s\n' "$_pointer" > "$WM_HOME/outbox/$_id/$(date +%s)-$$.msg"
-    wm_warn "the question could not be confirmed delivered to '$_id' right now (its pane may be showing a dialog, or another delivery held it). It is QUEUED for automatic retry by the watcher; request $_req stays pending - arm the await as usual, and consider a longer --timeout."
+    if [ "$_send_rc" -eq 5 ]; then
+      wm_warn "the question could not be confirmed delivered to '$_id' right now - its pane looks busy (still repainting on its own clock), so the Enter may be queued behind its current turn rather than lost. It is QUEUED for automatic retry by the watcher; request $_req stays pending - arm the await as usual, and consider a longer --timeout."
+    else
+      wm_warn "the question could not be confirmed delivered to '$_id' right now (its pane may be showing a dialog, or another delivery held it). It is QUEUED for automatic retry by the watcher; request $_req stays pending - arm the await as usual, and consider a longer --timeout."
+    fi
   fi
 
   wm_ok "asked $_id (request $_req)"
