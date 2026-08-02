@@ -32,6 +32,13 @@ assert_not_contains "--classify --owner <id> is accepted by the argument parser"
 
 # --- dispatch-point boundary: --classify against a live cycle never claims ---
 test_new_home
+# d1 is backed by a real tmux window (issue #209): the cycle backgrounded below
+# runs a real reconcile now that it no longer skips merely because the crew
+# session is absent, so a LIVE_STATES fixture with no matching window would
+# flip to 'died' (and the watcher would fire and exit) before --classify runs
+# against what this block expects to still be a live cycle.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-d1 'sleep 600'
 wm_state crew-add --id d1 --type developer --objective x --repo /tmp --window wm-d1 --session-id s1 >/dev/null
 wm_state crew-set --id d1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/bg.log" 2>&1 &
