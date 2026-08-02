@@ -24,9 +24,24 @@ wm_state crew-get --id "$ID" >/dev/null 2>&1 || wm_die "no crew member '$ID'"
 # standdown cascades to descendants and prints every affected id (target first).
 AFFECTED="$(wm_state standdown --id "$ID")"
 
+# Sweep every affected id's outbox as abandoned (issue #169): every id in
+# $AFFECTED was JUST flipped to stood-down above, so each is unconditionally
+# delivery-terminal - this cascade does not re-test that. A single fresh
+# roster read/tmux snapshot for the whole invocation (free in a one-shot
+# CLI) covers the SENDER's own delivery-reachability check inside the sweep
+# for every id swept below.
+_sd_roster_json="$(wm_state crew-list --all --json 2>/dev/null)"
+if wm_tmux_reachable; then
+  _sd_windows_csv="$(wm_tmux_windows_csv)"; _sd_windows_valid=1
+else
+  _sd_windows_csv=""; _sd_windows_valid=0
+fi
+
 closed=0
 removed=0
 for cid in $AFFECTED; do
+  [ -n "$_sd_roster_json" ] && wm_outbox_sweep_abandoned "$cid" "it was stood down" stdout \
+    "$_sd_roster_json" "$_sd_windows_csv" "$_sd_windows_valid"
   WINDOW="wm-$cid"
 
   # One roster read per id, extended (issue #96) to also pull the Remote
