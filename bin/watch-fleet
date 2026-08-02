@@ -889,7 +889,7 @@ while :; do
     [ -d "$_ob_dir" ] || continue
     for _ob_f in "$_ob_dir"*; do
       [ -e "$_ob_f" ] || continue
-      case "$_ob_f" in *"/sent-"*) continue ;; esac
+      case "$(basename "$_ob_f")" in sent-*) continue ;; esac
       _ob_pending_ids="$_ob_pending_ids$(basename "$_ob_dir")
 "
       break
@@ -1268,7 +1268,7 @@ for r in data:
       [ -d "$_bs_dir" ] || continue
       for _bs_f in "$_bs_dir"*; do
         [ -e "$_bs_f" ] || continue
-        case "$_bs_f" in *"/sent-"*) continue ;; esac
+        case "$(basename "$_bs_f")" in sent-*) continue ;; esac
         _bs_any_pending=1; break 2
       done
     done

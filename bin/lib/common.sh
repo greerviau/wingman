@@ -1201,10 +1201,9 @@ wm_outbox_sweep_abandoned() {
   _sw_dir="$WM_HOME/outbox/$_sw_id"
   _sw_metadir="$WM_HOME/outbox-meta/$_sw_id"
   [ -d "$_sw_dir" ] || return 0
-  _sw_seq=0
   for _sw_f in "$_sw_dir"/*; do
     [ -e "$_sw_f" ] || continue
-    case "$_sw_f" in *"/sent-"*) continue ;; esac
+    case "$(basename "$_sw_f")" in sent-*) continue ;; esac
     _sw_stem="$(wm_outbox_basename "$_sw_f")"
     _sw_sidecar="$_sw_metadir/$_sw_stem"
 
@@ -1227,7 +1226,7 @@ wm_outbox_sweep_abandoned() {
 
     # 4. compose the notice: pointer, not payload, for anything crew-say's own
     # rule would also route to a file.
-    _sw_queued_at="$(date -u -r "$_sw_claimed" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    _sw_queued_at="$(wm_py -c 'import datetime,os,sys;print(datetime.datetime.fromtimestamp(os.path.getmtime(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$_sw_claimed" 2>/dev/null)"
     _sw_body="$(cat "$_sw_claimed" 2>/dev/null)"
     if wm_needs_pointer "$_sw_body"; then
       _sw_content="(long/multi-line message - read $_sw_claimed)"
@@ -1241,25 +1240,30 @@ wm_outbox_sweep_abandoned() {
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sw_id" "$_sw_sender_label" "$_sw_reason" "$_sw_claimed" \
       >> "$WM_HOME/outbox-abandoned.log"
 
-    # 6. notify: a sender that is itself still reachable (wingman, or a known,
-    # non-terminal sender) is always queued into its OWN outbox - never a
-    # direct send (no PANE_STABLE gate here, no per-poll bound on
+    # 6. notify: a known, non-empty, non-terminal sender is itself still
+    # reachable and is always queued into its OWN outbox - never a direct
+    # send (no PANE_STABLE gate here, no per-poll bound on
     # WM_SEND_LOCK_WAIT, and this scan is fleet-wide while every real send
-    # site is owner-scoped - see the plan for the full reasoning). Wingman,
-    # unknown, or a terminal sender routes through <notify-mode> instead.
+    # site is owner-scoped - see the plan for the full reasoning). Wingman
+    # (an empty, known sender), unknown (no sidecar), or a terminal sender
+    # all route through <notify-mode> instead - wingman is not itself an
+    # outbox this mechanism ever delivers into, only a routing floor for the
+    # notice-routing walk below.
     _sw_sender_reachable=0
-    if [ "$_sw_sender_known" = 1 ]; then
-      if [ -z "$_sw_sender" ]; then
-        _sw_sender_reachable=1   # wingman: always reachable
-      elif ! wm_outbox_delivery_terminal "$_sw_sender" "$_sw_roster_json" "$_sw_windows_csv" "$_sw_windows_valid"; then
-        _sw_sender_reachable=1
-      fi
+    if [ "$_sw_sender_known" = 1 ] && [ -n "$_sw_sender" ] \
+       && ! wm_outbox_delivery_terminal "$_sw_sender" "$_sw_roster_json" "$_sw_windows_csv" "$_sw_windows_valid"; then
+      _sw_sender_reachable=1
     fi
 
     if [ "$_sw_sender_reachable" = 1 ]; then
       mkdir -p "$WM_HOME/outbox/$_sw_sender" "$WM_HOME/outbox-meta/$_sw_sender" 2>/dev/null
-      _sw_seq=$((_sw_seq+1))
-      _sw_outfile="$WM_HOME/outbox/$_sw_sender/$(date +%s)-$$-$_sw_seq.msg"
+      # The swept id/stem (never reused - each queued file is claimed at
+      # most once, ever) make this unique even across separate calls to this
+      # function in the same process within the same second, unlike a
+      # per-call counter reset at every invocation - watch-fleet's own scan
+      # calls this once per terminal id per poll, and crew-standdown/
+      # crew-prune each call it once per cascaded/swept id too.
+      _sw_outfile="$WM_HOME/outbox/$_sw_sender/$(date +%s)-$$-$(printf '%s-%s' "$_sw_id" "$_sw_stem" | tr -c 'A-Za-z0-9._-' '_').msg"
       printf '' > "$WM_HOME/outbox-meta/$_sw_sender/$(basename "$_sw_outfile")"
       printf '%s\n' "$_sw_notice" > "$_sw_outfile"
     else

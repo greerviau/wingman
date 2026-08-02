@@ -199,6 +199,52 @@ assert_eq "exactly one of the two racing sweeps produced a notice" "$_race_lines
 _race_log_lines="$(grep -c "sw4" "$WINGMAN_HOME/outbox-abandoned.log" 2>/dev/null)"
 assert_eq "exactly one audit-log line was written for the raced message" "$_race_log_lines" "1"
 
+# --- review round 1, must-fix 1: an empty (KNOWN) sender is wingman, and
+# wingman must route through <notify-mode> like any other unreachable
+# sender - it is never itself an outbox this mechanism delivers into. The
+# bug this guards: treating empty-as-reachable wrote the notice to
+# "$WM_HOME/outbox/$_sw_sender" with the variable empty, which collapses to
+# a stray FILE directly under outbox/ that nothing ever reads. ------------
+mkdir -p "$WINGMAN_HOME/outbox/sw5" "$WINGMAN_HOME/outbox-meta/sw5"
+printf 'a message wingman itself queued\n' > "$WINGMAN_HOME/outbox/sw5/1-m.msg"
+: > "$WINGMAN_HOME/outbox-meta/sw5/1-m.msg"   # empty sidecar = wingman
+_ros5='[{"id":"sw5","status":"died"}]'
+_out5="$(wm_outbox_sweep_abandoned sw5 "it died" stdout "$_ros5" "" 1)"
+assert_contains "a wingman-authored (empty sender) message routes through notify-mode" \
+  "$_out5" "Abandoned outbox message for 'sw5'"
+assert_false "no stray file was ever written directly under outbox/ itself" \
+  "find '$WINGMAN_HOME/outbox' -maxdepth 1 -type f 2>/dev/null | grep -q ."
+
+# --- review round 1, must-fix 2: the notice filename must not collide
+# across SEPARATE calls to wm_outbox_sweep_abandoned in the same process
+# within the same second - watch-fleet's own scan calls it once per
+# terminal id per poll, and crew-standdown/crew-prune call it once per
+# cascaded/swept id, so two ids notifying the same live sender in one poll
+# must not have the second call's notice silently overwrite the first's. -
+mkdir -p "$WINGMAN_HOME/outbox/sw6a" "$WINGMAN_HOME/outbox-meta/sw6a"
+printf 'first message\n' > "$WINGMAN_HOME/outbox/sw6a/1.msg"
+printf 'shared-live-sender\n' > "$WINGMAN_HOME/outbox-meta/sw6a/1.msg"
+mkdir -p "$WINGMAN_HOME/outbox/sw6b" "$WINGMAN_HOME/outbox-meta/sw6b"
+printf 'second message\n' > "$WINGMAN_HOME/outbox/sw6b/1.msg"
+printf 'shared-live-sender\n' > "$WINGMAN_HOME/outbox-meta/sw6b/1.msg"
+_ros6='[{"id":"sw6a","status":"died"},{"id":"sw6b","status":"died"},{"id":"shared-live-sender","status":"working"}]'
+wm_outbox_sweep_abandoned sw6a "it died" stdout "$_ros6" "" 1 >/dev/null
+wm_outbox_sweep_abandoned sw6b "it died" stdout "$_ros6" "" 1 >/dev/null
+_notice_count="$(ls "$WINGMAN_HOME/outbox/shared-live-sender" 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "two separate sweeps notifying the same sender within one second each leave their own distinct notice" \
+  "$_notice_count" "2"
+
+# --- nice-to-have: the sent- skip matches the file's own BASENAME, never a
+# path substring - an outbox id that itself begins with "sent-" must not
+# have its own genuinely pending files misread as already-delivered. ------
+mkdir -p "$WINGMAN_HOME/outbox/sent-report" "$WINGMAN_HOME/outbox-meta/sent-report"
+printf 'a real pending message under a sent--prefixed id\n' > "$WINGMAN_HOME/outbox/sent-report/1.msg"
+printf 'long-gone-sender\n' > "$WINGMAN_HOME/outbox-meta/sent-report/1.msg"
+_ros7='[{"id":"sent-report","status":"died"}]'
+_out7="$(wm_outbox_sweep_abandoned sent-report "it died" stdout "$_ros7" "" 1)"
+assert_contains "an id beginning with 'sent-' does not fool the skip into ignoring its own pending file" \
+  "$_out7" "Abandoned outbox message for 'sent-report'"
+
 # =============================================================================
 # Section 5 - bin/crew-standdown cascades the sweep
 # =============================================================================
@@ -321,6 +367,80 @@ assert_true "the dead short-id window was swept" \
   "[ -d '$WINGMAN_HOME/outbox-abandoned/issue-169-plan-reviewer' ]"
 assert_false "the live long-id window, a strict superstring of the dead one, was NOT misread as live and swept" \
   "[ -d '$WINGMAN_HOME/outbox-abandoned/issue-169-plan-reviewer7' ]"
+
+# =============================================================================
+# Section 8 - review round 1, must-fix 3: the whole-fleet backstop (piece 1)
+# reaches an indirect descendant, with a namespaced PANE_STABLE capture that
+# does not contend with the owner-scoped watcher polling the same id, under
+# real two-process concurrency.
+# =============================================================================
+IDLE_STUB="$(wm_mktemp_dir)/idle-stub2.sh"
+cat > "$IDLE_STUB" <<'STUBEOF'
+#!/usr/bin/env bash
+stty -echo -icanon intr undef min 1 time 0 2>/dev/null
+printf 'PROMPT READY\n'
+buf=""
+while IFS= read -r -n1 ch; do
+  case "$ch" in
+    ""|$'\r'|$'\n') printf 'SUBMITTED:%s\n' "$buf"; buf="" ;;
+    $'\003') buf="" ;;
+    *) buf="$buf$ch" ;;
+  esac
+done
+STUBEOF
+chmod +x "$IDLE_STUB"
+export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2 WM_SUBMIT_POLL=0.3 WM_READY_TRIES=20 WM_SUBMIT_TRIES=8
+
+# lead-b needs its own LIVE window: if it had none, reconcile would flip it
+# to died and needs-attention would fire and exit the poll before the
+# backstop below ever runs on that same poll - looking like a broken
+# backstop when the real cause is an unrelated early exit.
+wm_state crew-add --id lead-b --type lead --objective x --repo /tmp --window wm-lead-b --session-id s11 >/dev/null
+tmux new-window -t "$WM_TMUX_TARGET:" -n wm-lead-b "sleep 300"
+wm_state crew-add --id worker-b --type developer --objective x --repo /tmp --window wm-worker-b --session-id s12 --parent lead-b >/dev/null
+tmux new-window -t "$WM_TMUX_TARGET:" -n wm-worker-b "bash '$IDLE_STUB'"
+sleep 0.3
+mkdir -p "$WINGMAN_HOME/outbox/worker-b"
+printf 'a message stuck behind lead-b own watcher not being current\n' > "$WINGMAN_HOME/outbox/worker-b/1.msg"
+
+# Two real, concurrent watch-fleet processes: lead-b's own owner-scoped cycle
+# (which directly covers worker-b, a report of lead-b) and wingman's
+# top-level cycle (which does NOT - worker-b's parent is lead-b, not "" - so
+# only its whole-fleet backstop can reach it).
+WM_WATCH_INTERVAL=1 "$WATCH" --owner lead-b >/dev/null 2>&1 &
+wm_track $!
+WM_WATCH_INTERVAL=1 "$WATCH" --owner "" >/dev/null 2>&1 &
+wm_track $!
+_i=0
+while [ "$_i" -lt 20 ]; do
+  [ -f "$WINGMAN_HOME/outbox/worker-b/sent-1.msg" ] && break
+  sleep 0.5; _i=$((_i+1))
+done
+"$WATCH" --owner lead-b --stop >/dev/null 2>&1
+"$WATCH" --owner "" --stop >/dev/null 2>&1
+assert_true "the backstop reached an indirect descendant (not a direct report of the top-level cycle)" \
+  "[ -f '$WINGMAN_HOME/outbox/worker-b/sent-1.msg' ]"
+assert_true "the backstop used its own NAMESPACED pane capture" \
+  "[ -f '$WINGMAN_HOME/pane-worker-b-backstop.hash' ]"
+assert_true "lead-b's own owner-scoped loop independently used the SHARED (non-namespaced) capture for the same id" \
+  "[ -f '$WINGMAN_HOME/pane-worker-b.hash' ]"
+
+# =============================================================================
+# Section 9 - nice-to-have: a sweep happens on the SAME poll that also fires
+# needs-attention, never deferred to a later poll by fire()'s own exit 0.
+# =============================================================================
+wm_state crew-add --id blk1 --type developer --objective x --repo /tmp --window wm-blk1 --session-id s13 >/dev/null
+tmux new-window -t "$WM_TMUX_TARGET:" -n wm-blk1 "sleep 300"
+wm_state crew-set --id blk1 --status blocked --blocker "needs a decision" >/dev/null
+mkdir -p "$WINGMAN_HOME/outbox/term1" "$WINGMAN_HOME/outbox-meta/term1"
+printf 'must be swept on the very poll that also fires\n' > "$WINGMAN_HOME/outbox/term1/1.msg"
+printf 'long-gone-sender\n' > "$WINGMAN_HOME/outbox-meta/term1/1.msg"
+wm_state crew-add --id term1 --type developer --objective x --repo /tmp --window wm-term1 --session-id s14 >/dev/null
+wm_state crew-set --id term1 --status stood-down >/dev/null
+_samepoll_out="$(WM_WATCH_INTERVAL=1 wm_timeout 10 "$WATCH" --owner "")"
+assert_contains "the genuine attention event fired as usual" "$_samepoll_out" "blocked: blk1"
+assert_true "the terminal member's outbox was swept on that SAME poll, not deferred" \
+  "[ -d '$WINGMAN_HOME/outbox-abandoned/term1' ]"
 
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 test_summary
