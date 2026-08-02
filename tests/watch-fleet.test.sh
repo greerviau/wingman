@@ -26,6 +26,12 @@ assert_contains "wake file names the member" "$(cat "$WINGMAN_HOME/wake")" "a1"
 
 # --- blocks while the fleet is only working, then fires on the flip ----------
 test_new_home
+# b1 is backed by a real tmux window (issue #209): reconcile now runs on every
+# poll regardless of whether the crew session exists, so a LIVE_STATES fixture
+# with no matching window would flip to died on the very first poll instead of
+# staying working through this block's blocking-then-flip assertions.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-b1 'sleep 600'
 wm_state crew-add --id b1 --type analyst --objective y --repo /tmp --window wm-b1 --session-id s2 >/dev/null
 wm_state crew-set --id b1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/out.log" 2>&1 &
@@ -48,6 +54,9 @@ kill "$wpid" 2>/dev/null
 
 # --- a blocked member is actionable too --------------------------------------
 test_new_home
+# c1 is backed by a real tmux window (issue #209): see b1's comment above.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-c1 'sleep 600'
 wm_state crew-add --id c1 --type developer --objective z --repo /tmp --window wm-c1 --session-id s3 >/dev/null
 wm_state crew-set --id c1 --status blocked --blocker "need a decision" >/dev/null
 out3="$(wm_timeout 45 "$WF" 2>/dev/null)"
@@ -55,6 +64,14 @@ assert_contains "blocked member fires with its reason" "$out3" "blocked: c1"
 
 # --- fire carries the full picture: deltas + directive + roster ---------------
 test_new_home
+# d1 and d2 are backed by real tmux windows (issue #209): see b1's comment
+# above. Both are LIVE_STATES fixtures here (d1 -> review, d2 -> working), and
+# without real windows both flip to died together, producing a
+# correlated:mass-death fire instead of the individual review fire this block
+# actually tests for.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-d1 'sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-d2 'sleep 600'
 wm_state crew-add --id d1 --type analyst --objective a --repo /tmp --window wm-d1 --session-id s4 >/dev/null
 wm_state crew-add --id d2 --type developer --objective b --repo /tmp --window wm-d2 --session-id s5 >/dev/null
 wm_state crew-set --id d2 --status working --summary "still building" >/dev/null
@@ -365,6 +382,9 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 assert_true "watch-fleet ignores SIGURG explicitly" "grep -qE \"trap '' (URG|SIGURG)\" '$WF'"
 
 test_new_home
+# u1 is backed by a real tmux window (issue #209): see b1's comment above.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-u1 'sleep 600'
 wm_state crew-add --id u1 --type developer --objective u --repo /tmp --window wm-u1 --session-id s18 >/dev/null
 wm_state crew-set --id u1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/urg.log" 2>&1 &
@@ -427,6 +447,9 @@ kill "$race_a" "$race_b" 2>/dev/null
 # --- --status is the scriptable liveness check (#12) --------------------------
 test_new_home
 assert_false "no live cycle: --status exits nonzero" "\"$WF\" --status >/dev/null 2>&1"
+# st1 is backed by a real tmux window (issue #209): see b1's comment above.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-st1 'sleep 600'
 wm_state crew-add --id st1 --type developer --objective s --repo /tmp --window wm-st1 --session-id ss1 >/dev/null
 wm_state crew-set --id st1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/status.log" 2>&1 &
@@ -1159,6 +1182,9 @@ rm -f "$WINGMAN_HOME"/watch.pid "$WINGMAN_HOME"/watch.beat
 # --- run-id ownership (#162): healthy is run-scoped, a foreign cycle is
 # --- replaced rather than adopted --------------------------------------------
 test_new_home
+# r1 is backed by a real tmux window (issue #209): see b1's comment above.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-r1 'sleep 600'
 wm_state crew-add --id r1 --type analyst --objective e --repo /tmp --window wm-r1 --session-id s20 >/dev/null
 wm_state crew-set --id r1 --status working --summary "busy" >/dev/null
 WINGMAN_RUN_ID=run-old "$WF" >"$WINGMAN_HOME/old.log" 2>&1 &

@@ -19,12 +19,22 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
-# Reconcile liveness before rendering (cheap, zero-token). Strays are adopted
-# first, so a member whose window sits in another session (spawned before the
-# exact-named crew session existed) is moved home rather than flagged died.
-if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
+# Reconcile liveness before rendering (cheap, zero-token). Reconciled against
+# every window in the crew session's own prefix family (#209), not just
+# whether the crew session itself exists: the crew session is exactly what
+# a tmux-server crash takes down first, so gating reconcile on its existence
+# was the one case reconcile exists to catch. Skipped only when the tmux
+# server itself is unreachable (wm_tmux_reachable) - never merely because
+# the crew session doesn't currently exist. Strays are adopted first, so a
+# member whose window sits in a prefix-sibling session is moved home rather
+# than flagged died - wm_tmux_adopt_strays' own has-session guard makes it
+# a no-op when the crew session is absent, which is safe here: the #44
+# hazard it guards against is now avoided by reconcile's own prefix-scoped
+# input regardless (see wm_tmux_prefix_windows_csv's own comment for why
+# this is scoped to the prefix family rather than the whole server).
+if wm_tmux_reachable; then
   wm_tmux_adopt_strays
-  wm_state reconcile --windows "$(wm_tmux_windows_csv)" >/dev/null
+  wm_state reconcile --windows "$(wm_tmux_prefix_windows_csv)" >/dev/null
 fi
 
 # Default the owner scope to the caller (wingman = "", a lead = its own id) so a

@@ -54,6 +54,13 @@ assert_contains "a top-level sibling is untouched by the cascade" "$(wm_state cr
 
 # --- per-owner watchers coexist ----------------------------------------------
 test_new_home
+# lead1/wkr1 are backed by real tmux windows (issue #209): both $WF calls
+# below run a real reconcile now that it no longer skips merely because the
+# crew session is absent, so a LIVE_STATES fixture with no matching window
+# would flip to 'died' on the very first poll instead of staying 'working'.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-lead1 'sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-wkr1 'sleep 600'
 wm_state crew-add --id lead1 --type lead  --objective big --repo /tmp --window wm-lead1 --session-id s1 >/dev/null
 wm_state crew-add --id wkr1  --type developer --objective a   --repo /tmp --window wm-wkr1  --session-id s2 --parent lead1 >/dev/null
 wm_state crew-set --id lead1 --status working --summary "managing" >/dev/null

@@ -72,6 +72,12 @@ export WM_WATCH_INTERVAL=1
 # A real, live, background-armed watch-fleet cycle (scenarios 1, 2, 3, 5)
 # ============================================================================
 test_new_home
+# a1 is backed by a real tmux window (issue #209): the cycle armed below runs a
+# real reconcile now that it no longer skips merely because the crew session is
+# absent, so a LIVE_STATES fixture with no matching window would flip to 'died'
+# (and the watcher would fire and exit) before this block's guard scenarios run.
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-a1 'sleep 600'
 wm_state crew-add --id a1 --type analyst --objective x --repo /tmp --window wm-a1 --session-id s1 >/dev/null
 wm_state crew-set --id a1 --status working --summary "in progress" >/dev/null
 "$WF" >"$WINGMAN_HOME/out.log" 2>&1 &
