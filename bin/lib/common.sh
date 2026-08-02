@@ -551,6 +551,81 @@ prompt_shape_in() {
   return 1
 }
 
+# Signature of the CLI's own chat composer, structurally rather than by
+# string-matching whatever was typed into it (issue #188): a "rule" line is a
+# LEADING RUN of at least WM_COMPOSER_RULE_MIN box-drawing horizontal
+# characters (─, U+2500) - a leading-run anchor, not a whole-line one,
+# because the top rule embeds a centered window label after its opening dash
+# run and a whole-line "^─+$" pattern would never match it. Scanning the
+# trailing WM_COMPOSER_TAIL lines of a capture, the composer region is
+# whatever sits strictly between the LAST two such rule lines; everything at
+# or after the bottom rule (a "/rc" line, the bypass-permissions status row,
+# an attachment chip - all of which mutate on their own clock, independent
+# of the composer) is excluded by construction, never read as "content".
+# Verified against a live pane, both an empty composer (captured on a busy,
+# mid-turn target - the state this detector's confirm loop actually reads,
+# not merely an idle fresh session, which can render a dim placeholder hint
+# that would otherwise be misread as pending) and a pending one (unsubmitted
+# text sitting in another crew member's composer), Claude Code v2.1.220,
+# 2026-08-02: an empty composer renders exactly the anchor glyph "❯" (U+276F
+# HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT) followed by one NBSP
+# (U+00A0) and nothing else, byte-exact e2 9d af c2 a0. There are no
+# vertical border glyphs at all - the region is bounded top and bottom by
+# horizontal rules only.
+WM_COMPOSER_RULE_MIN="${WM_COMPOSER_RULE_MIN:-20}"
+WM_COMPOSER_TAIL="${WM_COMPOSER_TAIL:-15}"
+WM_COMPOSER_RULE_CHAR="─"
+WM_COMPOSER_ANCHOR="❯$(printf '\xc2\xa0')"
+# Deliberately portable ERE (#52, see tests/detector-regex-portability.test.sh
+# and bin/watch-fleet's own WM_APIERR_RE comment): a {n} interval is rejected
+# outright by BSD grep -E in some combinations ("invalid repetition
+# count(s)"), which makes grep -qE exit 2 (error, silently read as "no
+# match" by every caller here) instead of 0/1 - silently disabling this
+# whole detector on macOS. WM_COMPOSER_RULE_MIN copies of the rule character
+# are spelled out literally below, followed by a plain `*` for "or more" -
+# functionally identical to "${WM_COMPOSER_RULE_CHAR}{$WM_COMPOSER_RULE_MIN,}"
+# but built from only literal concatenation and the portable `*` operator,
+# computed once here rather than per-poll since the knob is fixed for the
+# life of the process, like every other detector constant in this file.
+WM_COMPOSER_RULE_RE="^"
+_wm_ct_i=0
+while [ "$_wm_ct_i" -lt "$WM_COMPOSER_RULE_MIN" ]; do
+  WM_COMPOSER_RULE_RE="${WM_COMPOSER_RULE_RE}${WM_COMPOSER_RULE_CHAR}"
+  _wm_ct_i=$((_wm_ct_i+1))
+done
+WM_COMPOSER_RULE_RE="${WM_COMPOSER_RULE_RE}${WM_COMPOSER_RULE_CHAR}*"
+unset _wm_ct_i
+
+# Extracts the composer region from a pane capture and prints it (which may
+# itself be an empty string - not the same as "not recognized" below).
+# Returns 0 when a rule pair is found in the trailing WM_COMPOSER_TAIL lines
+# of the given text, 1 ("not recognized", nothing printed) when fewer than
+# two rule lines are found there - left entirely to the caller, which
+# reverts to the pre-#188 whole-pane-checksum behavior rather than treating
+# "not recognized" as any kind of refusal.
+wm_composer_text_in() {
+  _ct_tail="$(printf '%s\n' "$1" | tail -n "$WM_COMPOSER_TAIL")"
+  _ct_idxs="$(printf '%s\n' "$_ct_tail" | grep -nE "$WM_COMPOSER_RULE_RE" | cut -d: -f1)"
+  [ -n "$_ct_idxs" ] || return 1
+  [ "$(printf '%s\n' "$_ct_idxs" | grep -c '')" -ge 2 ] || return 1
+  _ct_bottom="$(printf '%s\n' "$_ct_idxs" | tail -n1)"
+  _ct_top="$(printf '%s\n' "$_ct_idxs" | tail -n2 | head -n1)"
+  _ct_start=$((_ct_top+1))
+  _ct_end=$((_ct_bottom-1))
+  [ "$_ct_start" -le "$_ct_end" ] && printf '%s\n' "$_ct_tail" | sed -n "${_ct_start},${_ct_end}p"
+  return 0
+}
+
+# True (rc 0) iff a wm_composer_text_in extraction is empty - reduces to the
+# anchor glyph + NBSP alone, no other text. False (rc 1, "pending") for
+# anything else. A misread here can only push a delivery toward "not yet
+# confirmed", never toward a false 0 - consistent with this whole detector's
+# design property (see _wm_tmux_send_message_locked below): every failure
+# mode degrades toward a false negative, never a false "confirmed".
+wm_composer_is_empty() {
+  [ "$(printf '%s' "$1" | sed -e 's/[[:space:]]*$//')" = "$WM_COMPOSER_ANCHOR" ]
+}
+
 # Wait until a target pane's interactive TUI has finished starting and is ready to
 # accept input, rather than guessing with a fixed delay. A freshly launched agent
 # paints a splash/prompt and connects MCP servers before it will honour keystrokes;
@@ -633,12 +708,42 @@ wm_tmux_pane_ready() {
 # prompt. Set WM_CLEAR_KEYS empty to skip this for a harness whose composer
 # does not clear on Ctrl-C.
 #
-# Returns: 0 on a CONFIRMED delivery (the pane advanced past its composed
+# A fifth failure mode - issue #188 - motivates the composer-region check
+# below: on a BUSY target (a Claude Code pane mid-turn, repainting on its
+# own clock - the elapsed-time line, streaming tokens, "N shell(s) still
+# running") the whole pane changes on the very first poll after Enter
+# regardless of whether the Enter itself registered, so the whole-pane
+# checksum this loop otherwise relies on cannot tell a genuine delivery from
+# a message still sitting, unsubmitted, in the composer. wm_composer_text_in
+# (above) reads the composer's OWN region instead, classified structurally
+# (empty vs. pending) rather than by matching $_text against it - a message
+# long/multi-line enough to wrap or paste-placeholder past any literal
+# match still confirms correctly. Engaging this composer-mode check is
+# strictly additive: an unrecognized region, or one already empty on the
+# just-composed snapshot, falls straight through to the whole-pane-checksum
+# behavior below, unchanged, for the rest of this call. Once engaged, any
+# poll that sees the whole pane change while the composer is still pending
+# sets a sticky "busy" flag for the remainder of this call, so a busy pane
+# is polled but never re-Entered again - repeated Enters into a pane whose
+# Enter may already be queued behind the current turn risk stacking
+# duplicate submits once the turn ends. The dialog check above still runs on
+# every poll of the composer-mode loop exactly as it does in the fallback
+# loop below, unaffected by the busy branch, and still takes priority (rc 2)
+# over everything else here.
+#
+# Returns: 0 on a CONFIRMED delivery (the composer region went empty, or -
+# when composer mode never engaged - the pane advanced past its composed
 # snapshot), 2 if refused because the pane looks dialog-shaped, 3 if the
-# submit could never be confirmed within WM_SUBMIT_TRIES (typed, Enter sent,
-# but the pane never visibly advanced - probably-not-delivered, previously
-# indistinguishable from success). Callers treating only "nonzero" as failure
-# keep working; callers that care report 3 as unconfirmed, not delivered.
+# submit could never be confirmed within WM_SUBMIT_TRIES and the pane was
+# idle throughout (typed, Enter sent, but nothing ever visibly advanced -
+# probably-not-delivered, previously indistinguishable from success), 5 if
+# the submit could never be confirmed AND the pane was busy (repainting on
+# its own clock) at some point during the confirm loop - probably queued
+# behind the current turn rather than lost outright. rc 5 is only reachable
+# once composer mode has engaged; the whole-pane-checksum fallback can still
+# only ever return 0 or 3. Callers treating only "nonzero" as failure keep
+# working; callers that care can tell an idle-genuine-swallow (3) apart from
+# a busy-likely-queued one (5).
 #
 # Concurrency: the whole type-and-submit sequence holds an mkdir-based
 # per-pane lock (send-<target>.lock under $WM_HOME). Multiple writers
@@ -694,10 +799,52 @@ _wm_tmux_send_message_locked() {
   if prompt_shape_in "$(printf '%s\n' "$_sm_composed_text" | tail -n "$WM_PERM_TAIL")"; then
     return 2
   fi
+  # Composer mode (issue #188) engages iff the composer's own region is
+  # recognized AND still pending on this just-composed snapshot - never a
+  # stricter gate than the whole-pane-checksum fallback below: "not
+  # recognized" or "recognized but already empty" (a race/anomaly) both fall
+  # straight through to that fallback, unchanged, for the rest of this call.
+  _sm_composer_mode=0
+  if _sm_region="$(wm_composer_text_in "$_sm_composed_text")" && ! wm_composer_is_empty "$_sm_region"; then
+    _sm_composer_mode=1
+  fi
   _sm_composed="$(printf '%s' "$_sm_composed_text" | cksum)"
   wm_tmux send-keys -t "$_target" Enter
   _sm_i=0
   _sm_max="${WM_SUBMIT_TRIES:-6}"
+
+  if [ "$_sm_composer_mode" -eq 1 ]; then
+    # Confirm on the composer going empty, never on a whole-pane byte change.
+    # _sm_busy is sticky for the rest of this loop once tripped by a whole-
+    # pane change seen while the composer is still pending, so a busy pane
+    # is polled but never re-Entered again. The dialog check still runs
+    # every poll and still takes priority (rc 2) over everything below it.
+    _sm_busy=0
+    _sm_prev_text="$_sm_composed_text"
+    while [ "$_sm_i" -lt "$_sm_max" ]; do
+      sleep "${WM_SUBMIT_POLL:-0.8}"
+      _sm_now_text="$(wm_tmux_pane_text "$_target")"
+      if prompt_shape_in "$(printf '%s\n' "$_sm_now_text" | tail -n "$WM_PERM_TAIL")"; then
+        return 2
+      fi
+      if _sm_region="$(wm_composer_text_in "$_sm_now_text")" && wm_composer_is_empty "$_sm_region"; then
+        return 0
+      fi
+      [ "$_sm_now_text" != "$_sm_prev_text" ] && _sm_busy=1
+      _sm_prev_text="$_sm_now_text"
+      [ "$_sm_busy" -eq 0 ] && wm_tmux send-keys -t "$_target" Enter
+      _sm_i=$((_sm_i+1))
+    done
+    # Exhausted every confirm retry without the composer ever going empty.
+    # _sm_busy=1 means the pane was actively repainting at some point while
+    # still pending - most likely a queued Enter, not a lost one (rc 5).
+    # _sm_busy=0 means the pane sat genuinely idle the whole time - the
+    # original genuine-swallow meaning of rc 3, unchanged.
+    [ "$_sm_busy" -eq 1 ] && return 5
+    return 3
+  fi
+
+  # Fallback: today's exact whole-pane-checksum behavior, unchanged.
   while [ "$_sm_i" -lt "$_sm_max" ]; do
     sleep "${WM_SUBMIT_POLL:-0.8}"
     _sm_now_text="$(wm_tmux_pane_text "$_target")"

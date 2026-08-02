@@ -987,12 +987,13 @@ for r in data:
           # (rc 2, dialog-shaped pane) or a contended send lock (rc 4) means
           # nothing was typed, so the next cycle should try again rather than
           # sit out a cooldown for a retry that never happened. rc 3 (typed,
-          # submit unconfirmed) marks the cooldown like a success - the
-          # keystrokes landed, and hammering /remote-control every poll into a
-          # pane that doesn't repaint adds nothing.
+          # submit unconfirmed, idle) and rc 5 (typed, submit unconfirmed,
+          # busy - issue #188) both mark the cooldown like a success - the
+          # keystrokes landed either way, and hammering /remote-control every
+          # poll into a pane that doesn't repaint adds nothing.
           wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"
           _rcretry_rc=$?
-          if [ "$_rcretry_rc" -eq 0 ] || [ "$_rcretry_rc" -eq 3 ]; then
+          if [ "$_rcretry_rc" -eq 0 ] || [ "$_rcretry_rc" -eq 3 ] || [ "$_rcretry_rc" -eq 5 ]; then
             : > "$_rcfile"
             # Reflect the self-heal back into the persisted field the same way
             # a detected drop is (issue #96).
@@ -1089,13 +1090,14 @@ for r in data:
           # when wm_tmux_send_message refused because the pane looks
           # dialog-shaped (rc 2) or the send lock was contended (rc 4) - those
           # must be retried, not treated as delivered. rc 3 (typed but the
-          # submit never visibly confirmed) DOES mark: the keystrokes landed,
-          # and an idle-stalled pane not repainting on them is exactly the
-          # shape under diagnosis here - resending every poll would spam the
+          # submit never visibly confirmed, idle) and rc 5 (same, but the
+          # pane was busy - issue #188, most likely this very nudge waking a
+          # stalled member back into streaming) DO mark: the keystrokes
+          # landed either way, and resending every poll would spam the
           # composer without adding signal.
           wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
           _nudge_rc=$?
-          if [ "$_nudge_rc" -eq 0 ] || [ "$_nudge_rc" -eq 3 ]; then
+          if [ "$_nudge_rc" -eq 0 ] || [ "$_nudge_rc" -eq 3 ] || [ "$_nudge_rc" -eq 5 ]; then
             : > "$_nudgefile"
             _just_nudged=1
           fi
