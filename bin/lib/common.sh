@@ -810,3 +810,50 @@ for r in roster if isinstance(roster, list) else []:
 wm_tmux_windows_csv() {
   wm_tmux_windows | tr '\n' ',' | sed 's/,$//'
 }
+
+# Comma-joined list of every live wm-* window name in the crew session AND
+# any session whose name is prefixed by it - the #39/#44 stray shape
+# (e.g. "wingman" vs "wingman-main") - not the whole tmux server. This is
+# the reconcile DEATH-CHECK input #209's fix needs, deliberately narrower
+# than a truly server-wide scan: cmd_reconcile (bin/lib/wm-state.py) also
+# uses this same --windows set to drive issue #79's orphan-window adoption
+# and the dead-owner re-adopt pass (both owner "" only), and a genuinely
+# unscoped scan would fabricate roster records for any wm-* window
+# anywhere on the machine - a different wingman home, a concurrent test
+# file's fixture - not just the crew's own (see #209's plan, "Chosen
+# approach", for the demonstrated cross-home hazard this avoids). A stray
+# parked in a session that does NOT share the crew session's name prefix is
+# not covered by this - see the plan's stated tradeoff before changing this
+# scope.
+wm_tmux_prefix_windows_csv() {
+  _wpc_tab="$(printf '\t')"
+  wm_tmux list-windows -a -F "#{session_name}${_wpc_tab}#{window_name}" 2>/dev/null \
+    | awk -F "$_wpc_tab" -v s="$WM_TMUX_SESSION" 'index($1, s) == 1 { print $2 }' \
+    | tr '\n' ',' | sed 's/,$//'
+}
+
+# True (0) if the tmux server can be talked to at all. tmux's server process
+# exits once its last session closes, so "no server currently running" is the
+# ordinary cold-start/all-crew-died state, not a fault - and depending on
+# exactly why it's not running, `tmux list-sessions` (exit 1) reports it one
+# of two ways: "no server running on <socket>" when the socket file exists
+# but nothing is listening (an ordinary kill-server), or "error connecting to
+# <socket> (No such file or directory)" when the socket file itself is
+# absent (a fresh boot, a wiped /tmp - the "host reset" shape #209 names
+# explicitly). Both must be treated as reachable-with-nothing-running, not
+# unreachable - measured directly against tmux 3.6, a genuine environment
+# fault (e.g. a permission-denied socket directory) produces a third,
+# different message ("couldn't create directory ... (Permission denied)"),
+# which is what still falls through to unreachable. Getting this right is
+# what lets #209's fix treat "nothing is alive" as safely reconcilable
+# (correctly flips every live-state record to died) while still skipping
+# reconcile - as the old has-session guard did - on a genuine environment
+# fault, so a transient tmux problem can never mass-flag a healthy fleet.
+wm_tmux_reachable() {
+  _wtr_out="$(wm_tmux list-sessions 2>&1)" && return 0
+  case "$_wtr_out" in
+    "no server running"*) return 0 ;;
+    "error connecting to "*"No such file or directory"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}

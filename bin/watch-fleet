@@ -833,9 +833,18 @@ while :; do
     exit 0
   fi
 
-  # Reconcile liveness so a dead window becomes 'died'. Strays are adopted
-  # first (a live window in the wrong session is moved home, never flagged).
-  if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
+  # Reconcile liveness so a dead window becomes 'died'. Reconciled against
+  # every window in the crew session's own prefix family (#209), not just
+  # whether the crew session itself exists: the crew session is exactly
+  # what a tmux-server crash takes down first, so gating reconcile on its
+  # existence was the one case it exists to catch. Skipped only when the
+  # tmux server itself is unreachable (wm_tmux_reachable) - never merely
+  # because the crew session doesn't currently exist. Strays are adopted
+  # first (a live window in a prefix-sibling session is moved home, never
+  # flagged) - wm_tmux_adopt_strays' own has-session guard makes it a no-op
+  # when the crew session is absent, which is safe here for the same reason
+  # as bin/crew-list.
+  if wm_tmux_reachable; then
     wm_tmux_adopt_strays
     # Pass this cycle's owner so the dead-owner re-adopt pass runs only under
     # wingman's watcher (--owner ""); a lead's cycle does the death-flip only (N4).
@@ -843,8 +852,18 @@ while :; do
     # flipped to died this call, space-joined - the outage-state signal below
     # (#23, item 0) needs exactly this poll's own death count, not the
     # roster's full died population.
-    _reconcile_died="$(wm_state reconcile --windows "$(wm_tmux_windows_csv)" --owner "$OWNER" 2>/dev/null)"
+    _reconcile_died="$(wm_state reconcile --windows "$(wm_tmux_prefix_windows_csv)" --owner "$OWNER" 2>/dev/null)"
+  fi
 
+  # Pane capture / messaging below needs the crew session ITSELF, not just a
+  # reachable server - a member's window is addressed inside it specifically
+  # (wm_tmux_win_target). If the crew session doesn't (yet) exist - e.g. the
+  # immediate aftermath of the tmux-server crash the block above just
+  # reconciled away, before anything has recreated the session - there is
+  # nothing here to capture or message; it resumes automatically the moment
+  # the session reappears (bin/spawn-crew/bin/crew-resume recreate it as a
+  # side effect, same as today).
+  if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
     # Pane backstop over every working OR already-blocked member: two failure
     # shapes never reach the status files on their own. A member frozen on an
     # interactive permission/trust prompt is flipped to blocked (independent of
