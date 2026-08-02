@@ -556,6 +556,54 @@ else
   fi
 fi
 
+# --- fleet-continuity Stop hooks (issue #185), project scope ----------------
+# hooks/stop-guard.sh and hooks/stop-continuity.sh are wired only for wingman's
+# own top-level session, via THIS repo's own checked-in .claude/settings.json
+# (not GUARD_SETTINGS, which is user scope) - this repo's first project-level
+# doctor check (until now there was none at all, per the onboarding-
+# preferences trio's own comment above). Report-only: the settings file is
+# version-controlled, so a failure here means a stale or broken checkout, not
+# something to auto-install - the remedy is re-checking the checkout or
+# `chmod +x`, never an installer run.
+# Overridable so tests can point this at a fixture instead of mutating the
+# real checkout's own settings.json/hooks - the same pattern
+# WM_CLAUDE_USER_SETTINGS already uses for GUARD_SETTINGS above.
+PROJECT_SETTINGS="${WM_PROJECT_SETTINGS:-$WM_REPO/.claude/settings.json}"
+STOP_GUARD_SCRIPT="${WM_STOP_GUARD_SCRIPT:-$WM_REPO/hooks/stop-guard.sh}"
+STOP_CONTINUITY_SCRIPT="${WM_STOP_CONTINUITY_SCRIPT:-$WM_REPO/hooks/stop-continuity.sh}"
+continuity_hooks_ok=1
+if ! wm_py -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+stops = d.get("hooks", {}).get("Stop", [])
+guard_ok = False
+continuity_ok = False
+for entry in stops:
+    for h in entry.get("hooks", []):
+        cmd = h.get("command", "")
+        if "stop-guard.sh" in cmd:
+            guard_ok = True
+        if "stop-continuity.sh" in cmd and h.get("asyncRewake") is True:
+            continuity_ok = True
+sys.exit(0 if (guard_ok and continuity_ok) else 1)
+' "$PROJECT_SETTINGS" >/dev/null 2>&1; then
+  continuity_hooks_ok=0
+fi
+if [ ! -x "$STOP_GUARD_SCRIPT" ] || [ ! -x "$STOP_CONTINUITY_SCRIPT" ]; then
+  continuity_hooks_ok=0
+fi
+if [ "$continuity_hooks_ok" = 1 ]; then
+  wm_ok "fleet-continuity Stop hooks registered ($PROJECT_SETTINGS)"
+else
+  wm_warn "fleet-continuity Stop hooks (issue #185) not registered/executable in $PROJECT_SETTINGS"
+  printf '    expected a Stop entry referencing hooks/stop-guard.sh and one referencing\n'
+  printf '    hooks/stop-continuity.sh with "asyncRewake": true, both scripts executable\n'
+  printf '    this file is version-controlled - re-check the checkout or chmod +x, not an install\n'
+fi
+
 # --- the settings file ------------------------------------------------------
 # A hand-edited config.local.toml is the one part of an install a pull cannot
 # keep correct, and a typo there fails quietly by nature: an unknown key simply

@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+# stop-continuity.sh - a Claude Code Stop hook, asyncRewake-registered (see
+# .claude/settings.json), wired only for the wingman repo. Tokenlessly
+# auto-arms bin/watch-fleet when crew are in flight with no live cycle,
+# accounting for whatever the previous cycle's exit actually was by running
+# `bin/watch-fleet --classify` itself, with no model turn spent specifically
+# on arming (issue #185).
+#
+# This hook's own process is the harness-tracked, long-lived thing under
+# asyncRewake - never a `cmd &`-backgrounded detached child (see
+# docs/architecture.md's wake-loop section for why that pattern cannot wake
+# an idle session at all). It foregrounds bin/watch-fleet for the life of one
+# self-bounded window (well under the harness's own async-hook timeout), then
+# either rewakes with what happened (exit 2) or lets the stop stand (exit 0).
+#
+# Recursion is NOT guarded by stop_hook_active - see the self-owned in-flight
+# marker below and docs/plans/2026-08-02-issue-185-asyncrewake-autoarm-plan.md
+# ("Why stop_hook_active cannot be the recursion guard") for why that would be
+# wrong here specifically, even though hooks/stop-guard.sh's own pass-1/pass-2
+# structure correctly relies on it for a different purpose.
+# bash-3.2-safe.
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(dirname "$HERE")"
+STATE_PY="$REPO/bin/lib/wm-state.py"
+WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
+WM_UV="${WM_UV:-uv run --no-project --quiet}"
+. "$HERE/lib/watcher-liveness.sh"
+
+# 1. Read stdin and discard it. stop_hook_active is deliberately never read -
+# not for gating (the in-flight marker below replaces that) and not for any
+# other purpose.
+cat >/dev/null
+
+# No state yet (pre-onboarding) -> nothing to guard, matching stop-guard.sh's
+# own fast exit.
+[ -f "$STATE_PY" ] || exit 0
+[ -d "$WM_HOME" ] || exit 0
+
+# 2. Kill switch.
+[ "${WM_STOP_AUTOARM:-1}" = "0" ] && exit 0
+
+# This hook guards wingman itself, so it scopes to wingman's own layer (owner
+# "" - wingman has no $WINGMAN_CREW_ID), exactly like hooks/stop-guard.sh.
+OWNER="${WINGMAN_CREW_ID:-}"
+
+# spurious_repeated_reason <classify_out>
+# Composes the exact "died N times in a row ... fleet supervision is not
+# being maintained" body plus the hint-selected remedy, reusing
+# .claude/commands/watch.md's own settled spurious-repeated prose verbatim
+# (minus its markdown emphasis, which is a doc-authoring convention, not
+# content) so the pilot reads the identical remedy regardless of whether a
+# model-driven /watch or this hook is what surfaced it.
+spurious_repeated_reason() {
+  _srr_count="$(printf '%s' "$1" | awk '{print $2}')"
+  _srr_hint="$(printf '%s' "$1" | awk '{print $3}')"
+  _srr_body="the watcher for this session has died $_srr_count times in a row with no successful cycle in between (see $WM_HOME/watch-spurious.log); fleet supervision is not being maintained."
+  case "$_srr_hint" in
+    stale-claim-lock)
+      _srr_body="$_srr_body
+A claim-lock directory ($claimlock) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $claimlock/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write $pidfile at once, which is exactly what this lock exists to prevent."
+      ;;
+    *)
+      _srr_body="$_srr_body
+Resume it by running /watch again or arming bin/watch-fleet directly."
+      ;;
+  esac
+  printf '%s' "$_srr_body"
+}
+
+# compose_attention_reason - restores incident-runbook routing (matched
+# against the "## New events" reason lines specifically, longest-token-first,
+# with `stalled` anchored to the bracketed status field) for a pre-claim or
+# post-window `fire`/`remote-control-dropped` outcome, since this hook's own
+# `auto` rewake is now the PRIMARY fire channel for wingman's top-level
+# session (its own body forbids running /watch, so nothing else routes this).
+compose_attention_reason() {
+  _wf="$wakefile"
+  _body="Crew need your attention (surfaced via automatic fleet continuity):
+Read $_wf and run bin/crew-list, surface each blocker/PR to the pilot (or
+answer via bin/crew-say), and give the pilot a compact roster status (who is
+on what, what is blocked, what is stalled, what is ready)."
+  # Only the "## New events" reason lines, not the whole wake file (which also
+  # carries the full roster and every member's own summary text via fire()'s
+  # crew-list dump) - a member whose summary happens to read "checking why the
+  # watcher stalled" must not false-positive on `stalled`.
+  _events="$(sed -n '/^## New events$/,/^## /{/^## /d;p}' "$_wf" 2>/dev/null)"
+  # Seven of the eight tokens are synthetic ids or fleet-scoped reason text
+  # fire() alone ever emits into this block, so a substring match against the
+  # scoped section is safe for them. `stalled` is different: it is ALSO a
+  # genuine English word a member's own free-text note (rendered inside the
+  # same "## New events" block, as `- **<id>** [<status>] <note>`) could
+  # plausibly contain - anchor that one token to the bracketed status field
+  # specifically, where it can only ever appear as the genuine status enum
+  # value, not as free text.
+  _matched=""
+  for _tok in correlated:api-outage-death correlated:mass-death \
+              correlated:api-outage usage-limit-approaching \
+              usage-limit-reset outage-detected outage-cleared; do
+    if printf '%s\n' "$_events" | grep -q "$_tok"; then
+      _matched="$_tok"
+      break
+    fi
+  done
+  if [ -z "$_matched" ] && printf '%s\n' "$_events" | grep -q '\[stalled\]'; then
+    _matched="stalled"
+  fi
+  if [ -n "$_matched" ]; then
+    _body="$_body
+This wake includes a '$_matched' reason - read docs/runbooks/incidents.md and
+follow its procedure before reporting anything; the generic roster report
+above is the wrong response for this reason."
+  fi
+  printf '%s' "$_body"
+}
+
+# rewake <body> <mode>
+# mode="auto": continuity is already handling re-arming on its own (rolled,
+# fire, remote-control-dropped) - appends the explicit "do not run /watch, do
+# not arm a watch-fleet cycle" sentence to the body itself, naming "a
+# watch-fleet cycle" specifically (not the more ambiguous "a watcher") since
+# an auto-mode body can also carry an appended unwaited instruction to arm a
+# DIFFERENT background task (crew-ask await).
+# mode="manual-remedy": automatic continuity has just demonstrated it isn't
+# working, or needs a different kind of manual action - the remedy text
+# already tells the model what to do; no "do not arm" sentence is appended.
+# Does not itself exit - every call site writes exit 2 on the next line.
+rewake() {
+  _body="$1"; _mode="$2"
+  if [ "$_mode" = "auto" ]; then
+    _body="$_body
+Fleet continuity is fully automatic for this session - do NOT run /watch and do NOT arm a watch-fleet cycle yourself in response to this. If nothing above asks for pilot action, just stop."
+  fi
+  printf '%s' "$_body" >&2
+  printf '%s' "$_body" | $WM_UV python -c 'import sys,json; print(json.dumps({"decision":"block","reason":sys.stdin.read()}))'
+}
+
+# 3+4. Fast path: no crew in flight, or a live cycle already exists. Also
+# leaves pidfile/beatfile/exitfile/runfile/wakefile/stopfile/suppressedfile/
+# claimlock/inflightfile/claimfailfile set for everything below (see
+# wm_owner_paths).
+active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --owner "$OWNER" --json 2>/dev/null | $WM_UV python -c 'import sys,json;
+try: print(len(json.load(sys.stdin)))
+except Exception: print(0)')"
+wm_watcher_up "$OWNER" "$WM_HOME"
+if [ "${active_crew:-0}" -eq 0 ] || [ "$watcher_up" = 1 ]; then
+  exit 0
+fi
+
+window="${WM_STOP_CONTINUITY_WINDOW:-480}"
+
+# 5. Self-owned, time-bounded in-flight marker. Not "pid alive" alone - "pid
+# alive AND recorded within $window plus a margin" - since this hook's own
+# total runtime is bounded by its own referee at $window, so anything older
+# than that plus a small margin (60s) cannot possibly be a live instance of
+# this hook, regardless of what the pid says. Not actively cleaned up on exit
+# (no rm in any trap) - the freshness bound makes that unnecessary.
+inflight_pid="$(cat "$inflightfile" 2>/dev/null)"
+inflight_age=999999
+if [ -f "$inflightfile" ]; then
+  inflight_age=$(( $(date +%s) - $($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$inflightfile" 2>/dev/null || echo 0) ))
+fi
+if [ -n "$inflight_pid" ] && kill -0 "$inflight_pid" 2>/dev/null && [ "$inflight_age" -lt $(( window + 60 )) ]; then
+  exit 0   # a genuinely concurrent instance is already managing continuity for this owner
+fi
+printf '%s\n' "$$" > "$inflightfile"
+
+# 6. Persistent stop-sanction gate. Silently, every time, no rewake - the
+# sanction was already reported once, synchronously, when `bin/watch-fleet
+# --stop` itself ran.
+wm_run_scoped_marker_active "$stopfile" && exit 0
+
+# 7. Persistent spurious-repeated standdown gate, checked BEFORE accounting -
+# not folded into accounting's own case - because accounting itself would
+# otherwise keep re-deriving fresh forensics from the same stale, unattended
+# residue. See hooks/stop-guard.sh's own no-watcher branch for the safety net
+# that keeps this standdown from going silent while it holds.
+wm_run_scoped_marker_active "$suppressedfile" && exit 0
+
+# 8. Claim-failure backoff check: a rolling backoff, not a standdown - a claim
+# failure may be transient, so this rate-limits automatic retry to once per
+# window rather than suppressing it outright.
+if [ -f "$claimfailfile" ]; then
+  claimfail_age=$(( $(date +%s) - $($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$claimfailfile" 2>/dev/null || echo 0) ))
+  [ "$claimfail_age" -lt "$window" ] && exit 0
+fi
+
+# 9. Pre-claim accounting, guarded exactly as "nothing to classify yet": only
+# proceed if $pidfile, $exitfile, or $runfile exists - otherwise there is no
+# prior cycle to account for, and misclassifying "never ran" as "died" would
+# falsely trip the failure budget.
+if [ -f "$pidfile" ] || [ -f "$exitfile" ] || [ -f "$runfile" ]; then
+  classify_out="$(WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --classify --owner "$OWNER" 2>/dev/null)"
+else
+  classify_out=""
+fi
+case "$classify_out" in
+  stopped)
+    printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
+    exit 0 ;;
+  spurious-repeated\ *)
+    _sr_reason="$(spurious_repeated_reason "$classify_out")"
+    {
+      printf '%s\n' "${WINGMAN_RUN_ID:-}"
+      printf '%s\n' "$_sr_reason"
+    } > "$suppressedfile"
+    rewake "$_sr_reason" manual-remedy
+    exit 2 ;;
+  healthy|fire|remote-control-dropped|spurious\ *|"")
+    : ;;   # proceed to claim - absorbed, or nothing to absorb
+  *)
+    : ;;   # unrecognized output - defensively proceed to claim rather than silently stopping
+esac
+
+# 10. Claim, foreground, self-bounded - with the referee recording its own
+# kill, a wait-time snapshot, and a reap loop.
+armlog="$WM_HOME/stop-autoarm${_okey:+-$_okey}.log"
+: > "$armlog"
+WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --owner "$OWNER" >"$armlog" 2>&1 &
+child=$!
+# The referee's own stdout/stderr are explicitly redirected to /dev/null -
+# never left to inherit this hook's own stdout, which under asyncRewake (or a
+# test capturing this hook via a pipe/command substitution) is a pipe. An
+# unredirected referee (or its own forked `sleep` child, which survives an
+# unexpected referee death since a dying parent does not take its children
+# down with it) would otherwise hold that pipe's write end open indefinitely,
+# so the reader on the other end would never see EOF - this hook's own final
+# JSON write in rewake() below would then never be observed by its caller,
+# even though the hook itself has long since produced it and moved on.
+( sleep "$window"
+  ( set -C; printf 'rolled\n' > "$exitfile" ) 2>/dev/null
+  kill -TERM "$child" 2>/dev/null
+) >/dev/null 2>&1 &
+referee=$!
+trap 'kill -TERM "$child" "$referee" 2>/dev/null' TERM INT
+
+wait "$child" 2>/dev/null; child_rc=$?
+exitfile_snapshot="$(cat "$exitfile" 2>/dev/null)"   # authoritative - see the plan's own rationale
+
+while kill -0 "$child" 2>/dev/null; do sleep 0.1; done
+kill "$referee" 2>/dev/null; wait "$referee" 2>/dev/null
+
+if [ -n "$exitfile_snapshot" ]; then
+  printf '%s\n' "$exitfile_snapshot" > "$exitfile"
+else
+  rm -f "$exitfile"
+fi
+
+# 11. Account for the outcome, and check unwaited here - after the window,
+# not before it (see the plan's "unwaited is checked here" section for why:
+# checking it pre-claim blocked the claim entirely, duplicated
+# hooks/stop-guard.sh's own report, and covered none of the gap it was
+# introduced for).
+#
+# A nonzero $child_rc with no $exitfile is NOT by itself proof the child
+# never claimed - the identical pair also results from a child that claimed
+# and armed successfully, then was killed by something that bypasses its own
+# INT/TERM trap (a raw SIGKILL, an OOM kill, an unhandled crash): neither
+# path ever writes $exitfile, and both leave a nonzero wait() status. Without
+# the pidfile check below, that second case was misrouted into the
+# claim-failure branch, touching $claimfailfile and silently suppressing
+# every subsequent invocation for a full window even though the claim path
+# itself was never actually contended - the one path that must reach
+# --classify's own spurious/spurious-repeated forensics (a genuine
+# fleet-supervision failure, not a lock contention) would otherwise never
+# get there, and the spurious-repeated budget could never trip. $pidfile is
+# written unconditionally by watch-fleet as its first act after passing the
+# claim, before it ever enters its blocking loop, so comparing it to $child's
+# own pid is exact, not a race: a live, successfully-claimed child leaves its
+# own pid there regardless of how it later dies; a child that never claimed
+# leaves it untouched (absent, or a stale value from an unrelated past
+# cycle, which correctly still falls through to claim-failure below since it
+# cannot match $child's own pid either).
+if [ ! -f "$exitfile" ] && [ "$child_rc" -ne 0 ] \
+  && [ "$(cat "$pidfile" 2>/dev/null)" != "$child" ]; then
+  touch "$claimfailfile"
+  _body="Automatic watcher re-arm failed: bin/watch-fleet did not claim within the continuity window. Last output:
+$(tail -n 20 "$armlog")
+Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
+  _mode="manual-remedy"
+else
+  classify_out="$(WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --classify --owner "$OWNER" 2>/dev/null)"
+  case "$classify_out" in
+    rolled)
+      _body="Fleet continuity window rolled - no crew event yet. A fresh watch cycle is arming automatically."
+      _mode="auto" ;;
+    fire|remote-control-dropped)
+      _body="$(compose_attention_reason)"
+      _mode="auto" ;;
+    stopped)
+      printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
+      _body=""; _mode="" ;;
+    healthy)
+      _body=""; _mode="" ;;
+    spurious-repeated\ *)
+      _sr_reason="$(spurious_repeated_reason "$classify_out")"
+      {
+        printf '%s\n' "${WINGMAN_RUN_ID:-}"
+        printf '%s\n' "$_sr_reason"
+      } > "$suppressedfile"
+      _body="$_sr_reason"
+      _mode="manual-remedy" ;;
+    spurious\ *|"")
+      _body=""; _mode="" ;;
+    *)
+      _body=""; _mode="" ;;
+  esac
+fi
+
+_unwaited_text="$(wm_unwaited_reason "$OWNER")"   # empty if every pending ask has a live waiter
+if [ -n "$_unwaited_text" ]; then
+  if [ -n "$_body" ]; then
+    _body="$_body
+
+$_unwaited_text"
+  else
+    _body="$_unwaited_text"
+    _mode="manual-remedy"
+  fi
+fi
+
+if [ -n "$_body" ]; then
+  rewake "$_body" "$_mode"
+  exit 2
+fi
+exit 0

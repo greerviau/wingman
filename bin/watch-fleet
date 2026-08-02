@@ -177,6 +177,15 @@ if [ -n "$OWNER" ]; then
   # (issue #169), keyed identically to the files above - a lead's own cycle
   # reads its own notices here.
   NOTICEFILE="$WM_HOME/pending-notices-$_key"
+  # The three markers hooks/stop-continuity.sh reads/writes for tokenless
+  # auto-arm (issue #185), cleared unconditionally at the claim point below.
+  # Re-derived independently in hooks/lib/watcher-liveness.sh's own
+  # wm_owner_paths - a known, accepted duplication (see the plan's "Files
+  # touched" section) - a cross-derivation regression test asserts the two
+  # derivations agree.
+  STOPFILE="$WM_HOME/watch-$_key.stopped"
+  SUPPRESSEDFILE="$WM_HOME/watch-$_key.suppressed"
+  CLAIMFAILFILE="$WM_HOME/stop-continuity-$_key.claimfail"
 else
   PIDFILE="$WM_HOME/watch.pid"
   WAKEFILE="$WM_HOME/wake"
@@ -185,6 +194,9 @@ else
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
   RUNFILE="$WM_HOME/watch.run"
   NOTICEFILE="$WM_HOME/pending-notices"
+  STOPFILE="$WM_HOME/watch.stopped"
+  SUPPRESSEDFILE="$WM_HOME/watch.suppressed"
+  CLAIMFAILFILE="$WM_HOME/stop-continuity.claimfail"
 fi
 # The claim-lock path is needed both by --classify's stale-claim-lock check
 # (dispatched before claim-lock acquisition) and by the claim loop itself
@@ -677,6 +689,14 @@ if [ -f "$EXITFILE" ]; then
   spurlog dropped-wake "$(cat "$EXITFILE" 2>/dev/null)"
   rm -f "$EXITFILE"
 fi
+# A successful claim is what actually resolves a stop sanction, a
+# spurious-repeated standdown, or a claim-failure backoff (issue #185) - each
+# is cleared here, unconditionally, regardless of which (if any) was in
+# force. $inflightfile is deliberately not among these: a claim succeeding
+# says nothing about whether the specific hook invocation that is claiming
+# right now is still in flight, so it is left to age out by its own time
+# bound instead (see hooks/stop-continuity.sh).
+rm -f "$STOPFILE" "$SUPPRESSEDFILE" "$CLAIMFAILFILE"
 : > "$BEATFILE" || true
 release_claim
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
