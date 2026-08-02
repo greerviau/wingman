@@ -92,5 +92,6 @@ printf '%s\n' "$MSG" > "$_qfile"
 case "$_rc" in
   2) wm_die "refused: '$ID's pane looks like it is showing a permission/confirmation dialog, not the chat input - typing here risks the message (and Enter) being consumed as an answer to that dialog instead of being submitted as chat text. The message is QUEUED at $_qfile; the watcher will retry it automatically once the pane clears (or resolve the dialog yourself first: bin/crew-takeover $ID)." ;;
   3) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered - treat it as NOT delivered. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
+  5) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered, and the pane was busy (still repainting on its own clock) - likely queued behind its current turn rather than lost outright. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
   *) wm_die "not sent: another delivery is holding '$ID's pane. The message is QUEUED at $_qfile; the watcher will retry it automatically." ;;
 esac
