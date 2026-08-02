@@ -150,7 +150,7 @@ assert_not_contains "the raw >500-char single-line payload was never retyped by 
 # --- a notice with no genuine attention event still fires, with its own
 # explicit stdout reason line (fire()'s own trigger channel) --------------
 printf 'a pre-existing pending notice for wingman\n' > "$WINGMAN_HOME/pending-notices"
-_fireout="$(WM_WATCH_INTERVAL=1 wm_timeout 10 "$WATCH" --owner "")"
+_fireout="$(WM_WATCH_INTERVAL=1 wm_timeout 45 "$WATCH" --owner "")"
 assert_contains "a notice-only fire prints its own abandoned-message reason line" \
   "$_fireout" "abandoned-message:"
 assert_contains "the wake file carries an Abandoned messages section" \

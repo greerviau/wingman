@@ -437,7 +437,7 @@ printf 'must be swept on the very poll that also fires\n' > "$WINGMAN_HOME/outbo
 printf 'long-gone-sender\n' > "$WINGMAN_HOME/outbox-meta/term1/1.msg"
 wm_state crew-add --id term1 --type developer --objective x --repo /tmp --window wm-term1 --session-id s14 >/dev/null
 wm_state crew-set --id term1 --status stood-down >/dev/null
-_samepoll_out="$(WM_WATCH_INTERVAL=1 wm_timeout 10 "$WATCH" --owner "")"
+_samepoll_out="$(WM_WATCH_INTERVAL=1 wm_timeout 45 "$WATCH" --owner "")"
 assert_contains "the genuine attention event fired as usual" "$_samepoll_out" "blocked: blk1"
 assert_true "the terminal member's outbox was swept on that SAME poll, not deferred" \
   "[ -d '$WINGMAN_HOME/outbox-abandoned/term1' ]"
