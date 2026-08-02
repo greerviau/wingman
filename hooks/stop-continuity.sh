@@ -233,7 +233,13 @@ child=$!
   kill -TERM "$child" 2>/dev/null
 ) >/dev/null 2>&1 &
 referee=$!
-trap 'kill -TERM "$child" "$referee" 2>/dev/null' TERM INT
+# term_forwarded records - as a plain local fact this hook already knows,
+# not evidence read back from $child's own side-effects - that an external
+# TERM/INT reached THIS hook and was forwarded. See the accounting step
+# below for why $child's own exit code and $pidfile's own content are both
+# unreliable once this trap has fired.
+term_forwarded=0
+trap 'term_forwarded=1; kill -TERM "$child" "$referee" 2>/dev/null' TERM INT
 
 wait "$child" 2>/dev/null; child_rc=$?
 exitfile_snapshot="$(cat "$exitfile" 2>/dev/null)"   # authoritative - see the plan's own rationale
@@ -255,25 +261,45 @@ fi
 #
 # A nonzero $child_rc with no $exitfile is NOT by itself proof the child
 # never claimed - the identical pair also results from a child that claimed
-# and armed successfully, then was killed by something that bypasses its own
-# INT/TERM trap (a raw SIGKILL, an OOM kill, an unhandled crash): neither
-# path ever writes $exitfile, and both leave a nonzero wait() status. Without
-# the pidfile check below, that second case was misrouted into the
-# claim-failure branch, touching $claimfailfile and silently suppressing
-# every subsequent invocation for a full window even though the claim path
-# itself was never actually contended - the one path that must reach
-# --classify's own spurious/spurious-repeated forensics (a genuine
-# fleet-supervision failure, not a lock contention) would otherwise never
-# get there, and the spurious-repeated budget could never trip. $pidfile is
-# written unconditionally by watch-fleet as its first act after passing the
-# claim, before it ever enters its blocking loop, so comparing it to $child's
-# own pid is exact, not a race: a live, successfully-claimed child leaves its
-# own pid there regardless of how it later dies; a child that never claimed
-# leaves it untouched (absent, or a stale value from an unrelated past
-# cycle, which correctly still falls through to claim-failure below since it
-# cannot match $child's own pid either).
+# and armed successfully, then died some other way (a raw SIGKILL, an OOM
+# kill, an unhandled crash, or a TERM/INT this hook itself received and
+# forwarded - none of which ever write $exitfile). Three independent,
+# imperfect-alone signals are combined below because each one's own gap is
+# closed by at least one of the other two:
+#
+# - $term_forwarded is set by this hook's own trap the instant an external
+#   TERM/INT reaches THIS process (see above) - a plain local fact, not
+#   evidence read back from $child's own side-effects, so it is exact
+#   regardless of how far $child itself had gotten. But $child_rc itself is
+#   NOT reliable evidence on its own once this trap has fired: the
+#   in-flight `wait "$child"` gets interrupted and returns 128+15=143 - a
+#   status reflecting that the WAIT was interrupted, not $child's own
+#   actual exit code - even on the fully ordinary path where $child's own
+#   INT/TERM trap ran cleanly (`rm -f "$PIDFILE"; exit 0`) moments later.
+# - $pidfile still naming $child's own pid is exact for a child that
+#   claimed and was then SIGKILL'd (or crashed) before it could run its own
+#   cleanup trap - watch-fleet writes $pidfile unconditionally as its first
+#   act after passing the claim, before its blocking loop. But it is blind
+#   to a child that claimed and then died via its OWN clean INT/TERM trap
+#   (forwarded or not): that trap's `rm -f "$PIDFILE"` clears the one piece
+#   of evidence this check depends on, indistinguishable by content alone
+#   from "never claimed at all".
+# - $armlog containing "armed pid=$child" is watch-fleet's own unambiguous,
+#   append-only confirmation that the claim succeeded, printed once,
+#   immediately after the claim - a claim that never got that far (still
+#   contending in the mkdir/retry loop, or wm_die's own failure text) never
+#   produces it. But there is a narrow window, between $pidfile's own write
+#   and this confirmation line a few statements later (release_claim, the
+#   beacon touch, the trap installation itself), where a SIGKILL landing
+#   inside it leaves $pidfile naming $child with no confirmation line yet -
+#   exactly the gap the $pidfile check above closes.
+#
+# None of the three is sufficient alone; together they leave no gap a
+# genuinely-armed child's own death - by any mechanism - can fall through.
 if [ ! -f "$exitfile" ] && [ "$child_rc" -ne 0 ] \
-  && [ "$(cat "$pidfile" 2>/dev/null)" != "$child" ]; then
+  && [ "$term_forwarded" -ne 1 ] \
+  && [ "$(cat "$pidfile" 2>/dev/null)" != "$child" ] \
+  && ! grep -q "armed pid=$child " "$armlog" 2>/dev/null; then
   touch "$claimfailfile"
   _body="Automatic watcher re-arm failed: bin/watch-fleet did not claim within the continuity window. Last output:
 $(tail -n 20 "$armlog")

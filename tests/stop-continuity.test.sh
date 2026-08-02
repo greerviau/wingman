@@ -16,17 +16,27 @@ WF="$TEST_REPO/bin/watch-fleet"
 GUARD="$TEST_REPO/hooks/stop-guard.sh"
 export WM_WATCH_INTERVAL=1
 
-run_hook() { printf '{}' | wm_timeout "${1:-10}" bash "$HOOK"; }
+# Default 20s, not 10s, for the same reason as wait_for_file's own default
+# below: several `uv run --no-project` subprocess startups happen before the
+# hook can even reach a claim attempt, and this is only an upper bound - a
+# fast invocation returns long before the timeout regardless.
+run_hook() { printf '{}' | wm_timeout "${1:-20}" bash "$HOOK"; }
 
+# Default 100 tries (20s), not 50 (10s): every invocation this file waits on
+# runs several `uv run --no-project` subprocesses (wm_state init, crew-list,
+# the JSON encoders) before it can even reach its own claim attempt, and a
+# loaded CI runner's own startup cost for each of those adds up - a 10s
+# default was measurably too tight and flaked intermittently across several
+# unrelated assertions in this file, not just one.
 wait_for_file() {
   # wait_for_file <path> [tries (x0.2s)]
-  _wf_tries="${2:-50}"; _wf_n=0
+  _wf_tries="${2:-100}"; _wf_n=0
   while [ ! -s "$1" ] && [ "$_wf_n" -lt "$_wf_tries" ]; do sleep 0.2; _wf_n=$((_wf_n+1)); done
   [ -s "$1" ]
 }
 
 wait_for_gone() {
-  _wfg_tries="${2:-50}"; _wfg_n=0
+  _wfg_tries="${2:-100}"; _wfg_n=0
   while kill -0 "$1" 2>/dev/null && [ "$_wfg_n" -lt "$_wfg_tries" ]; do sleep 0.2; _wfg_n=$((_wfg_n+1)); done
   ! kill -0 "$1" 2>/dev/null
 }
@@ -36,7 +46,7 @@ wait_for_file_gone() {
   # bin/watch-fleet writes $PIDFILE, then a few lines later clears the three
   # markers - wait_for_file on $PIDFILE alone can return inside that narrow
   # gap, before the markers are actually cleared.
-  _wfd_tries="${2:-50}"; _wfd_n=0
+  _wfd_tries="${2:-100}"; _wfd_n=0
   while [ -f "$1" ] && [ "$_wfd_n" -lt "$_wfd_tries" ]; do sleep 0.2; _wfd_n=$((_wfd_n+1)); done
   [ ! -f "$1" ]
 }
@@ -88,7 +98,7 @@ printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook2.out" 2>"$WINGMAN_HOME/hook2.err
 hookpid=$!; wm_track "$hookpid"
 assert_true "a live armed cycle appears shortly, with no model turn" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 wm_state crew-set --id d1 --status review --summary "done" >/dev/null
-assert_true "the hook exits within one poll interval of the fire-eligible flip" "wait_for_gone $hookpid 50"
+assert_true "the hook exits within one poll interval of the fire-eligible flip" "wait_for_gone $hookpid 100"
 wait "$hookpid" 2>/dev/null
 out2="$(cat "$WINGMAN_HOME/hook2.out" 2>/dev/null)"
 assert_contains "the rewake carries a block decision" "$out2" '"decision": "block"'
@@ -169,7 +179,7 @@ mkdir "$WINGMAN_HOME/watch.pid.lock"
 ( sleep 300 ) & _lockholder=$!; wm_track "$_lockholder"
 echo "$_lockholder" > "$WINGMAN_HOME/watch.pid.lock/owner"
 export WM_CLAIM_HARD_STALE_AGE=3600
-out6="$(run_hook 20)"; rc6=$?
+out6="$(run_hook 30)"; rc6=$?
 assert_eq "a claim failure still lets the hook itself exit with a rewake" "$rc6" "2"
 assert_contains "the rewake carries a block decision" "$out6" '"decision": "block"'
 assert_contains "the rewake carries the claim-failure text" "$out6" "did not claim within the continuity window"
@@ -214,10 +224,16 @@ wait_for_file_gone "$WINGMAN_HOME/watch.pid" 100
 unset WM_STOP_CONTINUITY_WINDOW
 
 # Time-bound companion: a genuinely live pid, but aged past window+60, does
-# not block - proving the bound is time-based, not liveness-only.
+# not block - proving the bound is time-based, not liveness-only. The window
+# itself is deliberately NOT set to the bare minimum here: only the marker's
+# own age (90s) needs to exceed window+60 to prove the point, and a window
+# too close to the claim sequence's own setup time (wm_state init, arg
+# parsing, the claim-lock dance) risks the referee firing before the child
+# even finishes claiming under load, which would make this flaky for a
+# reason unrelated to what it's actually testing.
 sleep 300 & livepid6=$!; wm_track "$livepid6"
 echo "$livepid6" > "$WINGMAN_HOME/stop-continuity.pid"
-export WM_STOP_CONTINUITY_WINDOW=1
+export WM_STOP_CONTINUITY_WINDOW=10
 wm_age_path "$WINGMAN_HOME/stop-continuity.pid" 90
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook10.out" 2>&1 &
 h10=$!; wm_track "$h10"
@@ -256,13 +272,13 @@ mkdir "$WINGMAN_HOME/watch.pid.lock"
 ( sleep 300 ) & _bh=$!; wm_track "$_bh"
 echo "$_bh" > "$WINGMAN_HOME/watch.pid.lock/owner"
 export WM_CLAIM_HARD_STALE_AGE=3600
-first="$(run_hook 20)"
+first="$(run_hook 30)"
 assert_contains "first invocation reports the claim failure" "$first" "did not claim within the continuity window"
 assert_true "first invocation touches the claim-failure marker" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
 second="$(run_hook)"
 assert_eq "second (immediate) invocation backs off silently, no further claim attempt" "$second" ""
 wm_age_path "$WINGMAN_HOME/stop-continuity.claimfail" 500
-third="$(run_hook 20)"
+third="$(run_hook 30)"
 assert_contains "after the window elapses, a third invocation retries and reports again" "$third" "did not claim within the continuity window"
 unset WM_CLAIM_HARD_STALE_AGE
 kill "$_bh" 2>/dev/null
@@ -297,6 +313,34 @@ out_sre="$(cat "$WINGMAN_HOME/sre.out" 2>/dev/null)"
 assert_false "a successful-arm-then-kill is NOT misrouted to the claim-failure branch" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
 assert_not_contains "the rewake does not carry the claim-failure text" "$out_sre" "did not claim within the continuity window"
 assert_eq "the death reached --classify's own forensics (the spurious count advanced to 1)" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "1"
+unset WM_STOP_CONTINUITY_WINDOW
+
+# Direct regression, companion to the one above: an external TERM landing on
+# the HOOK ITSELF (not the child) - forwarded to a child that had already
+# claimed and armed - must ALSO be routed through --classify, not
+# misclassified as a claim failure. This is a DIFFERENT failure mode from
+# the SIGKILL-to-child case above: here $child's own INT/TERM trap runs
+# cleanly and removes $pidfile as part of an entirely ordinary exit, so
+# neither $child_rc (the in-flight wait() is itself interrupted by the same
+# signal, returning 143 regardless of $child's own real exit code) nor
+# $pidfile's own content (cleanly cleared either way) can tell this apart
+# from "never claimed" - only $term_forwarded (this hook's own local record
+# of having received and forwarded the signal) and $armlog's own "armed
+# pid=" confirmation can.
+new_home
+add_crew_window d8f
+wm_state crew-set --id d8f --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=30
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/srf.out" 2>&1 &
+hpf=$!; wm_track "$hpf"
+assert_true "the child claims and arms" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+assert_contains "the child genuinely armed (not merely attempted)" "$(cat "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)" "armed pid="
+kill -TERM "$hpf" 2>/dev/null
+assert_true "the hook notices and exits" "wait_for_gone $hpf 100"
+wait "$hpf" 2>/dev/null
+out_srf="$(cat "$WINGMAN_HOME/srf.out" 2>/dev/null)"
+assert_false "a TERM forwarded to an already-armed child is NOT misrouted to the claim-failure branch" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
+assert_not_contains "the rewake (if any) does not carry the claim-failure text" "$out_srf" "did not claim within the continuity window"
 unset WM_STOP_CONTINUITY_WINDOW
 
 # spurious-repeated companion: repeated genuine external-kill deaths
@@ -406,7 +450,7 @@ h9r=$!; wm_track "$h9r"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 sleep 3
 wm_state crew-set --id d9 --status review --summary "done" >/dev/null
-assert_true "the hook exits (via fire, not the referee's rollover)" "wait_for_gone $h9r 50"
+assert_true "the hook exits (via fire, not the referee's rollover)" "wait_for_gone $h9r 100"
 wait "$h9r" 2>/dev/null
 out9r="$(cat "$WINGMAN_HOME/hook9r.out" 2>/dev/null)"
 assert_contains "a fire landing near the window's own expiry reports fire, never rolled" "$out9r" "surfaced via automatic fleet continuity"
@@ -428,7 +472,7 @@ cpid9s="$(cat "$WINGMAN_HOME/watch.pid")"
 # claim/startup path doesn't turn this into a flaky test in either direction.
 sleep 4.3
 kill -9 "$cpid9s" 2>/dev/null
-assert_true "the hook exits" "wait_for_gone $h9s 50"
+assert_true "the hook exits" "wait_for_gone $h9s 100"
 wait "$h9s" 2>/dev/null
 out9s="$(cat "$WINGMAN_HOME/hook9s.out" 2>/dev/null)"
 assert_not_contains "an external kill near expiry is never misreported as rolled" "$out9s" "window rolled"
@@ -443,7 +487,7 @@ export WM_STOP_CONTINUITY_WINDOW=2
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook10u.out" 2>&1 &
 h10u=$!; wm_track "$h10u"
 assert_true "the claim is NOT blocked by an unattended ask" "wait_for_file '$WINGMAN_HOME/watch.pid'"
-assert_true "the hook eventually rolls over and exits" "wait_for_gone $h10u 50"
+assert_true "the hook eventually rolls over and exits" "wait_for_gone $h10u 100"
 wait "$h10u" 2>/dev/null
 out10u="$(cat "$WINGMAN_HOME/hook10u.out" 2>/dev/null)"
 assert_contains "the rollover body is present" "$out10u" "window rolled"
@@ -491,12 +535,28 @@ assert_eq "the orphan is still alive: silent" "$out12a" ""
 assert_true "the orphan itself is untouched and still running" "kill -0 $orphanpid"
 kill "$orphanpid" 2>/dev/null
 assert_true "the orphan actually dies" "wait_for_gone $orphanpid"
-out12b="$(run_hook 20)"
-assert_contains "once the orphan is gone, the next invocation classifies it and arms fresh" "$out12b" '"decision": "block"'
+# d12's own status never becomes fire-eligible in this test, so a fully
+# correct invocation legitimately just keeps blocking (silently) once its
+# fresh claim succeeds - "arms fresh" is proven by a NEW, distinct watch.pid
+# appearing, not by waiting on a block/rewake decision that has nothing to
+# report here.
+export WM_STOP_CONTINUITY_WINDOW=60
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook12b.out" 2>&1 &
+h12b=$!; wm_track "$h12b"
+assert_true "once the orphan is gone, the next invocation classifies it and arms fresh" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 _fresh_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+assert_true "the fresh cycle is a distinct, real live process" "[ -n '$_fresh_pid' ] && [ '$_fresh_pid' != '$orphanpid' ] && kill -0 $_fresh_pid"
+kill -TERM "$h12b" 2>/dev/null
+wait "$h12b" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW
 [ -n "$_fresh_pid" ] && kill "$_fresh_pid" 2>/dev/null
 
 # --- (13) Incident-runbook routing --------------------------------------------
+# The summary text deliberately does NOT contain the word "stalled" - only
+# the bracketed status field does - so this test can only pass via the
+# anchored `[stalled]` match, not the unanchored substring match it replaced
+# (see the free-text negative companion below for the direct regression on
+# that anchoring specifically).
 new_home
 add_crew_window d13
 wm_state crew-set --id d13 --status working --summary busy >/dev/null
@@ -504,13 +564,34 @@ export WM_STOP_CONTINUITY_WINDOW=60
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook13.out" 2>&1 &
 h13=$!; wm_track "$h13"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
-wm_state crew-set --id d13 --status stalled --summary "checking why the watcher stalled" >/dev/null
-assert_true "the hook exits on the stall" "wait_for_gone $h13 50"
+wm_state crew-set --id d13 --status stalled --summary "no pane output for a while" >/dev/null
+assert_true "the hook exits on the stall" "wait_for_gone $h13 100"
 wait "$h13" 2>/dev/null
 out13="$(cat "$WINGMAN_HOME/hook13.out" 2>/dev/null)"
 assert_contains "the routing sentence names 'stalled'" "$out13" "a 'stalled' reason"
 assert_contains "the generic roster-report instruction is still present" "$out13" "surfaced via automatic fleet continuity"
 assert_contains "the routing sentence points at the incident runbook" "$out13" "docs/runbooks/incidents.md"
+unset WM_STOP_CONTINUITY_WINDOW
+
+# Free-text negative companion: a member's own status NOTE contains the word
+# "stalled" as ordinary free text, but its bracketed STATUS is something
+# else (not `stalled`) - the routing sentence must NOT fire. An unanchored
+# substring match against the "## New events" section (which the note text
+# lives inside too) would false-positive here; the anchored `[stalled]`
+# match correctly does not.
+new_home
+add_crew_window d13b
+wm_state crew-set --id d13b --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=60
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook13b.out" 2>&1 &
+h13b=$!; wm_track "$h13b"
+assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+wm_state crew-set --id d13b --status review --summary "checking why the watcher stalled earlier" >/dev/null
+assert_true "the hook exits on the fire" "wait_for_gone $h13b 100"
+wait "$h13b" 2>/dev/null
+out13b="$(cat "$WINGMAN_HOME/hook13b.out" 2>/dev/null)"
+assert_contains "the fire itself is still reported" "$out13b" "surfaced via automatic fleet continuity"
+assert_not_contains "free text containing 'stalled' does NOT trigger the runbook routing" "$out13b" "docs/runbooks/incidents.md"
 unset WM_STOP_CONTINUITY_WINDOW
 
 test_summary
