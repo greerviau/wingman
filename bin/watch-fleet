@@ -236,6 +236,12 @@ STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
 # denominator rules. A lone death/stall is always routine, never a "batch".
 MASS_MIN_COUNT="${WM_MASS_MIN_COUNT:-2}"
 MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
+# Bounded resurface for a `review` member with no live dependency watcher
+# (issue #187): one reminder per window, only when nothing is polling on the
+# member's behalf. Cadence in hours, deliberately independent of
+# WM_WATCH_INTERVAL - see bin/lib/wm-state.py's review-resurface-check.
+WM_REVIEW_RESURFACE_SECS="${WM_REVIEW_RESURFACE_SECS:-21600}"   # 6h, generous default
+WM_REVIEW_WAKER_GRACE="${WM_REVIEW_WAKER_GRACE:-120}"           # > pr-watch's own 30s default poll interval
 # API/connectivity-error pane signature (#23): a member showing one of these and
 # then going quiet is a likely local network blip or Anthropic-side outage, not a
 # broken agent, so its check-in nudge (see #61 below) uses this wording instead of
@@ -1545,6 +1551,20 @@ EOF_USAGE
   # a new (id, updated) still surfaces. The Stop hook uses --suppress-on handled so
   # an acked-but-unhandled event still blocks once (Fix A / #8).
   attention="$(wm_state needs-attention --owner "$OWNER" --suppress-on ack 2>/dev/null)"
+  # Bounded resurface for a `review` member with no live dependency watcher
+  # (issue #187): one reminder per WM_REVIEW_RESURFACE_SECS window, only when
+  # nothing (e.g. a bin/pr-watch cycle) is currently polling on the member's
+  # behalf. Merged into $attention before fire() so it flows through the
+  # identical fire -> $WAKEFILE/$EXITFILE -> harness-exit channel every other
+  # event already uses; fire()'s own ack of each row is a harmless no-op here
+  # since this event's own suppression lives entirely in its own on-disk
+  # stamp, not acked.json.
+  resurface="$(wm_state review-resurface-check --owner "$OWNER" \
+    --window-secs "$WM_REVIEW_RESURFACE_SECS" --waker-grace "$WM_REVIEW_WAKER_GRACE" 2>/dev/null)"
+  if [ -n "$resurface" ]; then
+    attention="${attention:+$attention
+}$resurface"
+  fi
   # A pending outbox-abandonment notice (issue #169) fires this cycle too,
   # even with no genuine attention event of its own - see fire()'s own
   # notice-only handling above.
