@@ -22,6 +22,14 @@ re-running is a no-op per event. Never overwrites the file if its existing
 content is not valid JSON - that is the pilot's own file and may carry other
 settings.
 
+--async-rewake/--timeout/--rewake-summary (issue #199) mirror the
+asyncRewake/timeout/rewakeSummary keys this repo's own project-scoped
+.claude/settings.json already carries for hooks/stop-continuity.sh, so the
+identical shape can be registered at user scope for
+hooks/stop-continuity-crew.sh. A Stop event has no tool to match against, so
+--event Stop omits the "matcher" key entirely rather than writing the
+otherwise-default matcher string into an entry where it is meaningless.
+
 --check reports registration status only (exit 0 registered, 1 not) and
 never writes.
 """
@@ -61,6 +69,9 @@ def main():
     ap.add_argument("--matcher", default="Edit|Write|NotebookEdit|Bash")
     ap.add_argument("--event", default="PreToolUse", help="hook event to register under")
     ap.add_argument("--check", action="store_true", help="report status only, never write")
+    ap.add_argument("--async-rewake", action="store_true", help='set "asyncRewake": true on the entry')
+    ap.add_argument("--timeout", type=int, default=None, help='set "timeout": <int> on the entry')
+    ap.add_argument("--rewake-summary", default=None, help='set "rewakeSummary": <str> on the entry')
     args = ap.parse_args()
 
     try:
@@ -78,12 +89,24 @@ def main():
         print(f"already registered in {args.settings}")
         sys.exit(0)
 
+    hook_entry = {"type": "command", "command": args.hook}
+    if args.async_rewake:
+        hook_entry["asyncRewake"] = True
+    if args.timeout is not None:
+        hook_entry["timeout"] = args.timeout
+    if args.rewake_summary is not None:
+        hook_entry["rewakeSummary"] = args.rewake_summary
+
+    group = {"hooks": [hook_entry]}
+    # A Stop event has no tool to match against - the existing project-scoped
+    # .claude/settings.json Stop entries carry no "matcher" key at all, so
+    # writing one here would be a nonsensical key on a Stop entry.
+    if args.event != "Stop":
+        group["matcher"] = args.matcher
+
     settings.setdefault("hooks", {})
     settings["hooks"].setdefault(args.event, [])
-    settings["hooks"][args.event].append({
-        "matcher": args.matcher,
-        "hooks": [{"type": "command", "command": args.hook}],
-    })
+    settings["hooks"][args.event].append(group)
 
     parent = os.path.dirname(args.settings)
     if parent:

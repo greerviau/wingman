@@ -215,6 +215,10 @@ def review_resurfaced_path():
     return os.path.join(home(), "review-resurfaced.json")
 
 
+def forward_motion_path():
+    return os.path.join(home(), "forward-motion.json")
+
+
 def pr_watch_beat_path(cid):
     return os.path.join(home(), "pr-watch-%s.beat" % _sanitize_id(cid))
 
@@ -2146,6 +2150,218 @@ def cmd_review_resurface_check(args):
             write_json(review_resurfaced_path(), store)
 
 
+def _forward_motion_signature(candidate, children):
+    """Hash of the candidate's own (summary, blocker, artifact, delivery)
+    plus the sorted (child_id, child_status, child_announced) tuple for
+    every one of `children` (already filtered to LIVE_STATES by the caller).
+    `announced` (falling back to `updated` only when absent) is used for
+    each child - not `updated` - matching the exact idiom
+    cmd_review_resurface_check/cmd_needs_attention already use elsewhere in
+    this file: `updated` bumps on every routine same-status summary refresh,
+    so keying on it would let an actively-narrating-but-not-actually-
+    progressing report reset the staleness clock forever. See
+    cmd_forward_motion_check's own docstring for the full rationale."""
+    own = (candidate.get("summary"), candidate.get("blocker"),
+           candidate.get("artifact"), candidate.get("delivery"))
+    child_tuples = sorted(
+        (c["id"], c.get("status"), c.get("announced") or c.get("updated"))
+        for c in children
+    )
+    payload = json.dumps([own, child_tuples], sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def cmd_forward_motion_check(args):
+    """Flip a WORKING candidate with active reports to 'stalled' the moment
+    its own situation has shown no forward motion for --window-secs, even
+    with a fully healthy, armed watcher cycle (issue #199, Gap B) - a
+    structural stall the liveness-only cmd_stall_check cannot see, since a
+    lead correctly running its own watch-fleet loop always shows a live
+    process tree and therefore never trips that check.
+
+    MUST be invoked by the CANDIDATE'S OWN PARENT's watch-fleet cycle, never
+    the candidate's own: to evaluate whether `lead1` (parent == "") is
+    stalled, this is called with --owner "" - wingman's own top-level
+    cycle - examining lead1 as one of ITS OWN candidate rows and, for each,
+    looking at lead1's own reports. A lead's own self-scoped cycle (--owner
+    <lead-id>) never evaluates whether IT ITSELF is stalled this way - only
+    something one layer up can see both sides of the relationship this check
+    needs (recursively, a lead's own cycle evaluating one of ITS sub-
+    managers, if the depth cap on spawning managers is ever relaxed). Easy
+    to misplace inside the wrong owner's loop; see bin/watch-fleet's own
+    call site comment.
+
+    Candidates: any record with status == "working", scoped by --owner
+    exactly like cmd_needs_attention/cmd_review_resurface_check, that
+    currently has at least one ACTIVE report (a child whose merged status is
+    in LIVE_STATES). This naturally selects only members capable of showing
+    this failure (today, only a `lead`-type member ever has reports at all -
+    the depth cap in playbooks/common/lead.md forbids spawning managers)
+    without special-casing on the `type` field, and stays correct if that
+    cap is ever relaxed.
+
+    Signature: see _forward_motion_signature. If ANYTHING about it changes -
+    a child's status flips, a new child appears (e.g. a reviewer finally
+    gets spawned), the candidate edits its own summary/blocker/artifact/
+    delivery - the staleness clock resets. This is deliberately more general
+    than testing "a review worker with no reviewer sibling" specifically: it
+    requires no new schema (there is no field anywhere linking a developer's
+    record to a reviewer's), and uniformly covers every "any wait" shape the
+    issue names (a dropped usage-limit-reset fire, a reviewer verdict nobody
+    ever requested, a CI run nobody is watching) rather than special-casing
+    each one.
+
+    Anchor/reset persistence (mirrors cmd_review_resurface_check's own
+    pattern) in a new store, forward-motion.json: {"<id>": {
+    "episode_announced": <str>, "signature": <str>, "since": <iso>}}. For
+    each candidate:
+      - if the stored entry's episode_announced matches the candidate's
+        CURRENT announced (falling back to updated) AND its signature
+        matches the current computed signature, reuse the stored anchor
+        (`since`);
+      - otherwise (no entry yet, a genuinely fresh working episode started,
+        or the roster/summary shape changed within the same episode), reset
+        the anchor to NOW - not to `announced`, unlike
+        cmd_review_resurface_check's own first-encounter behavior: there is
+        no meaningful "this shape has already been stale since X" to
+        inherit here, so a candidate seen for the first time (e.g. right
+        after this feature ships) never flips before a full fresh window
+        elapses, rather than potentially firing immediately off an old
+        `announced` timestamp it never had a chance to keep fresh against.
+
+    Keying the anchor to episode_announced in addition to signature is what
+    prevents a "resume from a previous flip, then immediately re-flip"
+    thrash: a genuine stall flip below always writes a fresh `announced`
+    (mirroring cmd_stall_check's own write shape), so the very next cycle
+    after a resume already sees a changed `announced` relative to whatever
+    was stored before the flip, forcing a reset - even though the plain
+    `--status working` resume call itself never advances `announced` any
+    further on its own (cmd_crew_set only advances it for a call whose
+    status is one of ATTENTION_STATES, which 'working' is not). Without this
+    key, a lead resumed with an otherwise-unchanged shape would find its OLD
+    stored anchor still >= window_secs in the past and re-flip on the very
+    next cycle.
+
+    Firing: if now - since >= --window-secs for a still-'working' candidate,
+    flip it directly to 'stalled' - a single stage, no courtesy nudge (unlike
+    cmd_stall_check's liveness path): a 30-minute-plus signature-staleness
+    reading on an armed, healthy watcher already has a much lower false-
+    positive rate than a liveness blip, so the added complexity of a second
+    nudge stage is not justified for this initial version. Reuses
+    cmd_stall_check's exact write shape: a with_locked re-check that the
+    record is still 'working' with the same `updated` immediately before
+    writing (closing the same self-report race window cmd_stall_check
+    closes), write status/summary/updated/announced, mirror into the
+    roster, render_board().
+
+    Once flipped, the candidate's status is no longer 'working', so it is
+    not re-examined by this check again until a human/owner resumes it -
+    this is a repeating STATE (like cmd_stall_check's own 'stalled'), not
+    (unlike cmd_review_resurface_check) a repeating REMINDER note.
+
+    Known, accepted false positive: a candidate that is genuinely, correctly
+    heads-down for longer than --window-secs without making any crew-set
+    call of its own, and without any report changing state, flips too. This
+    is self-healing by construction: the candidate's own next routine
+    crew-set call is itself a genuine transition out of 'stalled', clearing
+    the flag immediately - the cost is one avoidable board line, not a stuck
+    or corrupted state.
+
+    Prints 'stalled <id>' for each candidate flipped this cycle, one per
+    line; pure side effect otherwise (a candidate whose anchor has not yet
+    reached the window touches no disk state beyond its own anchor entry in
+    forward-motion.json)."""
+    ensure_home()
+    owner = getattr(args, "owner", None)
+    window_secs = args.window_secs
+
+    to_flip = []
+
+    with with_locked(forward_motion_path()):
+        store = read_json(forward_motion_path(), {})
+        if not isinstance(store, dict):
+            store = {}
+        changed = False
+        stamp = now()
+        stamp_dt = _parse_updated(stamp)
+
+        rows = [merged(r) for r in load_roster()]
+        by_parent = {}
+        for r in rows:
+            by_parent.setdefault(parent_of(r), []).append(r)
+
+        for r in rows:
+            if owner is not None and parent_of(r) != owner:
+                continue
+            if r.get("status") != "working":
+                continue
+            rid = r["id"]
+            children = [c for c in by_parent.get(rid, []) if c.get("status") in LIVE_STATES]
+            if not children:
+                continue
+
+            announced = r.get("announced") or r.get("updated")
+            if not announced:
+                continue
+            signature = _forward_motion_signature(r, children)
+
+            entry = store.get(rid)
+            if (isinstance(entry, dict) and entry.get("episode_announced") == announced
+                    and entry.get("signature") == signature):
+                anchor = entry.get("since")
+            else:
+                anchor = stamp
+                store[rid] = {"episode_announced": announced, "signature": signature, "since": stamp}
+                changed = True
+
+            anchor_dt = _parse_updated(anchor)
+            if anchor_dt is None or stamp_dt is None:
+                continue
+            elapsed = (stamp_dt - anchor_dt).total_seconds()
+            if elapsed >= window_secs:
+                to_flip.append((rid, len(children), r.get("summary"), r.get("updated")))
+
+        if changed:
+            write_json(forward_motion_path(), store)
+
+    for rid, n_reports, prior_summary, updated_snapshot in to_flip:
+        status_file = status_path(rid)
+        with with_locked(status_file):
+            current = read_json(status_file, None)
+            if (not isinstance(current, dict) or current.get("status") != "working"
+                    or current.get("updated") != updated_snapshot):
+                continue
+            live = current
+
+            reason = (
+                "no forward motion for over %s despite %d active report(s) - status, "
+                "summary, and every report's own status/announced have been unchanged "
+                "the whole time. Inspect with `bin/crew-takeover %s` or resume it with "
+                "`bin/crew-say %s <nudge>`."
+                % (_human_duration(window_secs), n_reports, rid, rid)
+            )
+            prior = (prior_summary or "").split("\n")[0][:80]
+            if prior:
+                reason += " (last summary: %s)" % prior
+
+            live["status"] = "stalled"
+            live["summary"] = reason
+            live["updated"] = now()
+            live["announced"] = live["updated"]  # a stall flip always announces
+            live.pop("nudged_at", None)
+            write_json(status_file, live)
+
+        with with_locked(crew_json_path()):
+            roster = load_roster()
+            for r in roster:
+                if r.get("id") == rid:
+                    r["status"] = "stalled"
+                    r["updated"] = live["updated"]
+            write_json(crew_json_path(), roster)
+        render_board()
+        print("stalled %s" % rid)
+
+
 def cmd_ack(args):
     """Record that the (id, announced) event has been surfaced to wingman, so
     needs-attention suppresses it until the crew's status changes (a new announced).
@@ -2965,6 +3181,19 @@ def build_parser():
     a.add_argument("--window-secs", type=int, default=21600, dest="window_secs")  # 6h, generous default
     a.add_argument("--waker-grace", type=int, default=120, dest="waker_grace")
     a.set_defaults(fn=cmd_review_resurface_check)
+
+    # Structural forward-motion / logical-stall detection (issue #199, Gap
+    # B): flips a WORKING candidate with active reports to 'stalled' once its
+    # own roster-shape signature has shown no change for --window-secs, even
+    # with a fully healthy, armed watcher cycle. Called every bin/watch-fleet
+    # iteration BY THE CANDIDATE'S OWN PARENT's cycle (see
+    # cmd_forward_motion_check's own docstring for why) - --owner "" is
+    # wingman's own top-level cycle, examining its own direct reports as
+    # candidates.
+    a = sub.add_parser("forward-motion-check")
+    a.add_argument("--owner", default=None)
+    a.add_argument("--window-secs", type=int, default=1800, dest="window_secs")  # 30 min default
+    a.set_defaults(fn=cmd_forward_motion_check)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)

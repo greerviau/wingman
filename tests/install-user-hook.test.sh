@@ -170,6 +170,67 @@ print(d['hooks']['PreToolUse'][0]['hooks'][0]['command'])
 ")"
 assert_eq "no --event defaults to PreToolUse" "$def_cmd" "$HOOK_PATH"
 
+# --- --event Stop: no matcher key, plus --async-rewake/--timeout/--rewake-summary (issue #199) ---
+SETTINGS_STOP="$WORK/settings-stop.json"
+STOP_CREW_HOOK="$TEST_REPO/hooks/stop-continuity-crew.sh"
+
+run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop \
+  --async-rewake --timeout 600 --rewake-summary "Wingman fleet continuity (crew)" >/dev/null
+
+stop_entry="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_STOP'))
+g = d['hooks']['Stop'][0]
+h = g['hooks'][0]
+print('matcher' in g)
+print(h['command'])
+print(h.get('asyncRewake'))
+print(h.get('timeout'))
+print(h.get('rewakeSummary'))
+")"
+assert_eq "a Stop registration carries no matcher key" "$(printf '%s\n' "$stop_entry" | sed -n 1p)" "False"
+assert_eq "the Stop entry's command is the given hook path" "$(printf '%s\n' "$stop_entry" | sed -n 2p)" "$STOP_CREW_HOOK"
+assert_eq "--async-rewake sets asyncRewake: true" "$(printf '%s\n' "$stop_entry" | sed -n 3p)" "True"
+assert_eq "--timeout sets the given timeout" "$(printf '%s\n' "$stop_entry" | sed -n 4p)" "600"
+assert_eq "--rewake-summary sets the given rewakeSummary" "$(printf '%s\n' "$stop_entry" | sed -n 5p)" "Wingman fleet continuity (crew)"
+
+if run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop --check >/dev/null 2>&1; then
+  ok "a Stop registration is detected as registered by --check"
+else
+  fail "a Stop registration is detected as registered by --check"
+fi
+
+# A Stop registration with none of the three new flags omits all three keys
+# (they are optional, not defaulted-on) and still carries no matcher.
+SETTINGS_STOP2="$WORK/settings-stop2.json"
+STOP_GUARD_CREW_HOOK="$TEST_REPO/hooks/stop-guard-crew.sh"
+run_installer --settings "$SETTINGS_STOP2" --hook "$STOP_GUARD_CREW_HOOK" --event Stop >/dev/null
+plain_stop="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_STOP2'))
+g = d['hooks']['Stop'][0]
+h = g['hooks'][0]
+print('matcher' in g)
+print('asyncRewake' in h)
+print('timeout' in h)
+print('rewakeSummary' in h)
+")"
+assert_eq "a plain Stop registration has no matcher key" "$(printf '%s\n' "$plain_stop" | sed -n 1p)" "False"
+assert_eq "a plain Stop registration has no asyncRewake key" "$(printf '%s\n' "$plain_stop" | sed -n 2p)" "False"
+assert_eq "a plain Stop registration has no timeout key" "$(printf '%s\n' "$plain_stop" | sed -n 3p)" "False"
+assert_eq "a plain Stop registration has no rewakeSummary key" "$(printf '%s\n' "$plain_stop" | sed -n 4p)" "False"
+
+# A non-Stop event registration is unaffected: it still carries a matcher, and
+# none of the three new (Stop-oriented) keys leak in when unset.
+SETTINGS_NONSTOP="$WORK/settings-nonstop.json"
+run_installer --settings "$SETTINGS_NONSTOP" --hook "$HOOK_PATH" --event PreToolUse >/dev/null
+nonstop_matcher="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_NONSTOP'))
+print('matcher' in d['hooks']['PreToolUse'][0])
+")"
+assert_eq "a non-Stop registration still carries a matcher key" "$nonstop_matcher" "True"
+
 # --- refuses to clobber invalid JSON ------------------------------------------
 SETTINGS3="$WORK/settings-broken.json"
 printf 'not valid json{' > "$SETTINGS3"

@@ -140,4 +140,64 @@ rm -f "$WINGMAN_HOME/watch-lead2.suppressed"
 kill "$gpid" 2>/dev/null
 unset WINGMAN_CREW_ID
 
+# =====================================================================
+# Wrapper tests (issue #199): hooks/stop-guard-crew.sh, registered ONLY at
+# user scope, extends the identical no-idle-blind constraint to crew sessions
+# whose project root is some other repo. See hooks/stop-guard-crew.sh's own
+# header for why the WINGMAN_CREW_ID gate must live in this wrapper file
+# rather than inside hooks/stop-guard.sh itself - which every case above
+# already proves is completely unmodified by this change, since none of them
+# were touched to add this section.
+CREW_HOOK="$TEST_REPO/hooks/stop-guard-crew.sh"
+
+# --- (W1) the wrapper no-ops with WINGMAN_CREW_ID unset -----------------------
+test_new_home
+wm_state crew-add --id gw1 --type developer --objective x --repo /tmp --window wm-gw1 --session-id s1 >/dev/null
+wm_state crew-set --id gw1 --status blocked --blocker "need a call" >/dev/null
+unset WINGMAN_CREW_ID
+outgw1="$(printf '{"stop_hook_active": false}' | bash "$CREW_HOOK")"
+assert_eq "wrapper with WINGMAN_CREW_ID unset: no output" "$outgw1" ""
+assert_false "wrapper with WINGMAN_CREW_ID unset: never reaches the real script (no scratch file)" "[ -f '$WINGMAN_HOME/stop-blocked.json' ]"
+
+# --- (W2) the wrapper execs through with WINGMAN_CREW_ID set -------------------
+test_new_home
+export WINGMAN_CREW_ID=lead-gw2
+wm_state crew-add --id gw2 --type developer --objective x --repo /tmp --window wm-gw2 --session-id s2 --parent lead-gw2 >/dev/null
+wm_state crew-set --id gw2 --status blocked --blocker "need a call on the API shape" >/dev/null
+outgw2="$(printf '{"stop_hook_active": false}' | bash "$CREW_HOOK")"
+assert_contains "the wrapper's own invocation blocks the stop" "$outgw2" '"decision": "block"'
+assert_contains "the wrapper's own reason lists the member" "$outgw2" "gw2"
+assert_true "the wrapper's own invocation writes the owner-scoped scratch file" "[ -f '$WINGMAN_HOME/stop-blocked-lead-gw2.json' ]"
+# The real second pass (stop_hook_active true), via the wrapper, marks
+# handled and allows the stop - identical to the unwrapped script's own
+# pass-2 behavior.
+outgw2b="$(printf '{"stop_hook_active": true}' | bash "$CREW_HOOK")"
+assert_eq "the wrapper's own pass-2 marks handled and allows the stop" "$outgw2b" ""
+assert_false "the wrapper's own pass-2 removes its scratch file" "[ -f '$WINGMAN_HOME/stop-blocked-lead-gw2.json' ]"
+unset WINGMAN_CREW_ID
+
+# --- (W3) double registration in the same repo: wrapper + real script, same owner, back-to-back
+# Approximates two live hook groups firing for the same Stop event in a crew
+# session whose project root IS the wingman repo. Both invocations share the
+# identical owner-keyed SCRATCH path, so this proves the duplicate pass
+# degrades gracefully: both produce an equivalent block, and a single
+# stop_hook_active=true pass (from either invocation path) fully clears it -
+# the empirical check for the plan's own "remaining case" discussion.
+test_new_home
+export WINGMAN_CREW_ID=lead-gw3
+wm_state crew-add --id gw3 --type developer --objective x --repo /tmp --window wm-gw3 --session-id s3 --parent lead-gw3 >/dev/null
+wm_state crew-set --id gw3 --status blocked --blocker "need a call" >/dev/null
+out_wrap="$(printf '{"stop_hook_active": false}' | bash "$CREW_HOOK")"
+out_real="$(printf '{"stop_hook_active": false}' | bash "$TEST_REPO/hooks/stop-guard.sh")"
+assert_contains "the wrapper's pass-1 blocks" "$out_wrap" '"decision": "block"'
+assert_contains "the real script's own pass-1 (same owner) also blocks" "$out_real" '"decision": "block"'
+assert_true "the shared owner-scoped scratch file exists after both" "[ -f '$WINGMAN_HOME/stop-blocked-lead-gw3.json' ]"
+# Whichever side's pass-2 runs first fully clears it; the other finds no
+# scratch file left and exits cleanly (never an error, never a re-block).
+out_real2="$(printf '{"stop_hook_active": true}' | bash "$TEST_REPO/hooks/stop-guard.sh")"
+assert_eq "the real script's own pass-2 marks handled and allows the stop" "$out_real2" ""
+out_wrap2="$(printf '{"stop_hook_active": true}' | bash "$CREW_HOOK")"
+assert_eq "the wrapper's own pass-2, run after the real script's, finds nothing left and is silent" "$out_wrap2" ""
+unset WINGMAN_CREW_ID
+
 test_summary
