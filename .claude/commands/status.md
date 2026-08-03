@@ -7,8 +7,9 @@ allowed-tools: Bash(bin/crew-list:*)
 Run `bin/crew-list $ARGUMENTS` and give me a compact roster: for each crew member
 the type, id, **status**, and one-line summary; then a short "needs you" section
 listing anything `blocked` (with its blocker), `stalled` (with the takeover /
-stand-down remedy), or in `review` with a `delivery`/`artifact` ready for me to
-look at.
+stand-down remedy), in `review` with a `delivery`/`artifact` ready for me to
+look at, or carrying one or more `parked` annotations (with each ref and note)
+even while otherwise `working`.
 
 By default `bin/crew-list` shows your direct reports (a lead shows as one line).
 If I pass `--tree`, run `bin/crew-list --tree` to show the whole org indented; if I

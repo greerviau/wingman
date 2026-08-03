@@ -45,6 +45,24 @@ Only pass the flags that changed.
   This is your signal that you are ready to be closed out, and **your owner closes you out as soon as it sees it**.
   A deliverable that is merely ready is `review`, never `done`; reach `done` only at the true end (the PR merged/closed, the plan approved and handed off) or an explicit close-out.
 
+## Per-issue blocking vs whole-effort blocking (roles that own multiple units of work)
+
+The states above describe a session producing **one** deliverable, where "I need a
+decision" and "I cannot proceed" are the same fact. A role that owns several independent
+units of work concurrently - today, only `lead` (`playbooks/common/lead.md`) - is
+different: one unit hitting a genuine blocking question never by itself means the
+*session* has nothing left it can progress.
+
+For such a role, `blocked` keeps its meaning unchanged - this session has nothing further
+it can legally progress - but is reserved for when that is true across the whole roster,
+not merely true for one unit. A unit that needs a decision the role cannot make, while
+other units remain actionable, is **parked**, not **blocked**: recorded via `crew-set
+--park "<ref>:<question>"` (a structured annotation, independent of `status`) while the
+role keeps working the rest. `playbooks/common/lead.md` defines the concrete
+park-and-continue discipline and the batched-escalation shape this feeds into; this
+contract only establishes that `parked` and `blocked` answer two different questions, and
+that a role owning multiple units always has both available to it.
+
 ## `blocked` for a human dependency
 
 Two related cases both belong under `blocked`, raised once, immediately, the moment you recognize them - never carried silently inside a `working` summary, and never worked around on your own:
