@@ -61,8 +61,8 @@ State home (default ~/.wingman, override with $WINGMAN_HOME):
                     is never mistaken for one whose record was truly lost.
 
 The merged view of a crew member = its crew.json base record with the live
-crew/<id>.json overlaid on top (status/summary/blocker/artifact/artifact_url/
-delivery/updated).
+crew/<id>.json overlaid on top (status/summary/blocker/parked/artifact/
+artifact_url/delivery/updated).
 crew.json is the roster of record; crew/<id>.json is the live signal. Wingman
 reads the merge; it never ingests panes or transcripts.
 
@@ -106,7 +106,10 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "de
 # status surface (STATUS_FIELDS above), never iterated generically by
 # cmd_crew_set, and carrying no gating weight anywhere - purely annotations a
 # render step (merged/render_roster_text/render_tree_text/render_board) may
-# show alongside a 'working' status. nudged_at (fix 1) is written by
+# show alongside a 'working' status - with one exception: parked (#203) feeds
+# the auto-composed blocker text on a --status blocked transition (see
+# cmd_crew_set), but is otherwise display-only like the rest of this tuple,
+# never itself gating announced/dedup. nudged_at (fix 1) is written by
 # cmd_stall_check's --just-nudged (riding the same per-poll call bin/watch-
 # fleet already makes for every candidate, rather than a second subprocess
 # spawned just to persist a timestamp) and cleared by cmd_crew_set on the
@@ -114,7 +117,9 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "de
 # flip.
 # long_shell_pid/long_shell_elapsed (fix 2) are written by cmd_stall_check's
 # per-poll duration probe, independent of the idle-nomination gates.
-DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed")
+# parked (#203) is a list of {"ref", "note", "since"} annotations - a unit of
+# work needing a decision, independent of this record's own status.
+DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -705,6 +710,60 @@ def cmd_crew_set(args):
             val = getattr(args, field, None)
             if val is not None:
                 live[field] = None if val == "" and field in ("blocker", "artifact", "artifact_url", "delivery") else val
+        # parked (#203) - independent of STATUS_FIELDS/announced, so this runs
+        # regardless of what --status was passed this call. A role owning several
+        # independent units of work (a lead) uses this to record "this one unit
+        # needs a decision" without flipping its own status to blocked.
+        if args.parked_clear:
+            live["parked"] = []
+        if args.unpark:
+            remove = set(args.unpark)
+            live["parked"] = [p for p in live.get("parked") or [] if p.get("ref") not in remove]
+        if args.park:
+            by_ref = dict((p.get("ref"), p) for p in live.get("parked") or [])
+            for item in args.park:
+                if ":" not in item:
+                    sys.exit("wm-state: --park expects 'ref:note' (ref may not itself "
+                              "contain a colon), got %r" % item)
+                ref, note = item.split(":", 1)
+                ref, note = ref.strip(), note.strip()
+                if not note:
+                    sys.exit("wm-state: --park %r has an empty note" % item)
+                by_ref[ref] = {
+                    "ref": ref,
+                    "note": note,
+                    # preserve the original park time across a re-park that only updates the note
+                    "since": (by_ref.get(ref) or {}).get("since") or now(),
+                }
+            live["parked"] = list(by_ref.values())
+        # Compose `blocker` deterministically from (lead-in, current parked list) on
+        # every touch while status is blocked, so re-deriving the same inputs always
+        # yields byte-identical output (#203). blocker_note/blocker_composed are
+        # composition inputs only - deliberately not in DISPLAY_ONLY_LIVE_FIELDS, so
+        # merged()/crew-get/crew-list never surface them; the visible `blocker` field
+        # already carries their effect. See docs/plans/2026-08-03-issue-203-per-issue-
+        # blocking-plan.md for why a naive "compose into blocker and read it back"
+        # approach is non-idempotent and leaks stale parked items across escalations.
+        if args.blocker is not None:
+            live["blocker_note"] = args.blocker or None
+        if live.get("status") == "blocked":
+            parked_items = live.get("parked") or []
+            lead_in = live.get("blocker_note")
+            if parked_items:
+                rendered = "; ".join(
+                    "[%s] %s" % (p.get("ref", "?"), p.get("note", "")) for p in parked_items
+                )
+                live["blocker"] = (
+                    "%s | parked: %s" % (lead_in, rendered) if lead_in else "parked: %s" % rendered
+                )
+                live["blocker_composed"] = True
+            else:
+                live["blocker"] = lead_in
+                live.pop("blocker_composed", None)
+        else:
+            live.pop("blocker_note", None)
+            if live.pop("blocker_composed", None) and args.blocker is None:
+                live["blocker"] = None
         # nudged_at (#155 fix 1) is stamped elsewhere (cmd_stall_check's --just-
         # nudged, riding the existing per-poll stall-check call bin/watch-fleet
         # already makes for every candidate) - this function only ever CLEARS it,
@@ -950,6 +1009,16 @@ def cmd_crew_list(args):
         # An explicit status filter is honored verbatim, so `--status stood-down`
         # is the deliberate way to inspect closed history.
         rows = [r for r in rows if r.get("status") == args.status]
+    elif args.parked:
+        # --parked is status-independent by design (#203) - a record can be
+        # working or blocked and still carry parked items - so it does not
+        # compose with --status/--active in the same call. The explicit
+        # != "stood-down" guard is required: this elif bypasses the default
+        # branch's own "elif not args.all" clause below, which is the only
+        # thing that otherwise drops stood-down records from the live roster
+        # view, and cmd_crew_standdown leaves `parked` untouched when it flips
+        # status to stood-down.
+        rows = [r for r in rows if r.get("parked") and r.get("status") != "stood-down"]
     elif args.active:
         rows = [r for r in rows if r.get("status") in LIVE_STATES]
     elif not args.all:
@@ -2151,18 +2220,23 @@ def cmd_review_resurface_check(args):
 
 
 def _forward_motion_signature(candidate, children):
-    """Hash of the candidate's own (summary, blocker, artifact, delivery)
-    plus the sorted (child_id, child_status, child_announced) tuple for
-    every one of `children` (already filtered to LIVE_STATES by the caller).
-    `announced` (falling back to `updated` only when absent) is used for
-    each child - not `updated` - matching the exact idiom
+    """Hash of the candidate's own (summary, blocker, artifact, delivery,
+    parked) plus the sorted (child_id, child_status, child_announced) tuple
+    for every one of `children` (already filtered to LIVE_STATES by the
+    caller). `announced` (falling back to `updated` only when absent) is used
+    for each child - not `updated` - matching the exact idiom
     cmd_review_resurface_check/cmd_needs_attention already use elsewhere in
     this file: `updated` bumps on every routine same-status summary refresh,
     so keying on it would let an actively-narrating-but-not-actually-
     progressing report reset the staleness clock forever. See
-    cmd_forward_motion_check's own docstring for the full rationale."""
+    cmd_forward_motion_check's own docstring for the full rationale. `parked`
+    (#203) is included so parking or unparking an item resets the staleness
+    clock directly - a lead now spends materially more time sitting in
+    `working` with active reports (it no longer flips to `blocked` for a
+    single parked item), which is exactly the shape this check polices."""
     own = (candidate.get("summary"), candidate.get("blocker"),
-           candidate.get("artifact"), candidate.get("delivery"))
+           candidate.get("artifact"), candidate.get("delivery"),
+           tuple(sorted((p.get("ref"), p.get("note")) for p in candidate.get("parked") or [])))
     child_tuples = sorted(
         (c["id"], c.get("status"), c.get("announced") or c.get("updated"))
         for c in children
@@ -2824,6 +2898,9 @@ def render_roster_text(rows):
         lines.append(line)
         if r.get("status") == "blocked" and r.get("blocker"):
             lines.append("      blocker: %s" % r["blocker"])
+        if r.get("parked"):
+            for p in r["parked"]:
+                lines.append("      parked[%s]: %s" % (p.get("ref", "?"), p.get("note", "")))
         if r.get("delivery"):
             lines.append("      delivery: %s" % r["delivery"])
         if r.get("artifact_url"):
@@ -2850,6 +2927,9 @@ def render_tree_text(rows):
         lines.append(line.rstrip())
         if r.get("status") == "blocked" and r.get("blocker"):
             lines.append("%s    blocker: %s" % (indent, r["blocker"]))
+        if r.get("parked"):
+            for p in r["parked"]:
+                lines.append("%s    parked[%s]: %s" % (indent, p.get("ref", "?"), p.get("note", "")))
         if r.get("delivery"):
             lines.append("%s    delivery: %s" % (indent, r["delivery"]))
         if r.get("artifact_url"):
@@ -2869,8 +2949,8 @@ def render_board():
     out.append("## Active (%d)" % len(active))
     out.append("")
     if active:
-        out.append("| type | id | status | window | repo | summary | blocker | delivery | artifact-url |")
-        out.append("|---|---|---|---|---|---|---|---|---|")
+        out.append("| type | id | status | window | repo | summary | blocker | parked | delivery | artifact-url |")
+        out.append("|---|---|---|---|---|---|---|---|---|---|")
         # Depth-first so each report sits under its owner, its id indented by depth,
         # letting a human read the org rather than a flat list.
         for r, depth in order_tree(active):
@@ -2881,10 +2961,13 @@ def render_board():
                 + (" (global)" if r.get("scope") == "global" else "")
                 + _git_suffix(r)
             )
-            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s |" % (
+            parked_cell = "; ".join(
+                "[%s] %s" % (p.get("ref", "?"), p.get("note", "")) for p in (r.get("parked") or [])
+            )
+            out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), marker, id_cell, r.get("status", "") + _stall_annotation(r),
                 r.get("window", ""), repo_cell,
-                _cell(r.get("summary")), _cell(r.get("blocker")), _cell(r.get("delivery")),
+                _cell(r.get("summary")), _cell(r.get("blocker")), _cell(parked_cell), _cell(r.get("delivery")),
                 _cell(r.get("artifact_url")),
             ))
     else:
@@ -3027,6 +3110,13 @@ def build_parser():
     # "Re-entering review without re-announcing"). Refused with --status
     # blocked/done, which must always announce.
     a.add_argument("--silent", action="store_true")
+    # Per-issue blocking (#203): park a unit needing a decision without flipping
+    # this record's own status - see cmd_crew_set's parked-mutation block.
+    a.add_argument("--park", action="append", default=None,
+                    help="park a unit needing a decision: 'ref:note' (repeatable)")
+    a.add_argument("--unpark", action="append", default=None,
+                    help="clear a parked unit by ref (repeatable)")
+    a.add_argument("--parked-clear", action="store_true", dest="parked_clear")
     a.set_defaults(fn=cmd_crew_set)
 
     a = sub.add_parser("crew-get")
@@ -3059,6 +3149,11 @@ def build_parser():
     a.add_argument("--owner", default=None)
     # Render the whole hierarchy as an indented tree (ignores --owner).
     a.add_argument("--tree", action="store_true")
+    # Per-issue blocking (#203): show only records with one or more parked
+    # items, regardless of status - a record can be working or blocked and
+    # still carry parked items. Status-independent by design; does not compose
+    # with --status/--active in the same call.
+    a.add_argument("--parked", action="store_true")
     a.set_defaults(fn=cmd_crew_list)
 
     sub.add_parser("render-board").set_defaults(fn=cmd_render_board)

@@ -88,6 +88,10 @@ That is the `verbosity=concise` behavior; a cached `verbosity=detailed` preferen
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it needs.
   Relay the pilot's answer back down with `bin/crew-say`.
   Only a genuine decision the pilot alone can make is escalated; a problem the owning member can resolve itself is routed *to that member*, never surfaced upward.
+  **One crew member's `blocked` fire is never a reason to stop before finishing whatever
+  else this turn already has you doing** - if you know of other actionable work (another
+  directive to dispatch, another member to spawn or steer) when a `blocked` fire arrives,
+  do that first and relay the escalation alongside it, not instead of it.
 
 Then return control.
 You do not keep talking or keep working; you wait for the next directive or a watcher wake.
@@ -152,7 +156,9 @@ When a directive fits a custom type better than the built-ins (e.g. "research X"
 - **The pilot grants merge autonomy** ("you can merge this one") → never inferred from a PR looking done or CI passing. Fresh: `--allow-merge`. Already spawned: `$WINGMAN_STATE crew-set --id <id> --allow-merge true`. Per-effort, never a global default.
 - **"Status" / "what's my crew doing?"** → `bin/crew-list`, summarized compactly **including each member's status**, each effort named by repo and objective; the crew id stays your own lookup key.
   It shows your **direct reports** (a lead is one line); `--tree` for the whole org, `--owner <lead-id>` to see inside a lead's team. Current crew only - reach for `--all` only when the pilot asks for history.
-- **"What's blocked?"** → `bin/crew-list --status blocked`; for each, surface the blocker and the decision it needs.
+- **"What's blocked?"** → `bin/crew-list --status blocked` for a fully halted member, plus
+  `bin/crew-list --parked` for a member still working with one or more items parked; for
+  each, surface the blocker/parked note and the decision it needs.
 - **A fire reason with a specific procedure** (`stalled`, a `correlated:*` batch, `outage-*`, `usage-limit-*`) → `/watch` routes these to [`docs/runbooks/incidents.md`](docs/runbooks/incidents.md). Follow that procedure rather than reporting the roster generically.
 - **"Take over X"** → `bin/crew-takeover <id>`; relay the command it prints. You cannot hand your own terminal over, so you only relay - lead with the effort's repo/objective, not the id, when confirming which one "X" resolved to. A *live* member cannot be resumed from another terminal; taking one over always means attaching to its window.
 - **Deliverable ready** → on a **pilot-facing** `review` with an `artifact` or `delivery`, announce it once ("plan ready" / "PR ready for review" with the pointer), then **leave it running** (see Member lifecycle). If the artifact is markdown, run the open-questions flow first (below).

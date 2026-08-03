@@ -195,6 +195,16 @@ Each layer sees only its direct reports (`blocked` escalates one hop up; a lead 
 
 **Escalation is recursive human-in-the-loop.** A worker that sets `blocked` surfaces to its owner (its lead), not to the pilot. The lead answers via `crew-say` if it can; if the decision is above its pay grade, it re-raises `blocked` on its *own* line, which surfaces one level up. Decisions travel up only as far as needed; the answer flows back down the same chain. Cascade stand-down mirrors this: standing down (or reaping) a member recurses to its descendants, so finishing a lead never orphans its sub-crew.
 
+A lead's own `blocked` is reserved for the case where it has nothing left it can progress
+across its whole team, not merely because one worker's task needs a decision (issue #203):
+a genuinely blocking question on one unit is recorded as a `parked` annotation (`crew-set
+--park`/`--unpark`, independent of `status`) while the lead keeps dispatching and
+supervising everything else, escalating only once every remaining unit is exhausted - as
+one batched `blocked` call that folds every parked item into `blocker` automatically, not
+one escalation per question. `bin/crew-list --parked` and the `/blocked`/`/status` skills
+surface these annotations alongside true `blocked` records, so the pilot's visibility into
+pending decisions never depends on the whole effort looking unhealthy.
+
 **Peers collaborate directly.** Siblings under the same lead `crew-say` each other for routine coordination (a developer↔reviewer exchange, a developer↔developer interface negotiation) without routing through the lead - which would pour their detail into the lead's context, the exact bloat the hierarchy prevents. The lead sees only the rolled-up outcome unless a genuine decision escalates. A guardrail in `crew-say` keeps collaboration within a team: a caller may message its own reports, a sibling under the same lead, or its own lead - not arbitrary crew elsewhere in the tree (override with `--force`).
 
 **Depth cap: two crew layers.** The full chain is pilot → wingman → lead → worker; wingman and the pilot are not crew layers, so the two crew layers are the lead and its workers. A lead does not spawn further leads; deeper nesting is a future opt-in gated behind cost guardrails.
