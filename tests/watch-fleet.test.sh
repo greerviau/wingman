@@ -532,7 +532,14 @@ i=0; while kill -0 "$aepid" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 1; i=$((i+1
 assert_false "watcher exited on the api-error stall" "kill -0 $aepid"
 assert_contains "cycle exits with the stalled reason carrying api-error:" \
   "$(cat "$WINGMAN_HOME/apierr.log")" "stalled: ae2 api-error:"
-assert_true "the nudge marker file was written before escalating" \
+# issue #214, §3.6 step 5: a genuine flip now clears the watcher's own
+# stall-<id>.nudged sidecar (previously never cleared at all - a pre-existing
+# gap this fix closes alongside the new refused-nudge counter) so a later,
+# unrelated stall episode for the same id cannot inherit a stale marker and
+# flip claiming a nudge that was never sent this time. The nudge having
+# happened before the flip is proven below by the pane content instead (the
+# marker's own existence is no longer evidence of that, by design).
+assert_false "the nudge marker is cleared once the flip actually happens" \
   "[ -f '$WINGMAN_HOME/stall-ae2.nudged' ]"
 ae2_nudge_count="$(tmux capture-pane -p -S -1000 -t "$WM_TMUX_SESSION:wm-ae2" | grep -c "This is usually transient")"
 assert_eq "the nudge landed exactly once through to the flip, never re-sent" "$ae2_nudge_count" "1"
@@ -1239,5 +1246,54 @@ wm_state crew-set --id r1 --status done --summary "done e" >/dev/null
 sleep 3
 assert_false "the replacement cycle fires normally" "kill -0 $newpid"
 assert_contains "the replacement cycle printed the fire reason" "$(cat "$WINGMAN_HOME/new.log")" "done: r1"
+
+# --- issue #214 §3.6: a nudge that can never be delivered still eventually --
+# flips the member stalled, via the refused-nudge escape hatch, rather than
+# exempting it from stall escalation forever. Simulated with a contended send
+# lock (rc 4) - deterministic and trivial to hold open, unlike a genuinely
+# busy pane (rc 6): a pane repainting fast enough for wm_tmux_send_message to
+# read it "busy" would also read unstable to watch-fleet's own PANE_STABLE
+# check above and never reach this block at all (§3.6's own note on why rc 2
+# is unreachable here applies just as much to a real rc 6).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id nu1 --type developer --objective f --repo /tmp --window wm-nu1 --session-id snu1 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-nu1 'trap "" INT; sleep 600'
+wm_age_status nu1
+# Pre-hold the per-pane send lock (bin/lib/common.sh's own mkdir-based
+# convention) so every attempted nudge this test drives refuses with rc 4
+# rather than ever actually typing. WM_SEND_LOCK_STALE is set far longer than
+# this test runs so the lock is never reclaimed out from under it.
+_nu1_target="$(printf '=%s:=%s' "$WM_TMUX_SESSION" "wm-nu1")"
+_nu1_lock="$WINGMAN_HOME/send-$(printf '%s' "$_nu1_target" | tr -c 'A-Za-z0-9._-' '_').lock"
+mkdir -p "$_nu1_lock"
+export WM_NUDGE_REFUSED_MAX=2
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
+  WM_SEND_LOCK_WAIT=1 WM_SEND_LOCK_STALE=9999 \
+  "$WF" >"$WINGMAN_HOME/nu1.log" 2>&1 &
+nupid=$!
+wm_track "$nupid"
+refusedfile="$WINGMAN_HOME/stall-nu1.nudge-refused"
+_wait=0
+while { [ ! -f "$refusedfile" ] || [ "$(cat "$refusedfile" 2>/dev/null)" -lt 2 ]; } && [ "$_wait" -lt 30 ]; do
+  sleep 1; _wait=$((_wait+1))
+done
+assert_eq "the refused-nudge counter reaches WM_NUDGE_REFUSED_MAX before any nudge is ever delivered" \
+  "$(cat "$refusedfile" 2>/dev/null)" "2"
+nudgefile="$WINGMAN_HOME/stall-nu1.nudged"
+_wait=0
+while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 15 ]; do sleep 1; _wait=$((_wait+1)); done
+assert_true "the escape hatch stamps the ordinary .nudged marker anyway once the max is reached" "[ -f '$nudgefile' ]"
+assert_false "the escape hatch never sets nudged_at (it would render a false 'nudge sent' on the board)" \
+  "wm_state crew-get --id nu1 | grep -q nudged_at"
+i=0; while kill -0 "$nupid" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 1; i=$((i+1)); done
+assert_false "watcher exited on the stall once the aged marker crossed the threshold" "kill -0 $nupid"
+assert_contains "cycle exits with the stalled reason" "$(cat "$WINGMAN_HOME/nu1.log")" "stalled: nu1"
+assert_contains "the reason names the undelivered nudge explicitly, not the generic template" \
+  "$(cat "$WINGMAN_HOME/nu1.log")" "could not deliver a check-in nudge in 2 attempts"
+kill "$nupid" 2>/dev/null
+rmdir "$_nu1_lock" 2>/dev/null
+unset WM_NUDGE_REFUSED_MAX
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 test_summary

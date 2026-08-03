@@ -218,6 +218,26 @@ def pane_tail_path(cid):
     return os.path.join(home(), "pane-tail-%s.txt" % _sanitize_id(cid))
 
 
+def _clear_stall_nudge_sidecars(cid):
+    """Delete bin/watch-fleet's stall-<id>.nudged and stall-<id>.nudge-refused
+    sidecars for cid, if present (issue #214, §3.6 step 5). Both are
+    $WM_HOME files the watcher alone creates and reads (never through
+    wm_state) to track one stall episode's check-in nudge; nothing ever
+    unlinked either before this, so a counter or marker from a resolved
+    episode survived into the next one, misleading a later flip's reason
+    text. Called at the two points an episode is known to be over: here
+    (a member self-reported - cmd_crew_set) and by cmd_stall_check on a
+    genuine flip - attached to the event rather than to a watcher poll,
+    since a poll-keyed clear would silently not happen while no watcher is
+    running, which is exactly when a stale counter would survive."""
+    sid = _sanitize_id(cid)
+    for _suffix in (".nudged", ".nudge-refused"):
+        try:
+            os.unlink(os.path.join(home(), "stall-%s%s" % (sid, _suffix)))
+        except OSError:
+            pass
+
+
 def review_resurfaced_path():
     return os.path.join(home(), "review-resurfaced.json")
 
@@ -788,6 +808,12 @@ def cmd_crew_set(args):
         if any(getattr(args, f, None) is not None for f in
                ("status", "summary", "blocker", "artifact", "artifact_url", "delivery")):
             live.pop("nudged_at", None)
+            # The member self-reported, so any stall episode in progress is
+            # over - clear the watcher's own stall-<id>.nudged/.nudge-refused
+            # sidecars too (issue #214, §3.6 step 5), or a later episode would
+            # inherit a stale refused-nudge count and flip claiming a nudge
+            # attempt that never happened.
+            _clear_stall_nudge_sidecars(args.id)
         # Auto-derive artifact_url from the publish marker unless the caller passed an
         # explicit value (including an explicit clear, already applied above) - see
         # _artifact_marker_url. This removes the free-text "remember to report the URL"
@@ -1606,7 +1632,23 @@ def cmd_stall_check(args):
             return
 
         prior = (live.get("summary") or "").split("\n")[0][:80]
-        if getattr(args, "api_error", 0):
+        if getattr(args, "nudge_undelivered", 0):
+            # issue #214, §3.6: the watcher could never actually TYPE a
+            # check-in nudge into this pane (busy with a pending composer,
+            # dialog-shaped, or lock-contended, WM_NUDGE_REFUSED_MAX
+            # consecutive polls in a row) and stamped the marker anyway so
+            # this flip could still happen - a member nobody can reach is
+            # more in need of surfacing, not less. Named explicitly rather
+            # than folded into the default template, which would otherwise
+            # falsely imply a nudge was delivered and simply produced no
+            # activity.
+            reason = ("could not deliver a check-in nudge in %d attempts - the pane is busy, "
+                      "dialog-shaped or locked, and the member has been idle for >%ds while "
+                      "status was 'working'. Inspect with `bin/crew-takeover %s` or stand down "
+                      "with `bin/crew-standdown %s`."
+                      % (int(os.environ.get("WM_NUDGE_REFUSED_MAX", "3")), int(args.threshold),
+                         args.id, args.id))
+        elif getattr(args, "api_error", 0):
             reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
                       "limit, connection error, 5xx, overloaded_error, or similar) and then "
                       "went quiet for >%ds while status was 'working' - the CLI's own retry/"
@@ -1632,6 +1674,11 @@ def cmd_stall_check(args):
         # (not a still-'working' render) is now the accurate signal to show.
         live.pop("nudged_at", None)
         write_json(status_file, live)
+    # This stall episode is over (flipped) - clear the watcher's own sidecars
+    # too, or a future episode's first flip would inherit a stale refused-nudge
+    # count (or a stale delivered-nudge marker) from this one (issue #214, §3.6
+    # step 5).
+    _clear_stall_nudge_sidecars(args.id)
 
     # Mirror into the roster, as crew-set does, so a later loss of the status
     # file still tells the truth.
@@ -3470,6 +3517,19 @@ def build_parser():
     # member per poll was enough to visibly skew the tight multi-member
     # timing the outage-detection tests depend on).
     a.add_argument("--just-nudged", type=int, default=0, dest="just_nudged")
+    # 1 iff the watcher's persisted refused-nudge counter for this candidate
+    # (bin/watch-fleet's stall-<id>.nudge-refused sidecar) has reached
+    # WM_NUDGE_REFUSED_MAX (issue #214, §3.6): a check-in nudge that a busy,
+    # dialog-shaped, or lock-contended pane refuses outright must not exempt
+    # the member from stall escalation forever, so the watcher stamps the
+    # ordinary nudged marker anyway once the refusal count crosses the max
+    # (without --just-nudged - nothing was actually delivered) and passes
+    # this flag on EVERY poll from then on, derived fresh from the persisted
+    # counter each time, not only on the poll that stamped it - the poll that
+    # stamps is never the poll that flips (--nudge-age must still age past
+    # --threshold first), so a flag set only at stamping time would never be
+    # set on the flipping poll.
+    a.add_argument("--nudge-undelivered", type=int, default=0, dest="nudge_undelivered")
     a.set_defaults(fn=cmd_stall_check)
 
     # Foreground-watcher wedge detection (issue #202, layer B): flips a
