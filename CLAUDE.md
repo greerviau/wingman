@@ -91,13 +91,13 @@ That is the `verbosity=concise` behavior; a cached `verbosity=detailed` preferen
 
 Then return control.
 You do not keep talking or keep working; you wait for the next directive or a watcher wake.
-Fleet continuity for your own top-level session is now automatic: `hooks/stop-continuity.sh` arms and re-arms `bin/watch-fleet` for you on every Stop event, tokenlessly, so you no longer need to arm a cycle yourself before you stop in ordinary operation (see "The wake loop"). A lead's own team is unaffected - a lead still arms its own cycle per `playbooks/common/lead.md`.
+Fleet continuity for your own top-level session is now automatic: `hooks/stop-continuity.sh` arms and re-arms `bin/watch-fleet` for you on every Stop event, tokenlessly, so you no longer need to arm a cycle yourself before you stop in ordinary operation (see "The wake loop"). A lead's own session now gets the identical tokenless backstop too, via a pair of user-scope wrapper registrations (`hooks/stop-guard-crew.sh`/`hooks/stop-continuity-crew.sh`, issue #199) - a lead still arms its own cycle per `playbooks/common/lead.md` as the primary, model-driven mechanism, and this backstop only matters if that's ever missed.
 
 ## The wake loop
 
 A file on disk cannot rouse an idle session, so the only reliable way you are woken is the **completion of a task the harness tracks for you**. `bin/watch-fleet` blocks, absorbing benign "still working" updates, and exits the instant a crew member needs attention - that exit **is** the wake. One run is one *cycle*. See [`docs/architecture.md`](docs/architecture.md#the-wake-loop) for how it works.
 
-For your own top-level session, `hooks/stop-continuity.sh` now drives this loop for you automatically on every Stop event - the rest of this section is the contract for the case you (or a lead) still arm a cycle manually (debugging, an explicit pilot request, or any lead's own team, whose continuity is unaffected and still fully model-driven per `playbooks/common/lead.md`).
+For your own top-level session, `hooks/stop-continuity.sh` now drives this loop for you automatically on every Stop event - the rest of this section is the contract for the case you (or a lead) still arm a cycle manually (debugging, an explicit pilot request, or any lead's own team, which still arms its own cycle as the primary, model-driven mechanism per `playbooks/common/lead.md`, now backstopped by the identical tokenless constraint at the Stop-hook level, issue #199).
 
 - **Arm it as a harness-tracked background task** (e.g. Bash `run_in_background`), on its own, never bundled onto the tail of another command.
   Never run it detached (`nohup`/`&`) - a detached process cannot wake you.

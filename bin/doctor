@@ -604,6 +604,61 @@ else
   printf '    this file is version-controlled - re-check the checkout or chmod +x, not an install\n'
 fi
 
+# --- fleet-continuity Stop hooks (issue #199), crew sessions, user scope ----
+# hooks/stop-guard-crew.sh and hooks/stop-continuity-crew.sh extend the #185
+# fleet-continuity Stop hooks above to crew sessions (a lead's own session, or
+# any worker) whose project root is some other repo, where this repo's own
+# project-scoped .claude/settings.json never loads - same rationale as the
+# interactive-prompt guard block above. Each wrapper no-ops for wingman's own
+# top-level session (WINGMAN_CREW_ID unset) and exec's into the identical,
+# unmodified hooks/stop-guard.sh / hooks/stop-continuity.sh for a crew
+# session; see the wrapper files themselves for why the gate must live there
+# rather than in the real scripts.
+# Overridable so tests can point these at a throwaway fixture instead of the
+# real checked-in wrapper files, the same pattern STOP_GUARD_SCRIPT/
+# STOP_CONTINUITY_SCRIPT already use above for the project-scope check.
+STOP_GUARD_CREW_HOOK="${WM_STOP_GUARD_CREW_SCRIPT:-$WM_REPO/hooks/stop-guard-crew.sh}"
+STOP_CONTINUITY_CREW_HOOK="${WM_STOP_CONTINUITY_CREW_SCRIPT:-$WM_REPO/hooks/stop-continuity-crew.sh}"
+STOP_CONTINUITY_CREW_SUMMARY="Wingman fleet continuity (crew)"
+continuity_crew_hooks_ok=1
+if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$STOP_GUARD_CREW_HOOK" --event Stop --check >/dev/null 2>&1; then
+  continuity_crew_hooks_ok=0
+fi
+if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop --check >/dev/null 2>&1; then
+  continuity_crew_hooks_ok=0
+fi
+if [ ! -x "$STOP_GUARD_CREW_HOOK" ] || [ ! -x "$STOP_CONTINUITY_CREW_HOOK" ]; then
+  continuity_crew_hooks_ok=0
+fi
+if [ "$continuity_crew_hooks_ok" = 1 ]; then
+  wm_ok "fleet-continuity Stop hooks (crew) registered ($GUARD_SETTINGS)"
+else
+  wm_warn "fleet-continuity Stop hooks (crew, issue #199) not registered/executable in $GUARD_SETTINGS"
+  printf '    extends the #185 fleet-continuity constraint to crew sessions in any repo,\n'
+  printf '    machine-wide (a lead'"'"'s own session gets the same no-idle-blind guarantee)\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $STOP_GUARD_CREW_HOOK --event Stop"
+    wm_warn "            and: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $STOP_CONTINUITY_CREW_HOOK --event Stop --async-rewake --timeout 600 --rewake-summary '$STOP_CONTINUITY_CREW_SUMMARY'"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$STOP_GUARD_CREW_HOOK" --event Stop >/dev/null \
+        && uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop --async-rewake --timeout 600 --rewake-summary "$STOP_CONTINUITY_CREW_SUMMARY" >/dev/null; then
+      wm_ok "registered fleet-continuity Stop hooks (crew)"
+    else
+      wm_err "failed to register fleet-continuity Stop hooks (crew)"
+    fi
+  fi
+fi
+
 # --- the settings file ------------------------------------------------------
 # A hand-edited config.local.toml is the one part of an install a pull cannot
 # keep correct, and a typo there fails quietly by nature: an unknown key simply

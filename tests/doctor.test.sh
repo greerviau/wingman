@@ -182,4 +182,65 @@ out5="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a non-executable script: doctor warns" "$out5" "fleet-continuity Stop hooks (issue #185) not registered"
 
+# --- fleet-continuity Stop hooks (issue #199), crew sessions, user scope ----
+# Unlike the project-scope pair above, this pair IS installable (GUARD_SETTINGS
+# is a real, pilot-owned file, not version-controlled) - mirrors the
+# project-scope case's registered/missing/non-executable shape, adapted for
+# that. Throwaway executable fixtures via WM_STOP_GUARD_CREW_SCRIPT/
+# WM_STOP_CONTINUITY_CREW_SCRIPT, never the real checked-in wrapper files.
+CREW_GUARD_SH="$WORK/crew-stop-guard.sh"
+CREW_CONTINUITY_SH="$WORK/crew-stop-continuity.sh"
+printf '#!/usr/bin/env bash\n' > "$CREW_GUARD_SH"; chmod +x "$CREW_GUARD_SH"
+printf '#!/usr/bin/env bash\n' > "$CREW_CONTINUITY_SH"; chmod +x "$CREW_CONTINUITY_SH"
+
+SETTINGS5="$WORK/crew-continuity-settings.json"
+out6="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS5" \
+        WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "fresh: doctor warns the crew Stop hooks are not registered" "$out6" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+assert_contains "fresh: doctor registers the crew Stop hooks" "$out6" "registered fleet-continuity Stop hooks (crew)"
+crew_guard_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS5'))
+cmds = [h['command'] for g in d['hooks']['Stop'] for h in g['hooks']]
+print('yes' if '$CREW_GUARD_SH' in cmds else 'no')
+")"
+assert_eq "the registered entry references the crew guard script" "$crew_guard_cmd" "yes"
+crew_continuity_entry="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS5'))
+for g in d['hooks']['Stop']:
+    for h in g['hooks']:
+        if h['command'] == '$CREW_CONTINUITY_SH':
+            print(h.get('asyncRewake'))
+            print(h.get('timeout'))
+            print(h.get('rewakeSummary'))
+")"
+assert_eq "the registered continuity entry sets asyncRewake" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 1p)" "True"
+assert_eq "the registered continuity entry sets timeout 600" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 2p)" "600"
+assert_eq "the registered continuity entry sets the crew rewakeSummary" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 3p)" "Wingman fleet continuity (crew)"
+
+# Idempotent: re-running reports already registered, does not duplicate.
+out7="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS5" \
+        WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a second run reports the crew Stop hooks already registered" "$out7" "fleet-continuity Stop hooks (crew) registered"
+stop_group_count="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS5'))
+print(len(d['hooks']['Stop']))
+")"
+assert_eq "re-running does not duplicate the Stop entries" "$stop_group_count" "2"
+
+# A script registered in settings.json but not executable on disk - warns,
+# same as the project-scope case.
+CREW_CONTINUITY_SH_NOEXEC="$WORK/crew-stop-continuity-noexec.sh"
+printf '#!/usr/bin/env bash\n' > "$CREW_CONTINUITY_SH_NOEXEC"
+chmod -x "$CREW_CONTINUITY_SH_NOEXEC"
+SETTINGS6="$WORK/crew-continuity-settings-noexec.json"
+out8="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS6" \
+        WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH_NOEXEC" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a non-executable crew script: doctor warns" "$out8" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+
 test_summary

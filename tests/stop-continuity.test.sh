@@ -594,4 +594,83 @@ assert_contains "the fire itself is still reported" "$out13b" "surfaced via auto
 assert_not_contains "free text containing 'stalled' does NOT trigger the runbook routing" "$out13b" "docs/runbooks/incidents.md"
 unset WM_STOP_CONTINUITY_WINDOW
 
+# =====================================================================
+# Wrapper tests (issue #199): hooks/stop-continuity-crew.sh, registered ONLY
+# at user scope, extends the identical asyncRewake auto-arm to crew sessions
+# whose project root is some other repo. See hooks/stop-continuity-crew.sh's
+# own header for why the WINGMAN_CREW_ID gate must live in this wrapper file
+# rather than inside hooks/stop-continuity.sh itself - which this file's
+# EVERY case above already proves is completely unmodified by this change,
+# since none of them were touched to add this section.
+CREW_HOOK="$TEST_REPO/hooks/stop-continuity-crew.sh"
+
+# --- (W1) the wrapper no-ops with WINGMAN_CREW_ID unset -----------------------
+new_home
+add_crew_window w1
+wm_state crew-set --id w1 --status working --summary busy >/dev/null
+unset WINGMAN_CREW_ID
+outw1="$(printf '{}' | wm_timeout 10 bash "$CREW_HOOK")"; rcw1=$?
+assert_eq "wrapper with WINGMAN_CREW_ID unset: exit 0" "$rcw1" "0"
+assert_eq "wrapper with WINGMAN_CREW_ID unset: no stdout" "$outw1" ""
+assert_false "wrapper with WINGMAN_CREW_ID unset: never reaches the real script (no claim)" "[ -f '$WINGMAN_HOME/watch.pid' ]"
+
+# --- (W2) the wrapper execs through with WINGMAN_CREW_ID set -------------------
+# Reuses test (2)'s exact owner-scoped auto-arm fixture shape, parameterized
+# by a real-looking crew id instead of hardcoded owner "".
+new_home
+export WINGMAN_CREW_ID=lead-w2
+wm_state crew-add --id w2 --type developer --objective x --repo /tmp --window wm-w2 --session-id s-w2 --parent lead-w2 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-w2 'sleep 600'
+wm_state crew-set --id w2 --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=60
+printf '{}' | bash "$CREW_HOOK" >"$WINGMAN_HOME/hookw2.out" 2>"$WINGMAN_HOME/hookw2.err" &
+hw2=$!; wm_track "$hw2"
+assert_true "the wrapper's own live invocation claims an owner-scoped cycle" "wait_for_file '$WINGMAN_HOME/watch-lead-w2.pid'"
+_w2pid="$(cat "$WINGMAN_HOME/watch-lead-w2.pid")"
+assert_true "the claimed pid is a real, live watch-fleet process" "kill -0 $_w2pid"
+# The wrapper's process image is genuinely replaced by exec - not left
+# running as a parent wrapping a child - so the pid bash assigned to the
+# backgrounded invocation now runs the REAL script, not the wrapper.
+_w2args="$(ps -o args= -p $hw2 2>/dev/null)"
+case "$_w2args" in
+  *stop-continuity-crew.sh*) fail "exec did not replace the wrapper's process image (still running the wrapper)" ;;
+  *stop-continuity.sh*) ok "exec replaced the wrapper's process image with the real script" ;;
+  *) fail "could not read the invocation's own command line to confirm exec ($_w2args)" ;;
+esac
+wm_state crew-set --id w2 --status review --summary "done" >/dev/null
+assert_true "the wrapper's own hook exits within one poll interval of the fire-eligible flip" "wait_for_gone $hw2 100"
+wait "$hw2" 2>/dev/null
+outw2="$(cat "$WINGMAN_HOME/hookw2.out" 2>/dev/null)"
+assert_contains "the wrapper's own rewake carries a block decision" "$outw2" '"decision": "block"'
+unset WM_STOP_CONTINUITY_WINDOW
+unset WINGMAN_CREW_ID
+
+# --- (W3) double registration in the same repo: wrapper + real script, same owner, back-to-back
+# Approximates two live hook groups firing for the same Stop event in a crew
+# session whose project root IS the wingman repo (both the project-scoped
+# registration of hooks/stop-continuity.sh and the new user-scope
+# registration of hooks/stop-continuity-crew.sh are live for that session).
+# Exactly one live watch-fleet cycle must result, and the losing side must
+# never surface a spurious claimfailfile/"re-arm failed" report - this is the
+# empirical check for the plan's own "remaining case" discussion.
+new_home
+export WINGMAN_CREW_ID=lead-w3
+wm_state crew-add --id w3 --type developer --objective x --repo /tmp --window wm-w3 --session-id s-w3 --parent lead-w3 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-w3 'sleep 600'
+wm_state crew-set --id w3 --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=20
+printf '{}' | bash "$CREW_HOOK" >"$WINGMAN_HOME/hookw3a.out" 2>&1 &
+hw3a=$!; wm_track "$hw3a"
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hookw3b.out" 2>&1 &
+hw3b=$!; wm_track "$hw3b"
+assert_true "exactly one cycle claims the owner-scoped pidfile" "wait_for_file '$WINGMAN_HOME/watch-lead-w3.pid'"
+_w3pid="$(cat "$WINGMAN_HOME/watch-lead-w3.pid")"
+assert_true "the claimed pid is a real, live watch-fleet process" "kill -0 $_w3pid"
+kill -TERM "$hw3a" "$hw3b" 2>/dev/null
+kill "$_w3pid" 2>/dev/null
+wait "$hw3a" 2>/dev/null; wait "$hw3b" 2>/dev/null
+assert_false "the losing side never touches the owner-scoped claimfail marker" "[ -f '$WINGMAN_HOME/stop-continuity-lead-w3.claimfail' ]"
+unset WM_STOP_CONTINUITY_WINDOW
+unset WINGMAN_CREW_ID
+
 test_summary
