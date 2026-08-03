@@ -10,6 +10,15 @@
 # exit re-invokes the crew session, which acts on the reason (fix CI, address +
 # reply to review, or clean up on merge/close) and arms exactly one fresh cycle.
 #
+# NEVER in the foreground of the arming Bash call, and never detached (nohup/
+# setsid/a trailing &): this script blocks until an event fires - that is its
+# entire wake mechanism - so a foreground arm wedges the calling session
+# indefinitely (issue #202), the same failure watch-fleet itself is exposed
+# to. If you cannot arm it as a harness-tracked background task, arm nothing:
+# no watcher at all is strictly better than a foreground one. hooks/
+# no-foreground-watcher-guard.sh mechanically enforces this at the tool-call
+# boundary.
+#
 # Events (one per exit, highest priority first):
 #   merged: <pr>                  PR merged            -> crew cleans up, sets done
 #   closed: <pr>                  PR closed unmerged   -> crew cleans up, sets done
@@ -143,6 +152,16 @@ fi
 # with none (or a stale one, the loop having exited or died) becomes eligible
 # for a bounded reminder. Same sanitization idiom as pane-tail-<id>.txt et al.
 BEATFILE="$WM_HOME/pr-watch-$(printf '%s' "$WINGMAN_CREW_ID" | tr -c 'A-Za-z0-9._-' '_').beat"
+
+# Forensics only - prevents nothing (issue #202: a foreground and a
+# backgrounded Bash call are indistinguishable from inside this process, so
+# nothing here can detect or refuse either way - only hooks/
+# no-foreground-watcher-guard.sh, at the tool-call boundary, can). Written to
+# stderr (wm_warn) so a caller capturing this script's stdout output (the
+# eventual reason line) never sees it. If you are reading this line in a
+# FOREGROUND tool result, this session is already wedged: this script blocks
+# until an event fires, so nothing after this line will ever run.
+wm_warn "pr-watch: if you are seeing this line in a FOREGROUND tool result, this session is already wedged (issue #202) - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
 
 # Top-of-loop check: an event already pending the instant a fresh cycle is armed
 # fires immediately (at-least-once across the crew's re-arms), mirroring watch-fleet.
