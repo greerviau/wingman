@@ -135,9 +135,19 @@ if [ "$ONCE" = 1 ]; then
 fi
 
 # --- the blocking loop ------------------------------------------------------
+# Liveness beacon (issue #187): touched every iteration of the REAL blocking
+# loop only, never in --once mode above, so watch-fleet's bounded-resurface
+# check (wm_state review-resurface-check) can tell "a pr-watch cycle is
+# actively polling this member's PR right now" from "nothing is" - a member
+# with a fresh beacon keeps today's once-only review announcement, while one
+# with none (or a stale one, the loop having exited or died) becomes eligible
+# for a bounded reminder. Same sanitization idiom as pane-tail-<id>.txt et al.
+BEATFILE="$WM_HOME/pr-watch-$(printf '%s' "$WINGMAN_CREW_ID" | tr -c 'A-Za-z0-9._-' '_').beat"
+
 # Top-of-loop check: an event already pending the instant a fresh cycle is armed
 # fires immediately (at-least-once across the crew's re-arms), mirroring watch-fleet.
 while :; do
+  : > "$BEATFILE"
   if reason="$(poll_once)"; then
     printf '%s\n' "$reason"
     exit 0
