@@ -211,6 +211,14 @@ def pane_tail_path(cid):
     return os.path.join(home(), "pane-tail-%s.txt" % _sanitize_id(cid))
 
 
+def review_resurfaced_path():
+    return os.path.join(home(), "review-resurfaced.json")
+
+
+def pr_watch_beat_path(cid):
+    return os.path.join(home(), "pr-watch-%s.beat" % _sanitize_id(cid))
+
+
 def read_text(path):
     try:
         with open(path) as fh:
@@ -2008,6 +2016,136 @@ def cmd_usage_decide(args):
     print(new_state)
 
 
+def _review_has_live_waker(cid, grace_secs):
+    """True iff bin/pr-watch's blocking loop is actively polling on this
+    member's behalf right now: its beacon file exists and was touched within
+    the last grace_secs. No beacon at all (never armed --once was used
+    exclusively) or a stale one (the loop exited or the process died) both
+    read as "no live waker" - see cmd_review_resurface_check."""
+    try:
+        age = time.time() - os.path.getmtime(pr_watch_beat_path(cid))
+    except OSError:
+        return False
+    return age < grace_secs
+
+
+def _human_duration(seconds):
+    """A short, human-readable rendering of a whole number of seconds, used
+    only for the resurface reminder's "unchanged for %s" wording. Prefers
+    the coarsest exact unit (hours, then minutes) so the generous-default
+    cadence (6h) reads as "6h" rather than "21600s"; a --window-secs value
+    that doesn't divide evenly falls back to plain seconds."""
+    seconds = int(seconds)
+    if seconds % 3600 == 0:
+        return "%dh" % (seconds // 3600)
+    if seconds % 60 == 0:
+        return "%dm" % (seconds // 60)
+    return "%ds" % seconds
+
+
+def cmd_review_resurface_check(args):
+    """Advance the bounded-resurface check for every `review` member with no
+    live dependency watcher (issue #187): a `review` member surfaces once, on
+    entry (cmd_needs_attention) - correct for one being actively shepherded by
+    something pollable (a developer's PR under bin/pr-watch), but silent
+    forever for one with nothing polling on its behalf (an analyst idling for
+    pilot feedback, a developer whose delivery has no forge signal, or one
+    that simply isn't currently running pr-watch). This adds exactly one
+    bounded reminder per --window-secs, scoped narrowly to that population.
+
+    Reads/writes its OWN store (review-resurfaced.json: {"<id>": {"announced":
+    "<iso>", "at": "<iso>"}}) - never acked.json/handled.json, and never the
+    member's own `announced` field - so firing a reminder cannot interact with
+    the #57 once-only dedup a live-watcher member still relies on, and the
+    resurface cadence is not derived from WM_WATCH_INTERVAL.
+
+    Called every bin/watch-fleet iteration but only ever *fires* (emits a row
+    and writes the store) once the wall-clock window has elapsed for a given
+    id, so poll cadence and resurface cadence stay fully decoupled. --owner
+    scopes exactly like cmd_needs_attention, so a lead's own watch-fleet cycle
+    bounded-resurfaces only its own team.
+
+    For each status == "review" record with no live waker
+    (_review_has_live_waker false, checked against --waker-grace):
+      - announced = the member's current announced (falling back to updated).
+      - If the store already has an entry for this id AND that entry's
+        recorded `announced` still matches the member's current `announced`,
+        the anchor is that entry's `at` (the last time this exact standing
+        review was resurfaced). Otherwise - no entry yet, or `announced` has
+        since moved (a genuine new `review` transition, already re-announced
+        via the normal #57 path) - the anchor is `announced` itself, and any
+        stale entry is discarded. A genuine re-announce therefore resets the
+        resurface clock for free, with no extra bookkeeping.
+      - If now - anchor >= --window-secs: emit one TSV row (id, "review",
+        announced, note) and write store[id] = {"announced": announced, "at":
+        now}. This is the ONLY place the store is written - a check that
+        doesn't cross the window touches nothing on disk, so a watch-fleet
+        restart or re-arm mid-window never resets the countdown; the
+        persisted (announced, at) pair, not any in-memory state, gates it.
+
+    The note is deliberately distinct from cmd_needs_attention's own note:
+    "REMINDER (no live watcher, unchanged for <window>): <pointer>", using the
+    same pointer priority (blocker/delivery/artifact_url/artifact/summary).
+    The leading "REMINDER (" token is the machine-checkable marker that
+    distinguishes a standing-work reminder from a fresh delivery event.
+
+    The read-modify-write is wrapped in with_locked, matching cmd_ack/
+    cmd_mark_handled - watch-fleet cycles for different owners share this one
+    file. Prints the TSV rows emitted; pure side effect otherwise (a check
+    that fires nothing touches no disk state at all)."""
+    ensure_home()
+    owner = getattr(args, "owner", None)
+    window_secs = args.window_secs
+    waker_grace = args.waker_grace
+
+    with with_locked(review_resurfaced_path()):
+        store = read_json(review_resurfaced_path(), {})
+        if not isinstance(store, dict):
+            store = {}
+        changed = False
+        stamp = now()
+        stamp_dt = _parse_updated(stamp)
+
+        for r in (merged(x) for x in load_roster()):
+            if owner is not None and parent_of(r) != owner:
+                continue
+            if r.get("status") != "review":
+                continue
+            rid = r["id"]
+            if _review_has_live_waker(rid, waker_grace):
+                continue
+            announced = r.get("announced") or r.get("updated")
+            if not announced:
+                continue
+
+            entry = store.get(rid)
+            if isinstance(entry, dict) and entry.get("announced") == announced:
+                anchor = entry.get("at")
+            else:
+                anchor = announced
+                if rid in store:
+                    del store[rid]
+                    changed = True
+
+            anchor_dt = _parse_updated(anchor)
+            if anchor_dt is None or stamp_dt is None:
+                continue
+            elapsed = (stamp_dt - anchor_dt).total_seconds()
+            if elapsed < window_secs:
+                continue
+
+            note = (r.get("blocker") or r.get("delivery")
+                    or r.get("artifact_url") or r.get("artifact") or r.get("summary") or "")
+            note = "REMINDER (no live watcher, unchanged for %s): %s" % (
+                _human_duration(window_secs), note)
+            print("%s\t%s\t%s\t%s" % (rid, "review", announced, note))
+            store[rid] = {"announced": announced, "at": stamp}
+            changed = True
+
+        if changed:
+            write_json(review_resurfaced_path(), store)
+
+
 def cmd_ack(args):
     """Record that the (id, announced) event has been surfaced to wingman, so
     needs-attention suppresses it until the crew's status changes (a new announced).
@@ -2817,6 +2955,16 @@ def build_parser():
     a = sub.add_parser("usage-decide")
     a.add_argument("--decision", required=True, choices=("wait", "continue"))
     a.set_defaults(fn=cmd_usage_decide)
+
+    # Bounded resurface for a `review` member with no live dependency watcher
+    # (issue #187). Called every bin/watch-fleet iteration, owner-scoped like
+    # needs-attention; only ever fires (writes review-resurfaced.json) once
+    # --window-secs has elapsed for a given id with no fresh pr-watch beacon.
+    a = sub.add_parser("review-resurface-check")
+    a.add_argument("--owner", default=None)
+    a.add_argument("--window-secs", type=int, default=21600, dest="window_secs")  # 6h, generous default
+    a.add_argument("--waker-grace", type=int, default=120, dest="waker_grace")
+    a.set_defaults(fn=cmd_review_resurface_check)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)
