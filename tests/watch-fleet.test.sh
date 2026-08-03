@@ -562,8 +562,6 @@ assert_contains "cycle exits with the stalled reason carrying api-error:" \
 # marker's own existence is no longer evidence of that, by design).
 assert_false "the nudge marker is cleared once the flip actually happens" \
   "[ -f '$WINGMAN_HOME/stall-ae2.nudged' ]"
-assert_contains "the marker records a confirmed nudge" \
-  "$(cat "$WINGMAN_HOME/stall-ae2.nudged" 2>/dev/null)" "confirmed"
 assert_eq "exactly one SUBMITTED line" "$(grep -c SUBMITTED "$AE2_MARKER")" "1"
 assert_contains "the submission carries the api-error-specific message, not the generic one" \
   "$(cat "$AE2_MARKER")" "This is usually transient"
@@ -1297,17 +1295,23 @@ WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/nu1.log" 2>&1 &
 nupid=$!
 wm_track "$nupid"
+# issue #236: .nudge-refused now carries "<count> <clock>" (extended from the
+# bare-count shape #214 originally shipped) so the escape hatch's own
+# --nudge-age can be derived from its own first-refusal clock rather than by
+# stamping a synthetic .nudged the #236 confirm/retry parser would otherwise
+# have to special-case. The two sidecars are therefore fully decoupled: .nudged
+# is never touched by an undelivered-nudge episode (nothing was ever typed),
+# only .nudge-refused is.
 refusedfile="$WINGMAN_HOME/stall-nu1.nudge-refused"
+refused_count_of() { awk '{print $1}' "$refusedfile" 2>/dev/null; }
 _wait=0
-while { [ ! -f "$refusedfile" ] || [ "$(cat "$refusedfile" 2>/dev/null)" -lt 2 ]; } && [ "$_wait" -lt 30 ]; do
+while { [ ! -f "$refusedfile" ] || [ "$(refused_count_of)" -lt 2 ]; } && [ "$_wait" -lt 30 ]; do
   sleep 1; _wait=$((_wait+1))
 done
 assert_eq "the refused-nudge counter reaches WM_NUDGE_REFUSED_MAX before any nudge is ever delivered" \
-  "$(cat "$refusedfile" 2>/dev/null)" "2"
+  "$(refused_count_of)" "2"
 nudgefile="$WINGMAN_HOME/stall-nu1.nudged"
-_wait=0
-while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 15 ]; do sleep 1; _wait=$((_wait+1)); done
-assert_true "the escape hatch stamps the ordinary .nudged marker anyway once the max is reached" "[ -f '$nudgefile' ]"
+assert_false "the escape hatch never stamps .nudged - that sidecar stays #236's alone" "[ -f '$nudgefile' ]"
 assert_false "the escape hatch never sets nudged_at (it would render a false 'nudge sent' on the board)" \
   "wm_state crew-get --id nu1 | grep -q nudged_at"
 i=0; while kill -0 "$nupid" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 1; i=$((i+1)); done
