@@ -13,10 +13,39 @@ behind these events are documented in
 
 ### `stalled`
 
-The mechanical layer has already sent that member one check-in nudge and
-waited a full cooldown window for activity before this fire ever reached you -
-a `stalled` fire is **always post-nudge, never a first response**. Do not send
-your own nudge and do not wait again; the self-heal window already ran.
+Three distinct mechanisms produce this fire, and they differ on the one thing
+that matters for your response - whether a nudge was already sent and a
+self-heal window already ran:
+
+1. **The nudge-gated liveness stall** (`cmd_stall_check`) - no pane output, no
+   status update, no running child process, for the idle window. The
+   mechanical layer sends one check-in nudge and waits a full cooldown for
+   activity **before** this fire ever reaches you; only silence through that
+   whole window produces it. Do not send your own nudge and do not wait
+   again - the self-heal window already ran.
+2. **The probe-free structural forward-motion stall** (`cmd_forward_motion_check`,
+   issue #199) - a lead (or sub-lead) whose own roster shape (its
+   `summary`/`blocker`/`artifact`/`delivery`, plus every active report's
+   status/announced) hasn't changed for `WM_FORWARD_MOTION_SECS` despite it
+   still reporting `working`. **No nudge is sent first** - this flips directly,
+   with no liveness signal to nudge in the first place (the session may be
+   actively orchestrating, just making no forward progress on its roster).
+3. **The probe-free wedge stall** (`wm_state wedge-check`, issue #202) - a
+   member's pane has repainted *continuously*, never idle at a prompt, for
+   `WM_WEDGE_SECS` while its own record went unwritten and a
+   `watch-fleet`/`pr-watch` descendant of its pane has itself been running
+   that long. **Also no nudge is sent first** - the signature this detects
+   *is* the session actively running, foreground, on a call that blocks until
+   an event fires (its own `watch-fleet`/`pr-watch` cycle, armed the wrong
+   way), so a nudge into that pane would sit unread until the underlying call
+   itself returns, which for this cause is never. The reason text names the
+   matched process/pid and both durations, and mentions "wedged mid-turn" /
+   "FOREGROUND" - that combination means the session foregrounded its own
+   watcher and **will not resume on its own**.
+
+So the old assumption - a `stalled` fire is always post-nudge, never a first
+response - only holds for case 1. Check the reason text before assuming a
+nudge already ran.
 
 Relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or
 `bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked`
@@ -26,11 +55,11 @@ keep relaying the exact `bin/crew-takeover <id>` command regardless - the
 pilot may need to run it themselves, and that is the actionable pointer, not
 narration.
 
-An invalid `--model` value is one cause: the agent CLI accepts it at startup,
-so the window stays alive, but every turn comes back as an in-chat model error
-instead of doing any work - the member never self-reports, so it surfaces as
-`stalled`, not `died`. `bin/crew-takeover <id>` attaches to the live window,
-where the model error is directly visible in the transcript.
+An invalid `--model` value is one cause of case 1: the agent CLI accepts it at
+startup, so the window stays alive, but every turn comes back as an in-chat
+model error instead of doing any work - the member never self-reports, so it
+surfaces as `stalled`, not `died`. `bin/crew-takeover <id>` attaches to the
+live window, where the model error is directly visible in the transcript.
 
 This is distinct from `died` (the session/window is confirmed gone, so no
 nudge was ever possible) - a `died` member is always relayed immediately, with

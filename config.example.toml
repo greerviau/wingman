@@ -120,5 +120,16 @@
 # it, and then flips it to `stalled`.
 # WM_STALL_IDLE = "180"
 
+# Seconds a member's pane must repaint continuously (never idle at a prompt)
+# while its own record goes unwritten and a watch-fleet/pr-watch descendant
+# runs, before it flips to `stalled` as a wedged foreground watcher (issue
+# #202). Not independent of WM_WEDGE_PANE_GAP below - preserve the ratio
+# between them if you retune either.
+# WM_WEDGE_SECS = "1800"
+
+# Seconds of pane silence that resets the above anchor - a healthy pane's own
+# longest continuously-live run saturates just past this value.
+# WM_WEDGE_PANE_GAP = "60"
+
 # Seconds between a crew window opening and its first message being delivered.
 # WM_SPAWN_DELAY = "2"

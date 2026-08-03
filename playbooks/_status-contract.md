@@ -108,7 +108,7 @@ Whether that return announces again depends on what pulled you back - see "Re-en
 
 Once your turn ends you are idle and **cannot rouse yourself** - so if you are in `review` waiting on an external condition, you must watch it with a wake loop, the same primitive your owner uses on itself.
 
-- Arm your dependency-watcher as a **harness-tracked background task** (e.g. Bash `run_in_background`), on its own, **never detached** (`nohup`/`&` can't wake you).
+- Arm your dependency-watcher as a **harness-tracked background task** (e.g. Bash `run_in_background`), on its own, **never foreground, and never detached** (`nohup`/`setsid`/a trailing `&` can't wake you - a detached process outlives the harness's own tracking, so its exit wakes nobody). **If you cannot arm it as a background task, arm nothing** - no watcher at all is strictly better than a foreground one: a foreground arm blocks your own session on it indefinitely, invisible to the stall detector, since `bin/watch-fleet`/`bin/pr-watch` block until an event fires and that is the entire mechanism (issue #202).
   It **blocks**, absorbing benign no-change polls for free, and **exits with one reason line** the instant something actionable happens - that exit re-invokes you.
 - **On each wake:** read the reason, act on it (which may move you to `working` and back), then **arm exactly one fresh cycle** before you end your turn.
   The chain persists only if you re-arm after every fire.

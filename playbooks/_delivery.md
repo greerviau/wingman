@@ -66,7 +66,7 @@ When it is `off`, unanswered, or unaskable, write nothing to the PR; all feedbac
 After the PR is up you shepherd it toward merge or close - fix CI, resolve conflicts, address review feedback - but **you press the merge button yourself only when this effort has been explicitly granted `allow_merge`** (see Merge authorization).
 
 Watching the PR is optional and forge-specific.
-`bin/pr-watch` is one available dependency-watcher for PR-shaped delivery; arm it as a harness-tracked background task per the wake loop in `playbooks/_status-contract.md` when you want to be woken on forge state:
+`bin/pr-watch` is one available dependency-watcher for PR-shaped delivery; arm it as a harness-tracked background task per the wake loop in `playbooks/_status-contract.md` when you want to be woken on forge state - on its own, **never foreground, and never detached** (`nohup`, `setsid`, a trailing `&`): `pr-watch` blocks until an event fires, so any other way of running it wedges this session indefinitely, invisible to the stall detector (issue #202). **If you cannot arm it as a background task, arm nothing** - no watcher at all is strictly better than a foreground one.
 
 ```
 $WINGMAN_BIN/pr-watch --pr <PR URL or number>
