@@ -201,4 +201,29 @@ wm_state crew-set --id pw5 --allow-merge true >/dev/null
 assert_contains "granting allow_merge afterward fires merge-ready, no PR change needed" "$(run)" "merge-ready: #42"
 assert_eq "merge-ready does not re-fire while still settled" "$(run)" ""
 
+# 11. the liveness beacon (issue #187): --once never touches it, but the real
+#     blocking loop does - the signal wm_state review-resurface-check (see
+#     tests/review-resurface.test.sh) relies on to tell "something is
+#     actively polling this member's PR" from "nothing is".
+test_new_home
+export WINGMAN_CREW_ID=pw6
+BEAT="$WINGMAN_HOME/pr-watch-pw6.beat"
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+"$PRWATCH" --pr 42 --once >/dev/null 2>&1
+assert_false "--once never touches the beacon" "[ -f '$BEAT' ]"
+
+"$PRWATCH" --pr 42 >/dev/null 2>&1 &
+bgpid=$!
+wm_track "$bgpid"
+_i=0
+while [ "$_i" -lt 20 ]; do
+  [ -f "$BEAT" ] && break
+  sleep 0.2; _i=$((_i+1))
+done
+assert_true "the real blocking loop touches its own beacon" "[ -f '$BEAT' ]"
+kill "$bgpid" 2>/dev/null
+
 test_summary

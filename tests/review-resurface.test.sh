@@ -98,6 +98,7 @@ at_1="$(uv run --no-project --quiet python -c "
 import json
 print(json.load(open('$WINGMAN_HOME/review-resurfaced.json'))['a4']['at'])
 ")"
+assert_true "the stored 'at' stamp for a4 was actually captured" "[ -n '$at_1' ]"
 
 # A check well within the NEXT window must stay silent AND must not touch the
 # stored 'at' - a check that doesn't fire is a pure read, so a watch-fleet
