@@ -594,6 +594,98 @@ assert_contains "the fire itself is still reported" "$out13b" "surfaced via auto
 assert_not_contains "free text containing 'stalled' does NOT trigger the runbook routing" "$out13b" "docs/runbooks/incidents.md"
 unset WM_STOP_CONTINUITY_WINDOW
 
+# --- (14) Pre-claim accounting (issue #197): a fire WITH a crew-status row is
+# absorbed, unchanged from #185 - pinned against stop-guard.sh's own
+# independent report so this is proven by test, not left as prose. Arms a
+# REAL cycle, flips the member to review, and lets the cycle fire and exit
+# naturally (no hand-seeding) before the hook is ever invoked.
+new_home
+add_crew_window d14
+wm_state crew-set --id d14 --status working --summary busy >/dev/null
+"$WF" >"$WINGMAN_HOME/d14-prior.log" 2>&1 &
+d14pid=$!; wm_track "$d14pid"
+assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+wm_state crew-set --id d14 --status review --summary "done" >/dev/null
+assert_true "the cycle fires and exits naturally" "wait_for_file_gone '$WINGMAN_HOME/watch.pid'"
+assert_eq "the fire record is left pending (never classified)" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "fire"
+export WM_STOP_CONTINUITY_WINDOW=60
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook14.out" 2>"$WINGMAN_HOME/hook14.err" &
+h14=$!; wm_track "$h14"
+assert_true "the hook proceeds to claim a fresh cycle (absorbed, not reported)" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+sleep 1
+assert_eq "no rewake/block decision for this invocation" "$(cat "$WINGMAN_HOME/hook14.out" 2>/dev/null)" ""
+guard_out14="$(printf '{"stop_hook_active": false}' | bash "$GUARD")"
+assert_contains "a direct stop-guard.sh call reports a block decision" "$guard_out14" '"decision": "block"'
+assert_contains "stop-guard.sh's own reason names the member's own row" "$guard_out14" "d14"
+kill -TERM "$h14" 2>/dev/null
+_d14survivor="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_d14survivor" ] && kill "$_d14survivor" 2>/dev/null
+wait "$h14" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW
+
+# --- (15) Pre-claim accounting (issue #197): a fire with NO crew-status row
+# is now reported, not silently absorbed - the narrower gap #185's own
+# reasoning never covered (a notice-only fire produces no needs-attention
+# row, so nothing else - in particular hooks/stop-guard.sh - will ever report
+# it). Needs at least one crew member present in a non-attention-worthy
+# status to stay past the fast path while producing no needs-attention row;
+# combined with a seeded pending-notices file (the same fixture pattern
+# tests/outbox-wake-and-retry-log.test.sh already uses), a real cycle fires
+# on the notice alone.
+new_home
+add_crew_window d15
+wm_state crew-set --id d15 --status working --summary busy >/dev/null
+printf 'a pre-existing pending notice for the d15 fixture\n' > "$WINGMAN_HOME/pending-notices"
+out15_arm="$(WM_WATCH_INTERVAL=1 wm_timeout 45 "$WF" --owner "" 2>/dev/null)"
+assert_contains "the notice-only fire prints its own reason line" "$out15_arm" "abandoned-message:"
+assert_eq "the fire record is left pending (never classified)" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "fire"
+assert_true "fire() leaves the runfile behind (only the pidfile is cleared)" "[ -f '$WINGMAN_HOME/watch.run' ]"
+export WM_STOP_CONTINUITY_WINDOW=60
+out15="$(run_hook)"; rc15=$?
+assert_eq "the hook reports (block/rewake) rather than silently proceeding to claim" "$rc15" "2"
+assert_contains "the rewake carries compose_attention_reason's own text" "$out15" "surfaced via automatic fleet continuity"
+assert_not_contains "the record is reported, not silently rolled over" "$out15" "window rolled"
+assert_false "the runfile is removed by this reporting branch" "[ -f '$WINGMAN_HOME/watch.run' ]"
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook15b.out" 2>&1 &
+h15b=$!; wm_track "$h15b"
+assert_true "a follow-up invocation (simulating the next Stop event) then claims a fresh cycle normally" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+assert_eq "the spurious count is still at 0 (the notice-only fire never contributed to it)" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+kill -TERM "$h15b" 2>/dev/null
+_d15survivor="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_d15survivor" ] && kill "$_d15survivor" 2>/dev/null
+wait "$h15b" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW
+
+# --- (16) Pre-claim accounting (issue #197): remote-control-dropped is always
+# reported - it never has a crew-status row by construction (self_pane_check
+# fires independently of crew status), so stop-guard.sh's own needs-attention
+# check can never catch it. Companion to (15), same assertions, self-pane
+# fixture pattern from tests/watch-fleet-classify.test.sh.
+new_home
+add_crew_window d16
+wm_state crew-set --id d16 --status working --summary busy >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm_self_pane 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
+printf '%s:wm_self_pane\n' "$WM_TMUX_SESSION" > "$WINGMAN_HOME/self-pane"
+rout16="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" --owner "" 2>/dev/null)"
+assert_contains "the self-pane check fires" "$rout16" "remote-control-dropped: wingman"
+assert_eq "the remote-control-dropped record is left pending (never classified)" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "remote-control-dropped"
+assert_true "self_pane_check's own exit leaves the runfile behind too" "[ -f '$WINGMAN_HOME/watch.run' ]"
+export WM_STOP_CONTINUITY_WINDOW=60
+out16="$(run_hook)"; rc16=$?
+assert_eq "the hook reports (block/rewake) rather than silently proceeding to claim" "$rc16" "2"
+assert_contains "the rewake carries compose_attention_reason's own text" "$out16" "surfaced via automatic fleet continuity"
+assert_false "the runfile is removed by this reporting branch" "[ -f '$WINGMAN_HOME/watch.run' ]"
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook16b.out" 2>&1 &
+h16b=$!; wm_track "$h16b"
+assert_true "a follow-up invocation then claims a fresh cycle normally" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+assert_eq "the spurious count is still at 0" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+kill -TERM "$h16b" 2>/dev/null
+_d16survivor="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_d16survivor" ] && kill "$_d16survivor" 2>/dev/null
+wait "$h16b" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW
+tmux kill-window -t "$WM_TMUX_SESSION:wm_self_pane" 2>/dev/null
+
 # =====================================================================
 # Wrapper tests (issue #199): hooks/stop-continuity-crew.sh, registered ONLY
 # at user scope, extends the identical asyncRewake auto-arm to crew sessions
