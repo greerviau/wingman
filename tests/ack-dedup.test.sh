@@ -46,6 +46,11 @@ assert_eq "first arm fires and exits 0" "$rc" "0"
 assert_contains "first arm surfaces the done member" "$out" "done: e1"
 assert_true "watcher recorded an ack store" "[ -f \"$WINGMAN_HOME/acked.json\" ]"
 
+# Classify the first arm's own unclassified fire before re-arming (issue
+# #197: a bare re-arm over it now refuses instead of claiming).
+cout="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "classify reports the pending fire" "$cout" "fire"
+
 # Re-arm: the same done event is now acked, so the fresh cycle must NOT fire
 # immediately - it blocks. (Before the fix it re-fired on every arm, forever.)
 "$WF" >"$WINGMAN_HOME/rearm.log" 2>&1 &

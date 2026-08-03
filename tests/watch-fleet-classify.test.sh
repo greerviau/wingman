@@ -136,21 +136,51 @@ assert_contains "the redundant arm reports healthy (does not start a rival)" "$o
 assert_eq "the fire record is never clobbered by the racing healthy write" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "fire"
 kill "$livepid3" 2>/dev/null
 
-# --- loud claim-time drop (r5 finding 5) ---------------------------------------
+# --- claim-time refusal over an unclassified fire (issue #197) -----------------
+# What was once a loud claim-and-discard (r5 finding 5) is now a refusal: a
+# fresh arm over an unclassified `fire`/`remote-control-dropped` record must
+# not claim, must not touch the record, and must leave a documented remedy.
 test_new_home
 wm_state crew-add --id ld1 --type developer --objective y --repo /tmp --window wm-ld1 --session-id sld1 >/dev/null
 wm_state crew-set --id ld1 --status done --summary "finished y" >/dev/null
 wm_timeout 45 "$WF" >/dev/null 2>&1
 assert_eq "the fire record is left pending (never classified)" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "fire"
+ld_out="$(wm_timeout 10 "$WF" 2>&1)"; ld_rc=$?
+assert_contains "the fresh arm refuses rather than claiming" "$ld_out" "refusing to arm"
+assert_contains "the refusal names the remedy" "$ld_out" "--classify"
+assert_true "the refusal exits nonzero" "[ $ld_rc -ne 0 ]"
+assert_false "the refusal never claims (no watch.pid written)" "[ -f '$WINGMAN_HOME/watch.pid' ]"
+assert_eq "the fire record is left untouched by the refusal" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "fire"
+assert_not_contains "nothing was silently discarded (no dropped-wake line)" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "dropped-wake"
+
+# The refusal is a one-shot correction, not a stuck state: --classify
+# consumes the record correctly, and a bare arm right after succeeds normally.
+ld_classify_out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "classify reports the pending fire and consumes the record" "$ld_classify_out" "fire"
+assert_false "classify clears the exit record" "[ -f '$WINGMAN_HOME/watch-exit' ]"
 "$WF" >"$WINGMAN_HOME/ld.log" 2>&1 &
 ldpid=$!
 wm_track "$ldpid"
 sleep 2
-assert_true "the fresh arm claims and blocks" "kill -0 $ldpid"
-assert_contains "the dropped record is logged before being cleared" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "dropped-wake"
-assert_contains "the dropped-wake line carries the record's contents" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "fire"
-assert_false "the stale record is cleared at claim time" "[ -f '$WINGMAN_HOME/watch-exit' ]"
+assert_true "a bare arm right after classify claims and blocks normally" "kill -0 $ldpid"
 kill "$ldpid" 2>/dev/null
+
+# --- claim-time refusal is scoped to fire/remote-control-dropped only ----------
+# Non-event leftover content (a deliberate stop, or a genuinely spurious
+# death) never carries an un-relayed event, so it keeps the original
+# loud-but-permissive claim-and-log behavior unchanged.
+test_new_home
+"$WF" --stop >/dev/null 2>&1
+assert_eq "a deliberate --stop leaves a 'stopped' record" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "stopped"
+"$WF" >"$WINGMAN_HOME/ne.log" 2>&1 &
+nepid=$!
+wm_track "$nepid"
+sleep 2
+assert_true "the fresh arm still claims and blocks over non-event content" "kill -0 $nepid"
+assert_contains "non-event content is still logged as dropped-wake" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "dropped-wake"
+assert_contains "the dropped-wake line still carries the record's contents" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "stopped"
+assert_false "the non-event record is still cleared at claim time" "[ -f '$WINGMAN_HOME/watch-exit' ]"
+kill "$nepid" 2>/dev/null
 
 # --- the failure budget: timing-independence -----------------------------------
 # Three genuinely spurious classifications in a row, with an arbitrary delay

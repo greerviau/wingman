@@ -207,8 +207,37 @@ case "$classify_out" in
     } > "$suppressedfile"
     rewake "$_sr_reason" manual-remedy
     exit 2 ;;
-  healthy|fire|remote-control-dropped|spurious\ *|"")
-    : ;;   # proceed to claim - absorbed, or nothing to absorb
+  remote-control-dropped)
+    # No crew-status row exists for this by construction (self_pane_check
+    # fires independently of crew status), so hooks/stop-guard.sh's own
+    # `needs-attention` check can never catch it on this same Stop event -
+    # always report it here rather than silently proceeding to claim.
+    rm -f "$runfile"
+    rewake "$(compose_attention_reason)" auto
+    exit 2 ;;
+  fire)
+    # #185's own reasoning (docs/plans/2026-08-02-issue-185-asyncrewake-
+    # autoarm-plan.md:201) is that rewaking a pre-claim fire here would
+    # double-report against hooks/stop-guard.sh's own independent
+    # `needs-attention` check on the same Stop - true, and left alone, for a
+    # fire that actually carries a crew-status row. But that reasoning does
+    # not cover a fire whose only content is a queued notice or a
+    # fleet-scoped signal (outage/usage-limit) - neither produces a
+    # needs-attention row, so nothing else will ever report it, and the
+    # premise the original decision leaned on for "it'll surface anyway"
+    # (a fresh cycle "re-fires... within one poll") is false regardless:
+    # fire() acks the event BEFORE writing the exit record
+    # (bin/watch-fleet:873-875), so a fresh claim never rediscovers it.
+    # Check the exact same predicate stop-guard.sh checks, so this can never
+    # drift from what stop-guard.sh actually does.
+    if [ -z "$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention --owner "$OWNER" --suppress-on handled 2>/dev/null)" ]; then
+      rm -f "$runfile"
+      rewake "$(compose_attention_reason)" auto
+      exit 2
+    fi
+    ;;   # a crew-status row exists - stop-guard.sh already reports it; proceed to claim
+  healthy|spurious\ *|"")
+    : ;;   # proceed to claim - nothing to absorb
   *)
     : ;;   # unrecognized output - defensively proceed to claim rather than silently stopping
 esac
