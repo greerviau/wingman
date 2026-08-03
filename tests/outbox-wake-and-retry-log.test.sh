@@ -182,6 +182,11 @@ while kill -0 "$_writerpid" 2>/dev/null || [ "$_j" -lt 30 ]; do
   wait "$_wpid" 2>/dev/null
   [ -f "$WINGMAN_HOME/wake" ] && cat "$WINGMAN_HOME/wake" >> "$_collected"
   wm_state crew-set --id churn1 --status blocked --blocker "churn $_j" >/dev/null 2>&1
+  # Classify the previous cycle's own unclassified fire before re-arming
+  # (issue #197: a bare re-arm over it now refuses instead of claiming). This
+  # loop re-arms every iteration, so the classify has to be here too, not
+  # just once upfront.
+  "$WATCH" --classify --owner "" >/dev/null 2>&1
   WM_WATCH_INTERVAL=1 "$WATCH" --owner "" >/dev/null 2>&1 &
   wm_track $!
   _wpid=$!
@@ -196,6 +201,9 @@ while [ "$_k" -lt 5 ]; do
   wait "$_wpid" 2>/dev/null
   [ -f "$WINGMAN_HOME/wake" ] && cat "$WINGMAN_HOME/wake" >> "$_collected"
   [ -s "$WINGMAN_HOME/pending-notices" ] || break
+  # Classify the previous cycle's own unclassified fire before re-arming
+  # (issue #197), same as the main churn loop above.
+  "$WATCH" --classify --owner "" >/dev/null 2>&1
   WM_WATCH_INTERVAL=1 "$WATCH" --owner "" >/dev/null 2>&1 &
   wm_track $!
   _wpid=$!

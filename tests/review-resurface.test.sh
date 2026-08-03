@@ -133,6 +133,9 @@ tmux new-session -d -s "$WM_TMUX_SESSION" -n wm-a5 "sleep 60"
 # test - otherwise a fresh cycle's own top-of-loop check would immediately
 # fire on THAT pending event instead.
 wm_timeout 10 "$WF" >/dev/null 2>&1
+# Classify that consumed fire before re-arming (issue #197: a bare re-arm
+# over it now refuses instead of claiming).
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
 
 export WM_WATCH_INTERVAL=1
 export WM_REVIEW_RESURFACE_SECS=8

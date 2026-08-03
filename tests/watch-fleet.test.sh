@@ -81,6 +81,7 @@ assert_contains "fire prints the review reason line" "$out4" "review: d1 /tmp/pl
 assert_contains "stdout directs beyond the deltas" "$out4" "not the full picture"
 assert_contains "directive names the wake file path" "$out4" "$WINGMAN_HOME/wake"
 assert_contains "directive demands the roster report" "$out4" "roster status"
+assert_contains "directive states the classify-first ordering (issue #197)" "$out4" "--classify"
 wake4="$(cat "$WINGMAN_HOME/wake")"
 assert_contains "wake file has a New events section" "$wake4" "## New events"
 assert_contains "wake file names the flipped member" "$wake4" "d1"
@@ -627,6 +628,10 @@ out_rv1="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "first cycle still fires on the pilot-facing review delivery" "$out_rv1" "review: rv1"
 assert_contains "after only one poll, remote_control_connected is untouched (not yet flipped)" \
   "$(wm_state crew-get --id rv1)" '"remote_control_connected": true'
+# Classify the first cycle's own unclassified fire before re-arming (issue
+# #197: a bare re-arm over it now refuses instead of claiming).
+cout_rv1="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "classify reports the pending review fire" "$cout_rv1" "fire"
 # Second cycle: the review event is now acked (see fire()'s own ack step), so
 # this run does not fire on it again and instead keeps blocking/looping - its
 # very first internal iteration reuses the hash persisted by the first cycle
@@ -651,6 +656,10 @@ out_sl1="$(wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
 assert_contains "first cycle still fires on the stalled event" "$out_sl1" "stalled: sl1"
 assert_contains "after only one poll, remote_control_connected is untouched for a stalled member too" \
   "$(wm_state crew-get --id sl1)" '"remote_control_connected": true'
+# Classify the first cycle's own unclassified fire before re-arming (issue
+# #197: a bare re-arm over it now refuses instead of claiming).
+cout_sl1="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "classify reports the pending stalled fire" "$cout_sl1" "fire"
 WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1 &
 sl1pid=$!
 wm_track "$sl1pid"
@@ -724,6 +733,11 @@ tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm_self_pane2 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'
 printf '%s:wm_self_pane2\n' "$WM_TMUX_SESSION" > "$WINGMAN_HOME/self-pane"
 wm_timeout 45 env WM_WATCH_INTERVAL=1 "$WF" >/dev/null 2>&1
+# Classify the first cycle's own unclassified remote-control-dropped record
+# before re-arming (issue #197: a bare re-arm over it now refuses instead of
+# claiming).
+cout_self="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "classify reports the pending remote-control-dropped fire" "$cout_self" "remote-control-dropped"
 "$WF" >"$WINGMAN_HOME/rearm.log" 2>&1 &
 rearm_pid=$!
 wm_track "$rearm_pid"
@@ -798,6 +812,11 @@ out="$(wm_timeout 45 "$WF" 2>"$WINGMAN_HOME/stale.err")"
 assert_contains "round 1: arm recovers and fires its real reason, not just exits 0" "$out" "done: sk1 finished round one"
 assert_contains "round 1: watcher logs that it cleared a stale claim lock" "$(cat "$WINGMAN_HOME/stale.err")" "clearing a stale claim lock"
 assert_false "round 1: the stale claim lock directory is gone after recovery" "[ -d \"$WINGMAN_HOME/watch.pid.lock\" ]"
+
+# Classify round 1's own unclassified fire before round 2 begins (issue #197:
+# a bare re-arm over it now refuses instead of claiming).
+cout_sk1="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "round 1's fire is classified before round 2 begins" "$cout_sk1" "fire"
 
 # Round 2: mint a genuinely NEW, unacked event (bumping sk1's `updated` stamp
 # via working -> done again) and fabricate a second, independent stale lock -
