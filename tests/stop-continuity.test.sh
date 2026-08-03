@@ -247,6 +247,12 @@ unset WM_STOP_CONTINUITY_WINDOW
 new_home
 add_crew_window d7
 wm_state crew-set --id d7 --status working --summary busy >/dev/null
+# A machine-wide `pgrep -f 'watch-fleet --owner '` cannot tell this test's own
+# leaked child apart from an unrelated watch-fleet cycle already running
+# elsewhere on this machine (a live fleet's own lead/orchestrator, say) - take
+# a baseline snapshot first so the check below is a set DIFFERENCE (pids new
+# since this sequence started), not an absolute count.
+_pre_wf_pids="$(wm_mktemp_file)"; pgrep -f 'watch-fleet --owner ' > "$_pre_wf_pids" 2>/dev/null
 export WM_STOP_CONTINUITY_WINDOW=2
 N=3
 rollovers=0
@@ -261,7 +267,19 @@ for i in 1 2 3; do
   esac
 done
 assert_eq "each of $N sequential invocations rolls over exactly once" "$rollovers" "$N"
-assert_false "no invocation left more than one watch-fleet child running" "pgrep -f 'watch-fleet --owner ' >/dev/null 2>&1"
+# The self-bounded window (2s) means the last rollover's own child should
+# exit on its own shortly after; poll briefly rather than asserting on the
+# very first sample.
+_wf_grace=0
+_new_wf_pids=""
+while [ "$_wf_grace" -lt 10 ]; do
+  _post_wf_pids="$(wm_mktemp_file)"; pgrep -f 'watch-fleet --owner ' > "$_post_wf_pids" 2>/dev/null
+  _new_wf_pids="$(grep -vxFf "$_pre_wf_pids" "$_post_wf_pids" 2>/dev/null)"
+  [ -z "$_new_wf_pids" ] && break
+  sleep 1; _wf_grace=$((_wf_grace+1))
+done
+assert_true "no invocation left a NEW watch-fleet child running (beyond whatever else may already be live on this machine)" \
+  "[ -z \"$_new_wf_pids\" ]"
 unset WM_STOP_CONTINUITY_WINDOW
 
 # --- (8) A deterministically failing fleet: backoff + standdown markers ------
