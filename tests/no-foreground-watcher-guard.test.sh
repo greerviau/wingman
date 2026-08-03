@@ -175,15 +175,19 @@ assert_contains "a dead interpreter denies a relevant payload (wrapper-level fai
 out="$(WM_UV=/bin/false run_hook 'gh pr list' omit)"
 assert_eq "an unrelated command is unaffected by a dead interpreter" "$out" ""
 
-# --- checked-in fixtures: real captured PreToolUse payload shapes -----------
-# Regression-pins the hook's own parsing against real payload shapes (they do
-# NOT pin the contract against a future harness version that stops sending
-# run_in_background at all - failing closed covers that, see the hook's own
-# header comment and docs/architecture.md).
+# --- checked-in fixtures: full-envelope PreToolUse payload shapes -----------
+# Hand-built (not literally captured from a live transcript), but with the
+# full real envelope - session_id/transcript_path/cwd/permission_mode
+# alongside hook_event_name/tool_name/tool_input/tool_use_id - so this
+# regression-pins the hook's own parsing against the real payload SHAPE, not
+# just the two fields the hook itself reads. Does NOT pin the contract
+# against a future harness version that stops sending run_in_background at
+# all - failing closed covers that, see the hook's own header comment and
+# docs/architecture.md.
 out="$(bash "$HOOK" < "$TEST_REPO/tests/fixtures/pretooluse-watch-fleet-foreground.json")"
-assert_contains "captured foreground fixture is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "full-envelope foreground fixture is denied" "$out" '"permissionDecision": "deny"'
 
 out="$(bash "$HOOK" < "$TEST_REPO/tests/fixtures/pretooluse-watch-fleet-background.json")"
-assert_eq "captured background fixture is allowed (no output)" "$out" ""
+assert_eq "full-envelope background fixture is allowed (no output)" "$out" ""
 
 test_summary

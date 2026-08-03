@@ -115,8 +115,10 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "de
 # spawned just to persist a timestamp) and cleared by cmd_crew_set on the
 # member's next self-report, or by cmd_stall_check itself on a genuine stall
 # flip.
-# long_shell_pid/long_shell_elapsed (fix 2) are written by cmd_stall_check's
-# per-poll duration probe, independent of the idle-nomination gates.
+# long_shell_pid/long_shell_elapsed (fix 2) are written by wm_state
+# wedge-check's per-poll duration probe (relocated from cmd_stall_check by
+# issue #202, which also widened it to 'blocked' members), independent of
+# every gate.
 # parked (#203) is a list of {"ref", "note", "since"} annotations - a unit of
 # work needing a decision, independent of this record's own status.
 DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked")
@@ -693,8 +695,10 @@ def cmd_crew_set(args):
         sys.exit("wm-state: --silent may not be used with --status %s - "
                   "blocked/done are always genuine and must always announce" % args.status)
     # #155 review fix: the read-modify-write below is now shared with
-    # cmd_stall_check's own side-effect writes (--just-nudged, the long-shell
-    # tracker) onto this SAME file from a different process (the watcher) - a
+    # cmd_stall_check's own side-effect write (--just-nudged) and wm_state
+    # wedge-check's long-shell tracker (relocated from cmd_stall_check by
+    # issue #202) onto this SAME file from a different process (the
+    # watcher) - a
     # write_json is a full-file replace, not a merge, so two unlocked writers
     # can silently clobber each other (a self-report landing between this
     # function's read and write would be reverted by whichever wrote last).
@@ -1340,17 +1344,21 @@ def _parse_ps_seconds(field):
 
 def _ps_tree(root_pid):
     """{pid: (cputime_secs, elapsed_secs, args)} for root_pid and its
-    descendants, from one `ps -ax -o pid=,ppid=,time=,etime=,args=` pass.
+    descendants, from one `ps -ax -ww -o pid=,ppid=,time=,etime=,args=` pass.
     `args` (the full command line) is last so the existing whitespace-split
     parse of the first four whitespace-separated fields stays correct via a
     bounded `split(None, 4)` - added for wm_state wedge-check (issue #202),
     which needs the command line to recognize a watch-fleet/pr-watch
     descendant; every other caller (_probe_execution,
-    _longest_running_descendant) ignores the third element. Empty dict if
-    the root is gone or ps cannot be read."""
+    _longest_running_descendant) ignores the third element. `-ww` (doubled,
+    both GNU/Linux and BSD/macOS `ps` accept it identically) requests
+    unlimited-width output - without it, a `ps` whose stdout is not a
+    terminal still defaults to a fixed column width on BSD/macOS and would
+    silently truncate a long command line, defeating `--proc-re` with no
+    error. Empty dict if the root is gone or ps cannot be read."""
     try:
         out = subprocess.check_output(
-            ["ps", "-ax", "-o", "pid=,ppid=,time=,etime=,args="],
+            ["ps", "-ax", "-ww", "-o", "pid=,ppid=,time=,etime=,args="],
             stderr=subprocess.DEVNULL, universal_newlines=True)
     except Exception:
         return {}

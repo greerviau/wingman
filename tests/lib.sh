@@ -77,6 +77,14 @@ test_new_home() {
   # stop-continuity.test.sh), so unsetting it here is exactly as safe as the
   # WINGMAN_CREW_ID unset just above and closes the same class of gap.
   unset WINGMAN_RUN_ID
+  # Same class of gap, one variable further (review round on issue #202's own
+  # PR): a session that holds a real reviewer's WM_REVIEW_TOKEN leaks it into
+  # every wm_state review-sign call a test makes without passing --token/
+  # WM_REVIEW_TOKEN explicitly, which can silently swap in a real proof
+  # instead of the test's own fixture token. Every test that cares about
+  # WM_REVIEW_TOKEN already sets it per-command (e.g. no-merge-guard.test.sh,
+  # wm-state-review-gate.test.sh), so unsetting it here is safe.
+  unset WM_REVIEW_TOKEN
   # A wingman/crew session (or a dev shell sourcing this box's autostart env)
   # may export a non-default budget, which would silently invalidate every
   # assertion that depends on the documented implicit default of 3.

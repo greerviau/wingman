@@ -131,5 +131,11 @@
 # longest continuously-live run saturates just past this value.
 # WM_WEDGE_PANE_GAP = "60"
 
+# Regex matched against a candidate descendant's own command line to decide
+# whether it counts as "this member's own watch-fleet/pr-watch call" for the
+# wedge check above. Widen it to catch a wedge on some other unbounded
+# foreground call if one is ever observed in practice.
+# WM_WEDGE_PROC_RE = "watch-fleet|pr-watch"
+
 # Seconds between a crew window opening and its first message being delivered.
 # WM_SPAWN_DELAY = "2"
