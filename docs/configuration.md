@@ -44,6 +44,9 @@ Wingman has around a hundred `WM_*` variables beyond the typed settings - intern
 [env]
 WM_WATCH_INTERVAL = "5"
 WM_STALL_IDLE = "180"
+WM_WEDGE_SECS = "1800"
+WM_WEDGE_PANE_GAP = "60"
+WM_WEDGE_PROC_RE = "watch-fleet|pr-watch"
 ```
 
 Two rules, both enforced by `bin/config --check`:

@@ -405,6 +405,42 @@ else
   fi
 fi
 
+# --- Foreground-watcher guard (any session, any repo), user scope ----------
+# hooks/no-foreground-watcher-guard.sh (PreToolUse) denies an arming
+# bin/watch-fleet/bin/pr-watch Bash call that is not `run_in_background:
+# true`, and every detached form (nohup, setsid, a trailing `&`) even with
+# it (issue #202: a delegate ran its own watcher in the foreground of a Bash
+# tool call and sat wedged for 5h27m, invisible to the stall detector, since
+# both scripts block until an event fires - that is their entire wake
+# mechanism). Like the watcher-protection guard just above, there is no
+# session type for which a foreground/detached arm is ever legitimate, so
+# this is registered unconditionally, with no crew-type gating at all.
+FOREGROUND_WATCHER_HOOK="$WM_REPO/hooks/no-foreground-watcher-guard.sh"
+if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$FOREGROUND_WATCHER_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
+  wm_ok "foreground-watcher guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "foreground-watcher guard hook (issue #202) not registered in $GUARD_SETTINGS"
+  printf '    denies a foreground or detached watch-fleet/pr-watch arm from any session, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $FOREGROUND_WATCHER_HOOK --matcher Bash"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$FOREGROUND_WATCHER_HOOK" --event PreToolUse --matcher Bash; then
+      wm_ok "registered foreground-watcher guard hook"
+    else
+      wm_err "failed to register foreground-watcher guard hook"
+    fi
+  fi
+fi
+
 # --- Interactive-prompt guard (crew sessions, any repo), user scope ---------
 # hooks/no-interactive-prompt-guard.sh (PreToolUse) denies AskUserQuestion,
 # EnterPlanMode, and ExitPlanMode outright for every crew session (issue

@@ -120,5 +120,22 @@
 # it, and then flips it to `stalled`.
 # WM_STALL_IDLE = "180"
 
+# Seconds a member's pane must repaint continuously (never idle at a prompt)
+# while its own record goes unwritten and a watch-fleet/pr-watch descendant
+# runs, before it flips to `stalled` as a wedged foreground watcher (issue
+# #202). Not independent of WM_WEDGE_PANE_GAP below - preserve the ratio
+# between them if you retune either.
+# WM_WEDGE_SECS = "1800"
+
+# Seconds of pane silence that resets the above anchor - a healthy pane's own
+# longest continuously-live run saturates just past this value.
+# WM_WEDGE_PANE_GAP = "60"
+
+# Regex matched against a candidate descendant's own command line to decide
+# whether it counts as "this member's own watch-fleet/pr-watch call" for the
+# wedge check above. Widen it to catch a wedge on some other unbounded
+# foreground call if one is ever observed in practice.
+# WM_WEDGE_PROC_RE = "watch-fleet|pr-watch"
+
 # Seconds between a crew window opening and its first message being delivered.
 # WM_SPAWN_DELAY = "2"

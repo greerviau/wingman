@@ -274,4 +274,31 @@ print(cmds.count('$TEST_REPO/hooks/no-worker-spawn-guard.sh'))
 ")"
 assert_eq "re-running does not duplicate the hook entry" "$worker_spawn_guard_count" "1"
 
+# --- Foreground-watcher guard hook (issue #202), user scope -----------------
+# hooks/no-foreground-watcher-guard.sh, registered by its own real, checked-in
+# path exactly like the worker-spawn guard above.
+SETTINGS11="$WORK/foreground-watcher-guard-settings.json"
+out11="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS11" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "fresh: doctor warns the foreground-watcher guard hook is not registered" "$out11" "foreground-watcher guard hook (issue #202) not registered"
+assert_contains "fresh: doctor registers the foreground-watcher guard hook" "$out11" "registered foreground-watcher guard hook"
+foreground_watcher_guard_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS11'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/no-foreground-watcher-guard.sh' in cmds else 'no')
+")"
+assert_eq "the registered entry references the real hook path" "$foreground_watcher_guard_cmd" "yes"
+
+# Idempotent: re-running reports already registered, does not duplicate the
+# entry for this hook specifically.
+out12="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS11" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a second run reports the foreground-watcher guard hook already registered" "$out12" "foreground-watcher guard hook registered"
+foreground_watcher_guard_count="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS11'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print(cmds.count('$TEST_REPO/hooks/no-foreground-watcher-guard.sh'))
+")"
+assert_eq "re-running does not duplicate the hook entry" "$foreground_watcher_guard_count" "1"
+
 test_summary

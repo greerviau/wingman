@@ -64,6 +64,27 @@ test_new_home() {
   # inside a crew session, the inherited crew id would silently re-scope
   # watch-fleet and the Stop hook to that crew's (empty) reports.
   unset WINGMAN_CREW_ID
+  # Pre-existing, unrelated gap found while validating issue #202: the suite
+  # also runs inside a real wingman/crew session sometimes (this repo's own
+  # tests are exercised by crew members), which exports a real, non-empty
+  # WINGMAN_RUN_ID. bin/watch-fleet's run-id ownership check (#162) then reads
+  # every fixture-recorded live cycle with no matching RUNFILE stamp as a
+  # FOREIGN cycle armed by "a different run" rather than legacy/unset-run-id
+  # behavior (a live cycle reads as healthy) - silently changing which branch
+  # a test exercises based on who happens to be running the suite, not what
+  # the test itself set up. Every test that cares about WINGMAN_RUN_ID already
+  # exports/unsets it explicitly around its own assertions (e.g.
+  # stop-continuity.test.sh), so unsetting it here is exactly as safe as the
+  # WINGMAN_CREW_ID unset just above and closes the same class of gap.
+  unset WINGMAN_RUN_ID
+  # Same class of gap, one variable further (review round on issue #202's own
+  # PR): a session that holds a real reviewer's WM_REVIEW_TOKEN leaks it into
+  # every wm_state review-sign call a test makes without passing --token/
+  # WM_REVIEW_TOKEN explicitly, which can silently swap in a real proof
+  # instead of the test's own fixture token. Every test that cares about
+  # WM_REVIEW_TOKEN already sets it per-command (e.g. no-merge-guard.test.sh,
+  # wm-state-review-gate.test.sh), so unsetting it here is safe.
+  unset WM_REVIEW_TOKEN
   # A wingman/crew session (or a dev shell sourcing this box's autostart env)
   # may export a non-default budget, which would silently invalidate every
   # assertion that depends on the documented implicit default of 3.

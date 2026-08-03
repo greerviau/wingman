@@ -101,7 +101,20 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
    or `spurious-repeated`, which already report by design per the bullets
    above.
 2. **Arm one fresh cycle, but only if none is already live and the failure
-   budget was not just exceeded.** The `healthy` branch above already
+   budget was not just exceeded.** Arm it as a Bash call with
+   `run_in_background: true`, on its own - not bundled onto another
+   command: `bin/watch-fleet` (or, for a lead, the same invocation, which
+   self-scopes via `$WINGMAN_CREW_ID`). **Never foreground, and never
+   detached** (`nohup`, `setsid`, a trailing `&`) - `bin/watch-fleet` blocks
+   until an event fires, so any way of running it other than as a
+   harness-tracked background task wedges this session indefinitely, invisible
+   to the stall detector (issue #202; a mechanical guard,
+   `hooks/no-foreground-watcher-guard.sh`, denies the foreground and detached
+   forms at the tool-call boundary, but do not rely on the guard - state the
+   invocation correctly the first time). **If you cannot arm it as a
+   background task, arm nothing** - no watcher at all is strictly better than
+   a foreground one, because a missing watcher is recoverable and a wedged
+   session is not. The `healthy` branch above already
    short-circuits before reaching this step, and `bin/watch-fleet`'s own
    singleton claim-then-check is atomic regardless, so arming here is always
    safe to *attempt* even under a race. `spurious-repeated` is a third,

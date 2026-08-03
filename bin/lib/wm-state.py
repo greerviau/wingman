@@ -115,8 +115,10 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "de
 # spawned just to persist a timestamp) and cleared by cmd_crew_set on the
 # member's next self-report, or by cmd_stall_check itself on a genuine stall
 # flip.
-# long_shell_pid/long_shell_elapsed (fix 2) are written by cmd_stall_check's
-# per-poll duration probe, independent of the idle-nomination gates.
+# long_shell_pid/long_shell_elapsed (fix 2) are written by wm_state
+# wedge-check's per-poll duration probe (relocated from cmd_stall_check by
+# issue #202, which also widened it to 'blocked' members), independent of
+# every gate.
 # parked (#203) is a list of {"ref", "note", "since"} annotations - a unit of
 # work needing a decision, independent of this record's own status.
 DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked")
@@ -222,6 +224,10 @@ def review_resurfaced_path():
 
 def forward_motion_path():
     return os.path.join(home(), "forward-motion.json")
+
+
+def wedge_anchor_path():
+    return os.path.join(home(), "wedge-anchor.json")
 
 
 def pr_watch_beat_path(cid):
@@ -689,8 +695,10 @@ def cmd_crew_set(args):
         sys.exit("wm-state: --silent may not be used with --status %s - "
                   "blocked/done are always genuine and must always announce" % args.status)
     # #155 review fix: the read-modify-write below is now shared with
-    # cmd_stall_check's own side-effect writes (--just-nudged, the long-shell
-    # tracker) onto this SAME file from a different process (the watcher) - a
+    # cmd_stall_check's own side-effect write (--just-nudged) and wm_state
+    # wedge-check's long-shell tracker (relocated from cmd_stall_check by
+    # issue #202) onto this SAME file from a different process (the
+    # watcher) - a
     # write_json is a full-file replace, not a merge, so two unlocked writers
     # can silently clobber each other (a self-report landing between this
     # function's read and write would be reverted by whichever wrote last).
@@ -1335,20 +1343,30 @@ def _parse_ps_seconds(field):
 
 
 def _ps_tree(root_pid):
-    """{pid: (cputime_secs, elapsed_secs)} for root_pid and its descendants, from
-    one `ps -ax -o pid=,ppid=,time=,etime=` pass. Empty dict if the root is gone
-    or ps cannot be read."""
+    """{pid: (cputime_secs, elapsed_secs, args)} for root_pid and its
+    descendants, from one `ps -ax -ww -o pid=,ppid=,time=,etime=,args=` pass.
+    `args` (the full command line) is last so the existing whitespace-split
+    parse of the first four whitespace-separated fields stays correct via a
+    bounded `split(None, 4)` - added for wm_state wedge-check (issue #202),
+    which needs the command line to recognize a watch-fleet/pr-watch
+    descendant; every other caller (_probe_execution,
+    _longest_running_descendant) ignores the third element. `-ww` (doubled,
+    both GNU/Linux and BSD/macOS `ps` accept it identically) requests
+    unlimited-width output - without it, a `ps` whose stdout is not a
+    terminal still defaults to a fixed column width on BSD/macOS and would
+    silently truncate a long command line, defeating `--proc-re` with no
+    error. Empty dict if the root is gone or ps cannot be read."""
     try:
         out = subprocess.check_output(
-            ["ps", "-ax", "-o", "pid=,ppid=,time=,etime="],
+            ["ps", "-ax", "-ww", "-o", "pid=,ppid=,time=,etime=,args="],
             stderr=subprocess.DEVNULL, universal_newlines=True)
     except Exception:
         return {}
     rows = {}
     children = {}
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) != 4:
+        parts = line.split(None, 4)
+        if len(parts) != 5:
             continue
         try:
             pid, ppid = int(parts[0]), int(parts[1])
@@ -1356,7 +1374,8 @@ def _ps_tree(root_pid):
             elapsed = _parse_ps_seconds(parts[3])
         except ValueError:
             continue
-        rows[pid] = (cpu, elapsed)
+        args = parts[4]
+        rows[pid] = (cpu, elapsed, args)
         children.setdefault(ppid, []).append(pid)
     if root_pid not in rows:
         return {}
@@ -1384,7 +1403,7 @@ def _probe_execution(root_pid, root_grace, gap, eps):
     if not first:
         return False
     root_elapsed = first[root_pid][1]
-    for pid, (_cpu, elapsed) in first.items():
+    for pid, (_cpu, elapsed, _args) in first.items():
         # etime arithmetic (root_elapsed - descendant_elapsed), never wall-clock
         # start-time parsing, so the comparison is locale-safe.
         if pid != root_pid and (root_elapsed - elapsed) > root_grace:
@@ -1418,7 +1437,7 @@ def _longest_running_descendant(root_pid, root_grace):
         return None
     root_elapsed = tree[root_pid][1]
     best = None
-    for pid, (_cpu, elapsed) in tree.items():
+    for pid, (_cpu, elapsed, _args) in tree.items():
         if pid == root_pid:
             continue
         if (root_elapsed - elapsed) > root_grace and (best is None or elapsed > best[1]):
@@ -1457,13 +1476,16 @@ def _track_long_running(cid, pane_pid, root_grace):
     longer than usual' annotation (#155 fix 2) without itself walking the
     process tree or needing to know the warn ceiling.
 
-    Called on every cmd_stall_check invocation for a 'working' member with a
-    resolvable pid - independent of the idle-nomination gates below it, since
-    the scenario this exists to catch (a single long-outstanding tool call or
-    background shell) keeps Claude Code's own pane repainting via its "N
-    shell(s) still running" indicator, so pane_idle/status_idle may never
-    cross STALL_IDLE and the rest of cmd_stall_check would otherwise never run
-    at all for this member.
+    Called on every wm_state wedge-check invocation (issue #202) for a
+    'working' OR 'blocked' member with a resolvable pid - independent of every
+    gate below it, since the scenario this exists to catch (a single
+    long-outstanding tool call or background shell) keeps Claude Code's own
+    pane repainting via its "N shell(s) still running" indicator, so
+    pane-liveness alone may never nominate this member for anything else.
+    Relocated here from cmd_stall_check (which only ever ran for 'working'
+    members) so the annotation is maintained for a 'blocked' member too - see
+    _stall_annotation's own docstring for the same widening on the render
+    side.
 
     Takes no `live` snapshot from its caller (#155 review fix): the process-
     tree probe below can take a moment, and cmd_stall_check's own initial read
@@ -1480,15 +1502,17 @@ def _track_long_running(cid, pane_pid, root_grace):
     finished command, or the watcher's own next poll simply catching the
     process tree between two different qualifying descendants - so a stale
     annotation never lingers past the process it described. A no-op once the
-    member is no longer 'working' by the time the lock is acquired (a self-
-    report to blocked/review/done raced this same call) - rendering already
-    gates on that, so there's nothing left to track.
+    member is no longer 'working' or 'blocked' by the time the lock is
+    acquired (a self-report to review/done raced this same call, or a
+    'blocked' member answered its blocker and resumed 'working' - either way
+    the ordinary status change already covers what happens next) - rendering
+    already gates on the same pair, so there's nothing left to track.
     """
     found = _longest_running_descendant(pane_pid, root_grace)
     path = status_path(cid)
     with with_locked(path):
         current = read_json(path, None)
-        if not isinstance(current, dict) or current.get("status") != "working":
+        if not isinstance(current, dict) or current.get("status") not in ("working", "blocked"):
             return
         if found is None:
             if "long_shell_pid" in current or "long_shell_elapsed" in current:
@@ -1528,10 +1552,17 @@ def cmd_stall_check(args):
     (an 'api-error:' prefix instead of the default) - it never changes the gates or
     the probe above, and does not by itself cause a flip.
 
-    --just-nudged and the long-shell duration tracking below (#155 fixes 1/2) are
-    unconditional side effects that run on every call regardless of the gates
-    above - see their own inline comments for why - and never change whether or
-    when a flip happens."""
+    --just-nudged (#155 fix 1) is an unconditional side effect that runs on every
+    call regardless of the gates above - see its own inline comment for why - and
+    never changes whether or when a flip happens. The long-shell duration tracking
+    #155 fix 2 originally added here (_track_long_running) has since been
+    relocated to wm_state wedge-check (issue #202), which runs for both
+    'working' and 'blocked' members every poll - this call only ever ran for
+    'working' ones, so lifting it out (rather than duplicating it) is what let
+    the annotation start covering 'blocked' members too, with no coverage lost
+    for 'working' ones: wedge-check's own call site in bin/watch-fleet sits
+    strictly above both the blocked skip and this call's own PFC_SHAPE skip,
+    so it runs at least as often as this command did."""
     ensure_home()
     live = read_json(status_path(args.id), None)
     if not isinstance(live, dict) or live.get("status") != "working":
@@ -1544,12 +1575,6 @@ def cmd_stall_check(args):
     # fresh under a lock rather than reusing `live` from just above.
     if getattr(args, "just_nudged", 0):
         _stamp_nudged_at(args.id)
-
-    # #155 fix 2: long-shell duration tracking runs unconditionally for every
-    # 'working' member with a resolvable pid, independent of the idle-
-    # nomination gates just below - see _track_long_running's docstring for
-    # why it cannot wait for those gates to pass first.
-    _track_long_running(args.id, args.pane_pid, args.root_grace)
 
     status_idle = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds()
     if args.pane_idle < args.threshold or status_idle < args.threshold:
@@ -1619,6 +1644,213 @@ def cmd_stall_check(args):
         write_json(crew_json_path(), roster)
     render_board()
     print("stalled")
+
+
+def _wedge_descendant(pane_pid, proc_re, threshold):
+    """Of pane_pid's descendants (never pane_pid itself), return
+    (pid, args, elapsed_seconds) for whichever has both: `args` matching
+    `proc_re` (a plain re.search, not anchored) AND its own elapsed time
+    >= threshold - preferring the longest-elapsed qualifying descendant if
+    more than one matches. None if the tree cannot be read, `proc_re` fails
+    to compile, or nothing qualifies. This is the wm_state wedge-check
+    instrument (issue #202, plan section 2.6): a matching, long-lived
+    descendant is what a watch-fleet/pr-watch cycle blocking in the
+    FOREGROUND of this pane looks like from outside it - necessary evidence,
+    never sufficient alone (see cmd_wedge_check's own docstring for why pane
+    continuity must accompany it)."""
+    tree = _ps_tree(pane_pid)
+    if not tree:
+        return None
+    try:
+        rx = re.compile(proc_re)
+    except re.error:
+        return None
+    best = None
+    for pid, (_cpu, elapsed, proc_args) in tree.items():
+        if pid == pane_pid or elapsed < threshold:
+            continue
+        if not rx.search(proc_args):
+            continue
+        if best is None or elapsed > best[2]:
+            best = (pid, proc_args, elapsed)
+    return best
+
+
+def cmd_wedge_check(args):
+    """Flag a WORKING or BLOCKED crew member 'stalled' iff it shows the
+    signature of a watch-fleet/pr-watch cycle blocking in the FOREGROUND of
+    its own session (issue #202): its pane has repainted continuously - never
+    idle at a prompt - for --threshold seconds of genuinely OBSERVED
+    continuity, its own record has gone unwritten for the same window, AND a
+    descendant matching --proc-re (default 'watch-fleet|pr-watch') has itself
+    been running >= --threshold seconds. All three must hold together -
+    pane continuity alone would flip any legitimately long foreground task,
+    and the descendant duration alone would flip a lead whose own
+    correctly-armed background watcher is simply blocking on a quiet crew
+    (see docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-plan.md,
+    section 2.6): only the combination is specific to a wedge.
+
+    Widened to 'blocked' (not just 'working', unlike cmd_stall_check) because
+    the wedge this is named for happens exactly as easily while answering a
+    blocker as it does mid-task - a delegate that receives its answer,
+    reports back once, and then foregrounds its own re-arm is wedged whether
+    its status says 'working' or 'blocked' at that moment.
+
+    Called per member per bin/watch-fleet poll (both statuses), unlike
+    cmd_stall_check (working only, and only once the blocked skip has
+    already excluded a blocked member for that poll) - see the call site
+    comment in bin/watch-fleet for why this one sits ABOVE that skip.
+
+    --root-grace is passed straight through to the relocated
+    _track_long_running call (#155 fix 2, issue #202) - see its own
+    docstring; it never gates a flip here, exactly as it never did in
+    cmd_stall_check.
+
+    Anchor store (wedge-anchor.json): {"<id>": {"since": <iso>,
+    "last_seen": <iso>, "pid": <pane_pid>}}, read-modify-written under
+    with_locked, matching forward-motion.json. `since` is the moment
+    continuity was last (re-)established; `last_seen` is the moment
+    continuity was last CONFIRMED, and is what makes the anchor require
+    genuinely OBSERVED continuity rather than merely "no poll has yet
+    observed a quiet pane since `since`" - a watcher outage spanning two
+    live observations would otherwise read as continuous coverage across the
+    whole gap it never actually watched. Three resets, in order, before the
+    update:
+      1. --pane-idle >= --pane-gap: the pane has fallen silent at its
+         prompt (a correctly-armed background watcher, or simply idle).
+         Drop the entry and return - nothing to anchor.
+      2. An entry exists and now - last_seen > --pane-gap: coverage was
+         lost (no poll observed this member across that stretch). Drop the
+         entry and re-anchor (create a fresh one), exactly as an observed
+         quiet pane does, so a genuine outage never accumulates credit for
+         the gap it did not watch.
+      3. An entry exists and its pid differs from --pane-pid: the session's
+         tmux pane was restarted. Drop the entry and re-anchor.
+    Otherwise the pane is live and observed: create the entry if absent, or
+    advance last_seen on the existing one. No entry-removal sweep for a
+    member that leaves working/blocked (matching forward-motion.json's own
+    practice - cmd_prune sweeps only acked/handled records) - noted, not
+    fixed, here.
+
+    On a genuine flip: `blocker` (if any) is cleared from the field but its
+    text is copied into the new `summary` first - a false positive must
+    never destroy an open question (the #202 plan's own must-fix over its
+    first revision, which discarded it). Re-reads and bails under
+    with_locked(status_path(id)) unless status is still working/blocked and
+    `updated` still matches this call's own initial snapshot - the same
+    TOCTOU guard cmd_forward_motion_check uses, so a genuine self-report
+    landing in the meantime always wins over a stale nomination.
+
+    Prints 'stalled <id>' on a flip, nothing otherwise. Idempotent and safe
+    to call every poll for every working/blocked member."""
+    ensure_home()
+    cid = args.id
+    status_file = status_path(cid)
+    live = read_json(status_file, None)
+    if not isinstance(live, dict) or live.get("status") not in ("working", "blocked"):
+        return
+    updated_snapshot = live.get("updated")
+    updated_dt = _parse_updated(updated_snapshot)
+
+    # Unconditional side effect (#155 fix 2, relocated here by issue #202) -
+    # independent of every gate below. See _track_long_running's own
+    # docstring for why it cannot wait for those gates to pass first.
+    _track_long_running(cid, args.pane_pid, args.root_grace)
+
+    stamp = now()
+    stamp_dt = _parse_updated(stamp)
+
+    anchor_path = wedge_anchor_path()
+    with with_locked(anchor_path):
+        store = read_json(anchor_path, {})
+        if not isinstance(store, dict):
+            store = {}
+        entry = store.get(cid)
+
+        if args.pane_idle >= args.pane_gap:
+            if cid in store:
+                del store[cid]
+                write_json(anchor_path, store)
+            return
+
+        reanchor = not isinstance(entry, dict)
+        if not reanchor:
+            last_seen_dt = _parse_updated(entry.get("last_seen"))
+            if (last_seen_dt is None or stamp_dt is None
+                    or (stamp_dt - last_seen_dt).total_seconds() > args.pane_gap):
+                reanchor = True  # coverage lost
+            elif entry.get("pid") != args.pane_pid:
+                reanchor = True  # pane restarted
+
+        if reanchor:
+            store[cid] = {"since": stamp, "last_seen": stamp, "pid": args.pane_pid}
+        else:
+            entry["last_seen"] = stamp
+            store[cid] = entry
+        write_json(anchor_path, store)
+        since = store[cid]["since"]
+
+    since_dt = _parse_updated(since)
+    if since_dt is None or stamp_dt is None or (stamp_dt - since_dt).total_seconds() < args.threshold:
+        return
+    if updated_dt is None or (stamp_dt - updated_dt).total_seconds() < args.threshold:
+        return
+
+    proc_re = getattr(args, "proc_re", None) or os.environ.get("WM_WEDGE_PROC_RE") or "watch-fleet|pr-watch"
+    found = _wedge_descendant(args.pane_pid, proc_re, args.threshold)
+    if found is None:
+        return
+    desc_pid, desc_args, desc_elapsed = found
+
+    with with_locked(status_file):
+        current = read_json(status_file, None)
+        if (not isinstance(current, dict) or current.get("status") not in ("working", "blocked")
+                or current.get("updated") != updated_snapshot):
+            return
+        live = current
+
+        reason = (
+            "wedged mid-turn for over %s: its pane has repainted "
+            "continuously the whole time (never idle at a prompt) while its "
+            "own record has not been written, and `%s` (pid %d) has been "
+            "running as a descendant of its pane for %s. That is the "
+            "signature of a blocking watcher started in the FOREGROUND of "
+            "its own session (issue #202) - a correctly backgrounded one "
+            "leaves the session idle at its prompt. It will not resume on "
+            "its own: inspect with `bin/crew-takeover %s`, or stand it down "
+            "with `bin/crew-standdown %s`."
+            % (_human_duration(args.threshold), desc_args, desc_pid,
+               _human_duration(desc_elapsed), cid, cid)
+        )
+        blocker = live.get("blocker")
+        if blocker:
+            reason += " (unanswered question was: %s)" % blocker
+        prior = (live.get("summary") or "").split("\n")[0][:80]
+        if prior:
+            reason += " (last summary: %s)" % prior
+
+        live["status"] = "stalled"
+        live["summary"] = reason
+        live["updated"] = now()
+        live["announced"] = live["updated"]  # a stall flip always announces
+        live.pop("nudged_at", None)
+        # Clear the FIELD only after its text has already been copied into
+        # `reason` above - a false positive must never destroy an open
+        # question. Leaving it set would also make cmd_needs_attention's
+        # `blocker or delivery or artifact_url or artifact or summary` note
+        # surface the stale question instead of this stall reason.
+        live.pop("blocker", None)
+        write_json(status_file, live)
+
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        for r in roster:
+            if r.get("id") == cid:
+                r["status"] = "stalled"
+                r["updated"] = live["updated"]
+        write_json(crew_json_path(), roster)
+    render_board()
+    print("stalled %s" % cid)
 
 
 def _attention_suppressed(rid, upd, suppress_on, only_acked, acked, handled):
@@ -2859,20 +3091,43 @@ def _human_duration(seconds):
 
 
 def _stall_annotation(r):
-    """Short parenthetical suffix for a 'working' member's status cell (#155):
-    a self-heal nudge already sent and still within its cooldown window (fix
+    """Short parenthetical suffix for a crew member's status cell (#155): a
+    self-heal nudge already sent and still within its cooldown window (fix
     1), and/or a single outstanding tool call/background shell that has been
     running far longer than usual (fix 2). Both are purely informational -
-    they never change the status value itself - and both apply only while
-    status is still 'working' (nudged_at/long_shell_* can briefly outlive that
-    in the record, e.g. between a stalled flip and the next render, but a
-    non-'working' status is never annotated). Returns "" when neither
-    applies."""
-    if r.get("status") != "working":
+    they never change the status value itself.
+
+    The two halves are gated DIFFERENTLY, on purpose. Fix 1 (the nudge
+    annotation) stays 'working'-only, unchanged: only cmd_stall_check ever
+    stamps `nudged_at`, and it only ever nudges a 'working' member, so a
+    'blocked' record showing it would only ever be leftover/synthetic state,
+    never a live nudge episode. Fix 2 (the long-shell annotation) is WIDENED
+    to 'working' OR 'blocked' by issue #202, since `_track_long_running` now
+    maintains `long_shell_pid`/`long_shell_elapsed` for both statuses (see its
+    own docstring) - a CONTRACT CHANGE, not a pure extension: this half used
+    to be a strict subset of 'working' status, and is now also a strict
+    subset of 'blocked'. This means the SAME long-shell annotation now
+    renders next to every 'blocked' member holding a qualifying long-running
+    descendant - most commonly a lead whose own watch-fleet cycle is
+    correctly armed as a background task and has simply been blocking on a
+    quiet crew for a while (WM_LONG_SHELL_WARN's default 1200s ceiling is far
+    shorter than a routine parked wait). This is EVIDENCE, not a wedge
+    indicator: it is exactly the duration signal that, alone, cannot
+    discriminate a wedge from a healthy backgrounded watcher (see
+    docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-plan.md, section
+    2.6, conclusion 2) - the actual wedge indicator is the 'stalled' flip
+    wm_state wedge-check performs, which additionally requires continuous
+    pane liveness. Read this annotation as "something has been running a
+    while", never as "this member is wedged". Returns "" when neither half
+    applies, and unconditionally for any status other than 'working'/
+    'blocked' (nudged_at/long_shell_* can briefly outlive either in the
+    record, e.g. between a stalled flip and the next render, but any OTHER
+    status is never annotated)."""
+    if r.get("status") not in ("working", "blocked"):
         return ""
     parts = []
     nudged_at = r.get("nudged_at")
-    if nudged_at:
+    if r.get("status") == "working" and nudged_at:
         parsed = _parse_updated(nudged_at)
         if parsed is not None:
             age = (datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()
@@ -3216,6 +3471,27 @@ def build_parser():
     # timing the outage-detection tests depend on).
     a.add_argument("--just-nudged", type=int, default=0, dest="just_nudged")
     a.set_defaults(fn=cmd_stall_check)
+
+    # Foreground-watcher wedge detection (issue #202, layer B): flips a
+    # 'working' OR 'blocked' member to 'stalled' once its pane has repainted
+    # continuously (never idle at a prompt) for --threshold seconds of
+    # genuinely observed coverage, its own record has gone unwritten for the
+    # same window, and a --proc-re-matching descendant has itself been
+    # running that long. Called per member per bin/watch-fleet poll, ABOVE
+    # the blocked skip (see the call site comment in bin/watch-fleet) - see
+    # cmd_wedge_check's own docstring for the full design.
+    a = sub.add_parser("wedge-check")
+    a.add_argument("--id", required=True)
+    a.add_argument("--pane-idle", type=int, required=True, dest="pane_idle")
+    a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
+    a.add_argument("--root-grace", type=int, required=True, dest="root_grace")
+    a.add_argument("--threshold", type=int, required=True)
+    a.add_argument("--pane-gap", type=int, required=True, dest="pane_gap")
+    # Overridable via WM_WEDGE_PROC_RE (read directly by cmd_wedge_check when
+    # this is omitted) so an operator can widen the instrument without a code
+    # change - see the plan's "Residual gap" risk.
+    a.add_argument("--proc-re", default=None, dest="proc_re")
+    a.set_defaults(fn=cmd_wedge_check)
 
     a = sub.add_parser("needs-attention")
     # Emit only this owner's direct reports ("" = top level). Omit for every layer.

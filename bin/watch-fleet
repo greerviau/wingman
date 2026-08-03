@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # watch-fleet - the zero-token supervisor, armed as a harness-tracked background
-# task (never a detached daemon). One "cycle" is a single run of this script:
-# wingman starts it in the background, it BLOCKS - watching crew status files and
+# task - NEVER in the foreground of the arming Bash call, and never a detached
+# daemon (nohup/setsid/a trailing &). This script BLOCKS until an event fires -
+# that is its entire wake mechanism - so a foreground arm wedges the calling
+# session indefinitely (issue #202) and a detached one exits where nothing is
+# tracking it to notice. If you cannot arm it as a harness-tracked background
+# task, arm nothing: no watcher at all is strictly better than a foreground
+# one, because a missing watcher is recoverable and a wedged session is not.
+# hooks/no-foreground-watcher-guard.sh mechanically enforces this at the
+# tool-call boundary. One "cycle" is a single run of this script: wingman
+# starts it in the background, it BLOCKS - watching crew status files and
 # tmux window liveness, absorbing benign "still working" updates - and only EXITS
 # the moment a crew member flips to an attention state (blocked/review/done/died/
 # stalled) or freezes on a prompt. Because it is a task the agent harness tracks,
@@ -224,6 +232,17 @@ STALL_IDLE="${WM_STALL_IDLE:-180}"
 STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
 STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
+# Foreground-watcher wedge detection (issue #202, layer B - wm-state
+# wedge-check). WM_WEDGE_SECS is the continuous-liveness window (30 min,
+# matching WM_FORWARD_MOTION_SECS); WM_WEDGE_PANE_GAP is the pane silence
+# that resets the continuity anchor - measured at ~30x below the healthy
+# ceiling (docs/analysis/2026-08-03-issue-202-wedge-measurement.md). The two
+# are not independent: a healthy pane's longest live run saturates just past
+# WM_WEDGE_PANE_GAP by construction, so the real safety margin is the ratio
+# WM_WEDGE_SECS / WM_WEDGE_PANE_GAP (30x at these defaults) - retune together
+# to preserve that ratio, not either value alone.
+WM_WEDGE_SECS="${WM_WEDGE_SECS:-1800}"        # 30 min
+WM_WEDGE_PANE_GAP="${WM_WEDGE_PANE_GAP:-60}"  # pane silence that resets the anchor
 # WM_LONG_SHELL_WARN (#155 fix 2, seconds, default 1200 = 20 minutes) is not
 # read here at all - it is a render-time-only ceiling `wm-state.py`'s own
 # rendering reads straight from the environment (inherited by every `wm_state`
@@ -728,6 +747,20 @@ rm -f "$STOPFILE" "$SUPPRESSEDFILE" "$CLAIMFAILFILE"
 release_claim
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
+# Forensics only - prevents nothing (issue #202, plan section 2.4: a
+# foreground and a `run_in_background: true` Bash call are indistinguishable
+# from inside this process, so nothing here can detect or refuse either
+# way - only hooks/no-foreground-watcher-guard.sh, at the tool-call boundary,
+# can). Written to stderr (wm_warn) so the stdout token contract (armed/
+# healthy/<reason>:) stays byte-identical regardless. If you are reading this
+# line in a FOREGROUND tool result, this session is ALREADY wedged: this
+# script blocks until an event fires, so nothing after this line will ever
+# run, and the tool call will never return. Arm it as a harness-tracked
+# background task (Bash run_in_background: true) instead - never detached
+# (nohup/setsid/a trailing &), and if you cannot arm it as a background
+# task, arm nothing: no watcher at all is strictly better than a foreground
+# one.
+wm_warn "watch-fleet: if you are seeing this line in a FOREGROUND tool result, this session is already wedged (issue #202) - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
 
 # The prompt-shape detector (prompt_shape_in) and its WM_PERM_PROMPT_RE/
 # WM_PERM_OPTION_RE/WM_PERM_MARK_RE/WM_PERM_MIN_OPTS/WM_PERM_TAIL/WM_PERM_ADJ/
@@ -1201,6 +1234,34 @@ for r in data:
         wm_state crew-set --id "$_id" --status blocked --blocker "$_blocker" >/dev/null 2>&1
         continue   # the permission freeze is the more specific diagnosis, superseding any prior blocker reason
       fi
+
+      # Pane-liveness observations, computed here - ABOVE the blocked skip
+      # just below - because wm-state wedge-check (issue #202) needs them for
+      # BOTH working and blocked members, unlike the stall-check call further
+      # down, which only ever runs for a 'working' member once the blocked
+      # skip has already `continue`d past this poll for a blocked one. Moving
+      # the computation up (not just a call) costs nothing extra - it is one
+      # `tmux list-windows` and one `list-panes`, already paid for every
+      # 'working' member every poll before this change.
+      _idle="$(wm_tmux_window_activity_age "$_win")"
+      _pid="$(wm_tmux_pane_pid "$_win")"
+
+      # wm-state wedge-check (issue #202, layer B): flips a member wedged
+      # mid-turn on a foreground watch-fleet/pr-watch call to 'stalled' once
+      # its pane has repainted continuously - never idle at a prompt - for
+      # WM_WEDGE_SECS while its own record has gone unwritten for the same
+      # window AND a matching descendant has been running that long. Sits
+      # ABOVE the blocked skip on purpose (the opposite of stall-check below
+      # it): the wedge signature applies to a 'blocked' member exactly as
+      # much as a 'working' one - answering a blocker and then foregrounding
+      # a watcher wedges a session just as surely as doing it mid-task - and
+      # wedge-check itself gates on status internally (working/blocked only,
+      # everything else a no-op), so nothing else in this loop needs to admit
+      # blocked members on its behalf.
+      [ -n "$_pid" ] && wm_state wedge-check --id "$_id" \
+        --pane-idle "$_idle" --pane-pid "$_pid" --root-grace "$STALL_ROOT_GRACE" \
+        --threshold "$WM_WEDGE_SECS" --pane-gap "$WM_WEDGE_PANE_GAP" >/dev/null 2>&1
+
       # An already-blocked member with no dialog freeze detected needs no further
       # diagnosis here: its existing blocker reason is left untouched, and the
       # stall/api-error checks below only make sense for a member that claims to
@@ -1217,8 +1278,6 @@ for r in data:
       # Silent-stall backstop: no pane repaint AND no status update for STALL_IDLE
       # seconds nominates the member; stall-check probes its process tree and flags
       # it stalled only if nothing there is executing or armed to wake it.
-      _idle="$(wm_tmux_window_activity_age "$_win")"
-      _pid="$(wm_tmux_pane_pid "$_win")"
 
       # Stall self-heal nudge (#61): every stall-idle candidate gets exactly one
       # check-in nudge before stall-check is even allowed to confirm+flip it -
