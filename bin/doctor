@@ -556,6 +556,41 @@ else
   fi
 fi
 
+# --- Worker-spawn depth-cap guard hook (crew sessions, any repo), user scope
+# hooks/no-worker-spawn-guard.sh (PreToolUse) mechanically restricts
+# bin/spawn-crew to orchestrator-type callers (wingman's own top-level
+# session, or a lead not itself spawning a further lead) - issue #212,
+# recommendation 3. Must fire inside crew sessions whose project root is
+# some other repo entirely, so like the other crew-facing hooks it needs
+# user-level registration - a project-level entry in this repo's settings
+# never loads there.
+WORKER_SPAWN_GUARD_HOOK="$WM_REPO/hooks/no-worker-spawn-guard.sh"
+if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$WORKER_SPAWN_GUARD_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
+  wm_ok "worker-spawn depth-cap guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "worker-spawn depth-cap guard hook (issue #212) not registered in $GUARD_SETTINGS"
+  printf '    restricts bin/spawn-crew to orchestrator-type callers (wingman/lead),\n'
+  printf '    for crew sessions in any repo, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $WORKER_SPAWN_GUARD_HOOK --matcher Bash"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$WORKER_SPAWN_GUARD_HOOK" --event PreToolUse --matcher Bash; then
+      wm_ok "registered worker-spawn depth-cap guard hook"
+    else
+      wm_err "failed to register worker-spawn depth-cap guard hook"
+    fi
+  fi
+fi
+
 # --- fleet-continuity Stop hooks (issue #185), project scope ----------------
 # hooks/stop-guard.sh and hooks/stop-continuity.sh are wired only for wingman's
 # own top-level session, via THIS repo's own checked-in .claude/settings.json

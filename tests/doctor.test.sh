@@ -243,4 +243,35 @@ out8="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS6" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a non-executable crew script: doctor warns" "$out8" "fleet-continuity Stop hooks (crew, issue #199) not registered"
 
+# --- Worker-spawn depth-cap guard hook (issue #212), user scope -------------
+# hooks/no-worker-spawn-guard.sh is registered by its own real, checked-in
+# path (unlike the Stop-hooks pair above, there is no fixture-script env var
+# to swap in) - a throwaway settings.json is enough to isolate this from the
+# real developer machine.
+SETTINGS9="$WORK/worker-spawn-guard-settings.json"
+out9="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS9" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "fresh: doctor warns the worker-spawn guard hook is not registered" "$out9" "worker-spawn depth-cap guard hook (issue #212) not registered"
+assert_contains "fresh: doctor registers the worker-spawn guard hook" "$out9" "registered worker-spawn depth-cap guard hook"
+worker_spawn_guard_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS9'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/no-worker-spawn-guard.sh' in cmds else 'no')
+")"
+assert_eq "the registered entry references the real hook path" "$worker_spawn_guard_cmd" "yes"
+
+# Idempotent: re-running reports already registered, does not duplicate the
+# entry for this hook specifically (other hooks share the same PreToolUse
+# array, so this counts occurrences of THIS hook's own command string, not
+# the group's total size).
+out10="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS9" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a second run reports the worker-spawn guard hook already registered" "$out10" "worker-spawn depth-cap guard hook registered"
+worker_spawn_guard_count="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS9'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print(cmds.count('$TEST_REPO/hooks/no-worker-spawn-guard.sh'))
+")"
+assert_eq "re-running does not duplicate the hook entry" "$worker_spawn_guard_count" "1"
+
 test_summary
