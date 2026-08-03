@@ -242,6 +242,12 @@ MASS_MIN_RATIO="${WM_MASS_MIN_RATIO:-0.5}"
 # WM_WATCH_INTERVAL - see bin/lib/wm-state.py's review-resurface-check.
 WM_REVIEW_RESURFACE_SECS="${WM_REVIEW_RESURFACE_SECS:-21600}"   # 6h, generous default
 WM_REVIEW_WAKER_GRACE="${WM_REVIEW_WAKER_GRACE:-120}"           # > pr-watch's own 30s default poll interval
+# Structural forward-motion / logical-stall detection (issue #199, Gap B): a
+# WORKING member with active reports (a lead) flips to 'stalled' once its own
+# roster-shape signature has shown no change for this window, even with a
+# fully healthy, armed watcher cycle - see bin/lib/wm-state.py's
+# forward-motion-check.
+WM_FORWARD_MOTION_SECS="${WM_FORWARD_MOTION_SECS:-1800}"   # 30 min default
 # API/connectivity-error pane signature (#23): a member showing one of these and
 # then going quiet is a likely local network blip or Anthropic-side outage, not a
 # broken agent, so its check-in nudge (see #61 below) uses this wording instead of
@@ -1543,6 +1549,14 @@ EOF_USAGE
     esac
   fi
 
+  # Structural forward-motion / logical-stall detection (issue #199, Gap B):
+  # run BEFORE needs-attention, not merged into $attention afterward like
+  # review-resurface-check below - this call performs the roster mutation
+  # (a direct flip to 'stalled') itself, and needs-attention must see that
+  # fresh status in the very same cycle it was written, exactly the same
+  # ordering relationship the per-id stall-check loop above already has with
+  # this same needs-attention call.
+  wm_state forward-motion-check --owner "$OWNER" --window-secs "$WM_FORWARD_MOTION_SECS" >/dev/null 2>&1
   # Who needs this owner right now? Scoped to the owner's own direct reports, so a
   # lead's worker never wakes wingman and vice versa. Checked at the top of the loop
   # so an event already pending on arm fires immediately (at-least-once re-arms).
