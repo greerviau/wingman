@@ -17,8 +17,24 @@ print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$2"; }
 STUB_DIR="$(wm_mktemp_dir)"
 ALIVE_STUB="$STUB_DIR/alive.sh"
 DEAD_STUB="$STUB_DIR/dead.sh"
+DIALOG_STUB="$STUB_DIR/dialog.sh"
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$ALIVE_STUB"; chmod +x "$ALIVE_STUB"
 printf '#!/usr/bin/env bash\nexit 7\n' > "$DEAD_STUB"; chmod +x "$DEAD_STUB"
+# A freshly relaunched window that lands straight on a startup gate
+# (workspace-trust/Bypass) instead of an idle chat prompt - exactly the shape
+# §3.7 row 7 (issue #214) covers: the resume itself succeeds (the window and
+# roster record are already in place by the time the nudge is attempted), but
+# the nudge send refuses (rc 2, dialog-shaped) since typing into it risks the
+# Enter being consumed as the dialog's own answer.
+cat > "$DIALOG_STUB" <<'DIALOGEOF'
+#!/usr/bin/env bash
+stty -echo -icanon min 1 time 0 2>/dev/null
+printf 'Do you want to proceed?\n'
+printf '\xe2\x9d\xaf 1. Yes\n'
+printf '  2. No, exit\n'
+while IFS= read -r -n1 ch; do :; done
+DIALOGEOF
+chmod +x "$DIALOG_STUB"
 
 # --- a died member with a live session resumes --------------------------------
 test_new_home
@@ -57,6 +73,29 @@ assert_contains "the resume script exports a high CLAUDE_CODE_RESUME_TOKEN_THRES
   "$launch" "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999"
 assert_contains "the resume script exports a high CLAUDE_CODE_RESUME_THRESHOLD_MINUTES" \
   "$launch" "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #214, §3.7 row 7: an undelivered resume nudge is queued, not lost --
+# The relaunched window lands on a startup gate instead of an idle prompt, so
+# the resume nudge (WM_CLEAR_KEYS="") refuses with rc 2. The resume itself
+# still succeeds (the window/roster registration happened before the nudge
+# was ever attempted); only the nudge is queued for the watcher's outbox
+# retry, and crew-resume warns rather than silently dropping it.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rgate1 --type developer --objective x --repo /tmp --window wm-rgate1 --session-id sess-rgate1 >/dev/null
+wm_state crew-set --id rgate1 --status died >/dev/null
+out_gate="$(WM_AGENT="$DIALOG_STUB" "$CR" rgate1 2>&1)"
+assert_contains "the resume itself still succeeds despite the undeliverable nudge" "$out_gate" "1 resumed"
+assert_eq "status flips to working" "$(field_of rgate1 status)" "working"
+assert_contains "crew-resume warns the nudge was not delivered (dialog-shaped)" \
+  "$out_gate" "resume nudge NOT delivered"
+assert_contains "the warning names the dialog/trust shape, not silence" "$out_gate" "trust dialog"
+assert_contains "crew-resume reports the nudge as queued" "$out_gate" "resume nudge is QUEUED"
+q_gate="$(ls "$WINGMAN_HOME/outbox/rgate1" 2>/dev/null | grep -v '^sent-' | head -1)"
+assert_true "the resume nudge landed in the outbox, not dropped" "[ -n \"$q_gate\" ]"
+assert_contains "the queued nudge carries the resumed-session context text" \
+  "$(cat "$WINGMAN_HOME/outbox/rgate1/$q_gate" 2>/dev/null)" "Your previous window was interrupted"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- a resume outside any wingman run exports an empty run id ------------------

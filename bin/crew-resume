@@ -285,8 +285,23 @@ EOF
   # Ctrl-C, which would otherwise risk killing a not-yet-raw-mode process
   # outright instead of clearing anything it hasn't composed yet.
   WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge"
-  if [ $? -eq 2 ]; then
+  _resume_nudge_rc=$?
+  if [ "$_resume_nudge_rc" -eq 2 ]; then
     wm_warn "'$_rid': resume nudge NOT delivered - its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $_rid)"
+  elif [ "$_resume_nudge_rc" -eq 6 ]; then
+    wm_warn "'$_rid': resume nudge NOT delivered - its pane is mid-turn with a composer already holding text, so nothing was typed."
+  fi
+  # Any nonzero rc means the nudge did not confirm delivered (issue #214): a
+  # resumed session that misses this nudge otherwise silently gets nothing -
+  # no re-arm reminder, no "you were resumed" context - since crew-resume
+  # itself never retries. Queue it the same way crew-say does so the watcher's
+  # own outbox retry picks it up once the pane clears.
+  if [ "$_resume_nudge_rc" -ne 0 ]; then
+    mkdir -p "$WM_HOME/outbox/$_rid" "$WM_HOME/outbox-meta/$_rid"
+    _resume_qfile="$WM_HOME/outbox/$_rid/$(date +%s)-$$.msg"
+    printf '%s\n' "${WINGMAN_CREW_ID:-}" > "$WM_HOME/outbox-meta/$_rid/$(basename "$_resume_qfile")"
+    printf '%s\n' "$_resume_nudge" > "$_resume_qfile"
+    wm_warn "'$_rid': the resume nudge is QUEUED at $_resume_qfile; the watcher will retry it automatically."
   fi
 
   # --- verify the resume actually took -----------------------------------------

@@ -40,6 +40,17 @@ done <<EOF
 $("$WM_BIN/discover-projects" --roots 2>/dev/null)
 EOF
 
+# Exported so the orchestrator's own documented arm command
+# ($WINGMAN_BIN/watch-fleet) is cwd-independent exactly like a lead's
+# (bin/spawn-crew and bin/crew-resume already export both into every crew
+# launch) - without this, a bare `bin/watch-fleet` resolves against whatever
+# cwd this session happens to be in after any earlier `cd`, which is exactly
+# the drift issue #214's Defect C reports. $CLAUDE_PROJECT_DIR is not a fix
+# for this: it is hook-only and unset in an ordinary session's own tool
+# calls (verified directly - see the plan this fixes).
+export WINGMAN_BIN="$WM_BIN"
+export WINGMAN_REPO="$WM_REPO"
+
 cd "$WM_REPO" || wm_die "cannot cd into wingman repo: $WM_REPO"
 # shellcheck disable=SC2086
 exec claude $adddirs "$@"

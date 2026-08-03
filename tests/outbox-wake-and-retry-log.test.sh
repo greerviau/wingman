@@ -14,6 +14,17 @@ test_new_home
 
 WATCH="$TEST_REPO/bin/watch-fleet"
 
+# File-scope, not per-block (issue #214, the same mechanism as
+# tests/outbox-abandonment.test.sh's identical fix): wm_tmux_pane_ready's
+# readiness gate is now duration-based (WM_READY_QUIET, default 1.5s), and
+# the capture count it derives scales INVERSELY with WM_READY_POLL. This file
+# sets WM_READY_POLL=0.2 below, which at the default quiet window derives 9
+# captures (~1.8s per readiness check instead of ~0.2s, a 9x inflation) -
+# enough to run this file's `wm_timeout 45`-bounded cycles out of budget
+# before their expected event fires. Set once here so every block is
+# covered.
+export WM_READY_QUIET=0.2
+
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _idle "sleep 300"
 
 # =============================================================================

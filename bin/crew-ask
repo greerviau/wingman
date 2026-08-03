@@ -311,6 +311,8 @@ cmd_send() {
     printf '%s\n' "$_pointer" > "$_qfile"
     if [ "$_send_rc" -eq 5 ]; then
       wm_warn "the question could not be confirmed delivered to '$_id' right now - its pane looks busy (still repainting on its own clock), so the Enter may be queued behind its current turn rather than lost. It is QUEUED for automatic retry by the watcher; if '$_id' ends before that happens, you'll be notified instead of the question silently vanishing. Request $_req stays pending - arm the await as usual, and consider a longer --timeout."
+    elif [ "$_send_rc" -eq 6 ]; then
+      wm_warn "'$_id' is mid-turn with a message already composed in its input box, so nothing was typed. It is QUEUED for automatic retry by the watcher once the pane clears. Request $_req stays pending - arm the await as usual, and consider a longer --timeout."
     else
       wm_warn "the question could not be confirmed delivered to '$_id' right now (its pane may be showing a dialog, or another delivery held it). It is QUEUED for automatic retry by the watcher; if '$_id' ends before that happens, you'll be notified instead of the question silently vanishing. Request $_req stays pending - arm the await as usual, and consider a longer --timeout."
     fi

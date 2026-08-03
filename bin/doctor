@@ -730,6 +730,49 @@ else
   fi
 fi
 
+# --- denial-report backstop Stop hook (issue #214), crew sessions, user scope
+# hooks/denial-report-guard.sh blocks a crew session's Stop the moment its
+# transcript shows a `toolDenialKind: "user-rejected"` tool-call denial it has
+# not already reported - the mechanical backstop for Defect B's prose rule in
+# playbooks/_status-contract.md (§3.8). Registered here rather than as a
+# wrapper over a shared project-scope script (unlike the fleet-continuity
+# pair above): this defect only ever matters for a crew session, so there is
+# no project-scope twin to extend. Same overridable-path convention as the
+# other user-scope guards above, for tests.
+DENIAL_REPORT_GUARD_HOOK="${WM_DENIAL_REPORT_GUARD_SCRIPT:-$WM_REPO/hooks/denial-report-guard.sh}"
+denial_report_guard_ok=1
+if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$DENIAL_REPORT_GUARD_HOOK" --event Stop --check >/dev/null 2>&1; then
+  denial_report_guard_ok=0
+fi
+if [ ! -x "$DENIAL_REPORT_GUARD_HOOK" ]; then
+  denial_report_guard_ok=0
+fi
+if [ "$denial_report_guard_ok" = 1 ]; then
+  wm_ok "denial-report Stop hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "denial-report Stop hook (issue #214) not registered/executable in $GUARD_SETTINGS"
+  printf '    surfaces a denied tool call (toolDenialKind: user-rejected) a crew session\n'
+  printf '    would otherwise silently absorb, machine-wide (any repo a lead/worker runs in)\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $DENIAL_REPORT_GUARD_HOOK --event Stop"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$DENIAL_REPORT_GUARD_HOOK" --event Stop >/dev/null; then
+      wm_ok "registered denial-report Stop hook"
+    else
+      wm_err "failed to register denial-report Stop hook"
+    fi
+  fi
+fi
+
 # --- the settings file ------------------------------------------------------
 # A hand-edited config.local.toml is the one part of an install a pull cannot
 # keep correct, and a typo there fails quietly by nature: an unknown key simply

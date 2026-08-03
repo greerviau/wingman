@@ -225,12 +225,17 @@ out7="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS5" \
         WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a second run reports the crew Stop hooks already registered" "$out7" "fleet-continuity Stop hooks (crew) registered"
+# 3, not 2: this -y run against a fresh, shared settings file also registers
+# hooks/denial-report-guard.sh (issue #214) alongside the crew-guard/crew-
+# continuity pair, since that block is unconditional and this test does not
+# override WM_DENIAL_REPORT_GUARD_SCRIPT - it registers using its own real,
+# checked-in path, exercised (not stubbed) here as an incidental side effect.
 stop_group_count="$(uv run --no-project --quiet python -c "
 import json
 d = json.load(open('$SETTINGS5'))
 print(len(d['hooks']['Stop']))
 ")"
-assert_eq "re-running does not duplicate the Stop entries" "$stop_group_count" "2"
+assert_eq "re-running does not duplicate the Stop entries" "$stop_group_count" "3"
 
 # A script registered in settings.json but not executable on disk - warns,
 # same as the project-scope case.
@@ -242,6 +247,44 @@ out8="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS6" \
         WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH_NOEXEC" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "a non-executable crew script: doctor warns" "$out8" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+
+# --- denial-report backstop Stop hook (issue #214), user scope -------------
+# hooks/denial-report-guard.sh is a single hook, not a pair - registered/
+# missing/non-executable shape adapted from the crew-continuity pair above,
+# via a throwaway executable fixture (WM_DENIAL_REPORT_GUARD_SCRIPT), never
+# the real checked-in script.
+DENIAL_GUARD_SH="$WORK/denial-report-guard.sh"
+printf '#!/usr/bin/env bash\n' > "$DENIAL_GUARD_SH"; chmod +x "$DENIAL_GUARD_SH"
+
+SETTINGS9="$WORK/denial-guard-settings.json"
+out9="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS9" \
+        WM_DENIAL_REPORT_GUARD_SCRIPT="$DENIAL_GUARD_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "fresh: doctor warns the denial-report Stop hook is not registered" "$out9" "denial-report Stop hook (issue #214) not registered"
+assert_contains "fresh: doctor registers the denial-report Stop hook" "$out9" "registered denial-report Stop hook"
+denial_guard_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS9'))
+cmds = [h['command'] for g in d['hooks']['Stop'] for h in g['hooks']]
+print('yes' if '$DENIAL_GUARD_SH' in cmds else 'no')
+")"
+assert_eq "the registered entry references the denial-report guard script" "$denial_guard_cmd" "yes"
+
+# Idempotent: re-running reports already registered, does not duplicate.
+out10="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS9" \
+        WM_DENIAL_REPORT_GUARD_SCRIPT="$DENIAL_GUARD_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a second run reports the denial-report Stop hook already registered" "$out10" "denial-report Stop hook registered"
+
+# A script registered in settings.json but not executable on disk - warns.
+DENIAL_GUARD_SH_NOEXEC="$WORK/denial-report-guard-noexec.sh"
+printf '#!/usr/bin/env bash\n' > "$DENIAL_GUARD_SH_NOEXEC"
+chmod -x "$DENIAL_GUARD_SH_NOEXEC"
+SETTINGS10="$WORK/denial-guard-settings-noexec.json"
+out11="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS10" \
+        WM_DENIAL_REPORT_GUARD_SCRIPT="$DENIAL_GUARD_SH_NOEXEC" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a non-executable denial-report script: doctor warns" "$out11" "denial-report Stop hook (issue #214) not registered"
 
 # --- Worker-spawn depth-cap guard hook (issue #212), user scope -------------
 # hooks/no-worker-spawn-guard.sh is registered by its own real, checked-in

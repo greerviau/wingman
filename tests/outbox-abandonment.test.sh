@@ -25,6 +25,18 @@ STANDDOWN="$TEST_REPO/bin/crew-standdown"
 PRUNE="$TEST_REPO/bin/crew-prune"
 WATCH="$TEST_REPO/bin/watch-fleet"
 
+# File-scope, not per-block (issue #214): wm_tmux_pane_ready's readiness gate
+# is now duration-based (WM_READY_QUIET, default 1.5s), and the capture count
+# it derives scales INVERSELY with WM_READY_POLL - both blocks below set a
+# sub-second poll (0.3s and 0.2s) to keep the suite fast, which at the
+# default quiet window would derive 6 and 9 captures respectively (~1.5-1.6s
+# per readiness check instead of ~0.2-0.3s), and the second block's cycle
+# (bounded by `wm_timeout 45` below) then runs out of budget before emitting
+# its `blocked: blk1` event. Measured: patched without this, 2 failed;
+# patched with it, green. Set once here so both blocks are covered, not just
+# whichever one a per-block fix happened to touch.
+export WM_READY_QUIET=0.2
+
 # A real tmux server is up for the whole file (mirrors every other E2E test
 # here) so wm_tmux_reachable reads "reachable" throughout except where a test
 # deliberately breaks it.

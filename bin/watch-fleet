@@ -232,6 +232,12 @@ STALL_IDLE="${WM_STALL_IDLE:-180}"
 STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
 STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
+# Consecutive polls a check-in nudge can go undelivered (rc 2 dialog-shaped, 4
+# lock-contended, 6 busy-with-pending-composer - issue #214) before the escape
+# hatch stamps the ordinary .nudged marker anyway, so an unreachable member
+# still eventually flips 'stalled' instead of being exempt from escalation
+# forever. See the stall-nudge block below and wm-state.py's cmd_stall_check.
+WM_NUDGE_REFUSED_MAX="${WM_NUDGE_REFUSED_MAX:-3}"
 # Foreground-watcher wedge detection (issue #202, layer B - wm-state
 # wedge-check). WM_WEDGE_SECS is the continuous-liveness window (30 min,
 # matching WM_FORWARD_MOTION_SECS); WM_WEDGE_PANE_GAP is the pane silence
@@ -1192,11 +1198,12 @@ for r in data:
         _rc_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_rcfile" 2>/dev/null || echo 0) ))
         if [ ! -f "$_rcfile" ] || [ "$_rc_age" -ge "$RC_DROPPED_COOLDOWN" ]; then
           # Only mark the cooldown when the retry actually went out: a refusal
-          # (rc 2, dialog-shaped pane) or a contended send lock (rc 4) means
-          # nothing was typed, so the next cycle should try again rather than
-          # sit out a cooldown for a retry that never happened. rc 3 (typed,
-          # submit unconfirmed, idle) and rc 5 (typed, submit unconfirmed,
-          # busy - issue #188) both mark the cooldown like a success - the
+          # (rc 2, dialog-shaped pane), a contended send lock (rc 4), or a
+          # busy pane with a pending composer (rc 6, issue #214) means nothing
+          # was typed, so the next cycle should try again rather than sit out
+          # a cooldown for a retry that never happened. rc 3 (typed, submit
+          # unconfirmed, idle) and rc 5 (typed, submit unconfirmed, busy -
+          # issue #188) both mark the cooldown like a success - the
           # keystrokes landed either way, and hammering /remote-control every
           # poll into a pane that doesn't repaint adds nothing.
           wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"
@@ -1206,6 +1213,13 @@ for r in data:
             # Reflect the self-heal back into the persisted field the same way
             # a detected drop is (issue #96).
             wm_state crew-set --id "$_id" --remote-control-connected true >/dev/null 2>&1
+          elif [ "$_rcretry_rc" -eq 6 ]; then
+            # Busy with a composer already holding text (issue #214) - nothing
+            # was typed, and no cooldown is marked, so this retries again next
+            # cycle. Logged rather than silent, so a member stuck busy across
+            # many consecutive cycles is visible instead of quietly retried
+            # forever.
+            wm_warn "'$_id' is mid-turn with a pending composer - could not retry its /remote-control reconnect this cycle; will retry next cycle."
           fi
         fi
       fi
@@ -1299,6 +1313,7 @@ for r in data:
       _api=0
       _nudge_age=-1
       _just_nudged=0
+      _nudge_undelivered=0
       if [ "$_idle" -ge "$STALL_IDLE" ]; then
         if [ "$PANE_STABLE" != 1 ]; then
           continue   # first sighting or still changing; one more poll before acting
@@ -1316,7 +1331,20 @@ for r in data:
         else
           _nudge_msg="Checking in: if you're mid-task, keep going. If you're stuck, unstick yourself and continue."
         fi
-        _nudgefile="$WM_HOME/stall-$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_').nudged"
+        _idkey="$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_')"
+        _nudgefile="$WM_HOME/stall-$_idkey.nudged"
+        # A nothing-typed rc against the nudge send (2 dialog, 4 lock-contended,
+        # 6 busy-with-pending-composer - issue #214) means the episode's ONE
+        # check-in nudge never actually reached the pane. Left unhandled that
+        # exempts the member from stall escalation forever: --nudge-age stays
+        # -1 until the .nudged marker exists, and nothing else ever creates it.
+        # A counter (not a timestamp - the poll cadence is the clock) survives
+        # across polls so WM_NUDGE_REFUSED_MAX consecutive refusals - not just
+        # one - are required before the escape hatch fires, in case the very
+        # next poll would have delivered it normally.
+        _refusedfile="$WM_HOME/stall-$_idkey.nudge-refused"
+        _refused_count="$(cat "$_refusedfile" 2>/dev/null)"
+        case "$_refused_count" in ''|*[!0-9]*) _refused_count=0 ;; esac
         if [ -f "$_nudgefile" ]; then
           _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || date +%s) ))
         else
@@ -1334,8 +1362,33 @@ for r in data:
           if [ "$_nudge_rc" -eq 0 ] || [ "$_nudge_rc" -eq 3 ] || [ "$_nudge_rc" -eq 5 ]; then
             : > "$_nudgefile"
             _just_nudged=1
+            rm -f "$_refusedfile" 2>/dev/null
+            _refused_count=0
+          elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ]; then
+            _refused_count=$((_refused_count+1))
+            printf '%s' "$_refused_count" > "$_refusedfile"
+            if [ "$_refused_count" -ge "$WM_NUDGE_REFUSED_MAX" ]; then
+              # The escape hatch: stamp the ordinary marker anyway so
+              # --nudge-age starts ageing toward the flip exactly as a
+              # delivered nudge's would. Stamp the marker file ONLY -
+              # _just_nudged stays 0, unlike the delivered-nudge pair above:
+              # --just-nudged 1 would make stall-check stamp nudged_at, which
+              # crew-list/board.md render as "self-heal nudge sent Ns ago" - a
+              # false claim on the board for the whole ageing window. An
+              # unreachable member is described by stall-check's own
+              # --nudge-undelivered reason template instead, never by
+              # borrowing the delivered-nudge annotation.
+              : > "$_nudgefile"
+            fi
           fi
         fi
+        # Derived from the persisted counter on EVERY poll, never only on the
+        # poll that stamped the marker above: the poll that stamps is never
+        # the poll that flips (--nudge-age must still climb to STALL_IDLE
+        # across later polls first), so a flag set only at stamping time would
+        # not be set on the flipping poll and stall-check's undelivered-nudge
+        # reason would never render.
+        [ "$_refused_count" -ge "$WM_NUDGE_REFUSED_MAX" ] && _nudge_undelivered=1
       fi
 
       # Surface the nudge on the crew record itself (#155 fix 1): the marker
@@ -1356,7 +1409,8 @@ for r in data:
         --nudge-age "$_nudge_age" --just-nudged "$_just_nudged" \
         --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
-        --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" >/dev/null 2>&1
+        --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" \
+        --nudge-undelivered "$_nudge_undelivered" >/dev/null 2>&1
     done
   fi
 
