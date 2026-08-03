@@ -689,17 +689,32 @@ echo $$ > "$PIDFILE"
 # different run can recognize this cycle as foreign - see the singleton
 # guard's run-id ownership check above (#162).
 printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$RUNFILE"
-# Loud, not silent: the only way a record can still be present at a fresh
-# claim is that a wake was never classified - i.e. the record is the last
-# remaining trace of an event `fire()` already acked. Append it to the
-# forensic log before clearing it, so a lost wake leaves evidence rather than
-# vanishing without a trace. This code path never touches
-# $SPURCOUNTFILE - the count file's only three writers are inside
-# --classify (see the comments there); a claim-time reset would silently
-# revert the whole fix for any failure that claims successfully before dying.
+# The only way a record can still be present at a fresh claim is that a wake
+# was never classified - i.e. the record is the last remaining trace of an
+# event `fire()` already acked. For `fire`/`remote-control-dropped` this is a
+# genuine, not-yet-relayed event (issue #197): refuse to claim rather than
+# silently discard it. Roll back the pidfile/runfile writes just above and
+# release the claim lock, leaving $EXITFILE/$WAKEFILE both intact for a
+# `--classify` call - the only legitimate consumer - to pick up next. This
+# never touches $SPURCOUNTFILE - the count file's only three writers are
+# inside --classify (see the comments there).
+#
+# Any OTHER leftover content never carries an un-relayed event, so it keeps
+# the original loud-but-permissive behavior: log it and let the claim
+# proceed.
 if [ -f "$EXITFILE" ]; then
-  spurlog dropped-wake "$(cat "$EXITFILE" 2>/dev/null)"
-  rm -f "$EXITFILE"
+  _claim_exit="$(cat "$EXITFILE" 2>/dev/null)"
+  case "$_claim_exit" in
+    fire|remote-control-dropped)
+      rm -f "$PIDFILE" "$RUNFILE"
+      release_claim
+      wm_die "watcher: refusing to arm - an unclassified '$_claim_exit' record is still pending (issue #197: this record was never classified before something tried to arm a fresh cycle). Run 'bin/watch-fleet --classify${OWNER:+ --owner $OWNER}' first, act on its result, THEN arm."
+      ;;
+    *)
+      spurlog dropped-wake "$_claim_exit"
+      rm -f "$EXITFILE"
+      ;;
+  esac
 fi
 # A successful claim is what actually resolves a stop sanction, a
 # spurious-repeated standdown, or a claim-failure backoff (issue #185) - each
@@ -862,7 +877,11 @@ fire() {
   fi
   printf -- '--\n'
   printf 'The lines above are state-change deltas, not the full picture.\n'
-  printf 'Read %s for the full roster (or run bin/crew-list), then report a compact\n' "$WAKEFILE"
+  printf 'This record is not yet classified. If you are not already responding to a\n'
+  printf '`bin/watch-fleet --classify` result, run that FIRST - never arm a bare cycle\n'
+  printf 'while this one is unclassified; a bare arm now refuses rather than silently\n'
+  printf 'discarding it (issue #197), but only --classify actually reports it. Read\n'
+  printf '%s for the full roster (or run bin/crew-list), then report a compact\n' "$WAKEFILE"
   printf 'roster status to the pilot: who is on what, what is blocked, what is stalled,\n'
   printf 'what is ready for review. Then arm one fresh watch-fleet cycle before you stop.\n'
   # Firing IS the delivery, so ack each surfaced (id, updated). That suppresses
@@ -870,6 +889,11 @@ fire() {
   # crew - or this crew with a new status (new updated) - is not acked and still
   # surfaces on the next arm's top-of-loop check. Acks the REAL ids from
   # $_attention, never the synthetic $_grouped rows (see the comment above).
+  # This ack happens BEFORE $EXITFILE is written below - both #185's own
+  # gap-safety claim ("a fresh cycle re-fires within one poll") and issue
+  # #197 fix 2's rebuttal of it depend on that ordering, in opposite
+  # directions. Reordering these two writes silently invalidates both
+  # arguments at once.
   printf '%s\n' "$_attention" | while IFS=$'\t' read -r id st upd note; do
     [ -n "$id" ] && wm_state ack --id "$id" --updated "$upd" >/dev/null 2>&1
   done

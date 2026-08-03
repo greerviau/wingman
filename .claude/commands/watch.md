@@ -106,7 +106,12 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
    singleton claim-then-check is atomic regardless, so arming here is always
    safe to *attempt* even under a race. `spurious-repeated` is a third,
    deliberate reason to skip this step - not a race, but a refusal to keep
-   re-arming a watcher that has just demonstrated it cannot stay up.
+   re-arming a watcher that has just demonstrated it cannot stay up. If this
+   arm instead fails with "refusing to arm - an unclassified ... record is
+   still pending" (issue #197), step 1 was skipped or its result was never
+   acted on: run `bin/watch-fleet --classify`, act on what it reports, then
+   retry this arm - the record and the wake file are both left untouched by
+   the refusal, so nothing is lost by classifying late.
 3. End the turn once armed (or once step 1 concluded no re-arm is
    warranted). Never call `/watch` twice in the same turn, and never bundle
    its arm onto the tail of another command.
