@@ -19,10 +19,20 @@ self-heal window already ran:
 
 1. **The nudge-gated liveness stall** (`cmd_stall_check`) - no pane output, no
    status update, no running child process, for the idle window. The
-   mechanical layer sends one check-in nudge and waits a full cooldown for
-   activity **before** this fire ever reaches you; only silence through that
-   whole window produces it. Do not send your own nudge and do not wait
-   again - the self-heal window already ran.
+   mechanical layer sends one check-in nudge and waits a full cooldown before
+   this fire reaches you, **and it retries until the submit is confirmed, up
+   to `WM_STALL_NUDGE_TRIES` attempts.** The reason text tells you which
+   happened:
+   - If it reads `even after a check-in nudge`, the nudge was **confirmed
+     delivered** and the member ignored it for a full window. Do not send
+     your own nudge and do not wait again.
+   - If it reads `the submit was never confirmed`, the member's input is
+     **not reachable** - a nudge of your own is unlikely to land either. Go
+     straight to `bin/crew-takeover <id>`; this is the one `stalled` shape
+     where sending a message is close to futile. The watcher has *attempted*
+     a best-effort clear of the stray nudge text from its composer, but that
+     clear is sent and never verified, so check the pane when you attach
+     rather than assuming it is clean.
 2. **The probe-free structural forward-motion stall** (`cmd_forward_motion_check`,
    issue #199) - a lead (or sub-lead) whose own roster shape (its
    `summary`/`blocker`/`artifact`/`delivery`, plus every active report's

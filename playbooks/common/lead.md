@@ -123,10 +123,13 @@ the second is `blocked`. The first is **parked**.
   the irreversible set: an unverifiable merge, a security-posture call, a dependency
   change, closing out work unfixed, or unusual spend. When genuinely unsure which bucket a
   call falls in, treat it as irreversible and park it.
-- A worker that flips to `stalled` under your own watch cycle has already had one check-in
-  nudge auto-sent and a full cooldown window to respond before the fire ever reaches you -
-  the mechanical layer (`$WINGMAN_BIN/watch-fleet`/`wm-state.py`) is identical at every
-  layer, since it runs the same code path against each owner's own team. Handle a `stalled`
+- A worker that flips to `stalled` under your own watch cycle has already had a check-in
+  nudge auto-sent, retried until its submit is confirmed (bounded), and a full cooldown
+  window to respond after a confirmed send before the fire ever reaches you - or, if the
+  nudge could never be confirmed delivered, its own retry budget exhausted and it escalated
+  on that basis instead; the reason text says which. The mechanical layer
+  (`$WINGMAN_BIN/watch-fleet`/`wm-state.py`) is identical at every layer, since it runs the
+  same code path against each owner's own team. Handle a `stalled`
   fire the same way as a worker's `blocked` question: resolve it yourself if you can (a
   plain follow-up `crew-say`, since you have more context on that worker than your owner
   would); if you cannot and other work remains actionable, park the takeover/close-out
