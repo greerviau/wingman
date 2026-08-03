@@ -7,8 +7,13 @@
 # silently stalled member without false-positiving on busy or parked panes.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+# For wm_composer_text_in/wm_composer_is_empty, used by z1/ae1/ae2 below to
+# assert a real submission against the composer stub fixture (issue #236)
+# rather than grepping tmux scrollback for text that may only have been typed.
+. "$TEST_REPO/bin/lib/common.sh"
 
 WF="$TEST_REPO/bin/watch-fleet"
+COMPOSER_STUB="$TEST_REPO/tests/fixtures/composer-stub.sh"
 export WM_WATCH_INTERVAL=1
 # The watcher blocks until an event fires, so bound every foreground run with
 # wm_timeout and reap any backgrounded one on exit (lib.sh's shared trap; every
@@ -101,23 +106,21 @@ assert_contains "lead wake roster names the lead's member" "$wake5" "w1"
 assert_false "lead wake file excludes the top-level member" "grep -q t1 '$WINGMAN_HOME/wake-lead-x'"
 
 # --- stall fires end-to-end, but only after a single check-in nudge + wait (#61) --
-# An errored/idle agent: a window running a bare sleep - no output, no
-# late-started children, no CPU - with a stale status file. The general (non-
-# api-error) path now gets the same one-shot nudge + wait as the api-error path
-# below, using the generic "checking in" wording since the pane shows no
-# recognized error signature. The wait-before-flip is driven by WM_STALL_IDLE
-# alone (#101) - there is no separate cooldown knob to also set.
+# An errored/idle agent: a window running the composer stub (issue #236 - a
+# real submission, not merely typed-but-unsubmitted text sitting in scrollback,
+# which is exactly the blind spot this suite used to have) with WM_TEST_BUSY=0
+# WM_TEST_SWALLOW=0 so the nudge registers cleanly. The general (non-api-error)
+# path gets the same nudge + wait as the api-error path below, using the
+# generic "checking in" wording since the pane shows no recognized error
+# signature. The wait-before-flip is driven by WM_STALL_IDLE alone (#101) -
+# there is no separate cooldown knob to also set.
 test_new_home
+Z1_MARKER="$(wm_mktemp_file)"
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id z1 --type developer --objective e --repo /tmp --window wm-z1 --session-id s8 >/dev/null
-# trap '' INT: wm_tmux_send_message now sends a defensive Ctrl-C before typing
-# (clears a composer's stray unsubmitted text - issue #157), which a real
-# Claude Code composer absorbs harmlessly since its own raw-mode input handling
-# never lets the tty's SIGINT disposition fire. This bare `sleep` stand-in has
-# no such handling, so without the trap a real SIGINT would kill it outright;
-# the trap (inherited across exec by a child process, same as a real
-# composer's own immunity) keeps it alive to receive the nudge/retry text.
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z1 'trap "" INT; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z1 \
+  "WM_TEST_BUSY=0 WM_TEST_SWALLOW=0 WM_TEST_MARKER='$Z1_MARKER' bash '$COMPOSER_STUB'"
+sleep 1
 wm_age_status z1
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/stall.log" 2>&1 &
@@ -127,8 +130,13 @@ nudgefile="$WINGMAN_HOME/stall-z1.nudged"
 _wait=0
 while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 40 ]; do sleep 1; _wait=$((_wait+1)); done
 assert_true "the generic check-in nudge marker appears" "[ -f '$nudgefile' ]"
-assert_contains "the pane receives the generic check-in message, not the api-error one" \
-  "$(tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-z1")" "Checking in: if you're mid-task"
+assert_contains "the marker records a confirmed nudge" "$(cat "$nudgefile" 2>/dev/null)" "confirmed"
+assert_eq "exactly one SUBMITTED line" "$(grep -c SUBMITTED "$Z1_MARKER")" "1"
+assert_contains "the submission carries the generic check-in message, not the api-error one" \
+  "$(cat "$Z1_MARKER")" "Checking in: if you're mid-task"
+z1_region="$(wm_composer_text_in "$(wm_tmux_pane_text "$WM_TMUX_SESSION:wm-z1")")"
+z1_empty=0; wm_composer_is_empty "$z1_region" && z1_empty=1
+assert_eq "the composer region is empty after delivery" "$z1_empty" "1"
 assert_true "watcher is still blocking right after the nudge (flip is deferred)" "kill -0 $spid"
 assert_contains "the member is still working, not yet flipped stalled" \
   "$(wm_state crew-get --id z1)" '"status": "working"'
@@ -138,8 +146,8 @@ assert_contains "cycle exits with the stalled reason" "$(cat "$WINGMAN_HOME/stal
 assert_contains "the reason notes a check-in nudge already ran" \
   "$(cat "$WINGMAN_HOME/stall.log")" "even after a check-in nudge"
 assert_contains "wake file names the stalled member" "$(cat "$WINGMAN_HOME/wake")" "z1"
-z1_nudge_count="$(tmux capture-pane -p -S -1000 -t "$WM_TMUX_SESSION:wm-z1" | grep -c "Checking in: if you're mid-task")"
-assert_eq "the nudge landed exactly once through to the flip, never re-sent" "$z1_nudge_count" "1"
+assert_eq "the nudge landed exactly once through to the flip, never re-sent" \
+  "$(grep -c SUBMITTED "$Z1_MARKER")" "1"
 kill "$spid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
@@ -487,14 +495,22 @@ assert_contains "the wake file also shows the collapsed bullet" "$wakem" "correl
 
 # --- an api-error nudge fires once, ever, and is never re-sent (#23, #101) ----
 # A pane whose tail matches WM_APIERR_RE, gone idle past STALL_IDLE, but with a
-# busy (silent) child so the execution probe finds activity and never confirms a
-# stall - isolates the nudge behavior from the escalation path below. Sending is
-# now gated purely on the marker file's existence (#101), so there is no
-# cooldown knob to set and no timing window in which a resend could land.
+# busy (silent) sibling process so the execution probe finds activity and never
+# confirms a stall - isolates the nudge behavior from the escalation path
+# below. Sending is now gated on the marker's CONFIRMED state (#236, replacing
+# #101's existence-only gate); the marker's content, not merely its mtime,
+# proves it is never re-sent. The composer stub (issue #236) proves an actual
+# submission was made, not merely that api-error text sat typed in the
+# composer; a CPU-spinning sibling ('while :; do :; done &' before exec'ing
+# into the stub - same pid, so the spinner survives as the stub's own child)
+# keeps the execution probe from ever confirming a stall on its own.
 test_new_home
+AE1_MARKER="$(wm_mktemp_file)"
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id ae1 --type developer --objective h --repo /tmp --window wm-ae1 --session-id sae1 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae1 'trap "" INT; echo "Error: rate limit exceeded (429 Too Many Requests)"; while :; do :; done'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae1 \
+  "WM_TEST_BUSY=0 WM_TEST_SWALLOW=0 WM_TEST_TRANSCRIPT='Error: rate limit exceeded (429 Too Many Requests)' WM_TEST_MARKER='$AE1_MARKER' bash -c 'while :; do :; done & exec bash $COMPOSER_STUB'"
+sleep 1
 wm_age_status ae1
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >/dev/null 2>&1 &
@@ -504,25 +520,30 @@ nudgefile="$WINGMAN_HOME/stall-ae1.nudged"
 _wait=0
 while [ ! -f "$nudgefile" ] && [ "$_wait" -lt 25 ]; do sleep 1; _wait=$((_wait+1)); done
 assert_true "the nudge marker file appears" "[ -f '$nudgefile' ]"
-assert_contains "the pane receives the api-error-specific message, not the generic one" \
-  "$(tmux capture-pane -p -t "$WM_TMUX_SESSION:wm-ae1")" "This is usually transient"
+assert_contains "the marker records a confirmed nudge" "$(cat "$nudgefile" 2>/dev/null)" "confirmed"
+assert_eq "exactly one SUBMITTED line" "$(grep -c SUBMITTED "$AE1_MARKER")" "1"
+assert_contains "the submission carries the api-error-specific message, not the generic one" \
+  "$(cat "$AE1_MARKER")" "This is usually transient"
 assert_true "watcher keeps blocking (CPU activity suppresses the stall flip)" "kill -0 $napid"
 assert_contains "the member stays working, not flipped stalled" \
   "$(wm_state crew-get --id ae1)" '"status": "working"'
-first_mtime="$(uv run --no-project --quiet python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$nudgefile")"
+first_content="$(cat "$nudgefile" 2>/dev/null)"
 sleep 6
-second_mtime="$(uv run --no-project --quiet python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$nudgefile")"
-assert_eq "the nudge marker is never re-touched once it exists" "$first_mtime" "$second_mtime"
-ae1_nudge_count="$(tmux capture-pane -p -S -1000 -t "$WM_TMUX_SESSION:wm-ae1" | grep -c "This is usually transient")"
-assert_eq "the api-error message lands exactly once despite the member never flipping" "$ae1_nudge_count" "1"
+second_content="$(cat "$nudgefile" 2>/dev/null)"
+assert_eq "the nudge marker is never re-touched once it exists" "$first_content" "$second_content"
+assert_eq "the api-error message lands exactly once despite the member never flipping" \
+  "$(grep -c SUBMITTED "$AE1_MARKER")" "1"
 kill "$napid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- an unrecovered api-error escalates to stalled only after a nudge + wait --
 test_new_home
+AE2_MARKER="$(wm_mktemp_file)"
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id ae2 --type developer --objective i --repo /tmp --window wm-ae2 --session-id sae2 >/dev/null
-tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae2 'trap "" INT; echo "Error: connection error (ECONNRESET)"; sleep 600'
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ae2 \
+  "WM_TEST_BUSY=0 WM_TEST_SWALLOW=0 WM_TEST_TRANSCRIPT='Error: connection error (ECONNRESET)' WM_TEST_MARKER='$AE2_MARKER' bash '$COMPOSER_STUB'"
+sleep 1
 wm_age_status ae2
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
   "$WF" >"$WINGMAN_HOME/apierr.log" 2>&1 &
@@ -541,8 +562,11 @@ assert_contains "cycle exits with the stalled reason carrying api-error:" \
 # marker's own existence is no longer evidence of that, by design).
 assert_false "the nudge marker is cleared once the flip actually happens" \
   "[ -f '$WINGMAN_HOME/stall-ae2.nudged' ]"
-ae2_nudge_count="$(tmux capture-pane -p -S -1000 -t "$WM_TMUX_SESSION:wm-ae2" | grep -c "This is usually transient")"
-assert_eq "the nudge landed exactly once through to the flip, never re-sent" "$ae2_nudge_count" "1"
+assert_contains "the marker records a confirmed nudge" \
+  "$(cat "$WINGMAN_HOME/stall-ae2.nudged" 2>/dev/null)" "confirmed"
+assert_eq "exactly one SUBMITTED line" "$(grep -c SUBMITTED "$AE2_MARKER")" "1"
+assert_contains "the submission carries the api-error-specific message, not the generic one" \
+  "$(cat "$AE2_MARKER")" "This is usually transient"
 kill "$aepid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 

@@ -217,4 +217,77 @@ out="$(wm_state stall-check --id n2 --pane-idle 999 --pane-pid "$n2_pid" $NUDGEC
 assert_eq "a fresh self-report before the recheck cancels the flip" "$out" ""
 assert_eq "member stays working" "$(status_of n2)" "working"
 
+# --- #236: --nudge-confirmed selects among the four reason templates ---------
+# --nudge-confirmed only ever changes the reason TEXT of an already-decided
+# flip, never the gates or the flip decision itself - exactly like --api-error,
+# which it sits beside.
+
+# nudge-confirmed 1 (default, explicit and omitted both) + api-error 0: today's
+# original wording, unchanged.
+test_new_home
+wm_state crew-add --id nc1 --type developer --objective x --repo /tmp --window wm-nc1 --session-id snc1 >/dev/null
+wm_state crew-set --id nc1 --status working --summary "digging" >/dev/null
+wm_age_status nc1
+spawn_bg sleep 600
+nc1_pid=$!
+out="$(wm_state stall-check --id nc1 --pane-idle 999 --pane-pid "$nc1_pid" $NUDGECHECK --nudge-age 5)"
+assert_eq "omitting --nudge-confirmed still flips (defaults to 1)" "$out" "stalled"
+assert_contains "default wording: a nudge already ran" \
+  "$(cat "$WINGMAN_HOME/crew/nc1.json")" "even after a check-in nudge"
+
+# nudge-confirmed 0 + api-error 0: the new generic unconfirmed template, naming
+# the attempt count and never claiming a nudge landed.
+test_new_home
+wm_state crew-add --id nc2 --type developer --objective x --repo /tmp --window wm-nc2 --session-id snc2 >/dev/null
+wm_state crew-set --id nc2 --status working --summary "digging" >/dev/null
+wm_age_status nc2
+spawn_bg sleep 600
+nc2_pid=$!
+out="$(wm_state stall-check --id nc2 --pane-idle 999 --pane-pid "$nc2_pid" $NUDGECHECK --nudge-age 5 \
+  --nudge-confirmed 0 --nudge-attempts 3)"
+assert_eq "an unconfirmed nudge still flips 'stalled'" "$out" "stalled"
+nc2_reason="$(cat "$WINGMAN_HOME/crew/nc2.json")"
+assert_contains "reason states the submit was never confirmed" "$nc2_reason" "the submit was never confirmed"
+assert_contains "reason renders the attempt count" "$nc2_reason" "3 time(s)"
+assert_contains "reason still names the takeover/stand-down remedy" "$nc2_reason" "crew-takeover nc2"
+assert_not_contains "reason never claims a nudge already ran" "$nc2_reason" "even after a check-in nudge"
+
+# nudge-confirmed 1 + api-error 1: today's original api-error wording,
+# unchanged.
+test_new_home
+wm_state crew-add --id nc3 --type developer --objective x --repo /tmp --window wm-nc3 --session-id snc3 >/dev/null
+wm_state crew-set --id nc3 --status working --summary "calling the API" >/dev/null
+wm_age_status nc3
+spawn_bg sleep 600
+nc3_pid=$!
+out="$(wm_state stall-check --id nc3 --pane-idle 999 --pane-pid "$nc3_pid" $NUDGECHECK --nudge-age 5 --api-error 1)"
+assert_eq "an api-error stall flips 'stalled'" "$out" "stalled"
+nc3_reason="$(cat "$WINGMAN_HOME/crew/nc3.json")"
+assert_contains "reason carries the api-error: prefix" "$nc3_reason" "api-error:"
+assert_contains "default api-error wording: already nudged once" "$nc3_reason" "Already nudged once"
+assert_contains "reason names the resume remedy" "$nc3_reason" "crew-resume nc3"
+
+# nudge-confirmed 0 + api-error 1: the api-error prefix plus the unconfirmed
+# clause, naming the attempt count and never claiming a nudge landed.
+test_new_home
+wm_state crew-add --id nc4 --type developer --objective x --repo /tmp --window wm-nc4 --session-id snc4 >/dev/null
+wm_state crew-set --id nc4 --status working --summary "calling the API" >/dev/null
+wm_age_status nc4
+spawn_bg sleep 600
+nc4_pid=$!
+out="$(wm_state stall-check --id nc4 --pane-idle 999 --pane-pid "$nc4_pid" $NUDGECHECK --nudge-age 5 \
+  --api-error 1 --nudge-confirmed 0 --nudge-attempts 2)"
+assert_eq "an unconfirmed api-error stall still flips 'stalled'" "$out" "stalled"
+nc4_reason="$(cat "$WINGMAN_HOME/crew/nc4.json")"
+assert_contains "reason carries the api-error: prefix" "$nc4_reason" "api-error:"
+assert_contains "reason states the submit was never confirmed" "$nc4_reason" "the submit was never confirmed"
+assert_contains "reason renders the attempt count" "$nc4_reason" "2 time(s)"
+assert_contains "reason still names the resume remedy" "$nc4_reason" "crew-resume nc4"
+assert_not_contains "reason never claims a nudge already ran" "$nc4_reason" "Already nudged once"
+
+# --nudge-confirmed changes ONLY the reason text: nc1 and nc2 above both flip
+# to "stalled" (the $out assertion) for the identical $NUDGECHECK gate inputs,
+# differing only in --nudge-confirmed/--nudge-attempts and the reason text
+# that follows - so the flip decision itself never depended on the flag.
+
 test_summary
