@@ -1,10 +1,10 @@
 ---
 description: Process one watch-fleet wake and arm the next cycle
-allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/wake*)
+allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/wake*)
 ---
 
 1. **If I was just woken because a `watch-fleet` background task I armed
-   completed:** run `bin/watch-fleet --classify` (bare - no stdin, no pipe)
+   completed:** run `$WINGMAN_BIN/watch-fleet --classify` (bare - no stdin, no pipe)
    and act on the single-line result. Throughout, "the owner-scoped wake
    file" means `~/.wingman/wake` for wingman's own top-level cycle,
    `~/.wingman/wake-<key>` for a lead's own cycle - `bin/watch-fleet
@@ -84,7 +84,7 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
        to prevent."*
      - any other hint (`sigkill-suspected` / `clean-exit-or-sigterm` /
        `hung-or-stale-pidfile`): *"Resume it by running `/watch` again or
-       arming `bin/watch-fleet` directly."*
+       arming `$WINGMAN_BIN/watch-fleet` directly."*
 
    **`healthy` and `spurious` mean literally zero characters of chat output
    this turn - not even a one-line acknowledgment.** "Nothing to report"
@@ -103,8 +103,13 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
 2. **Arm one fresh cycle, but only if none is already live and the failure
    budget was not just exceeded.** Arm it as a Bash call with
    `run_in_background: true`, on its own - not bundled onto another
-   command: `bin/watch-fleet` (or, for a lead, the same invocation, which
-   self-scopes via `$WINGMAN_CREW_ID`). **Never foreground, and never
+   command: `$WINGMAN_BIN/watch-fleet` (or, for a lead, the same invocation,
+   which self-scopes via `$WINGMAN_CREW_ID`) - cwd-independent, unlike a bare
+   `bin/watch-fleet` (issue #214); `$WINGMAN_BIN` is exported for you by
+   `bin/wingman` (or, for a lead, by `bin/spawn-crew`/`bin/crew-resume`). If
+   `$WINGMAN_BIN` is unset (this session was started by running `claude`
+   directly rather than via `bin/wingman`), fall back to `bin/watch-fleet`
+   resolved relative to this repo's own root. **Never foreground, and never
    detached** (`nohup`, `setsid`, a trailing `&`) - `bin/watch-fleet` blocks
    until an event fires, so any way of running it other than as a
    harness-tracked background task wedges this session indefinitely, invisible
@@ -122,9 +127,13 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash(bin/crew-list:*), Read(~/.wingman/w
    re-arming a watcher that has just demonstrated it cannot stay up. If this
    arm instead fails with "refusing to arm - an unclassified ... record is
    still pending" (issue #197), step 1 was skipped or its result was never
-   acted on: run `bin/watch-fleet --classify`, act on what it reports, then
-   retry this arm - the record and the wake file are both left untouched by
-   the refusal, so nothing is lost by classifying late.
+   acted on: run `$WINGMAN_BIN/watch-fleet --classify`, act on what it
+   reports, then retry this arm - the record and the wake file are both left
+   untouched by the refusal, so nothing is lost by classifying late.
+   **After arming, confirm it actually launched** (a live pid) before
+   treating the cycle as armed - `hooks/stop-guard.sh`'s
+   `active_crew > 0 && watcher_up == 0` branch is the existing backstop for a
+   failed arm, by design rather than coincidence.
 3. End the turn once armed (or once step 1 concluded no re-arm is
    warranted). Never call `/watch` twice in the same turn, and never bundle
    its arm onto the tail of another command.
