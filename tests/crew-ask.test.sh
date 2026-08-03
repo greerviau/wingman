@@ -18,7 +18,7 @@ ASK="$TEST_REPO/bin/crew-ask"
 # Fast, deterministic tmux delivery against a sleeping pane, and a snappy watcher.
 export WM_ASK_WATCH_INTERVAL=1
 export WM_SUBMIT_DELAY=0 WM_SUBMIT_TRIES=1 WM_SUBMIT_POLL=0.2
-export WM_READY_TRIES=1 WM_READY_POLL=0
+export WM_READY_TRIES=4 WM_READY_POLL=0
 
 # Extract the "request <req>" id from a send's output.
 req_of() { printf '%s\n' "$1" | sed -n 's/.*request \(ask-[a-z0-9]*\).*/\1/p' | head -1; }

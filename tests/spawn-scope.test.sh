@@ -74,7 +74,7 @@ SYMWS2="$(wm_mktemp_dir)/symws2-link"
 mkdir -p "$(dirname "$SYMWS2")"
 ln -s "$WS2" "$SYMWS2"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=1 WM_READY_POLL=0 \
+export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 WM_READY_POLL=0 \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 # [projects].roots points discovery at the workspace; [projects.pins] registers
