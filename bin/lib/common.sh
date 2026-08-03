@@ -648,36 +648,67 @@ wm_composer_is_empty() {
 # accept input, rather than guessing with a fixed delay. A freshly launched agent
 # paints a splash/prompt and connects MCP servers before it will honour keystrokes;
 # keys sent into that window land but a submit can be swallowed by the startup
-# transition. Readiness is inferred harness-neutrally: the pane is non-empty and
-# byte-stable across two consecutive reads (startup paints, then settles at an idle
-# prompt). An already-idle session (the crew-say path) satisfies this on the first
-# check. Best-effort and bounded (WM_READY_TRIES polls of WM_READY_POLL seconds), so
-# a pane that never settles still proceeds rather than hanging (returns 0, same as
-# an ordinary ready pane - there is nothing more specific to report).
+# transition. Readiness is inferred harness-neutrally: the pane must hold
+# byte-identical for WM_READY_QUIET seconds (startup paints, then settles at an
+# idle prompt) - a duration, not a fixed capture count, so lowering WM_READY_POLL
+# cannot silently shrink the guarantee (issue #214). An already-idle session (the
+# crew-say path) satisfies this well within the bound. Bounded by WM_READY_TRIES
+# polls of WM_READY_POLL seconds each.
 #
 # A pane that settles stable but dialog-shaped (prompt_shape_in matches its tail)
 # is NOT ready for chat text - it is a permission/confirmation/trust prompt, and
 # byte-stability alone cannot tell that apart from an idle chat prompt (a frozen
 # dialog is just as stable as a parked one). Returns 2 in that case so the caller
 # refuses to type into it rather than guessing.
+#
+# A pane that never settles within the budget is NOT ready either - it is not an
+# ambiguous signal to be waved through, it is the strongest available evidence
+# that the target's own turn is actively running (issue #214). Returns 6 in that
+# case rather than falling open to 0; the caller treats 6 as busy, not as ready.
+#
+# Returns: 0 ready and idle, 2 dialog-shaped, 6 never settled (busy).
+
+# Seconds of byte-identical pane required before a pane counts as idle. THE
+# LOAD-BEARING INVARIANT of issue #214's fix: a Claude Code turn never leaves
+# its pane byte-identical this long. Measured on 2.1.220 - a turn-active pane's
+# longest quiet window is ~0.5s (100 samples at 0.5s, longest identical run 2);
+# an idle pane, with or without background work, holds still indefinitely
+# (100/100 and 40/40 identical). 1.5s is 3x that margin. Re-measure before
+# lowering it; see docs/plans/2026-08-03-issue-214-busy-pane-refusal-plan.md.
+WM_READY_QUIET="${WM_READY_QUIET:-1.5}"
+
 wm_tmux_pane_ready() {
   _pr_target="$1"
-  _pr_prev=""; _pr_i=0
+  _pr_prev=""; _pr_i=0; _pr_run=0
   _pr_max="${WM_READY_TRIES:-40}"
+  _pr_poll="${WM_READY_POLL:-0.5}"
+  # Captures needed to span WM_READY_QUIET: n-1 gaps of _pr_poll each, so
+  # n = 1 + ceil(quiet/poll), floored at 2. A zero poll interval (stub-driven
+  # tests) cannot express a duration at all, so it falls back to 4 captures.
+  _pr_need="$(awk -v q="$WM_READY_QUIET" -v p="$_pr_poll" 'BEGIN{
+    if (p+0 <= 0) { print 4; exit }
+    n = q/p; m = int(n); if (m < n) m++; m++; if (m < 2) m = 2; print m }')"
   while [ "$_pr_i" -lt "$_pr_max" ]; do
     _pr_text="$(wm_tmux_pane_text "$_pr_target")"
     _pr_cur="$(printf '%s' "$_pr_text" | cksum)"
-    if [ -n "$_pr_text" ] && [ "$_pr_cur" = "$_pr_prev" ]; then
+    if [ -z "$_pr_text" ]; then
+      _pr_run=0
+    elif [ "$_pr_cur" = "$_pr_prev" ]; then
+      _pr_run=$((_pr_run+1))
+    else
+      _pr_run=1
+    fi
+    if [ "$_pr_run" -ge "$_pr_need" ]; then
       if prompt_shape_in "$(printf '%s\n' "$_pr_text" | tail -n "$WM_PERM_TAIL")"; then
         return 2
       fi
       return 0
     fi
     _pr_prev="$_pr_cur"
-    sleep "${WM_READY_POLL:-0.5}"
+    sleep "$_pr_poll"
     _pr_i=$((_pr_i+1))
   done
-  return 0
+  return 6
 }
 
 # Deliver a message into a live interactive session: wait for the TUI to be ready,
@@ -757,11 +788,13 @@ wm_tmux_pane_ready() {
 # probably-not-delivered, previously indistinguishable from success), 5 if
 # the submit could never be confirmed AND the pane was busy (repainting on
 # its own clock) at some point during the confirm loop - probably queued
-# behind the current turn rather than lost outright. rc 5 is only reachable
-# once composer mode has engaged; the whole-pane-checksum fallback can still
-# only ever return 0 or 3. Callers treating only "nonzero" as failure keep
-# working; callers that care can tell an idle-genuine-swallow (3) apart from
-# a busy-likely-queued one (5).
+# behind the current turn rather than lost outright, 6 if refused because the
+# target's own turn was running and its composer already held unsubmitted
+# text (issue #214) - like rc 2 and rc 4, nothing was typed. rc 5 is only
+# reachable once composer mode has engaged; the whole-pane-checksum fallback
+# can still only ever return 0 or 3. Callers treating only "nonzero" as
+# failure keep working; callers that care can tell an idle-genuine-swallow
+# (3) apart from a busy-likely-queued one (5).
 #
 # Concurrency: the whole type-and-submit sequence holds an mkdir-based
 # per-pane lock (send-<target>.lock under $WM_HOME). Multiple writers
@@ -802,8 +835,42 @@ wm_tmux_send_message() {
 _wm_tmux_send_message_locked() {
   _target="$1"; _text="$2"
   wm_tmux_pane_ready "$_target"
-  [ $? -eq 2 ] && return 2
+  _sm_ready=$?
+  [ "$_sm_ready" -eq 2 ] && return 2
   _sm_clear_keys="${WM_CLEAR_KEYS-C-c}"
+  if [ "$_sm_ready" -eq 6 ]; then
+    # The target's own turn is running. The clear-keystroke would land as a
+    # live interrupt of whatever tool call is in flight (issue #214), so it is
+    # never sent here. The text and the Enter are safe: verified against a live
+    # 2.1.220 pane with a foreground tool call in flight, they queue behind the
+    # current turn and are answered when it ends, with no denial recorded.
+    _sm_busy_text="$(wm_tmux_pane_text "$_target")"
+    # The dialog check cannot be skipped just because the pane never settled -
+    # an animated or repainting dialog would otherwise be typed into, which is
+    # the exact failure the rc-2 refusal exists to prevent.
+    if prompt_shape_in "$(printf '%s\n' "$_sm_busy_text" | tail -n "$WM_PERM_TAIL")"; then
+      return 2
+    fi
+    # A composer that already holds text cannot be cleared (that needs the
+    # keystroke we just ruled out) and must not be typed into (the two messages
+    # would concatenate into one garbled submit - issue #157). Refuse; the
+    # caller queues and the watcher retries.
+    if _sm_busy_region="$(wm_composer_text_in "$_sm_busy_text")" \
+       && ! wm_composer_is_empty "$_sm_busy_region"; then
+      return 6
+    fi
+    _sm_clear_keys=""
+  elif [ -n "$_sm_clear_keys" ]; then
+    # Idle: send the clear-keystroke only if there may be something to clear.
+    # A recognized-and-empty composer has nothing to clear, so the keystroke is
+    # pure downside - it is the one keystroke that can abort a turn if this
+    # pane was mis-read as idle.
+    _sm_idle_text="$(wm_tmux_pane_text "$_target")"
+    if _sm_idle_region="$(wm_composer_text_in "$_sm_idle_text")" \
+       && wm_composer_is_empty "$_sm_idle_region"; then
+      _sm_clear_keys=""
+    fi
+  fi
   if [ -n "$_sm_clear_keys" ]; then
     wm_tmux send-keys -t "$_target" $_sm_clear_keys
     sleep "${WM_CLEAR_DELAY:-0.3}"
@@ -1344,6 +1411,7 @@ wm_outbox_try_redeliver() {
     2) _tr_outcome=dialog-refused ;;
     3|5) _tr_outcome=unconfirmed ;;
     4) _tr_outcome=lock-contended ;;
+    6) _tr_outcome=busy ;;
     *) _tr_outcome=unconfirmed ;;
   esac
   printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" "$_tr_outcome" >> "$WM_HOME/outbox-retry.log"
