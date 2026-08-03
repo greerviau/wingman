@@ -17,6 +17,7 @@ The rules stated in prose across these docs and `CLAUDE.md` are also enforced me
 - `hooks/usage-limit-spawn-guard.sh` denies new crew spawns while a fleet-wide usage-quota window is approaching its cap or the pilot chose to wait for it to reset; both this and the outage guard share their `PreToolUse` machinery (`hooks/lib/spawn_pause_guard.py`) rather than duplicating it.
 - `hooks/artifact-link-guard.sh` and `hooks/artifact-publish-tracker.sh` enforce the Artifact-publish contract - a markdown deliverable is published as a hosted link only when the pilot asked for that and a content scan passes.
 - `hooks/pilot-preferences-guard.sh` denies every other tool call in a fresh run until the onboarding-preference questions are answered (see "The preferences gate" below).
+- `hooks/denial-report-guard.sh` (a `Stop` hook, crew sessions only) blocks the Stop the moment a crew session's own transcript shows a `toolDenialKind: "user-rejected"` tool-call denial it has not already reported - the mechanical backstop for `playbooks/_status-contract.md`'s "a tool call of yours was denied and no rule anywhere tells you what to do about it" case (issue #214). `user-rejected` is the one denial kind that carries no remedy of its own (unlike `permission-rule`, which carries the denying hook's own text, or `automode-blocked`); it covers both a live interrupt of an in-flight tool call and an ungranted permission in an unattended session, and the block names which one occurred. Deduped per (crew id, denial record uuid) via `$WINGMAN_HOME/denial-seen-<id>.json`, so a given denial only ever blocks one Stop. Fails **open** on any parse/IO problem - the opposite of this repo's fail-closed guards, since this gates ending a turn rather than an action that must not happen.
 
 Not a hook, but the same "mechanical, not prose" discipline: `bin/spawn-crew`, `bin/crew-takeover`, and `bin/crew-resume` all bake a `claudeMdExcludes` entry (via the shared `wm_claude_md_excludes()` helper) into every crew launch, unconditionally, so wingman's own root `CLAUDE.md` - the orchestrator's own first-person persona - never auto-loads into a crew session's context. This is the mechanical counterpart to the `TARGET_IS_WM_REPO`-gated prose disclaimer (issue #69) `bin/spawn-crew` also injects into a crew member's system prompt: the disclaimer tells a member to disregard the file if it sees it, while this exclusion stops it from being loaded at all (issue #213).
 
@@ -60,6 +61,7 @@ Most guards ship with this repo, but several must be registered in the user-leve
 - `hooks/api-outage-spawn-guard.sh` — pauses new spawns during a fleet-wide outage.
 - `bin/lib/usage-statusline.py` (as the `statusLine` capture command) + `hooks/usage-limit-spawn-guard.sh` — the usage-limit-quota detection pair.
 - `hooks/no-merge-guard.sh` + `hooks/merge-attribution-tracker.sh` — the merge-authorization pair.
+- `hooks/denial-report-guard.sh` — the denied-tool-call backstop, for every crew session regardless of which repo it launches in.
 
 ## Checkout freshness (advisory, not a hook)
 
