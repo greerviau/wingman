@@ -1124,6 +1124,10 @@ for tid in ids:
     # is already exactly where it is supposed to be. Both then flow through the
     # normal needs-attention/fire path below.
     #
+    # A `working` member holding a late-started descendant (an armed watcher,
+    # an in-flight tool shell) is skipped by both stages - it is demonstrably
+    # alive, so neither the nudge nor the flip applies (issue #234).
+    #
     # review and stalled are also pulled into this same pane-capture loop
     # (issue #96), but only for Remote Control connection-state tracking - see
     # the review|stalled continue below, which skips them past every
@@ -1354,6 +1358,33 @@ for r in data:
           _nudge_msg="An API/connectivity error appears to have interrupted your last turn (rate limit, network blip, or a brief Anthropic-side outage). This is usually transient - please retry your last action."
         else
           _nudge_msg="Checking in: if you're mid-task, keep going. If you're stuck, unstick yourself and continue."
+        fi
+        # issue #234: the check-in nudge below is stage 1 of an escalation that
+        # wm_state stall-check (stage 2, at the bottom of this loop body) has
+        # already declined for a member whose pane tree holds a late-started
+        # descendant - an armed watcher, an in-flight tool shell. A lead parked
+        # on its own watch-fleet/Stop-hook chain is exactly that shape, by
+        # design, for as long as its delegates work. Nudging it types into a
+        # correctly-parked session and burns one of its turns for an escalation
+        # that cannot happen, so ask the same question stage 2 asks, before
+        # typing rather than after, and skip the whole episode for this poll.
+        #
+        # Placed AFTER api_error_check on purpose: _OUTAGE_API_SIGNALS must
+        # still count this member for the fleet-wide outage state machine (#23)
+        # - only the keystroke is suppressed, never the observation. The probe
+        # is branch (a) only (see cmd_liveness_probe), so it answers 'alive' for
+        # a strict subset of what stage 2 refuses: this can never silence a
+        # member that would otherwise have been escalated.
+        #
+        # `continue` also skips this poll's stall-check call, which would have
+        # re-run the same probe and returned without flipping - so the net cost
+        # for an exempt member is one subprocess swapped for another. (It saves
+        # no sleep: _probe_execution returns at branch (a) before it ever
+        # reaches its sampling sleep, so an exempt member's stall-check call
+        # never slept either.)
+        if [ -n "$_pid" ] && [ "$(wm_state liveness-probe --pane-pid "$_pid" \
+             --root-grace "$STALL_ROOT_GRACE" 2>/dev/null)" = alive ]; then
+          continue
         fi
         _idkey="$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_')"
         _nudgefile="$WM_HOME/stall-$_idkey.nudged"

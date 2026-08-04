@@ -389,6 +389,25 @@ def parent_of(record):
     return record.get("parent") or ""
 
 
+def _active_report_count(cid):
+    """How many of cid's direct reports are currently live (merged status in
+    LIVE_STATES). This is the same population cmd_forward_motion_check selects
+    for its own candidacy test (see its `children` filter) - kept as a separate
+    six-line read rather than a shared scan so this can be called from the
+    stall-flip path without reshaping #199's hot loop; if the definition of
+    'active report' ever changes, both sites must move together.
+
+    Today only a `lead` ever has reports at all (the depth cap in
+    playbooks/common/lead.md forbids spawning managers), so this is the
+    type-free way to ask 'is this a manager with work in flight' - and it stays
+    correct if that cap is ever relaxed."""
+    n = 0
+    for r in load_roster():
+        if parent_of(r) == cid and merged(r).get("status") in LIVE_STATES:
+            n += 1
+    return n
+
+
 def descendants_inclusive(roster, root_id):
     """The set of ids for `root_id` and every member transitively owned by it.
     Following the `parent` chain, so standing down a lead reaps its whole
@@ -1471,6 +1490,28 @@ def _longest_running_descendant(root_pid, root_grace):
     return best
 
 
+def cmd_liveness_probe(args):
+    """Print 'alive' iff --pane-pid's process tree holds a descendant that
+    started more than --root-grace seconds after the root - _probe_execution's
+    branch (a), exposed as a standalone read-only question so bin/watch-fleet
+    can ask it BEFORE deciding to type a check-in nudge into a pane (issue
+    #234), instead of only afterwards via cmd_stall_check's own probe.
+
+    Deliberately branch (a) only: branch (b) (summed cputime delta over a
+    --probe-gap sleep) would make this call block for seconds inside the
+    watcher's per-member loop, and the population it alone would catch - a
+    member burning CPU with no late-started descendant - repaints its pane and
+    so never reaches the idle threshold that nominates a nudge candidate in the
+    first place. The consequence is that this answers 'alive' for a strict
+    SUBSET of the members cmd_stall_check refuses to flip, which is the
+    property the caller depends on: suppressing a nudge can never suppress an
+    escalation that would otherwise have happened.
+
+    Takes no --id: the question is about a process tree, not a crew record, and
+    nothing here reads or writes any state file."""
+    print("alive" if _longest_running_descendant(args.pane_pid, args.root_grace) else "", end="")
+
+
 def _stamp_nudged_at(cid):
     """Stamp nudged_at = now() onto cid's status file the moment bin/watch-
     fleet passes --just-nudged 1 to cmd_stall_check (#155 fix 1) - the same
@@ -1686,6 +1727,29 @@ def cmd_stall_check(args):
                           "be wedged, so it most likely never saw the nudge at all. Inspect with "
                           "`bin/crew-takeover %s` or stand down with `bin/crew-standdown %s`."
                           % (int(args.threshold), nudge_attempts, args.id, args.id))
+        # issue #234: the templates above all describe a member whose own agent
+        # is the suspect. For a member that still owns live reports that
+        # diagnosis is very likely wrong - the observed silence is its own wake
+        # chain (its armed watcher, its Stop-hook re-arm) having died over a
+        # sub-crew nobody has closed out - and so is the takeover/stand-down
+        # remedy they name: a crew-say nudge makes it re-arm and pick its own
+        # crew back up, with no session lost. Appended to whichever template was
+        # chosen, rather than added as further template variants, so this
+        # composes with the api-error and undelivered-nudge wordings instead of
+        # multiplying them.
+        #
+        # "live", never "running"/"progressing": LIVE_STATES spans working,
+        # blocked, review and stalled, so a report counted here may be parked
+        # awaiting a verdict rather than doing anything. This clause exists to
+        # stop a reason text asserting more than the evidence supports; it must
+        # not commit the same error one level down.
+        _reports = _active_report_count(args.id)
+        if _reports:
+            reason += (" It still owns %d live report(s) that nobody has closed "
+                       "out: the likely failure is this member's own wake chain "
+                       "(a dead watcher or a missed re-arm), not its agent - try "
+                       "`bin/crew-say %s <nudge>` first, which makes it re-arm and "
+                       "resume supervising them." % (_reports, args.id))
         if prior:
             reason += " (last summary: %s)" % prior
 
@@ -3567,6 +3631,14 @@ def build_parser():
     # many times a submit was attempted, not just that one was.
     a.add_argument("--nudge-attempts", type=int, default=0, dest="nudge_attempts")
     a.set_defaults(fn=cmd_stall_check)
+
+    # Read-only exposure of cmd_stall_check's own branch-(a) proof-of-life
+    # probe (issue #234), so bin/watch-fleet can ask the same question BEFORE
+    # typing a check-in nudge into a pane, not only afterwards via stall-check.
+    a = sub.add_parser("liveness-probe")
+    a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
+    a.add_argument("--root-grace", type=int, default=30, dest="root_grace")
+    a.set_defaults(fn=cmd_liveness_probe)
 
     # Foreground-watcher wedge detection (issue #202, layer B): flips a
     # 'working' OR 'blocked' member to 'stalled' once its pane has repainted
