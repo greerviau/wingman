@@ -145,3 +145,13 @@ and, **only** if the prior decision was "wait" (or the reset arrived before the
 pilot answered at all), note that the fleet can resume normal spawning - no
 manual restart needed, this is fully automatic. A "continue anyway" decision
 resets silently with no fire at all, so there is nothing to announce there.
+
+## Other incidents (not a `watch-fleet` fire)
+
+### A guard hook is not firing
+
+Check registration first, before suspecting the hook's own matching logic: `bin/lib/sync-user-hooks.py --check --report --settings ~/.claude/settings.json` (from the wingman repo) lists every guard the manifest (`bin/lib/user-hooks.json`) expects that is not currently registered in user-level `settings.json`. Since issue #241, every session-creation path (`bin/wingman`, `bin/spawn-crew`, `bin/crew-resume`) reconciles this automatically and fails closed if it can't, so an unregistered guard here means either a checkout old enough to predate the manifest itself, or a settings file the reconciler could not parse. A registration written mid-run never retrofits an already-running session - Claude Code binds hooks at session start - so the fix is a restart (`systemctl --user restart wingman.service` or equivalent), not just a pull.
+
+### `wingman.service` is active but there is no tmux session
+
+`~/.wingman/last-launch-failure` is the durable trace for this: `bin/wingman`'s systemd unit is `Type=oneshot`/`RemainAfterExit=yes` with `ExecStart=tmux new-session -d`, which succeeds the instant the session exists - before `bin/wingman` itself has done anything - so `systemctl --user status wingman.service` reads `active` regardless of what happens next. If `bin/wingman` then refuses to start (most commonly: it could not reconcile its user-scope guard hooks, see above), its own `wm_die` message goes to a tmux pane that is destroyed moments later along with the session, reaching nobody. If the file is present, `bin/doctor` also surfaces it near the top of its own output. Read it, fix the named problem, then start wingman again - the file is only cleared by a launch that actually succeeds, so its mere presence means the last attempt refused.

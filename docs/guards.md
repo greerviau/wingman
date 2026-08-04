@@ -53,15 +53,22 @@ The two spawn-pause guards (outage, usage-limit) react to the fleet-wide state m
 
 ## Hooks that need user-level settings
 
-Most guards ship with this repo, but several must be registered in the user-level `~/.claude/settings.json` because they fire inside crew sessions whose project root is some other repo entirely. `bin/doctor` offers to register them during onboarding:
+Most guards ship with this repo, but several must be registered in the user-level `~/.claude/settings.json` because they fire inside crew sessions whose project root is some other repo entirely - a project-level entry in this repo's own `.claude/settings.json` never loads there. `bin/lib/user-hooks.json` is the declarative manifest of every one of them; `bin/lib/sync-user-hooks.py` reconciles it against `~/.claude/settings.json`, and **runs automatically, fail-closed, at every point a Claude Code session is created** - `bin/wingman`, `bin/spawn-crew`, and `bin/crew-resume` all reconcile before the session starts, so a merged guard is an active guard with no human step in between (issue #241). `bin/doctor` remains the interactive path: it registers the identical set (still via `bin/lib/install-user-hook.py`) as part of onboarding, and a behavioural test keeps the two from drifting apart.
 
 - `hooks/no-direct-edit-guard.sh` — the delegation guard, for wingman's own top-level session and any lead, regardless of which repo it launches in.
 - `hooks/no-worker-spawn-guard.sh` — the worker-spawn depth-cap guard, for every crew session regardless of which repo it launches in.
 - `hooks/artifact-publish-tracker.sh` + `hooks/artifact-link-guard.sh` — the Artifact-publish contract pair.
-- `hooks/api-outage-spawn-guard.sh` — pauses new spawns during a fleet-wide outage.
-- `bin/lib/usage-statusline.py` (as the `statusLine` capture command) + `hooks/usage-limit-spawn-guard.sh` — the usage-limit-quota detection pair.
 - `hooks/no-merge-guard.sh` + `hooks/merge-attribution-tracker.sh` — the merge-authorization pair.
+- `hooks/pr-open-marker-tracker.sh` — marks every PR a crew member opens with the same attribution marker.
+- `hooks/no-watcher-kill-guard.sh` — denies killing a live `watch-fleet` cycle from any session.
+- `hooks/no-foreground-watcher-guard.sh` — denies a foreground or detached `watch-fleet`/`pr-watch` arm from any session.
+- `hooks/no-interactive-prompt-guard.sh` — denies `AskUserQuestion`/`EnterPlanMode`/`ExitPlanMode` from every crew session.
+- `hooks/api-outage-spawn-guard.sh` — pauses new spawns during a fleet-wide outage.
+- `hooks/usage-limit-spawn-guard.sh` — pauses new spawns while a fleet-wide usage-quota window is approaching its cap. (The other half of this detection pair, `bin/lib/usage-statusline.py` registered as the `statusLine` capture command, is not a hook and is not in the manifest - it stays registered by `bin/doctor` only, since unlike a hook it never changes across pulls.)
+- `hooks/stop-guard-crew.sh` + `hooks/stop-continuity-crew.sh` — extend the `#185` fleet-continuity Stop pair to crew sessions in any repo.
 - `hooks/denial-report-guard.sh` — the denied-tool-call backstop, for every crew session regardless of which repo it launches in.
+
+**If a guard fires late.** `bin/lib/sync-user-hooks.py --check --report --settings ~/.claude/settings.json` lists anything the manifest expects that is not yet registered - the diagnostic for "a guard hook that should be active isn't." A registration written mid-run never retrofits an already-running session; Claude Code binds hooks at session start, so a pilot whose checkout was stale when their session started needs a restart, not just a pull.
 
 ## Checkout freshness (advisory, not a hook)
 
