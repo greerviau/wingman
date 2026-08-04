@@ -73,7 +73,11 @@
 # to outbox-abandoned.log, and a notice is queued to the sender (or, if the
 # sender is itself unreachable, routed up the parent chain into
 # pending-notices[-<owner>], folded into this cycle's own wake file the next
-# time it fires). Wingman's own top-level cycle additionally runs a
+# time it fires) - unless the sender is itself notice-routing-terminal too,
+# in which case the archive and log line are still written but no notice is
+# queued at all: nobody involved could act on it, so it must not be able to
+# fire a full attention wake on its own (issue #230). Wingman's own top-level
+# cycle additionally runs a
 # whole-fleet backstop over every OTHER pending outbox with a live window, so
 # a still-reachable nested member is not left waiting solely on its own
 # lead's watcher. See lib/common.sh's wm_outbox_* helpers for the mechanism.
