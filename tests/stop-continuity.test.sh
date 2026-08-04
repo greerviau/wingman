@@ -357,6 +357,13 @@ while [ "$_armed7c" -lt 2 ] && [ "$_n7c" -lt 100 ]; do
 done
 assert_true "a second armed line appears (the loop re-claimed in place)" "[ '$_armed7c' -ge 2 ]"
 assert_true "the hook is still running - it did not exit 0 and abandon the fleet" "kill -0 $h7c"
+# classify()'s spurious-count write happens-before the re-claim that produces
+# the second $armlog line above, within the hook's own single-threaded
+# control flow - but this test is a third, independent process, and a loaded
+# CI runner can still delay this process's own `cat` past that instant (same
+# class of gap wait_for_content/wait_for_pid_alive above already guard
+# against). Poll instead of asserting immediately.
+wait_for_content "$WINGMAN_HOME/watch-spurious-count" "1"
 assert_eq "the death reached --classify's own forensics (the spurious count advanced to 1)" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "1"
 kill -TERM "$h7c" 2>/dev/null
 wait "$h7c" 2>/dev/null
