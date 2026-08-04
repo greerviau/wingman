@@ -9,9 +9,16 @@
 # This hook's own process is the harness-tracked, long-lived thing under
 # asyncRewake - never a `cmd &`-backgrounded detached child (see
 # docs/architecture.md's wake-loop section for why that pattern cannot wake
-# an idle session at all). It foregrounds bin/watch-fleet for the life of one
-# self-bounded window (well under the harness's own async-hook timeout), then
-# either rewakes with what happened (exit 2) or lets the stop stand (exit 0).
+# an idle session at all). It foregrounds bin/watch-fleet in a loop, one
+# self-bounded window at a time, re-claiming in place across a quiet rollover
+# or an unexpected watch-cycle death rather than ending the turn for either -
+# until its own lifetime budget would be exceeded, the fleet empties, or
+# something genuinely worth reporting happens. Only then does it either
+# rewake with what happened (exit 2) or let the stop stand (exit 0). The
+# lifetime budget self-clamps to this hook's own registered `timeout` (issue
+# #231, see continuity_registered_timeout below) rather than trusting the
+# registration surface to have moved in lockstep - a session already running
+# when a timeout change lands keeps its old, smaller bound until it restarts.
 #
 # Recursion is NOT guarded by stop_hook_active - see the self-owned in-flight
 # marker below and docs/plans/2026-08-02-issue-185-asyncrewake-autoarm-plan.md
@@ -27,6 +34,11 @@ STATE_PY="$REPO/bin/lib/wm-state.py"
 WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
 . "$HERE/lib/watcher-liveness.sh"
+
+# Taken here, before any gate below, so the lifetime budget (see the
+# window/lifetime block ahead of the claim loop) covers the whole invocation
+# rather than only the time actually spent looping.
+hook_start="$(date +%s)"
 
 # 1. Read stdin and discard it. stop_hook_active is deliberately never read -
 # not for gating (the in-flight marker below replaces that) and not for any
@@ -136,6 +148,31 @@ Fleet continuity is fully automatic for this session - do NOT run /watch and do 
   printf '%s' "$_body" | $WM_UV python -c 'import sys,json; print(json.dumps({"decision":"block","reason":sys.stdin.read()}))'
 }
 
+# continuity_registered_timeout <settings_file> <command_marker>
+# Prints the `timeout` of the Stop entry whose command contains
+# <command_marker>, or nothing if the file is missing/unparseable or carries
+# no such entry - never a hard failure, just an empty result the caller
+# folds into its own fallback. Used by the lifetime self-clamp below to read
+# this hook's own registration rather than trust the registration surface
+# (four separate declaration sites - see the plan) to have moved in
+# lockstep.
+continuity_registered_timeout() {
+  $WM_UV python -c '
+import json, sys
+path, marker = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(0)
+for entry in (d.get("hooks") or {}).get("Stop", []) or []:
+    for h in entry.get("hooks") or []:
+        cmd = h.get("command", "")
+        t = h.get("timeout")
+        if marker in cmd and isinstance(t, int):
+            print(t)
+' "$1" "$2" 2>/dev/null
+}
+
 # 3+4. Fast path: no crew in flight, or a live cycle already exists. Also
 # leaves pidfile/beatfile/exitfile/runfile/wakefile/stopfile/suppressedfile/
 # claimlock/inflightfile/claimfailfile set for everything below (see
@@ -149,6 +186,41 @@ if [ "${active_crew:-0}" -eq 0 ] || [ "$watcher_up" = 1 ]; then
 fi
 
 window="${WM_STOP_CONTINUITY_WINDOW:-480}"
+lifetime="${WM_STOP_CONTINUITY_LIFETIME:-$WM_CONTINUITY_LIFETIME_DEFAULT}"
+
+# Self-clamp the lifetime budget against this hook's own registered
+# `timeout` (issue #231). Finding 1 of the companion analysis is that a hook
+# killed AT its own `timeout` has its exit code silently discarded, so
+# trusting the configured lifetime blindly would go dark on exactly the
+# session this exists to protect: Claude Code binds hooks at session start,
+# so a session already running when a timeout change lands keeps its old,
+# smaller bound until it restarts (docs/guards.md).
+#
+# Read BOTH candidate settings files rather than choosing one by
+# WINGMAN_CREW_ID: a crew session whose project root IS this repo loads both
+# the project registration (stop-continuity.sh, in .claude/settings.json)
+# and the user one (stop-continuity-crew.sh, in ~/.claude/settings.json),
+# and either could be the stale one mid-migration - clamp to the minimum
+# timeout found across whichever entries actually exist, so the result never
+# depends on which registration happened to invoke this process (unknowable
+# from inside the script - see hooks/stop-continuity-crew.sh's own header).
+# A file that yields nothing (missing, unparseable, no matching entry)
+# simply contributes nothing; if NEITHER yields a value at all, fall back to
+# the historical 600 rather than the configured default - "the fix silently
+# does nothing" is a far better failure than "continuity silently dies".
+_continuity_project_settings="${WM_PROJECT_SETTINGS:-$REPO/.claude/settings.json}"
+_continuity_user_settings="${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"
+_registered_timeout=""
+for _t in \
+  "$(continuity_registered_timeout "$_continuity_project_settings" "stop-continuity.sh")" \
+  "$(continuity_registered_timeout "$_continuity_user_settings" "stop-continuity-crew.sh")"; do
+  [ -n "$_t" ] || continue
+  if [ -z "$_registered_timeout" ] || [ "$_t" -lt "$_registered_timeout" ]; then
+    _registered_timeout="$_t"
+  fi
+done
+_lifetime_cap=$(( ${_registered_timeout:-600} - WM_CONTINUITY_TIMEOUT_MARGIN ))
+[ "$lifetime" -gt "$_lifetime_cap" ] && lifetime="$_lifetime_cap"
 
 # 5. Self-owned, time-bounded in-flight marker. Not "pid alive" alone - "pid
 # alive AND recorded within $window plus a margin" - since this hook's own
@@ -242,138 +314,220 @@ case "$classify_out" in
     : ;;   # unrecognized output - defensively proceed to claim rather than silently stopping
 esac
 
-# 10. Claim, foreground, self-bounded - with the referee recording its own
-# kill, a wait-time snapshot, and a reap loop.
+# 10+11. Claim, foreground, self-bounded, account for the outcome - looped in
+# place (issue #231) so a quiet rollover or an unexpected watch-cycle death
+# re-claims immediately instead of ending the turn. Truncated once here, then
+# appended to per iteration (armlog="$WM_HOME/stop-autoarm..." stays below
+# the gates above deliberately - hoisting it earlier would wipe the log on
+# every gated exit, including every Stop event a spurious-repeated standdown
+# holds, and that log is exactly what the standdown's own remedy text sends
+# the pilot to read).
 armlog="$WM_HOME/stop-autoarm${_okey:+-$_okey}.log"
 : > "$armlog"
-WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --owner "$OWNER" >"$armlog" 2>&1 &
-child=$!
-# The referee's own stdout/stderr are explicitly redirected to /dev/null -
-# never left to inherit this hook's own stdout, which under asyncRewake (or a
-# test capturing this hook via a pipe/command substitution) is a pipe. An
-# unredirected referee (or its own forked `sleep` child, which survives an
-# unexpected referee death since a dying parent does not take its children
-# down with it) would otherwise hold that pipe's write end open indefinitely,
-# so the reader on the other end would never see EOF - this hook's own final
-# JSON write in rewake() below would then never be observed by its caller,
-# even though the hook itself has long since produced it and moved on.
-( sleep "$window"
-  ( set -C; printf 'rolled\n' > "$exitfile" ) 2>/dev/null
-  kill -TERM "$child" 2>/dev/null
-) >/dev/null 2>&1 &
-referee=$!
-# term_forwarded records - as a plain local fact this hook already knows,
-# not evidence read back from $child's own side-effects - that an external
-# TERM/INT reached THIS hook and was forwarded. See the accounting step
-# below for why $child's own exit code and $pidfile's own content are both
-# unreliable once this trap has fired.
-term_forwarded=0
-trap 'term_forwarded=1; kill -TERM "$child" "$referee" 2>/dev/null' TERM INT
 
-wait "$child" 2>/dev/null; child_rc=$?
-exitfile_snapshot="$(cat "$exitfile" 2>/dev/null)"   # authoritative - see the plan's own rationale
+# child/referee are read by the trap below across the whole loop, so they are
+# declared once, outside it, and the trap installed once too - re-installing
+# it per iteration would be harmless but pointless. Left unquoted in the trap
+# body (unlike the claim itself) so an iteration boundary, where both are
+# momentarily "", expands to no argument rather than an empty-string one.
+child=""; referee=""; term_forwarded=0
+trap 'term_forwarded=1; kill -TERM $child $referee 2>/dev/null' TERM INT
 
-while kill -0 "$child" 2>/dev/null; do sleep 0.1; done
-kill "$referee" 2>/dev/null; wait "$referee" 2>/dev/null
+while :; do
+  # Refresh the in-flight marker every iteration, not just at entry: the
+  # freshness bound wm_watcher_up's caller enforces is $window+60, and this
+  # invocation can now live many multiples of $window - see "The concurrency
+  # guard across a long lifetime" in the plan for why a stamp fixed at entry
+  # would go stale mid-lifetime and let a concurrent instance in.
+  printf '%s\n' "$$" > "$inflightfile"
+  _body=""; _mode=""; _continue=0; _quiet=""
 
-if [ -n "$exitfile_snapshot" ]; then
-  printf '%s\n' "$exitfile_snapshot" > "$exitfile"
-else
-  rm -f "$exitfile"
-fi
+  # Re-claiming here is only safe because the PREVIOUS iteration's
+  # --classify (below) already consumed $exitfile - bin/watch-fleet itself
+  # refuses to arm over an unclassified exit record, and this iteration's own
+  # referee writes "rolled" under `set -C`. A cross-file invariant with a
+  # silent failure mode if --classify ever stopped consuming it.
+  WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --owner "$OWNER" >>"$armlog" 2>&1 &
+  child=$!
+  # The referee's own stdout/stderr are explicitly redirected to /dev/null -
+  # never left to inherit this hook's own stdout, which under asyncRewake (or
+  # a test capturing this hook via a pipe/command substitution) is a pipe. An
+  # unredirected referee (or its own forked `sleep` child, which survives an
+  # unexpected referee death since a dying parent does not take its children
+  # down with it) would otherwise hold that pipe's write end open
+  # indefinitely, so the reader on the other end would never see EOF - this
+  # hook's own final JSON write in rewake() below would then never be
+  # observed by its caller, even though the hook itself has long since
+  # produced it and moved on.
+  ( sleep "$window"
+    ( set -C; printf 'rolled\n' > "$exitfile" ) 2>/dev/null
+    kill -TERM "$child" 2>/dev/null
+  ) >/dev/null 2>&1 &
+  referee=$!
 
-# 11. Account for the outcome, and check unwaited here - after the window,
-# not before it (see the plan's "unwaited is checked here" section for why:
-# checking it pre-claim blocked the claim entirely, duplicated
-# hooks/stop-guard.sh's own report, and covered none of the gap it was
-# introduced for).
-#
-# A nonzero $child_rc with no $exitfile is NOT by itself proof the child
-# never claimed - the identical pair also results from a child that claimed
-# and armed successfully, then died some other way (a raw SIGKILL, an OOM
-# kill, an unhandled crash, or a TERM/INT this hook itself received and
-# forwarded - none of which ever write $exitfile). Three independent,
-# imperfect-alone signals are combined below because each one's own gap is
-# closed by at least one of the other two:
-#
-# - $term_forwarded is set by this hook's own trap the instant an external
-#   TERM/INT reaches THIS process (see above) - a plain local fact, not
-#   evidence read back from $child's own side-effects, so it is exact
-#   regardless of how far $child itself had gotten. But $child_rc itself is
-#   NOT reliable evidence on its own once this trap has fired: the
-#   in-flight `wait "$child"` gets interrupted and returns 128+15=143 - a
-#   status reflecting that the WAIT was interrupted, not $child's own
-#   actual exit code - even on the fully ordinary path where $child's own
-#   INT/TERM trap ran cleanly (`rm -f "$PIDFILE"; exit 0`) moments later.
-# - $pidfile still naming $child's own pid is exact for a child that
-#   claimed and was then SIGKILL'd (or crashed) before it could run its own
-#   cleanup trap - watch-fleet writes $pidfile unconditionally as its first
-#   act after passing the claim, before its blocking loop. But it is blind
-#   to a child that claimed and then died via its OWN clean INT/TERM trap
-#   (forwarded or not): that trap's `rm -f "$PIDFILE"` clears the one piece
-#   of evidence this check depends on, indistinguishable by content alone
-#   from "never claimed at all".
-# - $armlog containing "armed pid=$child" is watch-fleet's own unambiguous,
-#   append-only confirmation that the claim succeeded, printed once,
-#   immediately after the claim - a claim that never got that far (still
-#   contending in the mkdir/retry loop, or wm_die's own failure text) never
-#   produces it. But there is a narrow window, between $pidfile's own write
-#   and this confirmation line a few statements later (release_claim, the
-#   beacon touch, the trap installation itself), where a SIGKILL landing
-#   inside it leaves $pidfile naming $child with no confirmation line yet -
-#   exactly the gap the $pidfile check above closes.
-#
-# None of the three is sufficient alone; together they leave no gap a
-# genuinely-armed child's own death - by any mechanism - can fall through.
-if [ ! -f "$exitfile" ] && [ "$child_rc" -ne 0 ] \
-  && [ "$term_forwarded" -ne 1 ] \
-  && [ "$(cat "$pidfile" 2>/dev/null)" != "$child" ] \
-  && ! grep -q "armed pid=$child " "$armlog" 2>/dev/null; then
-  touch "$claimfailfile"
-  _body="Automatic watcher re-arm failed: bin/watch-fleet did not claim within the continuity window. Last output:
+  wait "$child" 2>/dev/null; child_rc=$?
+  exitfile_snapshot="$(cat "$exitfile" 2>/dev/null)"   # authoritative - see the plan's own rationale
+
+  while kill -0 "$child" 2>/dev/null; do sleep 0.1; done
+  kill "$referee" 2>/dev/null; wait "$referee" 2>/dev/null
+
+  if [ -n "$exitfile_snapshot" ]; then
+    printf '%s\n' "$exitfile_snapshot" > "$exitfile"
+  else
+    rm -f "$exitfile"
+  fi
+
+  # Captured before clearing $child/$referee, which happens immediately here
+  # rather than after the accounting below that still needs $_reaped_child:
+  # the trap fires on whatever $child/$referee currently name, and the gap
+  # between this reap and the next iteration's spawn (the accounting, the
+  # unwaited check, the budget check - all real wall-clock time) is exactly
+  # where a stale pid the OS may have already recycled would otherwise be
+  # targeted.
+  _reaped_child="$child"
+  child=""; referee=""
+
+  # Account for the outcome. A nonzero $child_rc with no $exitfile is NOT by
+  # itself proof the child never claimed - the identical pair also results
+  # from a child that claimed and armed successfully, then died some other
+  # way (a raw SIGKILL, an OOM kill, an unhandled crash, or a TERM/INT this
+  # hook itself received and forwarded - none of which ever write
+  # $exitfile). Three independent, imperfect-alone signals are combined below
+  # because each one's own gap is closed by at least one of the other two:
+  #
+  # - $term_forwarded is set by this hook's own trap the instant an external
+  #   TERM/INT reaches THIS process (see above) - a plain local fact, not
+  #   evidence read back from the child's own side-effects, so it is exact
+  #   regardless of how far the child itself had gotten. But $child_rc itself
+  #   is NOT reliable evidence on its own once this trap has fired: the
+  #   in-flight `wait` gets interrupted and returns 128+15=143 - a status
+  #   reflecting that the WAIT was interrupted, not the child's own actual
+  #   exit code - even on the fully ordinary path where the child's own
+  #   INT/TERM trap ran cleanly (`rm -f "$PIDFILE"; exit 0`) moments later.
+  # - $pidfile still naming the reaped child's own pid is exact for a child
+  #   that claimed and was then SIGKILL'd (or crashed) before it could run
+  #   its own cleanup trap - watch-fleet writes $pidfile unconditionally as
+  #   its first act after passing the claim, before its blocking loop. But it
+  #   is blind to a child that claimed and then died via its OWN clean
+  #   INT/TERM trap (forwarded or not): that trap's `rm -f "$PIDFILE"` clears
+  #   the one piece of evidence this check depends on, indistinguishable by
+  #   content alone from "never claimed at all".
+  # - $armlog containing "armed pid=<child>" is watch-fleet's own
+  #   unambiguous, append-only confirmation that the claim succeeded, printed
+  #   once, immediately after the claim - a claim that never got that far
+  #   (still contending in the mkdir/retry loop, or wm_die's own failure
+  #   text) never produces it. But there is a narrow window, between
+  #   $pidfile's own write and this confirmation line a few statements later
+  #   (release_claim, the beacon touch, the trap installation itself), where
+  #   a SIGKILL landing inside it leaves $pidfile naming the child with no
+  #   confirmation line yet - exactly the gap the $pidfile check above
+  #   closes.
+  #
+  # None of the three is sufficient alone; together they leave no gap a
+  # genuinely-armed child's own death - by any mechanism - can fall through.
+  if [ ! -f "$exitfile" ] && [ "$child_rc" -ne 0 ] \
+    && [ "$term_forwarded" -ne 1 ] \
+    && [ "$(cat "$pidfile" 2>/dev/null)" != "$_reaped_child" ] \
+    && ! grep -q "armed pid=$_reaped_child " "$armlog" 2>/dev/null; then
+    touch "$claimfailfile"
+    _body="Automatic watcher re-arm failed: bin/watch-fleet did not claim within the continuity window. Last output:
 $(tail -n 20 "$armlog")
 Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
-  _mode="manual-remedy"
-else
-  classify_out="$(WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --classify --owner "$OWNER" 2>/dev/null)"
-  case "$classify_out" in
-    rolled)
-      _body="Fleet continuity window rolled - no crew event yet. A fresh watch cycle is arming automatically."
-      _mode="auto" ;;
-    fire|remote-control-dropped)
-      _body="$(compose_attention_reason)"
-      _mode="auto" ;;
-    stopped)
-      printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
-      _body=""; _mode="" ;;
-    healthy)
-      _body=""; _mode="" ;;
-    spurious-repeated\ *)
-      _sr_reason="$(spurious_repeated_reason "$classify_out")"
-      {
-        printf '%s\n' "${WINGMAN_RUN_ID:-}"
-        printf '%s\n' "$_sr_reason"
-      } > "$suppressedfile"
-      _body="$_sr_reason"
-      _mode="manual-remedy" ;;
-    spurious\ *|"")
-      _body=""; _mode="" ;;
-    *)
-      _body=""; _mode="" ;;
-  esac
-fi
+    _mode="manual-remedy"
+  else
+    classify_out="$(WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --classify --owner "$OWNER" 2>/dev/null)"
+    case "$classify_out" in
+      rolled)
+        # Continue in place - no crew event, nothing to report yet. _mode is
+        # set here even though _body stays empty, so that IF the unwaited
+        # check below forces a break, the rewake carries "auto" (continuity
+        # IS still re-arming) rather than the unwaited branch's own
+        # "manual-remedy" default (which is only right when continuity is
+        # NOT re-arming - see that check for the full reasoning).
+        _continue=1; _quiet="rolled"; _mode="auto" ;;
+      fire|remote-control-dropped)
+        _body="$(compose_attention_reason)"
+        _mode="auto" ;;
+      stopped)
+        printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
+        _body=""; _mode="" ;;
+      healthy)
+        _body=""; _mode="" ;;
+      spurious-repeated\ *)
+        _sr_reason="$(spurious_repeated_reason "$classify_out")"
+        {
+          printf '%s\n' "${WINGMAN_RUN_ID:-}"
+          printf '%s\n' "$_sr_reason"
+        } > "$suppressedfile"
+        _body="$_sr_reason"
+        _mode="manual-remedy" ;;
+      spurious\ *)
+        # Continue in place - a deliberate behavior change (see the plan's
+        # "spurious continuing is a deliberate behavior change"): a
+        # watch-fleet child that died mid-window re-claims immediately rather
+        # than abandoning the fleet until the model's own next natural turn.
+        # Cannot spin: --classify's own consecutive-failure budget trips
+        # spurious-repeated (above) on the third consecutive death.
+        _continue=1; _quiet="spurious"; _mode="auto" ;;
+      "")
+        _body=""; _mode="" ;;
+      *)
+        _body=""; _mode="" ;;
+    esac
+  fi
 
-_unwaited_text="$(wm_unwaited_reason "$OWNER")"   # empty if every pending ask has a live waiter
-if [ -n "$_unwaited_text" ]; then
-  if [ -n "$_body" ]; then
-    _body="$_body
+  # Checked here - after the window, not before it - same reasoning as
+  # today's single-shot version: checking pre-claim blocked the claim
+  # entirely and duplicated hooks/stop-guard.sh's own report.
+  _unwaited_text="$(wm_unwaited_reason "$OWNER")"   # empty if every pending ask has a live waiter
+  if [ -n "$_unwaited_text" ]; then
+    _continue=0
+    if [ -n "$_body" ]; then
+      _body="$_body
 
 $_unwaited_text"
-  else
-    _body="$_unwaited_text"
-    _mode="manual-remedy"
+    else
+      _body="$_unwaited_text"
+      # Only defaulted when unset (see the `rolled`/`spurious` case above):
+      # right for healthy/stopped, where continuity is NOT re-arming and the
+      # "do NOT arm a watch-fleet cycle" sentence would be a lie; wrong for
+      # rolled/spurious, where it IS re-arming and wm_unwaited_reason's own
+      # remedy asks the model to arm a DIFFERENT background task
+      # (bin/crew-ask await).
+      [ -n "$_mode" ] || _mode="manual-remedy"
+    fi
   fi
-fi
+
+  [ "$term_forwarded" -eq 1 ] && _continue=0
+  [ "$_continue" -eq 1 ] || break
+
+  # Re-evaluate active_crew exactly as the fast path above does, BEFORE the
+  # budget check below: without this, the loop would keep a cycle armed for
+  # the rest of its lifetime after the last member finished, and checking it
+  # after the budget instead would spend a wake announcing a rollover to a
+  # session whose next invocation would exit immediately at the fast path
+  # anyway.
+  active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --owner "$OWNER" --json 2>/dev/null | $WM_UV python -c 'import sys,json;
+try: print(len(json.load(sys.stdin)))
+except Exception: print(0)')"
+  [ "${active_crew:-0}" -eq 0 ] && break
+
+  # The lifetime budget would be exceeded by another full window - break with
+  # an `auto` rewake naming what actually happened (a clean rollover, or a
+  # re-arm after an unexpected watch-cycle exit - conflating the two would
+  # misreport a killed child as a clean rollover). This is the one remaining
+  # wake on a fully idle fleet, and it is what keeps the chain alive: only a
+  # fresh Stop event can re-invoke an asyncRewake-registered hook.
+  if [ $(( $(date +%s) - hook_start + window )) -gt "$lifetime" ]; then
+    if [ "$_quiet" = "rolled" ]; then
+      _body="Fleet continuity window rolled - no crew event yet. A fresh watch cycle is arming automatically."
+    else
+      _body="Fleet continuity is re-arming after an unexpected watch-cycle exit - nothing to report yet. A fresh watch cycle is arming automatically."
+    fi
+    _mode="auto"
+    break
+  fi
+done
 
 if [ -n "$_body" ]; then
   rewake "$_body" "$_mode"

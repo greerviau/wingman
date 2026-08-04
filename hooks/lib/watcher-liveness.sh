@@ -11,6 +11,18 @@
 # file defines all three near the top, identically) - not re-threaded through
 # every call for that reason.
 
+# The internal claim-wait-account loop's own budget constants (issue #231):
+# how long one hook invocation's lifetime defaults to, the minimum registered
+# `timeout` bin/doctor requires so that lifetime actually fits inside it, and
+# the safety margin the hook clamps its own lifetime below the registered
+# timeout by (see hooks/stop-continuity.sh's own self-clamp). Env-overridable
+# (`:=`, not the functions' own `:-`) so the test suite can exercise the
+# clamp - in particular the margin, whose fixed 300s default cannot otherwise
+# be made to bind within a short test window.
+: "${WM_CONTINUITY_LIFETIME_DEFAULT:=3300}"
+: "${WM_CONTINUITY_TIMEOUT_MIN:=3600}"
+: "${WM_CONTINUITY_TIMEOUT_MARGIN:=300}"
+
 # wm_owner_paths <owner> <wm_home>
 # Derives the owner key once and sets every owner-keyed path both hooks (and
 # bin/watch-fleet's own per-owner block, re-derived independently there - see
