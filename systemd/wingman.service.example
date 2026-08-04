@@ -1,0 +1,77 @@
+# wingman.service.example - reference systemd --user unit for autostarting
+# wingman's top-level orchestrator in a tmux session (issue #250).
+#
+# This is a template, not something wingman installs or manages itself:
+#   cp systemd/wingman.service.example ~/.config/systemd/user/wingman.service
+#   # edit the two /path/to/wingman occurrences below to your actual clone
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wingman.service
+#
+# Requires `loginctl enable-linger $USER` (issue #208) so the user manager -
+# and everything under it, including this unit - survives your SSH session
+# ending; without linger, systemd stops the whole user manager (and this
+# unit with it) ~10s after your last login session closes.
+#
+# --- What this actually supervises ------------------------------------------
+# wingman-service-start (bin/wingman-service-start) creates the wingman-main
+# tmux session the first time this runs, then resolves and writes the tmux
+# SERVER's own pid - not this unit's launcher pid, and not any pane's pid -
+# to PIDFile. Type=forking + PIDFile is what lets systemd adopt that pid as
+# the unit's MainPID, so it actually notices when the tmux server dies -
+# previously (issue #250) ExecStart was `systemd-run --user --scope ...
+# tmux new-session -d ...`, which exited successfully the instant the
+# session was created; the unit then read as active (exited) regardless of
+# whether the tmux server was still alive five days later. Restart=on-failure
+# below is what turns "systemd notices" into "systemd recovers automatically,
+# within seconds" instead of requiring a human to notice and intervene.
+#
+# --- What a stop/restart now means, and why that trade-off is deliberate ----
+# wingman-main and every crew session share ONE tmux server process (there is
+# no per-session -L socket anywhere in this codebase). Tracking that server as
+# MainPID means `systemctl stop|restart wingman.service` now stops the whole
+# server - including any live crew - rather than only the wingman-main
+# session, which is a real behavior change from the untracked unit this
+# replaces. That is accepted, not overlooked: crew state lives in
+# ~/.wingman/crew.json (untouched by this unit or by
+# bin/wingman-service-start - see its own header) and is reconciled against
+# live tmux windows on the next `bin/crew-list`/`bin/watch-fleet` call
+# (issue #209), so a restart surfaces exactly what died - each formerly-live
+# crew member flips to `died` and is resumable via its recorded session id -
+# rather than silently discarding the roster or hiding the loss. The
+# alternative (keep the tmux server undetected by systemd, as before) is what
+# left the orchestrator dead for 4h40m in the incident that opened issue #250.
+#
+# --- Restart-storm guard -----------------------------------------------------
+# If bin/wingman itself is broken (crashes immediately on every launch),
+# StartLimitIntervalSec/StartLimitBurst below stop systemd from retrying
+# forever: after 5 failures inside 5 minutes the unit lands in `failed`
+# instead of looping, which is what `systemctl --user status wingman` will
+# show a human investigating.
+
+[Unit]
+Description=Wingman orchestrator (bin/wingman in the wingman-main tmux session)
+Documentation=file:///path/to/wingman/README.md
+After=default.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=forking
+PIDFile=%t/wingman-main.pid
+Restart=on-failure
+RestartSec=2
+WorkingDirectory=/path/to/wingman
+
+Environment=TERM=xterm-256color
+# claude lives in ~/.local/bin; uv (used by wingman's state engine) usually does too.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# bin/wingman forwards trailing args through to `claude`: -n/--name sets the
+# display name shown in the prompt box, the /resume picker, and the terminal
+# title; --remote-control publishes it to claude.ai/code under the same name.
+# (bin/spawn-crew does both for crew.)
+ExecStart=/path/to/wingman/bin/wingman-service-start wingman-main %t/wingman-main.pid -- \
+    /path/to/wingman/bin/wingman --name Wingman --remote-control Wingman
+
+[Install]
+WantedBy=default.target

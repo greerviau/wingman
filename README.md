@@ -142,5 +142,5 @@ GitHub Actions runs the same suite on every push and PR to `main`.
 - [reporting.md](docs/reporting.md) - report altitude, self-report vs verified state, and the visibility preferences.
 - [guards.md](docs/guards.md) - the mechanical guards, the preferences gate, checkout freshness, and autonomous mode.
 - [runbooks/incidents.md](docs/runbooks/incidents.md) - what to do on a stalled, mass-death, outage, or usage-limit fire.
-- [fleet-resilience.md](docs/fleet-resilience.md) - correlated fleet events, API-outage and usage-limit detection.
+- [fleet-resilience.md](docs/fleet-resilience.md) - correlated fleet events, API-outage and usage-limit detection, and systemd supervision of the tmux server itself.
 - [playbooks.md](docs/playbooks.md) - crew types, categories, and local overrides.
