@@ -7,6 +7,17 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now wingman.service
 #
+# Migrating onto a host that already has an UNSUPERVISED wingman-main tmux
+# server running (installing this for the first time, replacing an older
+# oneshot-style unit): stop whatever started that server and confirm it is
+# actually gone (`tmux has-session -t =wingman-main` fails) before the
+# `enable --now` above, or reboot first. Otherwise ExecStart adopts the
+# pre-existing server's pid into this unit's PIDFile/MainPID tracking - it
+# self-heals on that server's next death (the replacement lands correctly in
+# this unit's own cgroup), but until then `systemctl stop` semantics are not
+# what this file describes, since the tracked server was never actually
+# started by this unit.
+#
 # Requires `loginctl enable-linger $USER` (issue #208) so the user manager -
 # and everything under it, including this unit - survives your SSH session
 # ending; without linger, systemd stops the whole user manager (and this
@@ -21,9 +32,31 @@
 # previously (issue #250) ExecStart was `systemd-run --user --scope ...
 # tmux new-session -d ...`, which exited successfully the instant the
 # session was created; the unit then read as active (exited) regardless of
-# whether the tmux server was still alive five days later. Restart=on-failure
+# whether the tmux server was still alive five days later. Restart=always
 # below is what turns "systemd notices" into "systemd recovers automatically,
 # within seconds" instead of requiring a human to notice and intervene.
+#
+# Restart=always, not Restart=on-failure: systemd treats exit code 0 and
+# SIGTERM/SIGHUP/SIGINT/SIGPIPE as *clean* terminations, so on-failure would
+# NOT restart the two most likely deaths - the tracked server exiting 0 (the
+# ordinary case: bin/wingman/claude exits or crashes, the session ends, and
+# with no other session left on the socket the server exits cleanly) or a
+# plain SIGTERM (a cgroup teardown, an administrative kill, a session-manager
+# cleanup - the still-unidentified mechanism behind issue #218 among them).
+# Both would leave the unit parked at inactive (dead)/Result=success with
+# nothing for a human to notice - the exact silence issue #250 is about, just
+# with a green-looking unit definition in front of it. Since the failure
+# mode is unidentified, the supervisor must not pre-filter on exit status.
+# The trade-off: under Restart=always, exiting the orchestrator by hand from
+# inside tmux brings it back within ~2s too - the way to actually stop it is
+# `systemctl --user stop wingman.service` (still honored: systemd never
+# restarts after an explicit stop). For a unit whose whole purpose is
+# "wingman is up unless someone said otherwise," that is the correct
+# default. What Restart= can never cover, by design, is a stop systemd
+# itself initiates (`systemctl stop`, a shutdown) - that is an intentional,
+# not a missed, non-restart, but it does mean issue #250's option 2 (an
+# external liveness watchdog wholly outside this unit) is not made redundant
+# by this file and remains open as a follow-up.
 #
 # --- What a stop/restart now means, and why that trade-off is deliberate ----
 # wingman-main and every crew session share ONE tmux server process (there is
@@ -58,7 +91,7 @@ StartLimitBurst=5
 [Service]
 Type=forking
 PIDFile=%t/wingman-main.pid
-Restart=on-failure
+Restart=always
 RestartSec=2
 WorkingDirectory=/path/to/wingman
 

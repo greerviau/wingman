@@ -79,7 +79,7 @@ rm -f "$WM_HOME/last-launch-failure"   # the sync succeeded; the file means "las
 _gfc_out="$(REPO_DIR="$WM_REPO" timeout 15 "$WM_LIB/git-freshness-check.sh" 2>/dev/null)"
 case "$_gfc_out" in
   stale:*)
-    wm_warn "this wingman checkout is behind origin/main - guard fixes that have merged are not running here. Run: git -C $WM_REPO pull --ff-only && systemctl --user restart wingman.service"
+    wm_warn "this wingman checkout is behind origin/main - guard fixes that have merged are not running here. Run: git -C $WM_REPO pull --ff-only && systemctl --user restart wingman.service - but check $WM_BIN/crew-list first: a supervised wingman.service (systemd/wingman.service.example) tracks the whole tmux server, so this restart takes every live crew window down with it, not just this session (each flips to 'died' and stays resumable by session id)"
     ;;
 esac
 
