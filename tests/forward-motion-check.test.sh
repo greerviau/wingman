@@ -16,6 +16,23 @@
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
+wm_py() { uv run --no-project --quiet python "$@"; }
+
+# issue #235: the provenance _impose_stall records on every forward-motion flip.
+stall_field() {
+  wm_py -c '
+import json, sys
+d = json.load(open(sys.argv[1])).get("stall") or {}
+v = d.get(sys.argv[2])
+print(v if v is not None else "")
+' "$WINGMAN_HOME/crew/$1.json" "$2"
+}
+
+updated_of() {
+  wm_py -c 'import json,sys; print(json.load(open(sys.argv[1]))["updated"])' \
+    "$WINGMAN_HOME/crew/$1.json"
+}
+
 # --- 1. baseline fire: a lead + 3 developers all review, no reviewer --------
 test_new_home
 wm_state crew-add --id lead1 --type developer --objective x --repo /tmp --window wm-lead1 --session-id s1 >/dev/null
@@ -36,6 +53,23 @@ assert_contains "the reason mentions the active report count" "$reason1" "3 acti
 assert_contains "the reason points at crew-takeover" "$reason1" "bin/crew-takeover lead1"
 assert_contains "the reason points at crew-say for a nudge" "$reason1" "bin/crew-say lead1"
 assert_contains "the reason preserves the lead's own last summary" "$reason1" "(last summary: leading the effort)"
+
+# issue #235: the flip records provenance for cmd_stall_recheck to re-run
+# this SAME detector's own evidence later - source/since/prev_status/
+# prev_summary/children_sig (the reports-only hash, so a later recheck can
+# tell "at least one report has since changed state" without needing the
+# candidate's own summary/blocker/artifact/delivery, which cannot move while
+# latched stalled).
+assert_eq "stall.source records 'forward-motion'" "$(stall_field lead1 source)" "forward-motion"
+assert_eq "stall.prev_status records the pre-flip status" "$(stall_field lead1 prev_status)" "working"
+assert_eq "stall.prev_summary records the pre-flip summary, untruncated" \
+  "$(stall_field lead1 prev_summary)" "leading the effort"
+assert_eq "stall.prev_blocker is null - there was no blocker" "$(stall_field lead1 prev_blocker)" ""
+assert_eq "stall.since matches the record's own updated stamp" \
+  "$(stall_field lead1 since)" "$(updated_of lead1)"
+children_sig1="$(stall_field lead1 children_sig)"
+assert_eq "stall.children_sig is a sha256 hex digest (64 hex chars)" \
+  "$(printf '%s' "$children_sig1" | grep -cE '^[0-9a-f]{64}$')" "1"
 
 # --- 2. silent before the window elapses -------------------------------------
 test_new_home

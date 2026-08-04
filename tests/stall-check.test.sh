@@ -30,6 +30,21 @@ for r in json.load(open(sys.argv[1])):
 ' "$WINGMAN_HOME/crew.json" "$1"
 }
 
+summary_of() {
+  wm_py -c 'import json,sys; print(json.load(open(sys.argv[1]))["summary"])' \
+    "$WINGMAN_HOME/crew/$1.json"
+}
+
+# issue #235: the provenance _impose_stall records on every liveness flip.
+stall_field() {
+  wm_py -c '
+import json, sys
+d = json.load(open(sys.argv[1])).get("stall") or {}
+v = d.get(sys.argv[2])
+print(v if v is not None else "")
+' "$WINGMAN_HOME/crew/$1.json" "$2"
+}
+
 spawn_bg() { "$@" & wm_track "$!"; }
 
 # --- gates: fresh signals never reach the probe -------------------------------
@@ -82,6 +97,25 @@ assert_contains "stall reason preserves the prior summary" \
   "$(cat "$WINGMAN_HOME/crew/p1.json")" "compiling the widget"
 assert_contains "stall reason names the takeover remedy" \
   "$(cat "$WINGMAN_HOME/crew/p1.json")" "crew-takeover p1"
+
+# issue #235: the flip records provenance for cmd_stall_recheck to re-run
+# this SAME detector's own evidence later - source/since/prev_status/
+# prev_summary/prev_blocker, losslessly (prev_summary untruncated even
+# though the reason text above only carries an 80-char prefix of it). The
+# reason text itself is asserted BYTE-IDENTICAL here (not just via the
+# substring checks above), proving _impose_stall changed only what gets
+# WRITTEN onto the record, never the reason-composition logic itself.
+assert_eq "stall.source records 'liveness'" "$(stall_field p1 source)" "liveness"
+assert_eq "stall.prev_status records the pre-flip status" "$(stall_field p1 prev_status)" "working"
+assert_eq "stall.prev_summary records the pre-flip summary, untruncated" \
+  "$(stall_field p1 prev_summary)" "compiling the widget"
+assert_eq "stall.prev_blocker is null - there was no blocker" "$(stall_field p1 prev_blocker)" ""
+assert_eq "stall.since matches the record's own updated stamp" \
+  "$(stall_field p1 since)" "$(wm_py -c 'import json,sys; print(json.load(open(sys.argv[1]))["updated"])' "$WINGMAN_HOME/crew/p1.json")"
+assert_eq "the summary is byte-identical to cmd_stall_check's own template" \
+  "$(summary_of p1)" \
+  "no pane output, status update, running child process, or CPU activity for >5s while status was 'working', even after a check-in nudge - the agent likely errored or went idle. Inspect with \`bin/crew-takeover p1\` or stand down with \`bin/crew-standdown p1\`. (last summary: compiling the widget)"
+
 out="$(wm_state stall-check --id p1 --pane-idle 999 --pane-pid "$idle_pid" $CHECK)"
 assert_eq "second identical call is a silent no-op" "$out" ""
 

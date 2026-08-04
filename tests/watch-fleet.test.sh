@@ -1390,4 +1390,161 @@ rmdir "$_nu1_lock" 2>/dev/null
 unset WM_NUDGE_REFUSED_MAX
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #235: a stalled classification is self-correcting, and silently --
+# Inverted reproduction of the incident behind #235
+# (docs/plans/2026-08-04-issue-235-stalled-latch-plan.md, Appendix): a member
+# is genuinely flipped stalled by a real watch-fleet cycle, comes back to
+# unambiguous life (pane repainting continuously + a late-started descendant -
+# the exact signal that was ABSENT at flip time), and a FRESH real
+# watch-fleet cycle reverts it within a bounded number of polls - silently:
+# the watcher never exits, the wake file is never rewritten, and no fire
+# reason is ever printed naming it - while a genuinely still-dead sibling in
+# the same fleet stays stalled throughout (the recheck never touches a
+# record it has no evidence about). The only durable trace of the revert is
+# a line in stall-recheck.log.
+crew_status() { wm_state crew-get --id "$1" | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])"; }
+crew_updated() { wm_state crew-get --id "$1" | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['updated'])"; }
+
+test_new_home
+RV1_MARKER="$(wm_mktemp_file)"
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+
+# rv1: flipped first, alone (so its own nudge-then-wait timing matches the
+# proven single-candidate budget above, unslowed by any other candidate
+# sharing the same poll cycle) - then recovers.
+wm_state crew-add --id rv1 --type developer --objective e --repo /tmp --window wm-rv1 --session-id srv1 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rv1 \
+  "WM_TEST_BUSY=0 WM_TEST_SWALLOW=0 WM_TEST_MARKER='$RV1_MARKER' bash '$COMPOSER_STUB'"
+sleep 1
+wm_age_status rv1
+
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
+  "$WF" >"$WINGMAN_HOME/rv-p1.log" 2>&1 &
+flip1_pid=$!
+wm_track "$flip1_pid"
+i=0; while kill -0 "$flip1_pid" 2>/dev/null && [ "$i" -lt 70 ]; do sleep 1; i=$((i+1)); done
+kill "$flip1_pid" 2>/dev/null
+assert_contains "rv1 flipped to stalled" "$(wm_state crew-get --id rv1)" '"status": "stalled"'
+
+# Classify + ack the pending fire (matching the plan's own repro) so the next
+# cycle genuinely POLLS this still-pending event instead of re-firing on arm.
+"$WF" --classify >/dev/null 2>&1
+rv1_updated_flip="$(crew_updated rv1)"
+wm_state ack --id rv1 --updated "$rv1_updated_flip" >/dev/null
+
+# dead2: a genuinely idle control that never recovers - added only now (after
+# rv1's own flip is settled and acked) so it does not slow down rv1's own
+# single-candidate flip timing above, and flipped by its own dedicated cycle
+# for the identical reason. Backed by the SAME composer-stub fixture as rv1
+# (not a bare `sleep 600`, and confirmed empirically why): a 'working'
+# candidate always gets a check-in nudge typed into its pane before stall-
+# check is even allowed to flip it, and a bare `sleep` has no composer to
+# absorb that - the nudge's own keystrokes kill the pane's foreground
+# process outright, closing the window and producing 'died', not 'stalled'.
+DEAD2_MARKER="$(wm_mktemp_file)"
+wm_state crew-add --id dead2 --type developer --objective f --repo /tmp --window wm-dead2 --session-id sdead2 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-dead2 \
+  "WM_TEST_BUSY=0 WM_TEST_SWALLOW=0 WM_TEST_MARKER='$DEAD2_MARKER' bash '$COMPOSER_STUB'"
+sleep 1
+wm_age_status dead2
+
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
+  "$WF" >"$WINGMAN_HOME/rv-p1b.log" 2>&1 &
+flip2_pid=$!
+wm_track "$flip2_pid"
+i=0; while kill -0 "$flip2_pid" 2>/dev/null && [ "$i" -lt 70 ]; do sleep 1; i=$((i+1)); done
+kill "$flip2_pid" 2>/dev/null
+assert_contains "dead2 flipped to stalled" "$(wm_state crew-get --id dead2)" '"status": "stalled"'
+"$WF" --classify >/dev/null 2>&1
+wm_state ack --id dead2 --updated "$(crew_updated dead2)" >/dev/null
+
+# rv1 comes back to unambiguous life: same window name, a pane that repaints
+# continuously and holds a late-started descendant.
+tmux kill-window -t "$WM_TMUX_SESSION:wm-rv1" 2>/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rv1 \
+  'sh -c "sleep 4; while :; do echo tick; sleep 1; done"'
+sleep 6
+
+wake_before="$(cat "$WINGMAN_HOME/wake" 2>/dev/null || true)"
+
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
+  WM_STALL_RECHECK_CONFIRMS=2 \
+  "$WF" >"$WINGMAN_HOME/rv-p2.log" 2>&1 &
+rv2_pid=$!
+wm_track "$rv2_pid"
+i=0
+while [ "$i" -lt 20 ]; do
+  [ "$(crew_status rv1)" = working ] && break
+  sleep 1; i=$((i+1))
+done
+
+assert_eq "rv1 reverted to working within a bounded number of polls" "$(crew_status rv1)" working
+assert_true "the fix actually fixed the reported thing: updated is no longer the flip stamp" \
+  "[ '$(crew_updated rv1)' != '$rv1_updated_flip' ]"
+assert_eq "dead2 stays stalled throughout - the recheck never touches an unrelated record" \
+  "$(crew_status dead2)" stalled
+
+assert_true "the watcher NEVER EXITS across the silent revert - it keeps blocking" "kill -0 $rv2_pid"
+assert_eq "the wake file is byte-identical - never rewritten for a silent auto-clear" \
+  "$(cat "$WINGMAN_HOME/wake" 2>/dev/null || true)" "$wake_before"
+assert_not_contains "no fire reason is ever printed for rv1's revert" "$(cat "$WINGMAN_HOME/rv-p2.log")" "rv1"
+
+assert_true "stall-recheck.log recorded the clear" "[ -f '$WINGMAN_HOME/stall-recheck.log' ]"
+assert_contains "the log line names rv1 and the liveness source" \
+  "$(cat "$WINGMAN_HOME/stall-recheck.log")" "rv1 liveness cleared after"
+
+kill "$rv2_pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #235: a wedge revert to 'blocked' DOES fire once ------------------
+# The one exemption to the silent-clear rule: the restored blocker is a
+# genuinely open question nobody answered, so it re-announces exactly once
+# through the ordinary needs-attention path - not through anything the
+# recheck itself does.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id wb1 --type developer --objective x --repo /tmp --window wm-wb1 --session-id swb1 >/dev/null
+wm_state crew-set --id wb1 --status blocked --blocker "which approach?" >/dev/null
+# Ack the pre-existing 'blocked' state itself before the flip watcher ever
+# starts - otherwise the FIRST cycle fires immediately on THIS already-
+# actionable event (needs-attention has no notion of "wait for wedge-check
+# to get a look first"), before the wedge signature below ever gets a chance
+# to run any poll at all.
+wm_state ack --id wb1 --updated "$(crew_updated wb1)" >/dev/null
+# A pane that repaints continuously (never idle at a prompt) and holds a
+# `sleep`-matching descendant - the FOREGROUND-watcher wedge signature (issue
+# #202). The descendant is reaped by a waiting subshell the instant it dies
+# (verified empirically, mirroring tests/stall-recheck.test.sh's own fixture)
+# so killing it later leaves no zombie for _ps_tree to still see. proc-re is
+# narrowed to `sleep` (not the production default) purely to keep the
+# fixture simple.
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-wb1 \
+  'sleep 600 & child=$!; ( wait $child ) 2>/dev/null & while :; do echo tick; sleep 1; done'
+sleep 1
+
+WM_WEDGE_SECS=3 WM_WEDGE_PANE_GAP=5 WM_WEDGE_PROC_RE=sleep WM_WATCH_INTERVAL=1 \
+  "$WF" >"$WINGMAN_HOME/wb-p1.log" 2>&1 &
+wbflip_pid=$!
+wm_track "$wbflip_pid"
+i=0; while kill -0 "$wbflip_pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
+kill "$wbflip_pid" 2>/dev/null
+assert_contains "the wedge flip fires with the FOREGROUND signature" "$(cat "$WINGMAN_HOME/wb-p1.log")" "stalled: wb1"
+assert_contains "wb1 flipped to stalled" "$(wm_state crew-get --id wb1)" '"status": "stalled"'
+"$WF" --classify >/dev/null 2>&1
+wm_state ack --id wb1 --updated "$(crew_updated wb1)" >/dev/null
+
+# Kill the wedging descendant so its pane's process tree no longer holds it -
+# the wedge clearing predicate's own evidence.
+wedge_pid="$(wm_state crew-get --id wb1 | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['stall']['wedge_pid'])")"
+kill "$wedge_pid" 2>/dev/null
+sleep 1
+
+out="$(wm_timeout 45 env WM_WEDGE_SECS=3 WM_WEDGE_PANE_GAP=5 WM_WEDGE_PROC_RE=sleep \
+  WM_STALL_RECHECK_CONFIRMS=2 WM_WATCH_INTERVAL=1 "$WF" 2>/dev/null)"
+assert_contains "the revert to blocked fires once, naming the restored blocker" "$out" "blocked: wb1"
+assert_contains "the fire carries the restored blocker text" "$out" "which approach?"
+assert_contains "wb1 is genuinely back to blocked" "$(wm_state crew-get --id wb1)" '"status": "blocked"'
+
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary
