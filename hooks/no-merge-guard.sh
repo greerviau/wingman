@@ -63,6 +63,12 @@
 # calls `gh pr view` live (see fetch_reviews) - a security-relevant gate, so a
 # resolution failure (network hiccup, unresolvable PR/node id) fails CLOSED
 # (denied), unlike hooks/merge-attribution-tracker.sh's best-effort posture.
+# `review_gate_waived` clears THIS gate only - it has zero effect on a
+# forge-side branch ruleset or classic branch protection rule that
+# independently requires an approving review, which this hook has no way to
+# satisfy or waive (issue #190). See docs/guards.md's "Two merge gates, not
+# one" for the distinction, and bin/lib/merge-block-diagnose.sh for the
+# diagnostic that tells the two apart before a session escalates.
 #
 # issue #132 review (PR #134): the evidence check above trusts a roster
 # record's `type`/`delivery` fields (crew.json/crew-archive.jsonl) to tell a
@@ -446,6 +452,14 @@ def no_evidence_reason(pr_number, pr_url, issues):
         "itself): $WINGMAN_STATE crew-set --id %s --review-gate-waived true"
         % (crew_id or "<this-crew-id>")
     )
+    parts.append(
+        "Note: review_gate_waived clears only THIS hook'"'"'s own evidence "
+        "check - if the repository'"'"'s branch ruleset separately requires an "
+        "approving review, the merge will still fail at GitHub regardless "
+        "(issue #190). Run $WINGMAN_BIN/lib/merge-block-diagnose.sh --pr "
+        "<this PR URL> before escalating to find out whether one grant or "
+        "two is actually needed."
+    )
     return " ".join(parts)
 
 
@@ -456,7 +470,12 @@ def unresolved_pr_reason(detail):
         "is a security-relevant gate, not a best-effort attribution comment. "
         "Retry once resolvable, or ask the requester/lead to grant "
         "review_gate_waived for this effort if no review round is actually "
-        "wanted." % detail
+        "wanted. Note: review_gate_waived clears only THIS hook'"'"'s own "
+        "evidence check - if the repository'"'"'s branch ruleset separately "
+        "requires an approving review, the merge will still fail at GitHub "
+        "regardless (issue #190). Run $WINGMAN_BIN/lib/merge-block-diagnose.sh "
+        "--pr <this PR URL> before escalating to find out whether one grant "
+        "or two is actually needed." % detail
     )
 
 

@@ -93,9 +93,16 @@ Once the PR is green, `review` is where you stop and wait; the human merges it d
 
 **Merging requires more than `allow_merge: true`.** Once autonomy is granted, the same hook also requires verifiable evidence of a genuinely separate approving review before a merge succeeds: a real, distinct-account `APPROVED` GitHub review, or the documented comment-fallback verdict from a **different**, real `reviewer` whose own `--delivery` names this PR.
 That evidence lives on the forge, so **auto-merge requires `pr_comments=on` for this effort** - the reviewer must record its verdict on GitHub for the gate to see it.
-If your effort genuinely needs to merge with no review round at all, that is `review_gate_waived: true` (same actor restriction as `allow_merge`).
+If your effort genuinely needs to merge with no review round at all, that is `review_gate_waived: true` (same actor restriction as `allow_merge`). **This waiver clears wingman's own evidence check only** - if the repository's own branch ruleset separately requires an approving review, the waiver does not and cannot clear that: it is a second, independent gate enforced by GitHub, not by wingman, and no wingman-side field reaches it. Because every crew session shares one forge login while GitHub refuses self-approval (issue #50), such a rule is unmeetable by construction here, not merely unmet - see `docs/guards.md`'s "Two merge gates, not one".
 If it is granted and satisfied, `gh pr merge` succeeds, and a `PostToolUse` hook (`hooks/merge-attribution-tracker.sh`) automatically posts a PR comment attributing the merge to you (disclosing that an agent, not the human, merged under the human's credentials) - do not add that marker yourself.
-If you believe this PR needs your own merge and autonomy hasn't been granted, or a merge attempt is denied by the review-evidence check, report `blocked` naming exactly what's missing - never work around the guard.
+
+Before reporting `blocked` for **any** blocked or failed merge - whether `hooks/no-merge-guard.sh` denied it or GitHub itself refused it - run `$WINGMAN_BIN/lib/merge-block-diagnose.sh --pr <your PR URL>` and put its verdict and named remedies into your `blocker`, so the human is asked once for everything actually needed rather than one grant at a time:
+
+- **`self-fix`** means the block is yours to fix: a merge conflict, a branch behind its base, or a draft PR. Fix it and retry - do not escalate, exactly as with a routine CI failure.
+- **`wingman-gate`** means only wingman's own guard objects; the `blocker` names the missing grant.
+- **`forge-gate`** or **`both-gates`** means at least part of the remedy is **operator-only** (the forge's own gate needs an operator-side remedy - an admin override, a genuinely distinct reviewer credential, or a relaxed ruleset); say so explicitly in the `blocker` and name it, rather than asking for `review_gate_waived` alone and discovering the rest on the retry. `both-gates` needs both remedies, asked for in one round.
+- **`unknown`** means the diagnostic could not determine the cause; say that plainly rather than guessing at a remedy.
+- Never work around the guard - an available bypass (the diagnostic's `bypass: AVAILABLE` line) is not a granted one; this covers `--admin` exactly as it covers everything else `hooks/no-merge-guard.sh` denies.
 
 ### State mapping
 

@@ -40,7 +40,10 @@
 # all; same actor restriction as --allow-merge (never settable by the member
 # on itself), same visibility (`bin/crew-list` / board.md show it). Omit it
 # (the default) and grant later instead: `$WINGMAN_STATE crew-set --id <id>
-# --review-gate-waived true`.
+# --review-gate-waived true`. This clears hooks/no-merge-guard.sh's OWN
+# evidence check only - it has no effect on a forge-side branch ruleset that
+# separately requires an approving review (issue #190; see docs/guards.md's
+# "Two merge gates, not one").
 #
 # Review-signing token (issue #135, --type reviewer only): a random 32-byte
 # token, generated here and held only in the reviewer's own process
