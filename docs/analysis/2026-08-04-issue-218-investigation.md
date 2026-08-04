@@ -19,7 +19,7 @@ $ journalctl -b -1 -o short-precise --no-hostname | grep -icE "tmux-spawn.*(succ
 0
 ```
 
-Zero, out of 559 scope terminations this boot actually produced a "Consumed" (resource-accounting) line - none of them, related to either incident or not, ever show a `Stopping`/`Stopped`/`Succeeded`/`Failed` line. Checking the structured journal fields for one such line (a normal, unremarkable termination) confirms why:
+559 scope terminations this boot each produced a "Consumed" (resource-accounting) line - each one identifiable as a termination *because* of that line - and zero of those 559, related to either incident or not, also show a preceding `Stopping`/`Stopped`/`Succeeded`/`Failed` line. Checking the structured journal fields for one such line (a normal, unremarkable termination) confirms why:
 
 ```
 $ journalctl -b -1 -o verbose --no-hostname _SOURCE_REALTIME_TIMESTAMP=1785830543545930
