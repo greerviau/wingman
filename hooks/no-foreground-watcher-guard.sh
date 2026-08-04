@@ -39,10 +39,21 @@
 #     redirects, e.g. `bin/watch-fleet > /tmp/x 2>&1 &`) - detected via a
 #     conservative textual scan, since `command_segments()` discards a bare
 #     `&` the same way it discards `;` (see step below).
+#   - An arming bin/watch-fleet invocation (regardless of run_in_background)
+#     while a run-scoped spurious-repeated failure-budget standdown holds
+#     for this session's owner (issue #198) - never bin/pr-watch, which has
+#     no standdown concept. This closes the residual prose-only refusal left
+#     by fixing the standdown's own composed text: that fix removes the
+#     COMPETING instruction that told a model to arm and dissolve its own
+#     standdown, but does not make the refusal enforceable on its own.
+#     `bin/watch-fleet --clear-standdown` is allowlisted as the one explicit
+#     way out (see the read-only forms below) - it is a deliberate, two-step,
+#     explicitly-named action, not compliance with a nag.
 #
 # What is explicitly NOT denied (the read-only/one-shot forms, so a status
 # check or a manual stop is never blocked by this hook):
-#   - `--status`, `--stop`, `--classify` for bin/watch-fleet.
+#   - `--status`, `--stop`, `--classify`, `--clear-standdown` for
+#     bin/watch-fleet.
 #   - `--once` for bin/pr-watch.
 #   - `-h`/`--help` for either.
 #   - Any of the above under `timeout`/`nice`/`ionice`/`stdbuf` (the flag
@@ -138,7 +149,7 @@ esac
 
 OUT="$(printf '%s' "$INPUT" | \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
-import json, re, sys
+import json, os, re, sys
 
 from cmd_match import basename, command_segments, resolve_command
 
@@ -229,7 +240,7 @@ try:
     # (which warns and then blocks exactly like a bare call) are all arming
     # by construction, with nothing to enumerate for them specifically.
     ARM_DENY_FLAGS = {
-        "watch-fleet": ("--status", "--stop", "--classify", "-h", "--help"),
+        "watch-fleet": ("--status", "--stop", "--classify", "--clear-standdown", "-h", "--help"),
         "pr-watch": ("--once", "-h", "--help"),
     }
     LAUNCHER_WRAPPERS = ("nohup", "setsid", "timeout", "nice", "ionice", "stdbuf")
@@ -256,6 +267,7 @@ try:
         return None, None
 
     arming_found = False
+    watch_fleet_arming = False
     for seg in segments:
         b, argv = resolve_command(seg)
         if not argv:
@@ -273,8 +285,68 @@ try:
         if launcher in DETACHED_LAUNCHERS:
             deny(DENIAL_REASON)
         arming_found = True
+        if target == "watch-fleet":
+            watch_fleet_arming = True
 
     if arming_found:
+        # issue #198: an arming watch-fleet call (never pr-watch, which has
+        # no standdown concept) is denied outright while a run-scoped
+        # spurious-repeated standdown holds for this session'"'"'s owner -
+        # checked ahead of the &/run_in_background checks below, since
+        # neither of those makes an arm under a standdown legitimate.
+        # Fixing the standdown'"'"'s own composed text (see bin/watch-fleet'"'"'s
+        # spurious_repeated_reason) removes the COMPETING instruction that
+        # told a model to arm; it does not make the refusal enforceable on
+        # its own - #198'"'"'s own incident was a model reading a correctly-
+        # identified deliberate refusal and overriding it anyway. This is
+        # what makes it structural instead.
+        if watch_fleet_arming:
+            def read_standdown_marker(path):
+                # None means "genuinely absent" (the overwhelmingly common
+                # case - no standdown in force) and must allow. Anything
+                # else this raises (e.g. PermissionError from an
+                # unreadable $WINGMAN_HOME) propagates to the outer
+                # except below, which fails CLOSED via VERIFY_FAIL_REASON -
+                # "could not verify" is not the same answer as "not there".
+                try:
+                    with open(path) as f:
+                        return f.read()
+                except FileNotFoundError:
+                    return None
+
+            _owner = os.environ.get("WINGMAN_CREW_ID") or ""
+            _okey = re.sub(r"[^A-Za-z0-9._-]", "_", _owner) if _owner else ""
+            _wm_home = os.environ.get("WINGMAN_HOME") or os.path.join(os.path.expanduser("~"), ".wingman")
+            _marker_name = "watch-%s.suppressed" % _okey if _okey else "watch.suppressed"
+            _marker_path = os.path.join(_wm_home, _marker_name)
+            _marker_content = read_standdown_marker(_marker_path)
+            if _marker_content is not None:
+                _marker_lines = _marker_content.split("\n", 1)
+                _stamp = _marker_lines[0] if _marker_lines else ""
+                _body = _marker_lines[1] if len(_marker_lines) > 1 else ""
+                _run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+                # wm_run_scoped_marker_active'"'"'s own rule (hooks/lib/
+                # watcher-liveness.sh): honored if the stamp matches this
+                # run, is empty, or this session has no run id to check
+                # against - false only for a DIFFERENT, presumably-ended
+                # run'"'"'s stamp.
+                if not _run_id or not _stamp or _stamp == _run_id:
+                    _count_match = re.search(r"died (\d+) times", _body)
+                    _count_clause = " (%s deaths in a row)" % _count_match.group(1) if _count_match else ""
+                    STANDDOWN_DENIAL_REASON = (
+                        "A spurious-repeated failure-budget standdown is in force "
+                        "for this session" + _count_clause + " (issue #198): the "
+                        "watcher has died repeatedly with no successful cycle in "
+                        "between, and the failure budget is deliberately refusing "
+                        "further arms until a human intervenes. Arming now would "
+                        "clear the standdown, which is exactly the re-arm churn "
+                        "the budget exists to prevent. Lifting the standdown is "
+                        "up to the pilot, not a tool call: once the cause is "
+                        "understood, run bin/watch-fleet --clear-standdown, then "
+                        "fleet continuity re-arms automatically on the next Stop "
+                        "event."
+                    )
+                    deny(STANDDOWN_DENIAL_REASON)
         # command_segments() discards a bare `&` the same way it discards
         # `;` (it is punctuation to the segment splitter, not part of any
         # token), so a trailing background operator is invisible to the

@@ -350,4 +350,74 @@ _w=0
 while kill -0 "$ownerpid" 2>/dev/null && [ "$_w" -lt 30 ]; do sleep 0.2; _w=$((_w+1)); done
 assert_false "the owner-scoped process is no longer running after --stop" "kill -0 $ownerpid 2>/dev/null"
 
+# --- the standdown marker (issue #198) ------------------------------------------
+# A trip writes $SUPPRESSEDFILE itself, wherever the trip is observed - not only
+# when hooks/stop-continuity.sh happens to be the caller (the R3 defect this
+# fix closes).
+test_new_home
+export WINGMAN_RUN_ID="wf-classify-test-run"
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+trip_out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "the third classification trips spurious-repeated" "$trip_out" "spurious-repeated 3 clean-exit-or-sigterm"
+assert_true "the trip writes the standdown marker" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
+marker_stamp="$(sed -n '1p' "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)"
+assert_eq "line 1 is the arming run's own WINGMAN_RUN_ID" "$marker_stamp" "$WINGMAN_RUN_ID"
+marker_body="$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)"
+assert_true "line 2+ is non-empty" "[ -n \"$marker_body\" ]"
+assert_contains "the composed text carries the death count" "$marker_body" "died 3 times"
+assert_contains "the composed text points at watch-spurious.log" "$marker_body" "watch-spurious.log"
+assert_contains "the composed text names --clear-standdown as the way out" "$marker_body" "--clear-standdown"
+
+# The direct R1 regression: the composed text must never instruct the model
+# to arm - that is exactly the instruction that let a compliant model
+# dissolve its own standdown (issue #198).
+assert_not_contains "the composed text never says to resume by running /watch" "$marker_body" "Resume it by running"
+assert_not_contains "the composed text never says to arm bin/watch-fleet" "$marker_body" "arming bin/watch-fleet"
+unset WINGMAN_RUN_ID
+
+# The stale-claim-lock hint composes the lock-specific remedy, naming
+# $CLAIMLOCK rather than the generic --clear-standdown text.
+test_new_home
+mkdir "$WINGMAN_HOME/watch.pid.lock"
+( sleep 300 ) & _lock_holder=$!
+wm_track "$_lock_holder"
+echo "$_lock_holder" > "$WINGMAN_HOME/watch.pid.lock/owner"
+export WM_CLAIM_HARD_STALE_AGE=3600
+wm_timeout 15 "$WF" >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+wm_timeout 15 "$WF" >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+wm_timeout 15 "$WF" >/dev/null 2>&1
+lock_trip="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "the third refusal trips spurious-repeated (stale-claim-lock)" "$lock_trip" "spurious-repeated 3 stale-claim-lock"
+lock_body="$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)"
+assert_contains "the stale-claim-lock remedy names the claim lock path" "$lock_body" "$WINGMAN_HOME/watch.pid.lock"
+assert_not_contains "the stale-claim-lock remedy does not also carry the generic --clear-standdown text" "$lock_body" "Once the cause of the repeated deaths is understood"
+unset WM_CLAIM_HARD_STALE_AGE
+kill "$_lock_holder" 2>/dev/null
+rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null
+
+# A plain spurious (below budget) writes no marker.
+test_new_home
+out1="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "first spurious classification stays below budget" "$out1" "spurious 1 clean-exit-or-sigterm"
+assert_false "no standdown marker is written below the budget" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
+
+# --clear-standdown: removes an existing marker, exits 0, arms nothing, and
+# is a no-op with no marker present.
+test_new_home
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+assert_true "a standdown marker exists before --clear-standdown" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
+clear_out="$(wm_timeout 10 "$WF" --clear-standdown 2>&1)"; clear_rc=$?
+assert_eq "--clear-standdown exits 0" "$clear_rc" "0"
+assert_contains "--clear-standdown reports the standdown lifted" "$clear_out" "standdown lifted"
+assert_false "--clear-standdown removes the marker" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
+assert_false "--clear-standdown arms nothing (no watch.pid appears)" "[ -f '$WINGMAN_HOME/watch.pid' ]"
+noop_out="$(wm_timeout 10 "$WF" --clear-standdown 2>&1)"; noop_rc=$?
+assert_eq "--clear-standdown is a no-op with no marker present (still exits 0)" "$noop_rc" "0"
+assert_contains "--clear-standdown with no marker reports nothing to do" "$noop_out" "no standdown in force"
+
 test_summary

@@ -59,13 +59,23 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
      budget. Report nothing to the pilot (nothing about the fleet actually
      changed), then proceed to step 2 immediately.
    - `spurious-repeated <count> <hint>` - the watcher has died `<count>`
-     times in a row with no successful cycle in between; fleet supervision is
-     not being maintained. **Do not proceed to step 2.** Report this to the
-     pilot as a genuine attention event: *"the watcher for this session has
-     died `<count>` times in a row with no successful cycle in between (see
-     `~/.wingman/watch-spurious.log`); fleet supervision is not being
-     maintained."* Then append a remedy chosen from `<hint>`, the third field
-     on this same outcome line (no separate file read needed):
+     times in a row with no successful cycle in between; the failure budget
+     has tripped, and `bin/watch-fleet --classify` has already recorded a
+     standdown (`~/.wingman/watch.suppressed`, or the owner-scoped
+     equivalent) - not just this once, but durably, until a human lifts it.
+     **Do not proceed to step 2. Do NOT arm a watch-fleet cycle and do NOT
+     run `/watch` again in response to this** - the standdown is deliberate:
+     a successful claim clears it, which is exactly the re-arm churn the
+     failure budget exists to prevent, and `hooks/no-foreground-watcher-
+     guard.sh` denies an arm attempt from a tool call outright while it
+     holds (issue #198) - this is not merely advisory.
+
+     Report the diagnosis to the pilot as a genuine attention event: *"the
+     watcher for this session has died `<count>` times in a row with no
+     successful cycle in between (see `~/.wingman/watch-spurious.log`);
+     fleet supervision is not being maintained."* Then relay the **pilot
+     remedy** - their action, not yours - chosen from `<hint>`, the third
+     field on this same outcome line (no separate file read needed):
      - `stale-claim-lock`: *"A claim-lock directory
        (`~/.wingman/watch.pid.lock`) is blocking every arm attempt.
        `watch-fleet` already self-clears a lock left behind by a killed
@@ -83,8 +93,17 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
        `~/.wingman/watch.pid` at once, which is exactly what this lock exists
        to prevent."*
      - any other hint (`sigkill-suspected` / `clean-exit-or-sigterm` /
-       `hung-or-stale-pidfile`): *"Resume it by running `/watch` again or
-       arming `$WINGMAN_BIN/watch-fleet` directly."*
+       `hung-or-stale-pidfile`): *"Once the cause of the repeated deaths is
+       understood, lift the standdown with `$WINGMAN_BIN/watch-fleet
+       --clear-standdown` (or restart wingman, which clears it with the
+       run); fleet continuity re-arms automatically on the next Stop
+       event."*
+
+     This bullet's own composed text (`bin/watch-fleet`'s own
+     `spurious_repeated_reason`) is the same text both Stop hooks now
+     deliver on every subsequent Stop event while the standdown holds, so a
+     model-driven `/watch` and a hook-driven rewake never disagree on what
+     the pilot is told or what the model is asked to do.
 
    **`healthy` and `spurious` mean literally zero characters of chat output
    this turn - not even a one-line acknowledgment.** "Nothing to report"
@@ -116,7 +135,12 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
    to the stall detector (issue #202; a mechanical guard,
    `hooks/no-foreground-watcher-guard.sh`, denies the foreground and detached
    forms at the tool-call boundary, but do not rely on the guard - state the
-   invocation correctly the first time). **If you cannot arm it as a
+   invocation correctly the first time). The same guard also denies an
+   *arming* `watch-fleet` call outright while a `spurious-repeated` standdown
+   holds for this session (issue #198) - so the `spurious-repeated` skip
+   above is enforced structurally, not only by this instruction, and
+   attempting to arm anyway (including via `--clear-standdown` followed by
+   an arm in the same turn) will be refused. **If you cannot arm it as a
    background task, arm nothing** - no watcher at all is strictly better than
    a foreground one, because a missing watcher is recoverable and a wedged
    session is not. The `healthy` branch above already
@@ -132,8 +156,12 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
    untouched by the refusal, so nothing is lost by classifying late.
    **After arming, confirm it actually launched** (a live pid) before
    treating the cycle as armed - `hooks/stop-guard.sh`'s
-   `active_crew > 0 && watcher_up == 0` branch is the existing backstop for a
-   failed arm, by design rather than coincidence.
+   `active_crew > 0 && watcher_up == 0` branch is the backstop for a failed
+   arm, but it is silent by default since #185 made fleet continuity
+   (`hooks/stop-continuity.sh`) the primary re-arm path: that branch only
+   ever speaks under the kill switch (`WM_STOP_AUTOARM=0`) or while a
+   `spurious-repeated` standdown holds, so do not rely on it to catch every
+   failed arm - confirm the pid directly.
 3. End the turn once armed (or once step 1 concluded no re-arm is
    warranted). Never call `/watch` twice in the same turn, and never bundle
    its arm onto the tail of another command.

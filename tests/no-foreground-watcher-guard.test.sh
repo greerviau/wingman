@@ -206,4 +206,74 @@ assert_contains "denial cites issue #202" "$out" "issue #202"
 out="$(run_hook 'bash /abs/path/to/bin/pr-watch --pr https://github.com/owner/repo/pull/240' true)"
 assert_eq "allowed (interpreter-prefix form, run_in_background: true): bash .../pr-watch --pr <url>" "$out" ""
 
+# =============================================================================
+# issue #198: an arming watch-fleet call is denied outright while a
+# spurious-repeated standdown holds for this session's owner - never
+# pr-watch, which has no standdown concept - and --clear-standdown is
+# allowlisted as the one explicit way out.
+# =============================================================================
+test_new_home
+export WINGMAN_RUN_ID=standdown-test-run
+printf '%s\n%s\n' "$WINGMAN_RUN_ID" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
+
+out="$(run_hook 'bin/watch-fleet' true)"
+assert_contains "denied while a run-scoped standdown holds" "$out" '"permissionDecision": "deny"'
+assert_contains "denial cites issue #198" "$out" "issue #198"
+assert_contains "denial names --clear-standdown as the way out" "$out" "--clear-standdown"
+
+# Absence is a definite answer: no marker at all allows normally.
+rm -f "$WINGMAN_HOME/watch.suppressed"
+out="$(run_hook 'bin/watch-fleet' true)"
+assert_eq "allowed with no standdown marker present" "$out" ""
+
+# A marker stamped by a DIFFERENT, presumably-ended run reads as inactive -
+# the shared wm_run_scoped_marker_active predicate, reimplemented here.
+printf '%s\n%s\n' "some-other-run" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
+out="$(run_hook 'bin/watch-fleet' true)"
+assert_eq "allowed: a foreign-run standdown marker is treated as inactive" "$out" ""
+
+# Re-arm the CURRENT-run marker for the remaining checks in this section.
+printf '%s\n%s\n' "$WINGMAN_RUN_ID" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
+
+# The read-only/one-shot forms, including --clear-standdown itself, stay
+# allowed while the standdown holds - it is the explicit, pilot-directed way
+# out, never itself classified as arming.
+for cmd in \
+  'bin/watch-fleet --status' \
+  'bin/watch-fleet --stop' \
+  'bin/watch-fleet --classify' \
+  'bin/watch-fleet --clear-standdown'
+do
+  out="$(run_hook "$cmd" omit)"
+  assert_eq "allowed while suppressed (read-only/one-shot): $cmd" "$out" ""
+done
+
+# bin/pr-watch has no standdown concept - unaffected by a watch-fleet marker.
+out="$(run_hook 'bin/pr-watch --pr 5' true)"
+assert_eq "pr-watch arming is unaffected by a watch-fleet standdown marker" "$out" ""
+
+unset WINGMAN_RUN_ID
+rm -f "$WINGMAN_HOME/watch.suppressed"
+
+# --- owner scoping: a crew session is gated by its own owner-keyed marker,
+# never by the unscoped one, and vice versa ----------------------------------
+test_new_home
+printf '%s\n%s\n' "" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch-leadx.suppressed"
+out="$(WINGMAN_CREW_ID=leadx run_hook 'bin/watch-fleet' true)"
+assert_contains "a crew session (WINGMAN_CREW_ID=leadx) is gated by its own owner-scoped marker" "$out" '"permissionDecision": "deny"'
+rm -f "$WINGMAN_HOME/watch-leadx.suppressed"
+
+printf '%s\n%s\n' "" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
+out="$(WINGMAN_CREW_ID=leadx run_hook 'bin/watch-fleet' true)"
+assert_eq "an owner-scoped (leadx) session is unaffected by the unscoped marker" "$out" ""
+rm -f "$WINGMAN_HOME/watch.suppressed"
+
+# --- fail-closed posture: an unreadable $WINGMAN_HOME denies; a merely
+# absent marker is a different, definite answer and still allows ------------
+test_new_home
+chmod 000 "$WINGMAN_HOME"
+out="$(run_hook 'bin/watch-fleet' true)"
+assert_contains "an unreadable WINGMAN_HOME denies (fail-closed)" "$out" '"permissionDecision": "deny"'
+chmod 755 "$WINGMAN_HOME"
+
 test_summary

@@ -573,11 +573,16 @@ add_crew_window d8b
 wm_state crew-set --id d8b --status working --summary busy >/dev/null
 export WM_STOP_CONTINUITY_WINDOW=30
 _trip_out=""
+_trip_err=""
 _round=0
 while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
   _round=$((_round+1))
   _prev_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
-  printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sr$_round.out" 2>&1 &
+  # stdout (the JSON-wrapped block decision) and stderr (rewake()'s own raw
+  # body, printed unwrapped) are captured to SEPARATE files - the raw-body
+  # capture is what lets the R1 regression checks below compare against the
+  # marker's own stored text byte-for-byte, with no JSON escaping in the way.
+  printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sr$_round.out" 2>"$WINGMAN_HOME/sr$_round.err" &
   hp=$!; wm_track "$hp"
   _n=0
   while kill -0 "$hp" 2>/dev/null && [ "$_n" -lt 100 ]; do
@@ -591,11 +596,22 @@ while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
   wait_for_gone "$hp" 100 >/dev/null 2>&1
   wait "$hp" 2>/dev/null
   _trip_out="$(cat "$WINGMAN_HOME/sr$_round.out" 2>/dev/null)"
+  _trip_err="$(cat "$WINGMAN_HOME/sr$_round.err" 2>/dev/null)"
 done
 assert_true "the standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
 assert_contains "the tripping invocation rewakes via manual-remedy (no do-not-arm sentence)" "$_trip_out" "fleet supervision is not being maintained"
 assert_not_contains "the tripping invocation is not auto mode" "$_trip_out" "do NOT arm a watch-fleet cycle"
 assert_contains "the standdown marker carries the composed remedy text on line 2+" "$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)" "fleet supervision is not being maintained"
+# issue #198: --classify (not this hook) now authors the marker - the trip's
+# own rewake body is read back from it, not recomposed, so the two can never
+# drift (one author, two consumers).
+assert_eq "the tripping rewake body equals the marker's line 2+ (one author, two consumers)" "$_trip_err" "$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)"
+# The direct R1 regression: against REAL composed text from a REAL trip (not
+# a synthetic marker body), the standdown must never instruct the model to
+# resume/arm - that instruction is exactly what let a compliant model
+# dissolve its own standdown.
+assert_not_contains "R1 regression: the real trip text never says to resume by running /watch" "$_trip_out" "Resume it by running"
+assert_not_contains "R1 regression: the real trip text never says to arm bin/watch-fleet directly" "$_trip_out" "arming bin/watch-fleet"
 before_spur="$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)"
 suppressed_out="$(run_hook)"
 assert_eq "while suppressed, a subsequent invocation exits 0 with no rewake" "$suppressed_out" ""

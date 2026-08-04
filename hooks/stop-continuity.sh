@@ -63,30 +63,6 @@ cat >/dev/null
 # "" - wingman has no $WINGMAN_CREW_ID), exactly like hooks/stop-guard.sh.
 OWNER="${WINGMAN_CREW_ID:-}"
 
-# spurious_repeated_reason <classify_out>
-# Composes the exact "died N times in a row ... fleet supervision is not
-# being maintained" body plus the hint-selected remedy, reusing
-# .claude/commands/watch.md's own settled spurious-repeated prose verbatim
-# (minus its markdown emphasis, which is a doc-authoring convention, not
-# content) so the pilot reads the identical remedy regardless of whether a
-# model-driven /watch or this hook is what surfaced it.
-spurious_repeated_reason() {
-  _srr_count="$(printf '%s' "$1" | awk '{print $2}')"
-  _srr_hint="$(printf '%s' "$1" | awk '{print $3}')"
-  _srr_body="the watcher for this session has died $_srr_count times in a row with no successful cycle in between (see $WM_HOME/watch-spurious.log); fleet supervision is not being maintained."
-  case "$_srr_hint" in
-    stale-claim-lock)
-      _srr_body="$_srr_body
-A claim-lock directory ($claimlock) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $claimlock/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write $pidfile at once, which is exactly what this lock exists to prevent."
-      ;;
-    *)
-      _srr_body="$_srr_body
-Resume it by running /watch again or arming bin/watch-fleet directly."
-      ;;
-  esac
-  printf '%s' "$_srr_body"
-}
-
 # compose_attention_reason - restores incident-runbook routing (matched
 # against the "## New events" reason lines specifically, longest-token-first,
 # with `stalled` anchored to the bracketed status field) for a pre-claim or
@@ -275,7 +251,11 @@ wm_run_scoped_marker_active "$stopfile" && exit 0
 # not folded into accounting's own case - because accounting itself would
 # otherwise keep re-deriving fresh forensics from the same stale, unattended
 # residue. See hooks/stop-guard.sh's own no-watcher branch for the safety net
-# that keeps this standdown from going silent while it holds.
+# that keeps this standdown from going silent while it holds. The marker
+# itself is authored by `bin/watch-fleet --classify`'s own trip branch
+# (issue #198), not by this hook - it exists no matter which consumer
+# observed the trip (this hook, a lead's model-driven `/watch`, or a bare
+# diagnostic call), so this gate catches a standdown from any of them.
 wm_run_scoped_marker_active "$suppressedfile" && exit 0
 
 # 8. Claim-failure backoff check: a rolling backoff, not a standdown - a claim
@@ -300,11 +280,11 @@ case "$classify_out" in
     printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
     exit 0 ;;
   spurious-repeated\ *)
-    _sr_reason="$(spurious_repeated_reason "$classify_out")"
-    {
-      printf '%s\n' "${WINGMAN_RUN_ID:-}"
-      printf '%s\n' "$_sr_reason"
-    } > "$suppressedfile"
+    # --classify has already written $suppressedfile (the trip branch's own
+    # marker write) - read it back rather than recomposing it, so the trip
+    # text has exactly one author.
+    _sr_reason="$(tail -n +2 "$suppressedfile" 2>/dev/null)"
+    [ -n "$_sr_reason" ] || _sr_reason="$WM_STANDDOWN_FALLBACK"
     rewake "$_sr_reason" manual-remedy
     exit 2 ;;
   remote-control-dropped)
@@ -482,11 +462,11 @@ Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
       healthy)
         _body=""; _mode="" ;;
       spurious-repeated\ *)
-        _sr_reason="$(spurious_repeated_reason "$classify_out")"
-        {
-          printf '%s\n' "${WINGMAN_RUN_ID:-}"
-          printf '%s\n' "$_sr_reason"
-        } > "$suppressedfile"
+        # --classify has already written $suppressedfile (the trip branch's
+        # own marker write) - read it back rather than recomposing it, so
+        # the trip text has exactly one author.
+        _sr_reason="$(tail -n +2 "$suppressedfile" 2>/dev/null)"
+        [ -n "$_sr_reason" ] || _sr_reason="$WM_STANDDOWN_FALLBACK"
         _body="$_sr_reason"
         _mode="manual-remedy" ;;
       spurious\ *)

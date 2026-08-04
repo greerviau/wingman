@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
-# E2E: hooks/lib/watcher-liveness.sh's wm_owner_paths and bin/watch-fleet's own
-# per-owner file-definition block are two independent derivations of the same
-# owner-keyed paths (issue #185's own "known, accepted duplication" - see the
-# plan's "Files touched" section). This proves they agree, behaviorally, for
-# both an unscoped ("") and a scoped owner: bin/watch-fleet cannot be sourced
-# for its own path variables (it is a full script, not a library of
-# functions), so agreement is proven by observing that a claim in
-# bin/watch-fleet actually clears $STOPFILE/$SUPPRESSEDFILE/$CLAIMFAILFILE at
-# exactly the paths wm_owner_paths independently predicts - a drift in either
-# derivation would leave the "other side's" file untouched.
+# E2E: hooks/lib/watcher-liveness.sh's wm_owner_paths, bin/watch-fleet's own
+# per-owner file-definition block, and hooks/no-foreground-watcher-guard.sh's
+# own python-side derivation are THREE independent derivations of the same
+# owner-keyed paths (issue #185's own "known, accepted duplication", extended
+# by issue #198's own standdown-marker denial - see the plan's "Files
+# touched" section). This proves all three agree, behaviorally, for both an
+# unscoped ("") and a scoped owner: bin/watch-fleet cannot be sourced for its
+# own path variables (it is a full script, not a library of functions), so
+# agreement with it is proven by observing that a claim actually clears
+# $STOPFILE/$SUPPRESSEDFILE/$CLAIMFAILFILE at exactly the paths
+# wm_owner_paths independently predicts; agreement with the guard is proven
+# by observing that it denies an arm when a marker exists at exactly that
+# same predicted path - a drift in any derivation would leave the "other
+# side's" file untouched, or the guard reading (or missing) the wrong path.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 WF="$TEST_REPO/bin/watch-fleet"
 LIB="$TEST_REPO/hooks/lib/watcher-liveness.sh"
+GUARD="$TEST_REPO/hooks/no-foreground-watcher-guard.sh"
 export WM_WATCH_INTERVAL=1
+
+run_guard() {
+  # run_guard <command> - always run_in_background: true, matching an arm.
+  uv run --no-project --quiet python -c '
+import json, sys
+print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1], "run_in_background": True}}))
+' "$1" | bash "$GUARD"
+}
 
 check_owner() {
   _co_owner="$1"; _co_label="$2"
@@ -38,6 +51,19 @@ check_owner() {
   printf 'x\n' > "$_lib_stopfile"
   printf 'x\ny\n' > "$_lib_suppressedfile"
   printf 'x\n' > "$_lib_claimfailfile"
+
+  # issue #198: the guard's own independent derivation of the marker path -
+  # a marker at exactly the lib-predicted SUPPRESSEDFILE path, read under
+  # this owner's WINGMAN_CREW_ID, must deny an arm. No WINGMAN_RUN_ID is set
+  # (test_new_home unsets it), so the marker's "x" stamp is honored
+  # regardless (no run id to certify ownership against either way).
+  if [ -n "$_co_owner" ]; then
+    _guard_out="$(WINGMAN_CREW_ID="$_co_owner" run_guard 'bin/watch-fleet')"
+  else
+    unset WINGMAN_CREW_ID
+    _guard_out="$(run_guard 'bin/watch-fleet')"
+  fi
+  assert_contains "$_co_label: the guard's own marker-path derivation agrees with wm_owner_paths' (denies at the lib-predicted path)" "$_guard_out" '"permissionDecision": "deny"'
 
   if [ -n "$_co_owner" ]; then
     export WINGMAN_CREW_ID="$_co_owner"

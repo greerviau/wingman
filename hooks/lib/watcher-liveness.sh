@@ -23,6 +23,21 @@
 : "${WM_CONTINUITY_TIMEOUT_MIN:=3600}"
 : "${WM_CONTINUITY_TIMEOUT_MARGIN:=300}"
 
+# The spurious-repeated standdown's fallback text (issue #198), used by both
+# Stop hooks whenever a marker's own stored text (line 2+) comes back empty -
+# a pre-fix marker written by an older session, or a truncated write. Never
+# the routine arm-demanding nudge: falling back to that would be R1 again for
+# any legacy marker. Env-overridable like the constants above, primarily so
+# the test suite can assert against it directly rather than duplicating its
+# prose. `${WM_HOME:-}`, not a bare `$WM_HOME`: this line runs at SOURCE time,
+# unconditionally, and a caller that sources this file only for its
+# path-derivation helpers (e.g. tests/owner-paths-cross-derivation.test.sh)
+# may do so under `set -u` without ever setting $WM_HOME - a bare reference
+# would abort that sourcing outright. Every real Stop-hook caller has already
+# set $WM_HOME before sourcing this file (see the header comment above), so
+# this resolves to the real path in every case that actually surfaces it.
+: "${WM_STANDDOWN_FALLBACK:=Fleet supervision is standing down after repeated watch-fleet deaths for this session (see ${WM_HOME:-}/watch-spurious.log); supervision is not being maintained. Report this to the pilot and stop. Do NOT arm a watch-fleet cycle and do NOT run /watch in response - lifting the standdown is up to the pilot.}"
+
 # wm_owner_paths <owner> <wm_home>
 # Derives the owner key once and sets every owner-keyed path both hooks (and
 # bin/watch-fleet's own per-owner block, re-derived independently there - see
