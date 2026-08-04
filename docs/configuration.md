@@ -66,9 +66,10 @@ To find a knob, grep the source for `${WM_`.
   A preference answered in the settings file's `[prefs]` table is never asked at all, on any run; an answer given during a run (`/prefs`) is cached against that run id and outranks the file for the rest of it.
 - It resolves every discovered sibling project root (`bin/discover-projects`) and passes `--add-dir` for each, so a global-scope spawn, or wingman's own occasional cross-project read, never blocks on a first-time directory-permission prompt.
 - It registers this session's own tmux pane path at `$WM_HOME/self-pane` (only when running inside tmux) - the read-only signal `bin/watch-fleet`'s `self_pane_check` uses to detect wingman's own dropped Remote Control connection (see [Remote Control](architecture.md#remote-control)).
+- It launches `bin/lib/tmux-guardian.sh`, scope-wrapped independently of the tmux server it watches, so the shared server's whole cgroup dying (issue #218) does not also take out the one thing watching for it (see [Survival & reconciliation](architecture.md#survival--reconciliation)).
 - It refreshes `~/.wingman/` state and the project-discovery cache unconditionally on every launch, so the roster and project list are never stale from a previous run.
 
-None of this is required - the underlying scripts work without the launcher - but skipping it means hand-approving `--add-dir` prompts, no onboarding-preference caching for the run, and no disconnect detection for wingman's own session.
+None of this is required - the underlying scripts work without the launcher - but skipping it means hand-approving `--add-dir` prompts, no onboarding-preference caching for the run, no disconnect detection for wingman's own session, and no liveness trail if the tmux server itself dies.
 
 ## Spawning crew (the recipe)
 
