@@ -31,6 +31,21 @@ for r in json.load(open(sys.argv[1])):
 ' "$WINGMAN_HOME/crew.json" "$1"
 }
 
+summary_of() {
+  wm_py -c 'import json,sys; print(json.load(open(sys.argv[1]))["summary"])' \
+    "$WINGMAN_HOME/crew/$1.json"
+}
+
+# issue #235: the provenance _impose_stall records on every wedge flip.
+stall_field() {
+  wm_py -c '
+import json, sys
+d = json.load(open(sys.argv[1])).get("stall") or {}
+v = d.get(sys.argv[2])
+print(v if v is not None else "")
+' "$WINGMAN_HOME/crew/$1.json" "$2"
+}
+
 spawn_bg() { "$@" & wm_track "$!"; }
 
 # A matching root: the child's args are literally "sleep 600", matched by
@@ -78,6 +93,22 @@ assert_contains "reason names issue #202" "$inc1_json" "issue #202"
 assert_contains "the blocker TEXT survives in the new summary" "$inc1_json" "should we use approach A or B?"
 assert_contains "the last summary is carried too" "$inc1_json" "thanks - resuming"
 assert_not_contains "the blocker FIELD itself is cleared" "$inc1_json" '"blocker"'
+
+# issue #235: the flip records provenance for cmd_stall_recheck to re-run
+# this SAME detector's own evidence later - source/since/prev_status/
+# prev_blocker/wedge_pid. prev_blocker is what makes a lossless restore
+# possible even though the FIELD itself is cleared above (its TEXT was
+# copied into the new summary first, then captured here before the pop).
+assert_eq "stall.source records 'wedge'" "$(stall_field inc1 source)" "wedge"
+assert_eq "stall.prev_status records the pre-flip status" "$(stall_field inc1 prev_status)" "blocked"
+assert_eq "stall.prev_blocker restores losslessly, despite the FIELD being cleared" \
+  "$(stall_field inc1 prev_blocker)" "should we use approach A or B?"
+assert_contains "stall.prev_summary carries the untruncated pre-flip summary" \
+  "$(stall_field inc1 prev_summary)" "thanks - resuming"
+assert_true "stall.wedge_pid is a positive integer naming the matched descendant" \
+  "[ '$(stall_field inc1 wedge_pid)' -gt 0 ] 2>/dev/null"
+assert_eq "stall.since matches the record's own updated stamp" \
+  "$(stall_field inc1 since)" "$(wm_py -c 'import json,sys; print(json.load(open(sys.argv[1]))["updated"])' "$WINGMAN_HOME/crew/inc1.json")"
 
 # needs-attention surfaces the stall reason as the note, never the old
 # blocker text on its own.

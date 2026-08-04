@@ -120,4 +120,24 @@ assert_eq "the blocked member is untouched by the annotation itself" \
   "$(wm_py -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$WINGMAN_HOME/crew/ls3.json")" \
   "blocked"
 
+# --- issue #235 regression: _stall_annotation's gate was RESTRUCTURED (not
+# widened) to dispatch 'stalled' to its own _stalled_annotation - a leftover
+# long_shell_elapsed on a 'stalled' record must never show the working/
+# blocked-only long-shell annotation, however low WM_LONG_SHELL_WARN is set.
+test_new_home
+wm_state crew-add --id ls4 --type developer --objective d --repo /tmp --window wm-ls4 --session-id s4 >/dev/null
+wm_state crew-set --id ls4 --status working --summary "building" >/dev/null
+wm_py -c '
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["status"] = "stalled"
+d["long_shell_pid"] = 99999
+d["long_shell_elapsed"] = 99999
+json.dump(d, open(p, "w"))
+' "$WINGMAN_HOME/crew/ls4.json"
+roster_stalled="$(WM_LONG_SHELL_WARN=1 wm_state crew-list)"
+assert_not_contains "a stalled member never shows the long-shell annotation" "$roster_stalled" "longer than usual"
+assert_contains "a stalled member still gets its own dedicated annotation" "$roster_stalled" "stalled (flagged"
+
 test_summary

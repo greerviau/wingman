@@ -90,6 +90,28 @@ json.dump(d, open(p, "w"))
 roster3="$(wm_state crew-list)"
 assert_not_contains "a blocked member is never annotated even with nudged_at present" "$roster3" "self-heal nudge sent"
 
+# --- issue #235 regression: _stall_annotation's gate was RESTRUCTURED (not
+# widened) to dispatch 'stalled' to its own _stalled_annotation - a leftover
+# nudged_at on a 'stalled' record (the record was nudged, THEN genuinely
+# flipped, e.g. by a different detector's own write path) must still never
+# show the working-only nudge annotation, and the restructured gate must
+# still correctly route to the new stalled-only rendering instead of falling
+# through to "" the way any other non-working/blocked status does. -----------
+test_new_home
+wm_state crew-add --id n3 --type developer --objective z --repo /tmp --window wm-n3 --session-id s3 >/dev/null
+wm_state crew-set --id n3 --status working --summary "digging" >/dev/null
+wm_py -c '
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["status"] = "stalled"
+d["nudged_at"] = d["updated"]
+json.dump(d, open(p, "w"))
+' "$WINGMAN_HOME/crew/n3.json"
+roster4="$(wm_state crew-list)"
+assert_not_contains "a stalled member never shows the working-only nudge annotation" "$roster4" "self-heal nudge sent"
+assert_contains "a stalled member still gets its own dedicated annotation" "$roster4" "stalled (flagged"
+
 # --- regression: a self-report that lands between a caller's stale read and
 # a later write is never clobbered by _stamp_nudged_at/_track_long_running
 # (a reviewer-reported race on PR #156). A round trip through the CLI cannot

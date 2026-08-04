@@ -84,6 +84,28 @@ model error instead of doing any work - the member never self-reports, so it
 surfaces as `stalled`, not `died`. `bin/crew-takeover <id>` attaches to the
 live window, where the model error is directly visible in the transcript.
 
+**A `stalled` classification is now self-correcting** (issue #235): once you
+relay it, `watch-fleet` keeps re-running the SAME detector's own evidence
+against the record on every subsequent poll, and reverts it on its own once
+that evidence stops holding for a sustained number of consecutive polls.
+`bin/crew-list`/`board.md` show this directly - the status cell always
+carries the classification's own age (`stalled (flagged 3h12m ago)`), and,
+while a reverting streak is in progress, an extra clause
+(`showing activity for 10s - classification may be stale`). A record
+annotated that way is likely about to clear itself, so a takeover launched
+against it may turn out to be unnecessary - check the board again before
+attaching if the flagged age is small and the streak clause is present.
+**A silent clear produces no second fire**: nothing pages you when this
+happens (see [architecture.md](../architecture.md) for why), so if you were
+relayed "X is stalled, take it over" and come back to it later, re-read the
+board rather than assume the absence of a follow-up wake means X is still
+stalled. `$WINGMAN_HOME/stall-recheck.log` is the durable record of every
+clear (`<iso> <id> <source> cleared after <N> polls`) - check it to confirm
+whether, and when, a given member cleared itself. The one exception: a
+wedge stall (case 3 above) that reverts to `blocked` DOES fire once, because
+the restored `blocker` is a genuinely open question nobody answered, not a
+notification about the supervisor's own bookkeeping.
+
 This is distinct from `died` (the session/window is confirmed gone, so no
 nudge was ever possible) - a `died` member is always relayed immediately, with
 no wait of any kind.
