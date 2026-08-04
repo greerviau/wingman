@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# wingman-service-start - idempotent ExecStart target for a Type=forking
+# wingman.service (see systemd/wingman.service). Ensures the orchestrator's
+# tmux session exists, then resolves the tmux SERVER's own pid (not this
+# script's pid, and not any pane's pid) and writes it to a pidfile so systemd
+# can adopt it as the unit's MainPID.
+#
+# This closes issue #250: the previous ExecStart (`systemd-run --user --scope
+# ... tmux new-session -d ...`) exited successfully the instant the session
+# was created, so the unit sat at "active (exited)" whether the tmux server
+# had been alive for five days or had died five seconds earlier - nothing
+# ever told systemd the thing that mattered had gone away. With MainPID
+# tracked here and Restart=on-failure in the unit, systemd notices a dead
+# server directly (no polling) and restarts it within seconds.
+#
+# Deliberately does NOT use bin/lib/common.sh's wm_tmux_scoped. That helper
+# detaches a freshly-forked tmux server from a Type=oneshot caller's cgroup
+# so the server survives ExecStart exiting (issue #45) - a real hazard under
+# oneshot, where systemd tears down the whole cgroup the moment ExecStart
+# returns. Type=forking is the opposite case: systemd expects the daemon to
+# keep running in the same cgroup as the process that forked it, and tracks
+# it there on purpose. Detaching it here would defeat the supervision this
+# script exists to provide.
+#
+# Safe to re-run against an already-running session (a manual re-invocation,
+# or doctor probing it): the existing session is left alone and only the
+# pidfile is refreshed.
+#
+# Usage: wingman-service-start <session> <pidfile> [-- cmd...]
+#   <session>  tmux session name to create or reuse.
+#   <pidfile>  path to write the resolved tmux server pid to.
+#   cmd...     command to run as the session's initial window (argv form -
+#              each word its own argument, no shell re-parsing); only used
+#              the first time, when <session> does not already exist.
+# bash-3.2-safe.
+set -u
+
+usage() { echo "usage: wingman-service-start <session> <pidfile> [-- cmd...]" >&2; exit 2; }
+
+[ $# -ge 2 ] || usage
+SESSION="$1"
+PIDFILE="$2"
+shift 2
+[ -n "$SESSION" ] && [ -n "$PIDFILE" ] || usage
+[ "${1:-}" = "--" ] && shift
+
+TARGET="=$SESSION"
+
+if ! tmux has-session -t "$TARGET" 2>/dev/null; then
+  if [ $# -gt 0 ]; then
+    tmux new-session -d -s "$SESSION" -n wingman "$@" || exit 1
+  else
+    tmux new-session -d -s "$SESSION" -n wingman || exit 1
+  fi
+fi
+
+PID="$(tmux display-message -p -t "$TARGET" '#{pid}' 2>/dev/null)"
+case "$PID" in
+  ''|*[!0-9]*)
+    echo "wingman-service-start: could not resolve the tmux server pid" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$(dirname "$PIDFILE")" 2>/dev/null
+printf '%s\n' "$PID" > "$PIDFILE" || exit 1
