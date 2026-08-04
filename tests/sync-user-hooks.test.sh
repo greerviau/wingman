@@ -200,6 +200,17 @@ for g in d['hooks']['Stop']:
 ")"
 assert_eq "stop-guard-crew.sh (no entry_options in the manifest) carries none of those keys" "$guard_entry_options" "False False False"
 
+# --- a settings path whose parent directory does not exist yet ---------------
+# A first-ever run on a machine with no ~/.claude/ at all yet is exactly this
+# shape - the reconciler must create it rather than fail with an unhandled
+# OSError partway through the write-mode lock/write path.
+SETTINGS_NODIR="$WORK/does-not-exist-yet/nested/settings.json"
+out_nodir="$(run_sync --settings "$SETTINGS_NODIR" --repo "$TEST_REPO" 2>&1)"; rc_nodir=$?
+assert_eq "a missing parent directory: sync still exits 0" "$rc_nodir" "0"
+assert_true "a missing parent directory: the settings file is written anyway" "[ -f '$SETTINGS_NODIR' ]"
+count_nodir="$(all_registered "$SETTINGS_NODIR" | sort -u | wc -l | tr -d ' ')"
+assert_eq "a missing parent directory: every manifest entry is registered" "$count_nodir" "$EXPECTED_COUNT"
+
 # --- test 9: concurrency - N reconcilers racing one fresh settings file -------
 SETTINGS9="$WORK/concurrent.json"
 _pids=""

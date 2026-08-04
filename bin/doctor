@@ -52,10 +52,17 @@ echo
 # successful launch clears it, so a pilot who ran doctor cannot mistake that
 # for "wingman starts now".
 if [ -f "$WM_HOME/last-launch-failure" ]; then
-  _llf_ts="$(sed -n '1s/\t.*//p' "$WM_HOME/last-launch-failure" 2>/dev/null)"
-  _llf_component="$(sed -n '1s/^[^\t]*\t//p' "$WM_HOME/last-launch-failure" 2>/dev/null)"
-  _llf_reason="$(sed -n '2p' "$WM_HOME/last-launch-failure" 2>/dev/null)"
-  wm_err "the most recent wingman launch refused to start ($_llf_ts, $_llf_component): $_llf_reason"
+  # Parsed with bash parameter expansion rather than `sed ... \t`, whose `\t`
+  # is a GNU extension - BSD/macOS sed treats it as a literal "t", silently
+  # emptying both fields there. tail (not `sed -n '2p'`) captures the WHOLE
+  # reason: the reconciler prints one "error:" line per broken script, so a
+  # checkout missing several would otherwise only ever surface the first.
+  _llf_line1="$(head -n1 "$WM_HOME/last-launch-failure" 2>/dev/null)"
+  _llf_tab="$(printf '\t')"
+  _llf_ts="${_llf_line1%%"$_llf_tab"*}"
+  _llf_component="${_llf_line1#*"$_llf_tab"}"
+  _llf_reason="$(tail -n +2 "$WM_HOME/last-launch-failure" 2>/dev/null)"
+  wm_err "the most recent session launch refused to start ($_llf_ts, $_llf_component): $_llf_reason"
   printf '    fix the problem above, then start wingman again - this file is not cleared\n'
   printf '    until a launch actually succeeds: %s\n' "$WM_HOME/last-launch-failure"
   echo

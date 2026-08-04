@@ -222,7 +222,7 @@ esac
 
 # doctor surfaces it near the top of its own output while it is present.
 doctor_out="$("$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "bin/doctor surfaces the recorded launch failure" "$doctor_out" "the most recent wingman launch refused to start"
+assert_contains "bin/doctor surfaces the recorded launch failure" "$doctor_out" "the most recent session launch refused to start"
 assert_contains "bin/doctor's surfaced message names the component" "$doctor_out" "guard-hook sync"
 
 # A subsequent successful launch clears it.
@@ -234,6 +234,6 @@ assert_false "a successful launch clears the failure sink" "[ -f '$WINGMAN_HOME/
 # doctor no longer surfaces anything once it is cleared.
 doctor_out2="$("$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_false "bin/doctor no longer mentions a launch failure once cleared" \
-  "printf '%s' '$doctor_out2' | grep -q 'the most recent wingman launch refused to start'"
+  "printf '%s' '$doctor_out2' | grep -q 'the most recent session launch refused to start'"
 
 test_summary

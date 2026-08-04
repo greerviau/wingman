@@ -135,7 +135,8 @@ def apply_missing(settings, missing):
 
 
 def write_settings(path, settings):
-    parent = os.path.dirname(path) or "."
+    # The caller (main's write-mode block) has already created the parent
+    # directory before opening the sidecar lock, so this only writes the file.
     mode = None
     if os.path.exists(path):
         mode = stat.S_IMODE(os.stat(path).st_mode)
@@ -183,7 +184,14 @@ def main():
 
     # --- write mode: serialise via a sidecar lock, then re-check under it ----
     lock_path = f"{args.settings}.wm-lock"
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        parent = os.path.dirname(args.settings)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError as e:
+        print(f"error: could not open lock file {lock_path}: {e}", file=sys.stderr)
+        sys.exit(2)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
