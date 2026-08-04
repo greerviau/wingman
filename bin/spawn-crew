@@ -257,6 +257,18 @@ if [ "$PERM_MODE" = bypassPermissions ] && \
   wm_die "Bypass-Permissions mode has not been accepted yet. Run 'bin/doctor -y', or accept it manually (see bin/doctor's own message), then retry this spawn."
 fi
 
+# --- preflight: reconcile user-scope guard hooks (issue #241) ---------------
+# The crew session about to be spawned is the one that wedged in the incident
+# this fixes - see bin/wingman's identical block for the full rationale. Same
+# fail-closed posture, same no-override rule: no tmux window, no crew record,
+# no worktree path reservation on a sync failure.
+if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
+    --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
+  wm_launch_failure "guard-hook sync (spawn)" "$_sync_err"
+  wm_die "could not wire the user-level guard hooks this crew session needs: $_sync_err
+Fix the reported problem, or run 'bin/doctor -y', then retry this spawn."
+fi
+
 # Model and reasoning effort for the crew session, alongside the other
 # harness-specific knobs (WM_AGENT, WM_PERMISSION_MODE). Most specific wins:
 #   --model/--effort on this call

@@ -52,5 +52,36 @@ export WINGMAN_BIN="$WM_BIN"
 export WINGMAN_REPO="$WM_REPO"
 
 cd "$WM_REPO" || wm_die "cannot cd into wingman repo: $WM_REPO"
+
+# --- reconcile user-scope guard hooks (issue #241) ---------------------------
+# A merged guard hook is only active once it is registered in user-level
+# settings.json, and until now that registration only ever happened when a
+# human remembered to run bin/doctor. Fail closed, deliberately, with no
+# override: a session that could not wire its guards is the exact condition
+# that produced the incident this fixes (see the plan). The failure sink
+# makes the refusal observable even under systemd, where bin/wingman's own
+# stderr never reaches anyone (see wm_launch_failure's own comment).
+if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
+    --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
+  wm_launch_failure "guard-hook sync" "$_sync_err"
+  wm_die "could not wire wingman's user-level guard hooks: $_sync_err
+Fix the reported problem, or run 'bin/doctor -y', then start wingman again. This failure was also recorded in $WM_HOME/last-launch-failure."
+fi
+rm -f "$WM_HOME/last-launch-failure"   # the sync succeeded; the file means "last attempt refused"
+
+# --- checkout-freshness advisory (issue #241) ---------------------------------
+# Registration drift (above) is now impossible; deployment drift - this
+# checkout itself lagging origin/main - is not, and nothing here should ever
+# auto-pull a checkout a human may be mid-edit on. Advisory only: gated on the
+# "stale:" prefix in stdout, never on exit status, since the script also exits
+# non-zero (printing "error:...") when offline or detached - neither of which
+# is something this warning should ever fire for.
+_gfc_out="$(REPO_DIR="$WM_REPO" timeout 15 "$WM_LIB/git-freshness-check.sh" 2>/dev/null)"
+case "$_gfc_out" in
+  stale:*)
+    wm_warn "this wingman checkout is behind origin/main - guard fixes that have merged are not running here. Run: git -C $WM_REPO pull --ff-only && systemctl --user restart wingman.service"
+    ;;
+esac
+
 # shellcheck disable=SC2086
 exec claude $adddirs "$@"

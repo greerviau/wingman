@@ -344,4 +344,55 @@ print(cmds.count('$TEST_REPO/hooks/no-foreground-watcher-guard.sh'))
 ")"
 assert_eq "re-running does not duplicate the hook entry" "$foreground_watcher_guard_count" "1"
 
+# --- manifest/doctor equality (issue #241, the drift proof) -----------------
+# bin/doctor still registers user-scope hooks the old way (one
+# install-user-hook.py call per group); bin/lib/user-hooks.json +
+# bin/lib/sync-user-hooks.py now do the identical job automatically at every
+# session-creation choke point. This is what lets bin/doctor's own duplicated
+# registration blocks stay unrefactored for now (deferred follow-up) without
+# the two lists silently drifting apart: it fails the build the moment either
+# one registers a hook the other doesn't know about.
+#
+# Leave WM_STOP_GUARD_CREW_SCRIPT/WM_STOP_CONTINUITY_CREW_SCRIPT/
+# WM_DENIAL_REPORT_GUARD_SCRIPT unset here - doctor resolves those to real,
+# checked-in paths by default, matching what the manifest itself names; if
+# they were still set to some earlier test's throwaway fixtures in this file,
+# doctor would register fixture paths while the manifest registers real repo
+# paths and this assertion would fail for a reason that has nothing to do
+# with drift.
+SETTINGS_DOCTOR="$WORK/equality-doctor.json"
+SETTINGS_MANIFEST="$WORK/equality-manifest.json"
+(
+  unset WM_STOP_GUARD_CREW_SCRIPT WM_STOP_CONTINUITY_CREW_SCRIPT WM_DENIAL_REPORT_GUARD_SCRIPT
+  WM_CLAUDE_USER_SETTINGS="$SETTINGS_DOCTOR" "$TEST_REPO/bin/doctor" -y < /dev/null >/dev/null 2>&1
+)
+uv run --no-project --quiet "$TEST_REPO/bin/lib/sync-user-hooks.py" \
+  --settings "$SETTINGS_MANIFEST" --repo "$TEST_REPO" >/dev/null 2>&1
+
+equality_result="$(uv run --no-project --quiet python -c "
+import json
+
+def registrations(path):
+    d = json.load(open(path))
+    out = set()
+    for event, groups in (d.get('hooks') or {}).items():
+        for g in groups:
+            matcher = g.get('matcher')
+            for h in g.get('hooks', []):
+                entry_options = frozenset(
+                    (k, h.get(k)) for k in ('asyncRewake', 'timeout', 'rewakeSummary') if k in h
+                )
+                out.add((event, matcher, h.get('command'), entry_options))
+    return out
+
+doctor_set = registrations('$SETTINGS_DOCTOR')
+manifest_set = registrations('$SETTINGS_MANIFEST')
+if doctor_set == manifest_set:
+    print('MATCH')
+else:
+    print('only in doctor:', sorted(doctor_set - manifest_set))
+    print('only in manifest:', sorted(manifest_set - doctor_set))
+")"
+assert_eq "bin/doctor and sync-user-hooks.py register the identical set of user-scope hooks" "$equality_result" "MATCH"
+
 test_summary

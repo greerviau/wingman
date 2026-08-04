@@ -31,7 +31,7 @@ cd wingman
 bin/wingman          # recommended; plain `claude` also works
 ```
 
-On first launch wingman runs `bin/doctor` (installs any missing dependencies with your consent), discovers your sibling repos with zero config, and starts the supervisor.
+Run `bin/doctor -y` once, up front, to install missing dependencies and register wingman's guard hooks; `bin/wingman` then discovers your sibling repos with zero config and starts the supervisor (it reconciles guard-hook registration on every launch, but does not install dependencies for you the way `bin/doctor` does).
 Then give it a directive. All you need up front is `claude` and `git`.
 
 > `bin/wingman` is a thin launcher: it pre-adds sibling repos (`--add-dir`), mints a run id so preferences are asked once per run, and wires up Remote Control disconnect detection. Plain `claude` works too, with less - see [the launcher docs](docs/configuration.md#the-wingman-launcher).

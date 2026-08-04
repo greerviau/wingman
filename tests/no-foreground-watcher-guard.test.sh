@@ -190,4 +190,20 @@ assert_contains "full-envelope foreground fixture is denied" "$out" '"permission
 out="$(bash "$HOOK" < "$TEST_REPO/tests/fixtures/pretooluse-watch-fleet-background.json")"
 assert_eq "full-envelope background fixture is allowed (no output)" "$out" ""
 
+# --- issue #241: the incident's literal command shape, pinned ----------------
+# The wedge investigated in #241 was NOT a matcher gap (this file already
+# covers `bin/pr-watch --pr 5` above, denied/allowed correctly) - it was that
+# the guard was never registered on the live machine at all. Still, the
+# incident's exact `ps`-rendered shape (a `#!/usr/bin/env bash` script always
+# shows as `bash <script> <args>` regardless of how it was actually invoked)
+# is worth pinning explicitly rather than left to incidental coverage, so a
+# future change to the interpreter-prefix unwrapping in
+# hooks/lib/cmd_match.py's resolve_command() cannot silently regress it.
+out="$(run_hook 'bash /abs/path/to/bin/pr-watch --pr https://github.com/owner/repo/pull/240' omit)"
+assert_contains "denied (interpreter-prefix form, no run_in_background): bash .../pr-watch --pr <url>" "$out" '"permissionDecision": "deny"'
+assert_contains "denial cites issue #202" "$out" "issue #202"
+
+out="$(run_hook 'bash /abs/path/to/bin/pr-watch --pr https://github.com/owner/repo/pull/240' true)"
+assert_eq "allowed (interpreter-prefix form, run_in_background: true): bash .../pr-watch --pr <url>" "$out" ""
+
 test_summary

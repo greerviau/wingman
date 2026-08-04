@@ -93,6 +93,23 @@ print(state.get("state", "clear") if isinstance(state, dict) else "clear")
   fi
 fi
 
+# --- reconcile user-scope guard hooks (issue #241) ---------------------------
+# The third session-creation choke point (bin/wingman, bin/spawn-crew above,
+# and this): crew-resume writes its own launcher script and opens its own
+# tmux window, bypassing bin/spawn-crew's preflight entirely, so a resumed
+# session would otherwise bind whatever settings.json happened to exist -
+# exactly the recovery window (a pre-authorized --all-died after a mass-death
+# event) where an unguarded agent is most likely to do damage. Hoisted above
+# the per-member loop: this is process-global, runs once per invocation
+# (not once per resumed member), and a --all-died batch refuses as a whole
+# rather than resuming some members unguarded.
+if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
+    --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
+  wm_launch_failure "guard-hook sync (resume)" "$_sync_err"
+  wm_die "could not wire the user-level guard hooks this resumed session needs: $_sync_err
+Fix the reported problem, or run 'bin/doctor -y', then retry this resume."
+fi
+
 # Same model/effort/permission-mode resolution convention as bin/spawn-crew: no
 # CLI flags here (a resumed session has no per-call --model/--effort of its
 # own), just the same env-var defaults.
