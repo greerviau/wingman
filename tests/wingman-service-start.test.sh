@@ -4,7 +4,7 @@
 # the given command the first time, (2) resolve and write the tmux SERVER's
 # own pid (not a pane pid) to the pidfile so systemd can adopt it as
 # MainPID, (3) be a safe no-op re-run against an already-running session so
-# a Restart=on-failure retry or a manual doctor probe never errors out or
+# a Restart=always retry or a manual doctor probe never errors out or
 # duplicates the session, and (4) never touch ~/.wingman/crew.json - the
 # roster lives entirely outside this script's job.
 #

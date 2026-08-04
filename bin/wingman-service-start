@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # wingman-service-start - idempotent ExecStart target for a Type=forking
-# wingman.service (see systemd/wingman.service). Ensures the orchestrator's
-# tmux session exists, then resolves the tmux SERVER's own pid (not this
-# script's pid, and not any pane's pid) and writes it to a pidfile so systemd
-# can adopt it as the unit's MainPID.
+# wingman.service (see systemd/wingman.service.example). Ensures the
+# orchestrator's tmux session exists, then resolves the tmux SERVER's own
+# pid (not this script's pid, and not any pane's pid) and writes it to a
+# pidfile so systemd can adopt it as the unit's MainPID.
 #
 # This closes issue #250: the previous ExecStart (`systemd-run --user --scope
 # ... tmux new-session -d ...`) exited successfully the instant the session
 # was created, so the unit sat at "active (exited)" whether the tmux server
 # had been alive for five days or had died five seconds earlier - nothing
 # ever told systemd the thing that mattered had gone away. With MainPID
-# tracked here and Restart=on-failure in the unit, systemd notices a dead
+# tracked here and Restart=always in the unit, systemd notices a dead
 # server directly (no polling) and restarts it within seconds.
 #
 # Deliberately does NOT use bin/lib/common.sh's wm_tmux_scoped. That helper

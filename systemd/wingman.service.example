@@ -3,7 +3,9 @@
 #
 # This is a template, not something wingman installs or manages itself:
 #   cp systemd/wingman.service.example ~/.config/systemd/user/wingman.service
-#   # edit the two /path/to/wingman occurrences below to your actual clone
+#   # replace every /path/to/wingman occurrence below with your actual clone -
+#   # sed -i "s#/path/to/wingman#$HOME/github/wingman#g" ~/.config/systemd/user/wingman.service
+#   # a missed one (e.g. WorkingDirectory=) fails ExecStart with a CHDIR error
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now wingman.service
 #
@@ -48,7 +50,11 @@
 # with a green-looking unit definition in front of it. Since the failure
 # mode is unidentified, the supervisor must not pre-filter on exit status.
 # The trade-off: under Restart=always, exiting the orchestrator by hand from
-# inside tmux brings it back within ~2s too - the way to actually stop it is
+# inside tmux brings it back within ~2s too - but only if wingman-main was
+# the last session left on the server; with any crew window still live the
+# server survives, MainPID stays healthy, and nothing restarts (the same
+# live-server/dead-orchestrator blind spot documented in fleet-resilience.md
+# and the incidents runbook). The way to actually stop the server itself is
 # `systemctl --user stop wingman.service` (still honored: systemd never
 # restarts after an explicit stop). For a unit whose whole purpose is
 # "wingman is up unless someone said otherwise," that is the correct
