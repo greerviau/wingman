@@ -268,6 +268,31 @@ out="$(WINGMAN_CREW_ID=leadx run_hook 'bin/watch-fleet' true)"
 assert_eq "an owner-scoped (leadx) session is unaffected by the unscoped marker" "$out" ""
 rm -f "$WINGMAN_HOME/watch.suppressed"
 
+# --- MUST-FIX 3 (plan review): the command's own --owner must win over
+# $WINGMAN_CREW_ID, matching bin/watch-fleet's own precedence - otherwise the
+# marker the guard checks and the cycle the command actually arms can be
+# different owners ------------------------------------------------------------
+test_new_home
+
+# Bypass direction: WINGMAN_CREW_ID=leadx is under no standdown of its own,
+# but the command explicitly targets the unscoped owner ("") while THAT
+# owner's standdown holds. Checking only $WINGMAN_CREW_ID would find nothing
+# and wrongly allow - reopening R1's loop through the arm this session is
+# actually about to perform.
+printf '%s\n%s\n' "" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
+out="$(WINGMAN_CREW_ID=leadx run_hook 'bin/watch-fleet --owner ""' true)"
+assert_contains "an explicit --owner \"\" is gated by the unscoped marker even though WINGMAN_CREW_ID=leadx" "$out" '"permissionDecision": "deny"'
+rm -f "$WINGMAN_HOME/watch.suppressed"
+
+# False-deny direction: WINGMAN_CREW_ID=leadx is itself under a standdown,
+# but the command explicitly targets a different, healthy owner. Checking
+# only $WINGMAN_CREW_ID would find leadx's own marker and wrongly deny an arm
+# of an unrelated, un-suppressed cycle.
+printf '%s\n%s\n' "" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch-leadx.suppressed"
+out="$(WINGMAN_CREW_ID=leadx run_hook 'bin/watch-fleet --owner otherowner' true)"
+assert_eq "an explicit --owner otherowner is unaffected by leadx's own standdown" "$out" ""
+rm -f "$WINGMAN_HOME/watch-leadx.suppressed"
+
 # --- fail-closed posture: an unreadable $WINGMAN_HOME denies; a merely
 # absent marker is a different, definite answer and still allows ------------
 test_new_home

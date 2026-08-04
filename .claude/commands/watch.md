@@ -93,11 +93,16 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
        `~/.wingman/watch.pid` at once, which is exactly what this lock exists
        to prevent."*
      - any other hint (`sigkill-suspected` / `clean-exit-or-sigterm` /
-       `hung-or-stale-pidfile`): *"Once the cause of the repeated deaths is
-       understood, lift the standdown with `$WINGMAN_BIN/watch-fleet
-       --clear-standdown` (or restart wingman, which clears it with the
-       run); fleet continuity re-arms automatically on the next Stop
-       event."*
+       `hung-or-stale-pidfile`): no lock-specific detail beyond the diagnosis
+       already reported above.
+
+     Then, regardless of which hint fired, append the way out as a shared
+     closing line - never only on the default-hint branch, since a pilot who
+     has just cleared a stale claim lock still needs to know the standdown
+     itself does not clear on its own: *"Once the cause of the repeated
+     deaths is understood, lift the standdown with `$WINGMAN_BIN/watch-fleet
+     --clear-standdown` (or restart wingman, which clears it with the run);
+     fleet continuity re-arms automatically on the next Stop event."*
 
      This bullet's own composed text (`bin/watch-fleet`'s own
      `spurious_repeated_reason`) is the same text both Stop hooks now

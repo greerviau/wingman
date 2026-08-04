@@ -393,7 +393,9 @@ lock_trip="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "the third refusal trips spurious-repeated (stale-claim-lock)" "$lock_trip" "spurious-repeated 3 stale-claim-lock"
 lock_body="$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)"
 assert_contains "the stale-claim-lock remedy names the claim lock path" "$lock_body" "$WINGMAN_HOME/watch.pid.lock"
-assert_not_contains "the stale-claim-lock remedy does not also carry the generic --clear-standdown text" "$lock_body" "Once the cause of the repeated deaths is understood"
+# MUST-FIX 1 from the plan review: the way out must not be silently absent
+# once the pilot has cleared the lock but the standdown itself still holds.
+assert_contains "the stale-claim-lock remedy also names --clear-standdown as the way out" "$lock_body" "--clear-standdown"
 unset WM_CLAIM_HARD_STALE_AGE
 kill "$_lock_holder" 2>/dev/null
 rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null

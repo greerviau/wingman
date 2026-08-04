@@ -475,11 +475,17 @@ spurious_repeated_reason() {
   _srr_body="Fleet supervision is standing down: the watcher for this session has died $_srr_count times in a row with no successful cycle in between (see $SPURLOG); fleet supervision is not being maintained.
 
 YOUR action: report the paragraph above to the pilot, together with the pilot remedy below, then stop. Do NOT arm a watch-fleet cycle and do NOT run /watch in response to this. The standdown is deliberate - a successful claim clears it, which is exactly the re-arm churn the failure budget exists to prevent - and an arm attempt from a tool call is denied outright while it holds."
+  # The way out is a shared tail, appended after EVERY hint-selected
+  # paragraph - never only on the default hint. A pilot who has just cleared
+  # a stale claim lock still needs to be told the standdown itself does not
+  # clear on its own; without this tail that branch names no exit at all
+  # (issue #198 plan review, MUST-FIX 1).
+  _srr_clear="Once the cause of the repeated deaths is understood, lift the standdown with 'bin/watch-fleet --clear-standdown' (or restart wingman, which clears it with the run); fleet continuity re-arms automatically on the next Stop event."
   case "$_srr_hint" in
     stale-claim-lock)
-      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent." ;;
+      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent. $_srr_clear" ;;
     *)
-      _srr_remedy="Once the cause of the repeated deaths is understood, lift the standdown with 'bin/watch-fleet --clear-standdown' (or restart wingman, which clears it with the run); fleet continuity re-arms automatically on the next Stop event." ;;
+      _srr_remedy="$_srr_clear" ;;
   esac
   printf '%s\n\nPILOT REMEDY (their action, not yours - relay it): %s' "$_srr_body" "$_srr_remedy"
 }

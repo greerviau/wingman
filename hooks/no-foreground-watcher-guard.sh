@@ -266,8 +266,20 @@ try:
                     return b, i
         return None, None
 
+    def extract_owner_flag(target_argv):
+        """The command'"'"'s own --owner value, or None if not passed at all -
+        matching bin/watch-fleet'"'"'s own arg loop (`--owner) OWNER="${2:-}";
+        shift 2`), which takes the very next token unconditionally, including
+        an empty string. None (not passed) is distinct from "" (passed
+        empty) - only None falls back to $WINGMAN_CREW_ID below."""
+        for i, tok in enumerate(target_argv):
+            if tok == "--owner":
+                return target_argv[i + 1] if i + 1 < len(target_argv) else ""
+        return None
+
     arming_found = False
     watch_fleet_arming = False
+    watch_fleet_owner_argv = None
     for seg in segments:
         b, argv = resolve_command(seg)
         if not argv:
@@ -287,6 +299,7 @@ try:
         arming_found = True
         if target == "watch-fleet":
             watch_fleet_arming = True
+            watch_fleet_owner_argv = target_argv
 
     if arming_found:
         # issue #198: an arming watch-fleet call (never pr-watch, which has
@@ -301,6 +314,7 @@ try:
         # identified deliberate refusal and overriding it anyway. This is
         # what makes it structural instead.
         if watch_fleet_arming:
+            _owner_flag = extract_owner_flag(watch_fleet_owner_argv or [])
             def read_standdown_marker(path):
                 # None means "genuinely absent" (the overwhelmingly common
                 # case - no standdown in force) and must allow. Anything
@@ -314,7 +328,13 @@ try:
                 except FileNotFoundError:
                     return None
 
-            _owner = os.environ.get("WINGMAN_CREW_ID") or ""
+            # bin/watch-fleet'"'"'s own precedence (`:176-180`): --owner, when the
+            # command carries it, wins outright - only its ABSENCE falls back
+            # to $WINGMAN_CREW_ID. Checking the marker under $WINGMAN_CREW_ID
+            # alone would let `bin/watch-fleet --owner ""` bypass a standing
+            # standdown by targeting a different (or unscoped) owner than the
+            # one the guard checked (issue #198 plan review, MUST-FIX 3).
+            _owner = _owner_flag if _owner_flag is not None else (os.environ.get("WINGMAN_CREW_ID") or "")
             _okey = re.sub(r"[^A-Za-z0-9._-]", "_", _owner) if _owner else ""
             _wm_home = os.environ.get("WINGMAN_HOME") or os.path.join(os.path.expanduser("~"), ".wingman")
             _marker_name = "watch-%s.suppressed" % _okey if _okey else "watch.suppressed"

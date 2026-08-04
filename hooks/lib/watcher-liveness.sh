@@ -36,7 +36,7 @@
 # would abort that sourcing outright. Every real Stop-hook caller has already
 # set $WM_HOME before sourcing this file (see the header comment above), so
 # this resolves to the real path in every case that actually surfaces it.
-: "${WM_STANDDOWN_FALLBACK:=Fleet supervision is standing down after repeated watch-fleet deaths for this session (see ${WM_HOME:-}/watch-spurious.log); supervision is not being maintained. Report this to the pilot and stop. Do NOT arm a watch-fleet cycle and do NOT run /watch in response - lifting the standdown is up to the pilot.}"
+: "${WM_STANDDOWN_FALLBACK:=Fleet supervision is standing down after repeated watch-fleet deaths for this session (see ${WM_HOME:-}/watch-spurious.log); supervision is not being maintained. Report this to the pilot and stop. Do NOT arm a watch-fleet cycle and do NOT run /watch in response - lifting the standdown is up to the pilot, via 'bin/watch-fleet --clear-standdown' (or a fresh run).}"
 
 # wm_owner_paths <owner> <wm_home>
 # Derives the owner key once and sets every owner-keyed path both hooks (and
