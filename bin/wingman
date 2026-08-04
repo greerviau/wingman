@@ -32,6 +32,27 @@ export WINGMAN_RUN_ID
 # register; best-effort, never fatal.
 [ -n "${TMUX_PANE:-}" ] && printf '%s\n' "$TMUX_PANE" > "$WM_HOME/self-pane" 2>/dev/null
 
+# Start the tmux-server liveness guardian (issue #218): the shared tmux
+# server behind $TMUX_PANE above has twice died with its whole cgroup scope
+# torn down and zero preceding journal trace, taking wingman-main and every
+# crew window down with it in the same instant (they are all just sessions
+# on the one shared server socket). Nothing that lives inside that same
+# server can be the safety net for its own death, so this is launched
+# scope-wrapped exactly like wm_tmux_scoped already wraps the tmux server
+# itself - a one-off transient-unit invocation, not an installed systemd
+# unit - so it survives in a cgroup genuinely separate from whatever just
+# died. bin/lib/tmux-guardian.sh is idempotent (it exits immediately if a
+# live instance is already running for this $WINGMAN_HOME), so calling it
+# unconditionally on every startup - a deliberate restart, a crash recovery,
+# or the very first boot - never spawns a duplicate. Best-effort, like the
+# self-pane registration above: no systemd-run available just means weaker
+# (but still better than nothing) protection, never a launch failure.
+if wm_have systemd-run && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
+  systemd-run --user --scope --collect --quiet -- "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 &
+else
+  setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 < /dev/null &
+fi
+
 # Collect --add-dir args from the discovered roots.
 adddirs=""
 while IFS= read -r root; do
