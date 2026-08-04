@@ -644,6 +644,74 @@ wm_composer_is_empty() {
   [ "$(printf '%s' "$1" | sed -e 's/[[:space:]]*$//')" = "$WM_COMPOSER_ANCHOR" ]
 }
 
+# Acquire / release the per-pane send lock that serializes every keystroke aimed
+# at one pane. Extracted verbatim from wm_tmux_send_message's own body (issue
+# #236) so a caller that sends keystrokes WITHOUT going through the full
+# type-and-submit path - today wm_tmux_clear_pending_composer below - takes the
+# identical lock instead of racing it. Acquire returns 0 with the lock held, or
+# 4 if it could not be acquired within WM_SEND_LOCK_WAIT (nothing was sent).
+wm_tmux_send_lock() {
+  # The lock's parent must exist or every mkdir below fails and reads as
+  # permanent contention; callers can legitimately run before wm_state init.
+  mkdir -p "$WM_HOME" 2>/dev/null
+  _sl_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
+  _sl_wait="${WM_SEND_LOCK_WAIT:-45}"
+  _sl_stale="${WM_SEND_LOCK_STALE:-120}"
+  _sl_t0="$(date +%s)"
+  while ! mkdir "$_sl_lock" 2>/dev/null; do
+    _sl_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_sl_lock" 2>/dev/null || date +%s) ))
+    if [ "$_sl_age" -ge "$_sl_stale" ]; then
+      rmdir "$_sl_lock" 2>/dev/null   # crashed holder; reclaim and retry
+      continue
+    fi
+    if [ $(( $(date +%s) - _sl_t0 )) -ge "$_sl_wait" ]; then
+      wm_err "send lock for pane '$1' held by another delivery for ${_sl_wait}s+ - nothing was sent; retry shortly"
+      return 4
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+wm_tmux_send_unlock() {
+  _sl_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
+  rmdir "$_sl_lock" 2>/dev/null
+  return 0
+}
+
+# Best-effort cleanup for a delivery that typed into a composer but could never
+# confirm the submit (wm_tmux_send_message rc 3/5): if <target>'s composer
+# region is recognized AND still holds unsubmitted text, clear it once so the
+# stray text cannot later concatenate onto a human's next message. Holds the
+# per-pane send lock for the duration, exactly as wm_tmux_send_message does, so
+# this never interleaves with a concurrent crew-say/crew-ask delivery. Guarded
+# three further ways so it can never fire a keystroke somewhere it does not
+# belong: an unrecognized composer (a non-Claude-Code pane) is left alone, an
+# already-empty one is left alone, and a dialog-shaped pane is refused outright
+# by the same prompt_shape_in check every other keystroke in this file passes
+# first. BEST-EFFORT, and named so deliberately: the clear is sent but never
+# verified to have landed, so no caller may report the composer as clean.
+# rc 0 if there was nothing to do or the clear was sent, 1 if the composer was
+# not recognized, 2 if refused as dialog-shaped, 4 if the send lock was
+# contended (nothing sent - the next poll can try again).
+wm_tmux_clear_pending_composer() {
+  _cc_target="$1"
+  wm_tmux_send_lock "$_cc_target" || return 4
+  _cc_rc=0
+  _cc_text="$(wm_tmux_pane_text "$_cc_target")"
+  if prompt_shape_in "$(printf '%s\n' "$_cc_text" | tail -n "$WM_PERM_TAIL")"; then
+    _cc_rc=2
+  elif ! _cc_region="$(wm_composer_text_in "$_cc_text")"; then
+    _cc_rc=1
+  elif ! wm_composer_is_empty "$_cc_region"; then
+    _cc_keys="${WM_CLEAR_KEYS-C-c}"
+    # shellcheck disable=SC2086
+    [ -n "$_cc_keys" ] && wm_tmux send-keys -t "$_cc_target" $_cc_keys
+  fi
+  wm_tmux_send_unlock "$_cc_target"
+  return "$_cc_rc"
+}
+
 # Wait until a target pane's interactive TUI has finished starting and is ready to
 # accept input, rather than guessing with a fixed delay. A freshly launched agent
 # paints a splash/prompt and connects MCP servers before it will honour keystrokes;
@@ -807,28 +875,10 @@ wm_tmux_pane_ready() {
 # reclaims a lock older than WM_SEND_LOCK_STALE (a crashed holder) or gives
 # up with a refusal-style message on stderr and rc 4 (nothing was typed).
 wm_tmux_send_message() {
-  # The lock's parent must exist or every mkdir below fails and reads as
-  # permanent contention; callers can legitimately run before wm_state init.
-  mkdir -p "$WM_HOME" 2>/dev/null
-  _sm_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
-  _sm_wait="${WM_SEND_LOCK_WAIT:-45}"
-  _sm_stale="${WM_SEND_LOCK_STALE:-120}"
-  _sm_t0="$(date +%s)"
-  while ! mkdir "$_sm_lock" 2>/dev/null; do
-    _sm_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_sm_lock" 2>/dev/null || date +%s) ))
-    if [ "$_sm_age" -ge "$_sm_stale" ]; then
-      rmdir "$_sm_lock" 2>/dev/null   # crashed holder; reclaim and retry
-      continue
-    fi
-    if [ $(( $(date +%s) - _sm_t0 )) -ge "$_sm_wait" ]; then
-      wm_err "send lock for pane '$1' held by another delivery for ${_sm_wait}s+ - nothing was sent; retry shortly"
-      return 4
-    fi
-    sleep 1
-  done
+  wm_tmux_send_lock "$1" || return $?
   _wm_tmux_send_message_locked "$1" "$2"
   _sm_lrc=$?
-  rmdir "$_sm_lock" 2>/dev/null
+  wm_tmux_send_unlock "$1"
   return "$_sm_lrc"
 }
 

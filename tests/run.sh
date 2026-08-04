@@ -168,7 +168,7 @@ fi
 # docs/analysis/2026-07-14-test-suite-runtime.md's per-file timings; a file
 # not in this list, or a rank that has since drifted, still just runs - this
 # is a scheduling hint, not a required inventory.
-_wm_priority="watch-fleet.test.sh crew-resume.test.sh playbook-resolution.test.sh watch-fleet-classify.test.sh spawn-scope.test.sh tmux-session-targeting.test.sh stall-check.test.sh"
+_wm_priority="watch-fleet.test.sh stall-nudge-confirmation.test.sh crew-resume.test.sh playbook-resolution.test.sh watch-fleet-classify.test.sh spawn-scope.test.sh tmux-session-targeting.test.sh stall-check.test.sh"
 
 _wm_ordered=()
 for _p in $_wm_priority; do

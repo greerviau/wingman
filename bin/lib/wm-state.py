@@ -1561,9 +1561,12 @@ def cmd_stall_check(args):
     AND (#61) a check-in nudge has already had a full cooldown window to work.
 
     --nudge-age is the age in seconds of the watcher's per-id nudge marker file, or
-    -1 if no marker exists yet. A genuine stall only flips once --nudge-age is >= 0
-    and >= --threshold - i.e. the watcher already sent one check-in nudge (the
-    marker exists) and a full window has passed with no activity. On the first
+    -1 if no marker exists yet or the marker is still 'pending' (a nudge attempt is
+    in flight or awaiting retry). A genuine stall only flips once --nudge-age is >= 0
+    and >= --threshold. A non-negative age means one of two things: either a
+    confirmed nudge has had its cooldown, or (issue #236) the watcher exhausted its
+    bounded retry budget without ever confirming a submit - --nudge-confirmed is
+    what tells the reason text which of the two actually happened. On the first
     confirmed-idle poll (no marker yet, --nudge-age -1) or before the marker has
     aged past --threshold, this returns without flipping: the watcher sends (or
     already sent) the nudge and the flip is deferred to a later poll. A member that
@@ -1632,16 +1635,18 @@ def cmd_stall_check(args):
             return
 
         prior = (live.get("summary") or "").split("\n")[0][:80]
+        nudge_confirmed = getattr(args, "nudge_confirmed", 1)
+        nudge_attempts = getattr(args, "nudge_attempts", 0)
         if getattr(args, "nudge_undelivered", 0):
             # issue #214, §3.6: the watcher could never actually TYPE a
             # check-in nudge into this pane (busy with a pending composer,
             # dialog-shaped, or lock-contended, WM_NUDGE_REFUSED_MAX
             # consecutive polls in a row) and stamped the marker anyway so
             # this flip could still happen - a member nobody can reach is
-            # more in need of surfacing, not less. Named explicitly rather
-            # than folded into the default template, which would otherwise
-            # falsely imply a nudge was delivered and simply produced no
-            # activity.
+            # more in need of surfacing, not less. Checked first, ahead of
+            # both api_error and nudge_confirmed (#236): if a nudge was never
+            # typed at all, that dominates whatever the pane tail shows and
+            # whatever an earlier, unrelated attempt's own confirm state was.
             reason = ("could not deliver a check-in nudge in %d attempts - the pane is busy, "
                       "dialog-shaped or locked, and the member has been idle for >%ds while "
                       "status was 'working'. Inspect with `bin/crew-takeover %s` or stand down "
@@ -1649,19 +1654,38 @@ def cmd_stall_check(args):
                       % (int(os.environ.get("WM_NUDGE_REFUSED_MAX", "3")), int(args.threshold),
                          args.id, args.id))
         elif getattr(args, "api_error", 0):
-            reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
-                      "limit, connection error, 5xx, overloaded_error, or similar) and then "
-                      "went quiet for >%ds while status was 'working' - the CLI's own retry/"
-                      "backoff appears exhausted. Likely a local network blip or an Anthropic-"
-                      "side outage, not a broken agent. Already nudged once; if it does not "
-                      "recover, resume it with `bin/crew-resume %s`."
-                      % (int(args.threshold), args.id))
+            if nudge_confirmed:
+                reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
+                          "limit, connection error, 5xx, overloaded_error, or similar) and then "
+                          "went quiet for >%ds while status was 'working' - the CLI's own retry/"
+                          "backoff appears exhausted. Likely a local network blip or an Anthropic-"
+                          "side outage, not a broken agent. Already nudged once; if it does not "
+                          "recover, resume it with `bin/crew-resume %s`."
+                          % (int(args.threshold), args.id))
+            else:
+                reason = ("api-error: the pane shows an API/connectivity-error signature (rate "
+                          "limit, connection error, 5xx, overloaded_error, or similar) and then "
+                          "went quiet for >%ds while status was 'working' - the CLI's own retry/"
+                          "backoff appears exhausted. Likely a local network blip or an Anthropic-"
+                          "side outage, not a broken agent. A check-in nudge was typed into its "
+                          "pane %d time(s) but the submit was never confirmed - its input may be "
+                          "wedged, so it most likely never saw the nudge at all. If it does not "
+                          "recover, resume it with `bin/crew-resume %s`."
+                          % (int(args.threshold), nudge_attempts, args.id))
         else:
-            reason = ("no pane output, status update, running child process, or CPU activity "
-                      "for >%ds while status was 'working', even after a check-in nudge - the "
-                      "agent likely errored or went idle. Inspect with `bin/crew-takeover %s` "
-                      "or stand down with `bin/crew-standdown %s`."
-                      % (int(args.threshold), args.id, args.id))
+            if nudge_confirmed:
+                reason = ("no pane output, status update, running child process, or CPU activity "
+                          "for >%ds while status was 'working', even after a check-in nudge - the "
+                          "agent likely errored or went idle. Inspect with `bin/crew-takeover %s` "
+                          "or stand down with `bin/crew-standdown %s`."
+                          % (int(args.threshold), args.id, args.id))
+            else:
+                reason = ("no pane output, status update, running child process, or CPU activity "
+                          "for >%ds while status was 'working'. A check-in nudge was typed into "
+                          "its pane %d time(s) but the submit was never confirmed - its input may "
+                          "be wedged, so it most likely never saw the nudge at all. Inspect with "
+                          "`bin/crew-takeover %s` or stand down with `bin/crew-standdown %s`."
+                          % (int(args.threshold), nudge_attempts, args.id, args.id))
         if prior:
             reason += " (last summary: %s)" % prior
 
@@ -3530,6 +3554,18 @@ def build_parser():
     # --threshold first), so a flag set only at stamping time would never be
     # set on the flipping poll.
     a.add_argument("--nudge-undelivered", type=int, default=0, dest="nudge_undelivered")
+    # #236: 1 (default) iff the age reported by --nudge-age comes from a
+    # CONFIRMED nudge's cooldown clock; 0 iff it instead comes from a 'pending'
+    # marker that exhausted its retry budget without ever confirming a submit.
+    # Changes only which reason template a genuine stall is written with -
+    # never the gates or probe above - exactly like --api-error. Defaults to 1
+    # so every pre-#236 caller (and every existing test) keeps today's wording.
+    # Ignored when --nudge-undelivered is set (that check runs first).
+    a.add_argument("--nudge-confirmed", type=int, default=1, dest="nudge_confirmed")
+    # #236: display-only count of composer-leaving nudge attempts (rc 3/5),
+    # rendered into the unconfirmed reason templates so the operator sees how
+    # many times a submit was attempted, not just that one was.
+    a.add_argument("--nudge-attempts", type=int, default=0, dest="nudge_attempts")
     a.set_defaults(fn=cmd_stall_check)
 
     # Foreground-watcher wedge detection (issue #202, layer B): flips a

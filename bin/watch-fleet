@@ -234,10 +234,24 @@ STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
 # Consecutive polls a check-in nudge can go undelivered (rc 2 dialog-shaped, 4
 # lock-contended, 6 busy-with-pending-composer - issue #214) before the escape
-# hatch stamps the ordinary .nudged marker anyway, so an unreachable member
-# still eventually flips 'stalled' instead of being exempt from escalation
-# forever. See the stall-nudge block below and wm-state.py's cmd_stall_check.
+# hatch fires, so an unreachable member still eventually flips 'stalled'
+# instead of being exempt from escalation forever. See the stall-nudge block
+# below and wm-state.py's cmd_stall_check.
 WM_NUDGE_REFUSED_MAX="${WM_NUDGE_REFUSED_MAX:-3}"
+# Bounded retry for the stall self-heal nudge (issue #236). TRIES counts only
+# attempts that left text in the target's composer (wm_tmux_send_message rc
+# 3/5); a refusal that typed nothing (rc 2/4/6 - the WM_NUDGE_REFUSED_MAX
+# escape hatch above is what bounds THAT case) is retried next poll and never
+# burns this budget. TTL bounds a marker's life so a concluded episode's
+# marker can never gate a later one - it must stay comfortably above
+# STALL_IDLE or the flip window collapses (the #101 failure mode), hence the
+# floor.
+WM_STALL_NUDGE_TRIES="${WM_STALL_NUDGE_TRIES:-2}"
+WM_STALL_NUDGE_TTL="${WM_STALL_NUDGE_TTL:-$(( STALL_IDLE * (WM_STALL_NUDGE_TRIES + 2) ))}"
+if [ "$WM_STALL_NUDGE_TTL" -lt $(( STALL_IDLE * 2 )) ]; then
+  wm_warn "WM_STALL_NUDGE_TTL ($WM_STALL_NUDGE_TTL) is below 2x WM_STALL_IDLE; clamping to $(( STALL_IDLE * 2 ))"
+  WM_STALL_NUDGE_TTL=$(( STALL_IDLE * 2 ))
+fi
 # Foreground-watcher wedge detection (issue #202, layer B - wm-state
 # wedge-check). WM_WEDGE_SECS is the continuous-liveness window (30 min,
 # matching WM_FORWARD_MOTION_SECS); WM_WEDGE_PANE_GAP is the pane silence
@@ -1293,25 +1307,35 @@ for r in data:
       # seconds nominates the member; stall-check probes its process tree and flags
       # it stalled only if nothing there is executing or armed to wake it.
 
-      # Stall self-heal nudge (#61): every stall-idle candidate gets exactly one
-      # check-in nudge before stall-check is even allowed to confirm+flip it -
-      # not only an api-error match. Only acted on once stability is confirmed
-      # (PANE_STABLE), the same "one more poll before acting" rule
-      # prompt_freeze_check uses above - otherwise a pane still scrolling mid-turn
-      # would be nudged for no reason. --nudge-age (-1 if no marker exists yet) is
-      # passed straight through to stall-check, which flips only once that age
-      # reaches --threshold (STALL_IDLE) - the same wait window used for the
-      # staleness gates themselves, not a separate constant. The nudge is sent
-      # if and only if no marker exists yet (this is the first confirmed-idle
-      # poll of this stall episode) and is NEVER re-sent afterward: a resend
-      # gated on its own separate cooldown previously let that cooldown and
-      # stall-check's --threshold gate drift apart (#101) - tuned equal by
-      # default they raced (a duplicate nudge landed on the same poll as the
-      # flip), and tuned apart the marker could keep resetting itself and the
-      # member would never escalate at all. Marker-existence-only sending makes
-      # that impossible: once sent, the marker's age can only grow.
+      # Stall self-heal nudge (#61, retry/confirm reworked by #236): every
+      # stall-idle, pane-stable candidate gets a check-in nudge before
+      # stall-check is even allowed to confirm+flip it - not only an api-error
+      # match. The per-id marker ($WM_HOME/stall-<id>.nudged) now carries STATE
+      # (confirmed|pending), not mere existence: it is stamped 'confirmed' only
+      # on wm_tmux_send_message rc 0 (the composer went empty / the pane
+      # advanced past its composed snapshot); rc 3/5 (typed, Enter pressed, but
+      # the submit was never confirmed) burn one bounded attempt against
+      # WM_STALL_NUDGE_TRIES and leave the marker 'pending', which keeps
+      # --nudge-age at -1 and so keeps stall-check's flip gate closed for a
+      # retry; every other rc (nothing was even typed) leaves the marker
+      # untouched entirely, retried next qualifying poll - today's original
+      # behavior for that class, unchanged. Once the retry budget is
+      # exhausted, a best-effort composer clear is attempted (never verified -
+      # see wm_tmux_clear_pending_composer) so the stray unsubmitted text
+      # cannot later concatenate onto a human's next message, and --nudge-age
+      # is finally reported (with --nudge-confirmed 0) so stall-check's reason
+      # text tells the truth: a nudge was attempted, not that one landed. A
+      # marker older than WM_STALL_NUDGE_TTL is deleted and treated as absent,
+      # starting a fresh episode - the #101-closing property this preserves in
+      # its new form is that clock_epoch, unlike a bare mtime, is never
+      # advanced by a retry: it is set once, at the first composer-leaving
+      # attempt of an episode (or at confirmation, for the confirmed case), so
+      # a marker's reported age can only grow within one episode and the flip
+      # can never be starved by a resend racing stall-check's own threshold.
       _api=0
       _nudge_age=-1
+      _nudge_confirmed=1
+      _nudge_attempts=0
       _just_nudged=0
       _nudge_undelivered=0
       if [ "$_idle" -ge "$STALL_IDLE" ]; then
@@ -1333,62 +1357,152 @@ for r in data:
         fi
         _idkey="$(printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_')"
         _nudgefile="$WM_HOME/stall-$_idkey.nudged"
-        # A nothing-typed rc against the nudge send (2 dialog, 4 lock-contended,
-        # 6 busy-with-pending-composer - issue #214) means the episode's ONE
-        # check-in nudge never actually reached the pane. Left unhandled that
-        # exempts the member from stall escalation forever: --nudge-age stays
-        # -1 until the .nudged marker exists, and nothing else ever creates it.
-        # A counter (not a timestamp - the poll cadence is the clock) survives
-        # across polls so WM_NUDGE_REFUSED_MAX consecutive refusals - not just
-        # one - are required before the escape hatch fires, in case the very
-        # next poll would have delivered it normally.
+        _now=$(date +%s)
+
+        # The undelivered-nudge escape hatch (issue #214) and the confirm/
+        # retry marker (issue #236) track two genuinely different things and
+        # are kept in two separate sidecars rather than overloading one:
+        # .nudge-refused counts an UNBROKEN STREAK of sends that never even
+        # typed a byte (rc 2 dialog, 4 lock-contended, 6 busy-with-pending-
+        # composer), independent of whatever .nudged currently holds; .nudged
+        # (below) only ever changes on a send that DID type something (rc
+        # 0/3/5). "<count> <first_refusal_epoch>" - extended from #214's
+        # original bare-count shape so this escape hatch's own --nudge-age can
+        # be computed the same way the confirm/retry marker's is, rather than
+        # by stamping a synthetic empty .nudged that #236's parser would
+        # otherwise have to special-case. Invalid content (including a bare
+        # pre-extension count with no clock) is read as a fresh count-0
+        # streak rather than risk misreading a stale/foreign value as a real
+        # clock.
         _refusedfile="$WM_HOME/stall-$_idkey.nudge-refused"
-        _refused_count="$(cat "$_refusedfile" 2>/dev/null)"
+        _rf_rec="$(cat "$_refusedfile" 2>/dev/null)"
+        _refused_count="${_rf_rec%% *}"
+        _refused_clock="${_rf_rec#* }"
         case "$_refused_count" in ''|*[!0-9]*) _refused_count=0 ;; esac
+        case "$_refused_clock" in ''|*[!0-9]*|"$_refused_count") _refused_clock="$_now" ;; esac
+
+        # Parse the .nudged marker into scratch vars, promoting only after
+        # validation (state must be exactly confirmed|pending; attempts/clock
+        # must be non-empty and all-digits). A validation failure - including
+        # the empty file every pre-#236 marker is - MUST set all three:
+        # state=confirmed, attempts=0, clock=the marker's mtime, which is
+        # exactly today's pre-#236 behavior and the deliberate migration path
+        # (no member gets stuck, no re-nudge storm on upgrade). Leaving
+        # _nudge_attempts empty here would silently kill the whole stall-check
+        # call below (argparse type=int, swallowed by its 2>/dev/null at the
+        # call site) with no diagnostic anywhere.
+        _nudge_state=""
+        _nudge_clock=""
         if [ -f "$_nudgefile" ]; then
-          _nudge_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || date +%s) ))
-        else
-          # Only mark the episode nudged when the nudge actually went out, not
-          # when wm_tmux_send_message refused because the pane looks
-          # dialog-shaped (rc 2) or the send lock was contended (rc 4) - those
-          # must be retried, not treated as delivered. rc 3 (typed but the
-          # submit never visibly confirmed, idle) and rc 5 (same, but the
-          # pane was busy - issue #188, most likely this very nudge waking a
-          # stalled member back into streaming) DO mark: the keystrokes
-          # landed either way, and resending every poll would spam the
-          # composer without adding signal.
-          wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
-          _nudge_rc=$?
-          if [ "$_nudge_rc" -eq 0 ] || [ "$_nudge_rc" -eq 3 ] || [ "$_nudge_rc" -eq 5 ]; then
-            : > "$_nudgefile"
-            _just_nudged=1
-            rm -f "$_refusedfile" 2>/dev/null
-            _refused_count=0
-          elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ]; then
-            _refused_count=$((_refused_count+1))
-            printf '%s' "$_refused_count" > "$_refusedfile"
-            if [ "$_refused_count" -ge "$WM_NUDGE_REFUSED_MAX" ]; then
-              # The escape hatch: stamp the ordinary marker anyway so
-              # --nudge-age starts ageing toward the flip exactly as a
-              # delivered nudge's would. Stamp the marker file ONLY -
-              # _just_nudged stays 0, unlike the delivered-nudge pair above:
-              # --just-nudged 1 would make stall-check stamp nudged_at, which
-              # crew-list/board.md render as "self-heal nudge sent Ns ago" - a
-              # false claim on the board for the whole ageing window. An
-              # unreachable member is described by stall-check's own
-              # --nudge-undelivered reason template instead, never by
-              # borrowing the delivered-nudge annotation.
-              : > "$_nudgefile"
-            fi
+          _nr_rec="$(cat "$_nudgefile" 2>/dev/null)"
+          _nr_state="${_nr_rec%% *}"
+          _nr_rest="${_nr_rec#* }"
+          _nr_attempts="${_nr_rest%% *}"
+          _nr_clock="${_nr_rest##* }"
+          _nr_valid=1
+          case "$_nr_state" in
+            confirmed|pending) : ;;
+            *) _nr_valid=0 ;;
+          esac
+          case "$_nr_attempts" in
+            ""|*[!0-9]*) _nr_valid=0 ;;
+          esac
+          case "$_nr_clock" in
+            ""|*[!0-9]*) _nr_valid=0 ;;
+          esac
+          if [ "$_nr_valid" -eq 1 ]; then
+            _nudge_state="$_nr_state"
+            _nudge_attempts="$_nr_attempts"
+            _nudge_clock="$_nr_clock"
+          else
+            _nudge_state="confirmed"
+            _nudge_attempts=0
+            _nudge_clock="$(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_nudgefile" 2>/dev/null || echo "$_now")"
           fi
         fi
-        # Derived from the persisted counter on EVERY poll, never only on the
-        # poll that stamped the marker above: the poll that stamps is never
-        # the poll that flips (--nudge-age must still climb to STALL_IDLE
-        # across later polls first), so a flag set only at stamping time would
-        # not be set on the flipping poll and stall-check's undelivered-nudge
-        # reason would never render.
-        [ "$_refused_count" -ge "$WM_NUDGE_REFUSED_MAX" ] && _nudge_undelivered=1
+
+        # TTL expiry (Defect B fix, #236): a marker whose clock is older than
+        # WM_STALL_NUDGE_TTL belongs to a concluded episode - reap it and
+        # start fresh rather than let it gate a later, unrelated episode.
+        if [ -n "$_nudge_state" ] && [ $(( _now - _nudge_clock )) -gt "$WM_STALL_NUDGE_TTL" ]; then
+          rm -f "$_nudgefile"
+          _nudge_state=""
+        fi
+
+        case "$_nudge_state" in
+          confirmed)
+            _nudge_age=$(( _now - _nudge_clock ))
+            ;;
+          pending)
+            if [ "$_nudge_attempts" -ge "$WM_STALL_NUDGE_TRIES" ]; then
+              _nudge_age=$(( _now - _nudge_clock ))
+              _nudge_confirmed=0
+            else
+              wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
+              _nudge_rc=$?
+              if [ "$_nudge_rc" -eq 0 ]; then
+                printf 'confirmed %d %d\n' "$_nudge_attempts" "$_now" > "$_nudgefile"
+                _just_nudged=1
+                rm -f "$_refusedfile" 2>/dev/null
+                _refused_count=0
+              elif [ "$_nudge_rc" -eq 3 ] || [ "$_nudge_rc" -eq 5 ]; then
+                _nudge_attempts=$(( _nudge_attempts + 1 ))
+                printf 'pending %d %d\n' "$_nudge_attempts" "$_nudge_clock" > "$_nudgefile"
+                if [ "$_nudge_attempts" -ge "$WM_STALL_NUDGE_TRIES" ]; then
+                  wm_tmux_clear_pending_composer "$(wm_tmux_win_target "$_win")" || true
+                fi
+                rm -f "$_refusedfile" 2>/dev/null
+                _refused_count=0
+              elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ]; then
+                _refused_count=$(( _refused_count + 1 ))
+                printf '%d %d\n' "$_refused_count" "$_refused_clock" > "$_refusedfile"
+              fi
+              # rc 2/4/6 above burns no #236 retry budget (nothing was typed,
+              # so .nudged is left untouched and retried next qualifying
+              # poll) but DOES feed the #214 escape hatch above, so a
+              # composer-leaving retry that keeps landing on a busy/dialog/
+              # locked pane still eventually escalates instead of holding the
+              # flip gate closed forever.
+            fi
+            ;;
+          *)
+            _nudge_clock="$_now"
+            _nudge_attempts=0
+            wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
+            _nudge_rc=$?
+            if [ "$_nudge_rc" -eq 0 ]; then
+              printf 'confirmed %d %d\n' "$_nudge_attempts" "$_now" > "$_nudgefile"
+              _just_nudged=1
+              rm -f "$_refusedfile" 2>/dev/null
+              _refused_count=0
+            elif [ "$_nudge_rc" -eq 3 ] || [ "$_nudge_rc" -eq 5 ]; then
+              _nudge_attempts=$(( _nudge_attempts + 1 ))
+              printf 'pending %d %d\n' "$_nudge_attempts" "$_nudge_clock" > "$_nudgefile"
+              if [ "$_nudge_attempts" -ge "$WM_STALL_NUDGE_TRIES" ]; then
+                wm_tmux_clear_pending_composer "$(wm_tmux_win_target "$_win")" || true
+              fi
+              rm -f "$_refusedfile" 2>/dev/null
+              _refused_count=0
+            elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ]; then
+              _refused_count=$(( _refused_count + 1 ))
+              printf '%d %d\n' "$_refused_count" "$_refused_clock" > "$_refusedfile"
+            fi
+            ;;
+        esac
+
+        # Derived from the persisted counter on EVERY qualifying poll, never
+        # only on the poll that incremented it past the max - the poll that
+        # crosses the max is never the poll that flips (--nudge-age must
+        # still climb to STALL_IDLE across later polls first), so a flag set
+        # only at that moment would not be set on the flipping poll and
+        # stall-check's undelivered-nudge reason would never render. Takes
+        # priority over the #236 confirm/retry age above (see wm-state.py):
+        # if a nudge could never even be typed, that dominates whatever an
+        # unrelated earlier attempt's own confirm state was.
+        if [ "$_refused_count" -ge "$WM_NUDGE_REFUSED_MAX" ]; then
+          _nudge_undelivered=1
+          _nudge_age=$(( _now - _refused_clock ))
+        fi
       fi
 
       # Surface the nudge on the crew record itself (#155 fix 1): the marker
@@ -1404,9 +1518,12 @@ for r in data:
       # member's own status JSON without touching its summary/status;
       # cmd_crew_set clears it again the moment the member's own next self-
       # report comes in, and stall-check clears it itself on a genuine stall
-      # flip (see wm-state.py).
+      # flip (see wm-state.py). --just-nudged is now (#236) set only on a
+      # CONFIRMED send (rc 0), so the nudged_at annotation can never again
+      # describe an unconfirmed attempt as delivered.
       [ -n "$_pid" ] && wm_state stall-check --id "$_id" \
         --nudge-age "$_nudge_age" --just-nudged "$_just_nudged" \
+        --nudge-confirmed "$_nudge_confirmed" --nudge-attempts "$_nudge_attempts" \
         --pane-idle "$_idle" --pane-pid "$_pid" --threshold "$STALL_IDLE" \
         --root-grace "$STALL_ROOT_GRACE" --probe-gap "$STALL_PROBE_GAP" \
         --cpu-eps "$STALL_CPU_EPS" --api-error "$_api" \

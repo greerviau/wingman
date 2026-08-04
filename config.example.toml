@@ -120,6 +120,20 @@
 # it, and then flips it to `stalled`.
 # WM_STALL_IDLE = "180"
 
+# Bounded retries for the stall self-heal nudge (issue #236): how many
+# composer-leaving attempts (typed and Enter pressed, submit never confirmed)
+# the watcher makes before giving up and escalating with an "unconfirmed"
+# reason instead of retrying forever. 0 still sends one attempt before giving
+# up, not zero attempts.
+# WM_STALL_NUDGE_TRIES = "2"
+
+# Seconds before a stall nudge marker is treated as belonging to a concluded
+# episode and reaped, so it can never gate a later, unrelated episode. Derived
+# by default as WM_STALL_IDLE * (WM_STALL_NUDGE_TRIES + 2) (720 at defaults);
+# must stay above 2x WM_STALL_IDLE (enforced with a warning) or the flip
+# window can collapse (issue #101).
+# WM_STALL_NUDGE_TTL = "720"
+
 # Seconds a member's pane must repaint continuously (never idle at a prompt)
 # while its own record goes unwritten and a watch-fleet/pr-watch descendant
 # runs, before it flips to `stalled` as a wedged foreground watcher (issue
