@@ -140,4 +140,93 @@ assert_true "events log stays roughly flat across repeated cycles, not linear (b
 
 "$GUARDIAN" --stop
 
+# --- 8 (MUST-FIX 2, review round 1): a same-window turnover (kill+recreate
+# faster than one poll interval - the exact shape the 2026-08-04 incident's
+# own 17ms-later panes demonstrated is possible) must not destroy the dead
+# server's own last-known-good heartbeat by overwriting it with the NEW
+# server's state before the server-changed event ever reads it. Uses its own
+# guardian instance with a much longer interval so the kill+recreate below
+# reliably lands inside a single poll window rather than racing it.
+rm -f "$WINGMAN_HOME/tmux-guardian-events.log" "$WINGMAN_HOME/tmux-guardian.pid" "$WINGMAN_HOME/tmux-guardian.heartbeat"
+# Clean slate: section 7's loop leaves its last session ("sess-loop-7")
+# alive on this socket, and list-sessions prints one line per session (all
+# reporting the same shared server pid) - a stray leftover session here
+# would make the plain capture below return two identical-pid lines instead
+# of one, corrupting every $FT_PID1/$FT_PID2 comparison that follows.
+tmux -L "$SOCK" kill-server >/dev/null 2>&1
+tmux -L "$SOCK" new-session -d -s fastturn1 -n w 'sleep 300'
+FT_PID1="$(tmux -L "$SOCK" list-sessions -F '#{pid}' 2>/dev/null | head -n1)"
+WM_GUARDIAN_INTERVAL=3 "$GUARDIAN" --daemon &
+FTGPID=$!
+wm_track "$FTGPID"
+wait_for_grep "$WINGMAN_HOME/tmux-guardian-events.log" "server-first-seen"
+
+tmux -L "$SOCK" kill-server >/dev/null 2>&1
+tmux -L "$SOCK" new-session -d -s fastturn2 -n w 'sleep 300'
+FT_PID2="$(tmux -L "$SOCK" list-sessions -F '#{pid}' 2>/dev/null | head -n1)"
+
+wait_for_grep "$WINGMAN_HOME/tmux-guardian-events.log" "pid $FT_PID1 -> $FT_PID2"
+_ft_events="$(cat "$WINGMAN_HOME/tmux-guardian-events.log" 2>/dev/null)"
+assert_contains "a same-window turnover fires server-changed" "$_ft_events" "server-changed"
+assert_contains "the logged heartbeat is the OLD (dead) server's" "$_ft_events" "server_pid: $FT_PID1"
+assert_not_contains "the logged heartbeat is NOT already the new server's" "$_ft_events" "server_pid: $FT_PID2"
+
+"$GUARDIAN" --stop
+tmux -L "$SOCK" kill-server >/dev/null 2>&1
+
+# --- 9 (MUST-FIX 1, review round 1): the guardian must survive being
+# launched exactly the way bin/wingman launches it - scope-wrapped AND
+# setsid'd, from INSIDE the very tmux pane whose server later dies - not
+# from this test script's own, unrelated shell the way every assertion
+# above does. Without setsid, systemd-run's cgroup isolation is real but
+# irrelevant: the process is still a member of the pane's terminal session,
+# and when that pane's tmux server dies, the kernel sends SIGHUP to the
+# session's foreground process group. A guardian trapping only TERM/INT
+# dies silently, writing nothing - the exact failure this whole file was
+# blind to before this case existed, since launching it from the test
+# script's own shell never put it in the pane's session in the first place.
+# Skipped, not silently passed, if systemd-run/the user D-Bus isn't
+# available here - the same condition bin/wingman itself checks.
+if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
+  SOCK2="wm-test-guardian-launch-${WM_TEST_RUN_ID:-x}-$$"
+  wm_on_exit "tmux -L '$SOCK2' kill-server >/dev/null 2>&1"
+  LAUNCHHOME="$(wm_mktemp_dir)/wm-launch"
+  mkdir -p "$LAUNCHHOME"
+
+  # No trailing command: the pane's foreground process must be an actual
+  # shell reading a REPL loop, not a bare `sleep 300` (used elsewhere in
+  # this file as a cheap keep-alive) - send-keys below only does anything if
+  # something in the pane is reading and executing its own stdin.
+  tmux -L "$SOCK2" new-session -d -s launchsess -n w
+  LAUNCH_PID1="$(tmux -L "$SOCK2" list-sessions -F '#{pid}' 2>/dev/null | head -n1)"
+
+  # Sent into the pane itself (tmux send-keys), so the guardian's own
+  # controlling terminal is that pane's pty - the topology bin/wingman's own
+  # pane has, and the one the launch line under test (bin/wingman's own,
+  # reproduced verbatim below) must survive.
+  tmux -L "$SOCK2" send-keys -t launchsess \
+    "WINGMAN_HOME='$LAUNCHHOME' WM_GUARDIAN_TMUX_ARGS='-L $SOCK2' WM_GUARDIAN_INTERVAL=0.2 systemd-run --user --scope --collect --quiet -- setsid '$GUARDIAN' --daemon >/dev/null 2>&1 &" Enter
+
+  wait_for_grep "$LAUNCHHOME/tmux-guardian-events.log" "server-first-seen"
+  GUARDIAN_PID1="$(cat "$LAUNCHHOME/tmux-guardian.pid" 2>/dev/null)"
+  [ -n "$GUARDIAN_PID1" ] && ok "the pane-launched guardian recorded a pid" || fail "the pane-launched guardian recorded a pid"
+
+  tmux -L "$SOCK2" kill-server >/dev/null 2>&1
+  _i=0
+  while [ "$_i" -lt 25 ]; do
+    [ -f "$LAUNCHHOME/tmux-guardian-events.log" ] && grep -q "server-died" "$LAUNCHHOME/tmux-guardian-events.log" 2>/dev/null && break
+    sleep 0.2
+    _i=$((_i + 1))
+  done
+
+  assert_true "the guardian process itself survives its own pane's tmux server dying (SIGHUP without setsid)" \
+    "kill -0 $GUARDIAN_PID1 2>/dev/null"
+  assert_contains "a server-died event was written by the still-live guardian" \
+    "$(cat "$LAUNCHHOME/tmux-guardian-events.log" 2>/dev/null)" "tracked pid $LAUNCH_PID1 no longer answers"
+
+  kill -TERM "$GUARDIAN_PID1" 2>/dev/null
+else
+  echo "  SKIP - launch-topology regression (systemd-run/user D-Bus unavailable here)"
+fi
+
 test_summary
