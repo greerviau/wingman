@@ -200,6 +200,66 @@ else
   fail "a Stop registration is detected as registered by --check"
 fi
 
+# --- attribute-aware --check and in-place update (issue #231) ----------------
+# SETTINGS_STOP already carries STOP_CREW_HOOK registered with timeout 600
+# (set above). --check with no attribute flags still matches on command alone
+# (unchanged behavior, re-proven here against a fixture that actually HAS
+# entry_options this time, not just the plain fixtures elsewhere in this file).
+if run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop --check >/dev/null 2>&1; then
+  ok "--check with no attribute flags still matches on command alone"
+else
+  fail "--check with no attribute flags still matches on command alone"
+fi
+
+# --check with --timeout matching the registered value passes.
+if run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop --timeout 600 --check >/dev/null 2>&1; then
+  ok "--check with a matching --timeout passes"
+else
+  fail "--check with a matching --timeout passes"
+fi
+
+# --check with a DIFFERENT --timeout fails - the direct regression for the
+# migration hazard: a command-only match would read this as "already
+# registered" and never correct the stale timeout.
+if run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop --timeout 3600 --check >/dev/null 2>&1; then
+  fail "--check with a mismatched --timeout fails"
+else
+  ok "--check with a mismatched --timeout fails"
+fi
+
+# A non-check run against a differing entry rewrites it in place, rather than
+# leaving it stale or appending a duplicate group for the same command.
+run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop \
+  --async-rewake --timeout 3600 --rewake-summary "Wingman fleet continuity (crew)" >/dev/null
+updated_stop="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_STOP'))
+cmds = [h for g in d['hooks']['Stop'] for h in g['hooks'] if h['command'] == '$STOP_CREW_HOOK']
+print(len(cmds))
+print(cmds[0].get('timeout') if cmds else None)
+")"
+assert_eq "the resulting file has no duplicate entry for that command" "$(printf '%s\n' "$updated_stop" | sed -n 1p)" "1"
+assert_eq "the differing entry was rewritten in place to the new timeout" "$(printf '%s\n' "$updated_stop" | sed -n 2p)" "3600"
+if run_installer --settings "$SETTINGS_STOP" --hook "$STOP_CREW_HOOK" --event Stop --timeout 3600 --check >/dev/null 2>&1; then
+  ok "--check with the new --timeout passes after the in-place update"
+else
+  fail "--check with the new --timeout passes after the in-place update"
+fi
+
+# --- both reconcilers still run standalone after the shared-helper extraction
+# (issue #231) - a broken sibling import to bin/lib/user_hook_entry.py must
+# fail the build, not ship silently.
+if uv run --no-project --quiet "$INSTALLER" -h >/dev/null 2>&1; then
+  ok "install-user-hook.py still runs standalone under uv run"
+else
+  fail "install-user-hook.py still runs standalone under uv run"
+fi
+if uv run --no-project --quiet "$TEST_REPO/bin/lib/sync-user-hooks.py" -h >/dev/null 2>&1; then
+  ok "sync-user-hooks.py still runs standalone under uv run"
+else
+  fail "sync-user-hooks.py still runs standalone under uv run"
+fi
+
 # A Stop registration with none of the three new flags omits all three keys
 # (they are optional, not defaulted-on) and still carries no matcher.
 SETTINGS_STOP2="$WORK/settings-stop2.json"

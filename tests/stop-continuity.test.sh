@@ -15,6 +15,13 @@ HOOK="$TEST_REPO/hooks/stop-continuity.sh"
 WF="$TEST_REPO/bin/watch-fleet"
 GUARD="$TEST_REPO/hooks/stop-guard.sh"
 export WM_WATCH_INTERVAL=1
+# The internal claim-wait-account loop's own lever (issue #231): a lifetime
+# at or below the window yields exactly one iteration per invocation, which
+# is today's (pre-#231) single-shot behavior, so every test below that does
+# not override this locally keeps testing exactly what it always tested. The
+# loop-specific cases (7 and its siblings) override it locally to exercise
+# more than one iteration.
+export WM_STOP_CONTINUITY_LIFETIME=1
 
 # Default 20s, not 10s, for the same reason as wait_for_file's own default
 # below: several `uv run --no-project` subprocess startups happen before the
@@ -243,44 +250,222 @@ wait "$h10" 2>/dev/null
 kill "$livepid6" 2>/dev/null
 unset WM_STOP_CONTINUITY_WINDOW
 
-# --- (7) The self-bounded window rolls over cleanly across multiple rollovers -
+# --- (7, rewritten for issue #231) The internal loop absorbs several windows
+# and rewakes exactly once, from a SINGLE invocation - the direct regression
+# for this issue: the old code produced one rewake PER window (three
+# sequential invocations, three blocking errors), so it fails on the rewake
+# count alone. Assert a floor on the iteration count, never an exact N: each
+# iteration also pays several `uv run --no-project` startups (the claim,
+# --classify, wm_unwaited_reason, the active_crew re-check), so the number of
+# windows that fit in a fixed lifetime is load-dependent by design.
 new_home
 add_crew_window d7
 wm_state crew-set --id d7 --status working --summary busy >/dev/null
-# A machine-wide `pgrep -f 'watch-fleet --owner '` cannot tell this test's own
-# leaked child apart from an unrelated watch-fleet cycle already running
-# elsewhere on this machine (a live fleet's own lead/orchestrator, say) - take
-# a baseline snapshot first so the check below is a set DIFFERENCE (pids new
-# since this sequence started), not an absolute count.
-_pre_wf_pids="$(wm_mktemp_file)"; pgrep -f 'watch-fleet --owner ' > "$_pre_wf_pids" 2>/dev/null
 export WM_STOP_CONTINUITY_WINDOW=2
-N=3
-rollovers=0
-for i in 1 2 3; do
-  outN="$(run_hook 15)"; rcN=$?
-  case "$outN" in
-    *'"decision": "block"'*) : ;;
-    *) fail "rollover $i produced a block decision"; continue ;;
-  esac
-  case "$outN" in
-    *"window rolled"*) rollovers=$((rollovers+1)) ;;
-  esac
+export WM_STOP_CONTINUITY_LIFETIME=40
+out7loop="$(run_hook 60)"; rc7loop=$?
+armed_count7="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_true "the loop genuinely re-claimed more than once inside one invocation" "[ '$armed_count7' -ge 3 ]"
+block_count7="$(printf '%s' "$out7loop" | grep -c '"decision": "block"')"
+assert_eq "exactly one block decision reaches stdout (one process exit, not one per window)" "$block_count7" "1"
+assert_eq "the hook exited 2 (a genuine rewake, not silence)" "$rc7loop" "2"
+assert_contains "the one rewake carries the rollover body" "$out7loop" "window rolled"
+assert_contains "the one rewake carries the do-not-arm sentence" "$out7loop" "do NOT arm a watch-fleet cycle"
+assert_false "no live watch-fleet child is left behind" "[ -f '$WINGMAN_HOME/watch.pid' ]"
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (7b) A fire arriving in a LATER iteration is reported as a fire, never
+# swallowed and never conflated with a rollover - proves the loop does not
+# delay or lose a genuine event that arrives after the first window. A wider
+# window (10s, matching (7c) below) than the loop-cadence tests above:
+# detecting the flip needs the watch-fleet CHILD to have actually reached its
+# own live poll loop (WM_WATCH_INTERVAL=1) before the flip lands, not merely
+# to have claimed - a 2s window leaves too little margin for that under a
+# loaded machine and turns this into a startup-latency race unrelated to what
+# the test means to prove. ---
+new_home
+add_crew_window d7b
+wm_state crew-set --id d7b --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=10
+export WM_STOP_CONTINUITY_LIFETIME=60
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7b.out" 2>&1 &
+h7b=$!; wm_track "$h7b"
+assert_true "the first iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+_armed7b=0; _n7b=0
+while [ "$_armed7b" -lt 2 ] && [ "$_n7b" -lt 300 ]; do
+  _armed7b="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+  _armed7b="${_armed7b:-0}"
+  sleep 0.2; _n7b=$((_n7b+1))
 done
-assert_eq "each of $N sequential invocations rolls over exactly once" "$rollovers" "$N"
-# The self-bounded window (2s) means the last rollover's own child should
-# exit on its own shortly after; poll briefly rather than asserting on the
-# very first sample.
-_wf_grace=0
-_new_wf_pids=""
-while [ "$_wf_grace" -lt 10 ]; do
-  _post_wf_pids="$(wm_mktemp_file)"; pgrep -f 'watch-fleet --owner ' > "$_post_wf_pids" 2>/dev/null
-  _new_wf_pids="$(grep -vxFf "$_pre_wf_pids" "$_post_wf_pids" 2>/dev/null)"
-  [ -z "$_new_wf_pids" ] && break
-  sleep 1; _wf_grace=$((_wf_grace+1))
+assert_true "a second iteration genuinely re-claimed before the fire is introduced" "[ '$_armed7b' -ge 2 ]"
+wm_state crew-set --id d7b --status review --summary "done" >/dev/null
+assert_true "the hook exits within one poll interval of the fire-eligible flip" "wait_for_gone $h7b 200"
+wait "$h7b" 2>/dev/null
+out7b="$(cat "$WINGMAN_HOME/hook7b.out" 2>/dev/null)"
+assert_contains "the fire is reported via compose_attention_reason's own text" "$out7b" "surfaced via automatic fleet continuity"
+assert_not_contains "a fire is never conflated with a rollover" "$out7b" "window rolled"
+_survivor7b="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_survivor7b" ] && kill "$_survivor7b" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (7c) A mid-window watch-fleet child death re-claims in place instead of
+# abandoning the fleet - the direct regression for the deliberate `spurious`
+# behavior change (issue #231): today's code exits 0 on this exact death and
+# leaves the fleet unsupervised until the model's own next natural turn. ---
+new_home
+add_crew_window d7c
+wm_state crew-set --id d7c --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=10
+export WM_STOP_CONTINUITY_LIFETIME=60
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7c.out" 2>&1 &
+h7c=$!; wm_track "$h7c"
+assert_true "the first iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+cpid7c="$(cat "$WINGMAN_HOME/watch.pid")"
+kill -9 "$cpid7c" 2>/dev/null
+_armed7c=0; _n7c=0
+while [ "$_armed7c" -lt 2 ] && [ "$_n7c" -lt 100 ]; do
+  _armed7c="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+  _armed7c="${_armed7c:-0}"
+  sleep 0.2; _n7c=$((_n7c+1))
 done
-assert_true "no invocation left a NEW watch-fleet child running (beyond whatever else may already be live on this machine)" \
-  "[ -z \"$_new_wf_pids\" ]"
-unset WM_STOP_CONTINUITY_WINDOW
+assert_true "a second armed line appears (the loop re-claimed in place)" "[ '$_armed7c' -ge 2 ]"
+assert_true "the hook is still running - it did not exit 0 and abandon the fleet" "kill -0 $h7c"
+assert_eq "the death reached --classify's own forensics (the spurious count advanced to 1)" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "1"
+kill -TERM "$h7c" 2>/dev/null
+wait "$h7c" 2>/dev/null
+_survivor7c="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_survivor7c" ] && kill "$_survivor7c" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (7c') The budget-exhaustion body names what actually happened - the
+# direct regression against conflating a clean rollover with a re-arm after
+# an unexpected watch-cycle exit. Mirror of test (9) sub-case (b), whose own
+# assert_not_contains "window rolled" this must not violate. ---
+new_home
+add_crew_window d7cp
+wm_state crew-set --id d7cp --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=10
+export WM_STOP_CONTINUITY_LIFETIME=1
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7cp.out" 2>&1 &
+h7cp=$!; wm_track "$h7cp"
+assert_true "the first (and only, per the 1s lifetime) iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+cpid7cp="$(cat "$WINGMAN_HOME/watch.pid")"
+kill -9 "$cpid7cp" 2>/dev/null
+assert_true "the hook exits" "wait_for_gone $h7cp 100"
+wait "$h7cp" 2>/dev/null
+out7cp="$(cat "$WINGMAN_HOME/hook7cp.out" 2>/dev/null)"
+assert_contains "the budget-exhaustion body names the unexpected watch-cycle exit" "$out7cp" "re-arming after an unexpected watch-cycle exit"
+assert_not_contains "it is never conflated with a clean rollover" "$out7cp" "window rolled"
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (7d) The loop stops (silently) the moment the fleet empties, without
+# waiting out the rest of its lifetime - checked BEFORE the budget, so a
+# fleet that empties during the final window ends the invocation silently
+# instead of spending a wake to announce a rollover to a session whose next
+# invocation would exit immediately at the fast path anyway. ---
+new_home
+add_crew_window d7d
+wm_state crew-set --id d7d --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=60
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7d.out" 2>&1 &
+h7d=$!; wm_track "$h7d"
+assert_true "the first iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+# "stood-down", not "done": every status a member can leave LIVE_STATES
+# through other than "stood-down" (done/died/blocked/review/stalled) is ALSO
+# in wm-state.py's own ATTENTION_STATES, so it would legitimately fire a
+# roster-report event of its own - "stood-down" is the one terminal status
+# that is neither, the genuinely quiet "nothing left to do here" case this
+# test means to exercise.
+wm_state crew-set --id d7d --status stood-down --summary "wrapped up" >/dev/null
+_start7d="$(date +%s)"
+assert_true "the hook exits" "wait_for_gone $h7d 100"
+_elapsed7d=$(( $(date +%s) - _start7d ))
+wait "$h7d" 2>/dev/null
+out7d="$(cat "$WINGMAN_HOME/hook7d.out" 2>/dev/null)"
+assert_eq "no stdout - the empty-fleet break is silent" "$out7d" ""
+assert_true "the exit happened well inside the 60s lifetime (the fleet-empty break fired, not the budget)" "[ '$_elapsed7d' -lt 40 ]"
+assert_false "no live watch-fleet child is left behind" "[ -f '$WINGMAN_HOME/watch.pid' ]"
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (7e) The in-flight marker is refreshed every iteration, not fixed at
+# entry - without this, the freshness bound (window+60) goes stale partway
+# through a lifetime many multiples of one window, and a concurrent instance
+# could pass the guard. ---
+new_home
+add_crew_window d7e
+wm_state crew-set --id d7e --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=40
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7e.out" 2>&1 &
+h7e=$!; wm_track "$h7e"
+assert_true "the first iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+_mtime1_7e="$(uv run --no-project --quiet python -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$WINGMAN_HOME/stop-continuity.pid" 2>/dev/null)"
+_armed7e=0; _n7e=0
+while [ "$_armed7e" -lt 3 ] && [ "$_n7e" -lt 200 ]; do
+  _armed7e="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+  _armed7e="${_armed7e:-0}"
+  sleep 0.2; _n7e=$((_n7e+1))
+done
+assert_true "a third armed line appears" "[ '$_armed7e' -ge 3 ]"
+_mtime2_7e="$(uv run --no-project --quiet python -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$WINGMAN_HOME/stop-continuity.pid" 2>/dev/null)"
+assert_true "the in-flight marker's mtime advanced across iterations" "[ '$_mtime2_7e' -gt '$_mtime1_7e' ]"
+kill -TERM "$h7e" 2>/dev/null
+wait "$h7e" 2>/dev/null
+_survivor7e="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_survivor7e" ] && kill "$_survivor7e" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (7f) The lifetime self-clamps to the registered `timeout` - the direct
+# regression for the migration hazard, and the one test that would have
+# caught the first draft of the #231 plan's missing registration path.
+#
+# NH1 (round-2 review of the #231 plan): a fixture `timeout: 600` against the
+# real WM_STOP_CONTINUITY_LIFETIME=3300 clamps to 300s, which still admits
+# roughly 150 two-second windows across five minutes of wall clock - nowhere
+# near "a single window". The tempting fix (raise the window to >= 300s
+# instead) would pass vacuously via the trivial lifetime<=window path even
+# with the clamp deleted entirely - exactly the "passes for the right
+# reason, not by coincidence" trap this suite is careful about for test (9)
+# sub-case (b). The actual fix: set the fixture's own timeout to
+# window+margin, so the clamped lifetime equals the window exactly and only
+# the clamp (never the configured 3300s budget) can be what bounded it. ---
+new_home
+add_crew_window d7f
+wm_state crew-set --id d7f --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=3300
+PROJ_SETTINGS_7f="$WINGMAN_HOME/proj-settings-7f.json"
+cat > "$PROJ_SETTINGS_7f" <<JSON
+{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "$HOOK", "asyncRewake": true, "timeout": 302}]}]}}
+JSON
+export WM_PROJECT_SETTINGS="$PROJ_SETTINGS_7f"
+out7f="$(run_hook 30)"; rc7f=$?
+armed7f="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_eq "the clamp (not the configured 3300s budget) bounds the invocation to a single window" "$armed7f" "1"
+assert_eq "the hook exits 2 (a genuine budget-exhaustion rewake)" "$rc7f" "2"
+assert_contains "the single-window break reports a clean rollover" "$out7f" "window rolled"
+unset WM_PROJECT_SETTINGS WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# Unreadable-registration companion: a missing settings file falls back to
+# the historical 600s, not the configured default. Its own fallback is not
+# fixture-tunable (there is nothing to point a `timeout` fixture value at),
+# so this proves it a different way: override WM_CONTINUITY_TIMEOUT_MARGIN
+# (env-overridable for exactly this) so 600-margin lands on the window
+# exactly, the same one-window proof as above.
+new_home
+add_crew_window d7f2
+wm_state crew-set --id d7f2 --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=3300
+export WM_PROJECT_SETTINGS="$WINGMAN_HOME/does-not-exist-7f2.json"
+export WM_CONTINUITY_TIMEOUT_MARGIN=598
+out7f2="$(run_hook 30)"; rc7f2=$?
+armed7f2="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_eq "an unreadable registration falls back to the historical 600s, clamping to a single window" "$armed7f2" "1"
+assert_eq "the hook exits 2" "$rc7f2" "2"
+assert_contains "the single-window break reports a clean rollover" "$out7f2" "window rolled"
+unset WM_PROJECT_SETTINGS WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
 
 # --- (8) A deterministically failing fleet: backoff + standdown markers ------
 new_home
@@ -496,7 +681,13 @@ out9s="$(cat "$WINGMAN_HOME/hook9s.out" 2>/dev/null)"
 assert_not_contains "an external kill near expiry is never misreported as rolled" "$out9s" "window rolled"
 unset WM_STOP_CONTINUITY_WINDOW
 
-# --- (10) unwaited, checked once per invocation, after the window closes ----
+# --- (10, changed assertions for issue #231) unwaited, checked once per
+# invocation, after the window closes, and breaks the loop rather than a mere
+# single-shot pass. A rollover is no longer a reportable event on its own -
+# merging "window rolled" into this body would reintroduce exactly the noise
+# this issue is about - so the rewake carries the unwaited text ALONE (in
+# `auto` mode: continuity is still re-arming even though nothing else is
+# reported), not the rollover sentence. ----
 new_home
 add_crew_window d10
 wm_state crew-set --id d10 --status working --summary busy >/dev/null
@@ -508,8 +699,9 @@ assert_true "the claim is NOT blocked by an unattended ask" "wait_for_file '$WIN
 assert_true "the hook eventually rolls over and exits" "wait_for_gone $h10u 100"
 wait "$h10u" 2>/dev/null
 out10u="$(cat "$WINGMAN_HOME/hook10u.out" 2>/dev/null)"
-assert_contains "the rollover body is present" "$out10u" "window rolled"
-assert_contains "the unwaited-ask text is appended to the same rewake" "$out10u" "pending question with no live waiter"
+assert_contains "the unwaited-ask text is present" "$out10u" "pending question with no live waiter"
+assert_contains "auto mode survived (do-not-arm sentence present)" "$out10u" "do NOT arm a watch-fleet cycle"
+assert_not_contains "the rollover is no longer a reportable event on its own" "$out10u" "window rolled"
 unset WM_STOP_CONTINUITY_WINDOW
 
 # No-duplicate-with-stop-guard companion: both hooks agree byte-for-byte.
