@@ -1168,7 +1168,11 @@ wm_tmux_reachable() {
 # distinct terminal predicates, a generic sweep that surfaces an abandoned
 # message to its sender (or a caller-supplied notify channel) and durably
 # archives it, and an extraction of the existing redelivery logic so both the
-# owner-scoped loop and the whole-fleet backstop share one implementation.
+# owner-scoped loop and the whole-fleet backstop share one implementation. In
+# `wake` mode, a message whose sender is itself notice-routing-terminal (as
+# well as the recipient) is archived and logged but never announced (issue
+# #230): nobody involved could act on it, so it must not be able to fire a
+# full attention wake on its own.
 
 # Recover the stable stem of an outbox/<id>/ entry across whatever claim-
 # protocol prefix it currently carries (today, only the redelivery path's own
@@ -1405,14 +1409,44 @@ wm_outbox_sweep_abandoned() {
           printf '%s\n' "$_sw_notice"
           ;;
         wake)
-          _sw_owner="$(wm_outbox_resolve_notice_owner "$_sw_id" "$_sw_roster_json")"
-          if [ -n "$_sw_owner" ]; then
-            _sw_key="$(printf '%s' "$_sw_owner" | tr -c 'A-Za-z0-9._-' '_')"
-            _sw_noticefile="$WM_HOME/pending-notices-$_sw_key"
-          else
-            _sw_noticefile="$WM_HOME/pending-notices"
+          # Dead-to-dead residue never manufactures a wake (issue #230). The
+          # recipient is terminal by this function's own contract, and a
+          # KNOWN, non-empty sender that reached this branch is terminal too -
+          # so nobody involved can act, and appending here would be enough on
+          # its own to fire a full attention wake (bin/watch-fleet fires on a
+          # non-empty $NOTICEFILE alone), framed as live actionable state. The
+          # durable record above - the outbox-abandoned.log line and the
+          # archived payload - is deliberately unconditional and is the whole
+          # trail #169 guarantees; only the ANNOUNCEMENT is suppressed.
+          # Wingman (a known, empty sender) and unknown (no sidecar) are
+          # unaffected and still wake: neither is evidence that the party who
+          # sent this is gone. notice-terminality is asserted explicitly
+          # rather than inferred from "we reached this branch" - today
+          # wm_outbox_delivery_terminal implies it for every case, but that is
+          # an invariant of the two predicates' current bodies, not of their
+          # contracts, and this decision must not silently ride on it.
+          #
+          # What makes suppressing safe is that the RECIPIENT is already
+          # terminal here: `wake` has exactly one caller (bin/watch-fleet's
+          # per-poll scan), whose own classifier only ever emits a
+          # delivery-terminal id. A second `wake` caller passing a live
+          # recipient would silently drop a notice someone could have acted
+          # on - so anything adding one must re-establish that precondition.
+          _sw_dead_to_dead=0
+          if [ "$_sw_sender_known" = 1 ] && [ -n "$_sw_sender" ] \
+             && wm_outbox_notice_terminal "$_sw_sender" "$_sw_roster_json"; then
+            _sw_dead_to_dead=1
           fi
-          printf '%s\n' "$_sw_notice" >> "$_sw_noticefile"
+          if [ "$_sw_dead_to_dead" = 0 ]; then
+            _sw_owner="$(wm_outbox_resolve_notice_owner "$_sw_id" "$_sw_roster_json")"
+            if [ -n "$_sw_owner" ]; then
+              _sw_key="$(printf '%s' "$_sw_owner" | tr -c 'A-Za-z0-9._-' '_')"
+              _sw_noticefile="$WM_HOME/pending-notices-$_sw_key"
+            else
+              _sw_noticefile="$WM_HOME/pending-notices"
+            fi
+            printf '%s\n' "$_sw_notice" >> "$_sw_noticefile"
+          fi
           ;;
       esac
     fi

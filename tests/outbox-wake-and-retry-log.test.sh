@@ -171,6 +171,40 @@ assert_contains "the wake file's Abandoned messages section carries the actual n
 assert_false "the notice file was consumed (rename-aside emptied it) after the fire" \
   "[ -s '$WINGMAN_HOME/pending-notices' ]"
 
+# --- issue #230: dead-to-dead residue never reaches the wake channel. This
+# asserts POSITIVELY on a wake that definitely happens rather than trying to
+# prove a negative ("no fire occurred") against a wall-clock margin: a genuine
+# blocked event is staged BEFORE the cycle is armed, so the very first poll
+# both sweeps the dead-to-dead outbox (the scan runs ahead of needs-attention
+# in the same poll) and fires on the blocked member. What the fix changes is
+# only what that one wake carries - with it, the Abandoned messages section is
+# the empty placeholder; without it, the suppressed notice is folded in.
+# The notice-only fire above is still unclassified, and a bare arm refuses
+# over it (issue #197) - the churn loops below classify before every re-arm
+# for the same reason.
+"$WATCH" --classify --owner "" >/dev/null 2>&1
+rm -f "$WINGMAN_HOME/wake" "$WINGMAN_HOME/pending-notices"
+wm_state crew-add --id dd-live --type developer --objective x --repo /tmp --window wm-dd-live --session-id b8 >/dev/null
+tmux new-window -t "$WM_TMUX_TARGET:" -n wm-dd-live "sleep 300"
+wm_state crew-set --id dd-live --status blocked --blocker "needs a decision" >/dev/null
+wm_state crew-add --id dd-old-lead --type lead --objective x --repo /tmp --window wm-dd-old-lead --session-id b9 >/dev/null
+wm_state crew-set --id dd-old-lead --status stood-down >/dev/null
+wm_state crew-add --id dd-old-dev --type developer --objective x --repo /tmp --window wm-dd-old-dev --session-id b10 --parent dd-old-lead >/dev/null
+wm_state crew-set --id dd-old-dev --status stood-down >/dev/null
+mkdir -p "$WINGMAN_HOME/outbox/dd-old-dev" "$WINGMAN_HOME/outbox-meta/dd-old-dev"
+printf 'one more thing before you wrap up\n' > "$WINGMAN_HOME/outbox/dd-old-dev/1.msg"
+printf 'dd-old-lead\n' > "$WINGMAN_HOME/outbox-meta/dd-old-dev/1.msg"
+
+_dd_out="$(WM_WATCH_INTERVAL=1 wm_timeout 45 "$WATCH" --owner "")"
+_dd_wake="$(cat "$WINGMAN_HOME/wake" 2>/dev/null)"
+assert_true "the dead-to-dead message was still swept and durably archived" \
+  "[ -f '$WINGMAN_HOME/outbox-abandoned/dd-old-dev/1.msg' ]"
+assert_contains "the genuine attention event is what fired" "$_dd_out" "blocked: dd-live"
+assert_contains "that wake's Abandoned messages section is empty - the dead-to-dead notice was never queued" \
+  "$_dd_wake" "(none this cycle)"
+assert_not_contains "the dead-to-dead notice was not folded into an unrelated wake" \
+  "$_dd_wake" "dd-old-dev"
+
 # --- concurrent appenders during several fire cycles: nothing is silently
 # lost (best-effort concurrency stress for the rename-aside fold - S-4) ----
 rm -f "$WINGMAN_HOME/wake" "$WINGMAN_HOME/pending-notices"

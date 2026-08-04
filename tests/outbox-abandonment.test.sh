@@ -227,6 +227,52 @@ assert_contains "a wingman-authored (empty sender) message routes through notify
 assert_false "no stray file was ever written directly under outbox/ itself" \
   "find '$WINGMAN_HOME/outbox' -maxdepth 1 -type f 2>/dev/null | grep -q ."
 
+# --- issue #230: dead-to-dead residue is archived and logged, but never
+# announced - a notice whose sender is ALSO terminal would otherwise be
+# enough on its own to fire a full attention wake with nothing behind it.
+# The notice-file assertions glob over pending-notices* rather than naming
+# the wingman floor, so a future change to the notice-routing walk cannot
+# make them pass vacuously by writing to a per-owner channel instead.
+mkdir -p "$WINGMAN_HOME/outbox/dd1" "$WINGMAN_HOME/outbox-meta/dd1"
+printf 'dead to dead\n' > "$WINGMAN_HOME/outbox/dd1/1.msg"
+printf 'dead-sender\n' > "$WINGMAN_HOME/outbox-meta/dd1/1.msg"
+_rosdd='[{"id":"dd1","status":"stood-down"},{"id":"dead-sender","status":"stood-down"}]'
+wm_outbox_sweep_abandoned dd1 "its crew record is stood-down" wake "$_rosdd" "" 1
+assert_false "a dead-to-dead sweep appends no notice to any wake channel" \
+  "find '$WINGMAN_HOME' -maxdepth 1 -name 'pending-notices*' -size +0 2>/dev/null | grep -q ."
+assert_true "the durable archive is still written for a suppressed notice" \
+  "[ -f '$WINGMAN_HOME/outbox-abandoned/dd1/1.msg' ]"
+assert_contains "the audit log line is still written for a suppressed notice" \
+  "$(cat "$WINGMAN_HOME/outbox-abandoned.log" 2>/dev/null)" "dd1"
+
+# A `done` sender with no live window reaches this branch and is
+# notice-routing-terminal, so it is dead-to-dead too.
+mkdir -p "$WINGMAN_HOME/outbox/dd2" "$WINGMAN_HOME/outbox-meta/dd2"
+printf 'done sender\n' > "$WINGMAN_HOME/outbox/dd2/1.msg"
+printf 'done-sender\n' > "$WINGMAN_HOME/outbox-meta/dd2/1.msg"
+_rosdd2='[{"id":"dd2","status":"died"},{"id":"done-sender","status":"done"}]'
+wm_outbox_sweep_abandoned dd2 "its crew record is died" wake "$_rosdd2" "" 1
+assert_false "a done sender with no live window is also dead-to-dead (no notice)" \
+  "find '$WINGMAN_HOME' -maxdepth 1 -name 'pending-notices*' -size +0 2>/dev/null | grep -q ."
+
+# The two senders that must KEEP waking: neither is evidence anyone is gone.
+mkdir -p "$WINGMAN_HOME/outbox/dd3"
+printf 'unknown sender\n' > "$WINGMAN_HOME/outbox/dd3/1.msg"   # no sidecar at all
+_rosdd3='[{"id":"dd3","status":"stood-down"}]'
+wm_outbox_sweep_abandoned dd3 "its crew record is stood-down" wake "$_rosdd3" "" 1
+assert_contains "an unattributable (no sidecar) sender still queues a wake notice" \
+  "$(cat "$WINGMAN_HOME/pending-notices" 2>/dev/null)" "dd3"
+: > "$WINGMAN_HOME/pending-notices"
+
+mkdir -p "$WINGMAN_HOME/outbox/dd4" "$WINGMAN_HOME/outbox-meta/dd4"
+printf 'wingman sender\n' > "$WINGMAN_HOME/outbox/dd4/1.msg"
+: > "$WINGMAN_HOME/outbox-meta/dd4/1.msg"   # empty sidecar = wingman
+_rosdd4='[{"id":"dd4","status":"stood-down"}]'
+wm_outbox_sweep_abandoned dd4 "its crew record is stood-down" wake "$_rosdd4" "" 1
+assert_contains "a wingman-authored (empty, known) sender still queues a wake notice" \
+  "$(cat "$WINGMAN_HOME/pending-notices" 2>/dev/null)" "dd4"
+rm -f "$WINGMAN_HOME/pending-notices"
+
 # --- review round 1, must-fix 2: the notice filename must not collide
 # across SEPARATE calls to wm_outbox_sweep_abandoned in the same process
 # within the same second - watch-fleet's own scan calls it once per
