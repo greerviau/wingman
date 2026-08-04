@@ -9,9 +9,13 @@
 #
 # A `died` member's session_id and transcript survive independent of its
 # worktree (issue #251): when the transcript is confirmed present on disk, this
-# leads with recovery rather than reading as a dead end, and also surfaces any
-# refs/wip/<id> ref a dirty worktree was auto-anchored to at the moment of death
-# (see cmd_reconcile in bin/lib/wm-state.py).
+# leads with recovery rather than reading as a dead end - and still offers the
+# resume command, with a caveat, when the check comes back negative, since that
+# check has known blind spots (review round 1, MF-3). Also surfaces any
+# refs/wip/<id> ref a dirty worktree (tracked, staged, AND untracked files -
+# review round 1, MF-1) was auto-anchored to at the moment of death, or the
+# reason a genuine anchor attempt failed (review round 1, MF-4) - see
+# cmd_reconcile / _anchor_died_worktree in bin/lib/wm-state.py.
 #
 # Usage: crew-takeover <id>
 # bash-3.2-safe.
@@ -22,14 +26,21 @@ ID="${1:-}"
 [ -n "$ID" ] || wm_die "usage: crew-takeover <id>"
 
 info="$(wm_state crew-get --id "$ID" 2>/dev/null)" || wm_die "no crew member '$ID'"
-fields="$(printf '%s' "$info" | wm_py -c '
+# One field per line (never tab-joined - see bin/crew-resume's own identical
+# convention and comment): a tab is IFS whitespace, so an empty field (an
+# orphan-adopted record can carry an empty repo AND session_id, issue #79)
+# would collapse two adjacent delimiters into one and silently shift every
+# field after it - including STATUS, which now selects the branch below.
+_lines="$(printf '%s' "$info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
 r = d.get("resumable")
-print("\t".join([d.get("repo",""), d.get("session_id",""), d.get("window",""), d.get("status",""),
-                 "" if r is None else ("true" if r else "false")]))')"
-OLDIFS="$IFS"; IFS=$(printf '\t'); set -- $fields; IFS="$OLDIFS"
-REPO="${1:-}"; SID="${2:-}"; WINDOW="${3:-}"; STATUS="${4:-}"; RESUMABLE="${5:-}"
+for k in ("repo", "session_id", "window", "status", "worktree", "wip_anchor_error"):
+    print(d.get(k) or "")
+print("" if r is None else ("true" if r else "false"))')"
+{ read -r REPO; read -r SID; read -r WINDOW; read -r STATUS; read -r WORKTREE; read -r WIP_ERROR; read -r RESUMABLE; } <<EOF
+$_lines
+EOF
 
 live=0
 if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
@@ -54,11 +65,27 @@ if [ "$live" = 1 ]; then
   wm_info "Take the wheel of '$ID' (live). Run in your own shell:"
   printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
   echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
-elif [ "$STATUS" = died ] && [ "$RESUMABLE" = true ]; then
-  # Lead with recovery (issue #251): a died member's session_id is on record and
-  # its transcript is confirmed present on disk, so this is a resume, not a dead
-  # end - independent of whether the worktree itself survived.
-  wm_ok "'$ID' died, but its session state survived: the transcript is intact on disk. This command recovers it."
+elif [ "$STATUS" = died ] && [ -z "$SID" ]; then
+  # No session id was ever recorded - genuinely nothing to resume (distinct
+  # from RESUMABLE=false below, where a session id exists but its transcript
+  # could not be found; offering `--resume ''` here would just be wrong).
+  wm_warn "'$ID' died and no session_id was ever recorded for it - there is no session to resume."
+elif [ "$STATUS" = died ]; then
+  if [ "$RESUMABLE" = true ]; then
+    # Lead with recovery (issue #251): a died member's session_id is on record
+    # and its transcript is confirmed present on disk, so this is a resume,
+    # not a dead end - independent of whether the worktree itself survived.
+    wm_ok "'$ID' died, but its session state survived: the transcript is intact on disk. This command recovers it."
+  else
+    # Never let a failed existence check withhold the resume command outright
+    # (review round 1, MF-3): the check has known blind spots even after
+    # falling back to a glob scan server-side (a relocated ~/.claude home this
+    # box's env doesn't reflect, a naming-scheme drift in a newer CLI) - a
+    # negative here is evidence, not proof, and withholding the command
+    # entirely is the exact "confident and wrong" misreading issue #251 was
+    # filed over, just inverted.
+    wm_warn "'$ID' died - no session transcript was found at the expected location, but this may be a false negative (a relocated Claude Code home, or a naming scheme this check doesn't yet know about). Try the resume anyway; it costs nothing to attempt and fails fast if the transcript is genuinely gone:"
+  fi
   wm_info "Resume it yourself, from its repo:"
   printf '\n    cd %s && <your-agent-cli> --resume %s --settings %s\n\n' \
     "$(quote "$REPO")" "$SID" "$(quote "$(wm_claude_md_excludes)")"
@@ -67,8 +94,6 @@ elif [ "$STATUS" = died ] && [ "$RESUMABLE" = true ]; then
   echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
   echo "safe choice. To skip that prompt outright, export these first:"
   printf '\n    export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999 CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999\n\n'
-elif [ "$STATUS" = died ]; then
-  wm_warn "'$ID' died and its session transcript is gone (not on disk, or session_id was never recorded) - the conversation itself is not recoverable."
 else
   wm_warn "'$ID' has no live window (status=$STATUS)."
   wm_info "If you want to resume it yourself, from its repo:"
@@ -82,7 +107,17 @@ else
 fi
 
 if [ -n "$WIP_SHA" ]; then
-  wm_info "Its uncommitted worktree changes at time of death were also auto-anchored (issue #251). Recover them with:"
-  printf '\n    git -C %s stash apply %s\n\n' "$(quote "$REPO")" "$WIP_SHA"
-  echo "(safe to retry - this only applies the change, it does not delete refs/wip/$_wip_id)"
+  wm_info "Its uncommitted worktree changes at time of death were also auto-anchored (issue #251, tracked and untracked files alike). Recover them into a fresh location - this never touches any existing working tree, including \$REPO's own:"
+  printf '\n    git -C %s worktree add /tmp/%s-wip-recovery %s\n\n' "$(quote "$REPO")" "$_wip_id" "$WIP_SHA"
+  echo "Then inspect that new directory and copy out what you need; remove it with 'git -C $REPO worktree remove' when done."
+  echo "(safe to retry - this only reads the ref, it does not delete refs/wip/$_wip_id)"
+elif [ "$STATUS" = died ] && [ -n "$WIP_ERROR" ]; then
+  # A genuine anchor attempt failed at death (review round 1, MF-4) - most
+  # likely a stale .git/index.lock left by the very crash this exists to
+  # survive. Surfaced distinctly from "the tree was clean" (WIP_SHA empty,
+  # WIP_ERROR also empty), which is the whole point of this branch existing.
+  wm_warn "Its worktree could not be auto-anchored at death: $WIP_ERROR"
+  if [ -n "$WORKTREE" ]; then
+    wm_info "If the worktree still exists on disk, check it by hand: $WORKTREE"
+  fi
 fi

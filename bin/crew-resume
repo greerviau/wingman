@@ -334,7 +334,12 @@ EOF
   if wm_tmux_windows | grep -qx "$_window"; then _alive=1; else _alive=0; fi
 
   if [ "$_alive" = 1 ]; then
-    wm_state crew-set --id "$_rid" --status working \
+    # --clear-wip-anchor (issue #251, review round 1, nice-to-have 3): the
+    # death this resume just recovered from is over, so its WIP-anchor
+    # pointer/error (if any) no longer describes anything current - a live
+    # `working` member should not keep rendering `wip-ref: refs/wip/<id>
+    # (<sha>)` in crew-list/the tree view for a crash that's now resolved.
+    wm_state crew-set --id "$_rid" --status working --clear-wip-anchor \
       --summary "resumed after an interruption (was died); continuing prior session" >/dev/null
     wm_ok "'$_rid': resumed in window '$_window'"
     RESUME_RESULT="resumed"
