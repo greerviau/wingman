@@ -199,18 +199,27 @@ wm_state crew-add --id z3b-dev --type developer --objective gg --repo /tmp --win
   --session-id s10c --parent z3b >/dev/null
 wm_state crew-set --id z3b-dev --status working --summary "implementing the fix" >/dev/null
 # `& wait` keeps the pane root alive as the parent (a bare trailing command would
-# be exec'd by the pane shell, collapsing the tree to one idle process).
+# be exec'd by the pane shell, collapsing the tree to one idle process). Armed
+# at t=4, same as WM_STALL_IDLE below (6, matching sibling z3): candidacy must
+# not open before the late-started descendant actually exists.
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z3b 'sleep 4; sleep 600 & wait'
 wm_age_status z3b
-WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
+WM_STALL_IDLE=6 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
   "$WF" >/dev/null 2>&1 &
 qppid=$!
 wm_track "$qppid"
-# Typing the nudge into the pane resets that window's tmux activity age, so a
-# fixture that DOES get nudged would drop out of candidacy for a full
-# WM_STALL_IDLE afterward. Wait comfortably past 2x WM_STALL_IDLE + 2x
-# WM_WATCH_INTERVAL (10s) so a merely-late nudge cannot pass as a suppressed one.
-sleep 16
+# This case only pins the D1 guard if it gives an UN-guarded send enough time to
+# actually land: the fixture pane emits no output at all, so wm_tmux_send_message's
+# own wm_tmux_pane_ready (bin/lib/common.sh:680-712) would spin its full
+# WM_READY_TRIES x WM_READY_POLL (~20s) before even attempting the type+submit,
+# on top of the time to become a stall-idle candidate in the first place - a fixed
+# `sleep 16` finishes well before that and would pass identically whether the
+# guard exists or not (issue #234 review, PR #239 finding M1). Poll for the marker
+# for up to 40s instead - the same budget the neighbouring z1 case already uses for
+# its own (guarded-to-happen) nudge - so a guard-free build genuinely has time to
+# stamp the marker and turn this red, while a guarded build times out clean.
+_wait=0
+while [ ! -f "$WINGMAN_HOME/stall-z3b.nudged" ] && [ "$_wait" -lt 40 ]; do sleep 1; _wait=$((_wait+1)); done
 assert_true "watcher keeps blocking on a parked lead with a live report" "kill -0 $qppid"
 assert_contains "parked lead with a live report is never flagged" \
   "$(wm_state crew-get --id z3b)" '"status": "working"'
