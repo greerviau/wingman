@@ -232,6 +232,13 @@ STALL_IDLE="${WM_STALL_IDLE:-180}"
 STALL_ROOT_GRACE="${WM_STALL_ROOT_GRACE:-30}"
 STALL_PROBE_GAP="${WM_STALL_PROBE_GAP:-10}"
 STALL_CPU_EPS="${WM_STALL_CPU_EPS:-0.5}"
+# Stalled re-evaluation (issue #235): consecutive CONTRADICTING polls (see
+# wm_state stall-recheck) required before a 'stalled' record is auto-reverted.
+# Hard-floored to 2 in code regardless of this value - a watcher's first poll
+# for any member always reads PANE_STABLE=0 (no prior hash), which reads as
+# 'pane changed', so a value of 1 here would let every watcher restart clear
+# every liveness stall on the spot.
+WM_STALL_RECHECK_CONFIRMS="${WM_STALL_RECHECK_CONFIRMS:-2}"
 # Consecutive polls a check-in nudge can go undelivered (rc 2 dialog-shaped, 4
 # lock-contended, 6 busy-with-pending-composer - issue #214) before the escape
 # hatch fires, so an unreachable member still eventually flips 'stalled'
@@ -1242,12 +1249,56 @@ for r in data:
         fi
       fi
 
+      # Pane-liveness observations, computed here - ABOVE the review/stalled
+      # skip just below - because they are now shared by THREE consumers: the
+      # stalled re-evaluation immediately below (issue #235), wm-state
+      # wedge-check (issue #202, needs them for both working and blocked
+      # members), and the stall-check call further down (working only, once
+      # the blocked skip has already `continue`d past this poll for a
+      # blocked one). Moving the computation up (not just a call) costs
+      # nothing extra - it is one `tmux list-windows` and one `list-panes`,
+      # already paid for every 'working' member every poll before this
+      # change.
+      _idle="$(wm_tmux_window_activity_age "$_win")"
+      _pid="$(wm_tmux_pane_pid "$_win")"
+
+      # Stalled re-evaluation (#235): `stalled` is the one status the supervisor
+      # imposes unilaterally (see LIVE_STATES in bin/lib/wm-state.py), and until
+      # now the `continue` just below made it a one-way latch - no diagnostic
+      # ever looked at the record again, so a member that resumed activity stayed
+      # flagged until a human noticed. This re-runs the SAME detector's own
+      # evidence (recorded on the record's `stall` object at flip time) and
+      # reverts only on a sustained contradiction. Deliberately NOT a liveness
+      # probe for every source: a wedge-stalled (#202) or forward-motion-stalled
+      # (#199) member has a live process tree BY CONSTRUCTION, so a uniform
+      # liveness revert would delete both of those mechanisms outright.
+      if [ "$_orig_status" = stalled ]; then
+        _pane_changed=1
+        [ "$PANE_STABLE" = 1 ] && _pane_changed=0
+        _recheck="$(wm_state stall-recheck --id "$_id" \
+          --pane-pid "${_pid:-0}" --pane-changed "$_pane_changed" \
+          --root-grace "$STALL_ROOT_GRACE" \
+          --confirmations "$WM_STALL_RECHECK_CONFIRMS" 2>/dev/null)"
+        # Logged, never fired: an auto-clear corrects the supervisor's OWN prior
+        # conclusion, so it wakes nobody. Do NOT route this into fire()/$attention
+        # or add a --classify outcome for it - the log line and the board render
+        # are the whole surface. (The one thing that does still surface is a
+        # revert to `blocked`, which re-announces its restored blocker through
+        # the ordinary needs-attention path, not through anything here.)
+        if [ -n "$_recheck" ]; then
+          printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_recheck" \
+            >> "$WM_HOME/stall-recheck.log"
+        fi
+      fi
+
       # review/stalled were widened into this loop above solely for the
-      # Remote Control connection-state tracking just above; none of the
-      # freeze/stall diagnostics below apply to them (a review member sitting
-      # idle is exactly where it's supposed to be, and prompt_freeze_check's
-      # blocked-flip is scoped to the working/blocked population this loop
-      # originally covered).
+      # Remote Control connection-state tracking just above; the stalled
+      # re-evaluation just above is the one diagnostic that now runs for a
+      # `stalled` record before this `continue` - every OTHER freeze/stall
+      # diagnostic below still does not apply to either status (a review
+      # member sitting idle is exactly where it's supposed to be, and
+      # prompt_freeze_check's blocked-flip is scoped to the working/blocked
+      # population this loop originally covered).
       case "$_orig_status" in
         review|stalled) continue ;;
       esac
@@ -1267,16 +1318,8 @@ for r in data:
         continue   # the permission freeze is the more specific diagnosis, superseding any prior blocker reason
       fi
 
-      # Pane-liveness observations, computed here - ABOVE the blocked skip
-      # just below - because wm-state wedge-check (issue #202) needs them for
-      # BOTH working and blocked members, unlike the stall-check call further
-      # down, which only ever runs for a 'working' member once the blocked
-      # skip has already `continue`d past this poll for a blocked one. Moving
-      # the computation up (not just a call) costs nothing extra - it is one
-      # `tmux list-windows` and one `list-panes`, already paid for every
-      # 'working' member every poll before this change.
-      _idle="$(wm_tmux_window_activity_age "$_win")"
-      _pid="$(wm_tmux_pane_pid "$_win")"
+      # _idle/_pid are already computed above (hoisted ahead of the
+      # review/stalled skip, issue #235 - see the comment up there).
 
       # wm-state wedge-check (issue #202, layer B): flips a member wedged
       # mid-turn on a foreground watch-fleet/pr-watch call to 'stalled' once

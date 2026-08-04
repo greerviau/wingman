@@ -121,7 +121,19 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "de
 # every gate.
 # parked (#203) is a list of {"ref", "note", "since"} annotations - a unit of
 # work needing a decision, independent of this record's own status.
-DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked")
+# stall (issue #235) is the provenance object _impose_stall writes on every
+# 'stalled' flip - {"source", "since", "prev_status", "prev_summary",
+# "prev_blocker", ...} - so cmd_stall_recheck can later re-run the imposing
+# detector's own evidence and, on a sustained contradiction, revert the
+# record losslessly. Listed here so merged() carries it to the render layer
+# (_stalled_annotation reads it off a merged row) - but that is DISPLAY only:
+# cmd_stall_recheck itself never reads it through merged(), always via a
+# direct read_json(status_path(cid)) of the live status file, so the "no
+# gating weight" contract above still holds through this tuple - the gating
+# happens entirely inside cmd_stall_recheck's own direct read/write, not
+# through this overlay. cmd_crew_set pops it on the member's own next
+# self-report, exactly like nudged_at.
+DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked", "stall")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -389,23 +401,33 @@ def parent_of(record):
     return record.get("parent") or ""
 
 
-def _active_report_count(cid):
-    """How many of cid's direct reports are currently live (merged status in
-    LIVE_STATES). This is the same population cmd_forward_motion_check selects
-    for its own candidacy test (see its `children` filter) - kept as a separate
-    six-line read rather than a shared scan so this can be called from the
-    stall-flip path without reshaping #199's hot loop; if the definition of
-    'active report' ever changes, both sites must move together.
+def _active_reports(cid):
+    """cid's direct reports currently live (merged status in LIVE_STATES) -
+    the same population cmd_forward_motion_check selects for its own
+    candidacy test (see its `children` filter) and cmd_stall_recheck's
+    forward-motion clearing predicate re-reads to test whether any of them
+    has since moved (issue #235). The single shared read both now use, so the
+    'active report' definition can no longer drift between call sites the way
+    _active_report_count's own docstring used to flag as a live risk.
 
     Today only a `lead` ever has reports at all (the depth cap in
     playbooks/common/lead.md forbids spawning managers), so this is the
     type-free way to ask 'is this a manager with work in flight' - and it stays
     correct if that cap is ever relaxed."""
-    n = 0
+    out = []
     for r in load_roster():
-        if parent_of(r) == cid and merged(r).get("status") in LIVE_STATES:
-            n += 1
-    return n
+        if parent_of(r) != cid:
+            continue
+        m = merged(r)
+        if m.get("status") in LIVE_STATES:
+            out.append(m)
+    return out
+
+
+def _active_report_count(cid):
+    """How many of cid's direct reports are currently live. See
+    _active_reports."""
+    return len(_active_reports(cid))
 
 
 def descendants_inclusive(roster, root_id):
@@ -828,10 +850,13 @@ def cmd_crew_set(args):
                ("status", "summary", "blocker", "artifact", "artifact_url", "delivery")):
             live.pop("nudged_at", None)
             # The member self-reported, so any stall episode in progress is
-            # over - clear the watcher's own stall-<id>.nudged/.nudge-refused
-            # sidecars too (issue #214, §3.6 step 5), or a later episode would
+            # over - drop its provenance object too (issue #235), or a later
+            # render would annotate a status that is no longer 'stalled', and
+            # clear the watcher's own stall-<id>.nudged/.nudge-refused
+            # sidecars (issue #214, §3.6 step 5), or a later episode would
             # inherit a stale refused-nudge count and flip claiming a nudge
             # attempt that never happened.
+            live.pop("stall", None)
             _clear_stall_nudge_sidecars(args.id)
         # Auto-derive artifact_url from the publish marker unless the caller passed an
         # explicit value (including an explicit clear, already applied above) - see
@@ -1595,6 +1620,55 @@ def _track_long_running(cid, pane_pid, root_grace):
         write_json(path, current)
 
 
+def _impose_stall(cid, status_file, live, source, reason, clear_blocker=False, extra=None):
+    """The single write that imposes 'stalled' onto `live` (the current
+    on-disk dict for `cid`), shared by cmd_stall_check, cmd_wedge_check and
+    cmd_forward_motion_check (issue #235). Caller holds with_locked(status_file)
+    and has already re-checked the record (re-read fresh, status/updated still
+    match this call's own snapshot) before calling this - it performs the
+    write itself, matching every one of the three call sites' own prior
+    inline write_json(status_file, live).
+
+    Records the provenance cmd_stall_recheck needs to re-run THIS detector's
+    own evidence later (`source`, plus whatever per-source identifying data
+    the caller passes as `extra` - `wedge_pid` for a wedge flip, `children_sig`
+    for a forward-motion one), and the pre-flip (status, summary, blocker)
+    triple - captured from `live` BEFORE any of the mutations below, so a
+    revert can restore it losslessly. `prev_summary` is stored UNTRUNCATED
+    (the reason text passed in by the caller may itself carry only an
+    80-character prefix of it, which is fine for a human reading the fire but
+    would be lossy for a restore). `prev_blocker` exists because
+    `clear_blocker=True` (wedge only) pops the `blocker` FIELD below, after
+    this function has already captured its text - reverting without restoring
+    it would destroy an open question.
+
+    `stall.since` and `live["updated"]` are stamped from the SAME now() call,
+    so the flip instant recorded in the provenance and the record's own
+    version stamp are always identical, never a poll apart.
+
+    Every existing reason-string caller passes in unchanged (`reason` is
+    accepted, not composed here) - this only changes what gets WRITTEN onto
+    the record, not the text of any of the three flip reasons."""
+    stall = {
+        "source": source,
+        "since": now(),
+        "prev_status": live.get("status"),
+        "prev_summary": live.get("summary"),
+        "prev_blocker": live.get("blocker"),
+    }
+    if extra:
+        stall.update(extra)
+    live["stall"] = stall
+    live["status"] = "stalled"
+    live["summary"] = reason
+    live["updated"] = stall["since"]
+    live["announced"] = live["updated"]  # a stall flip always announces
+    live.pop("nudged_at", None)
+    if clear_blocker:
+        live.pop("blocker", None)
+    write_json(status_file, live)
+
+
 def cmd_stall_check(args):
     """Flag a WORKING crew member as 'stalled' iff it shows no external sign of life:
     BOTH staleness gates (pane_idle from the watcher, status_idle computed here) at
@@ -1753,15 +1827,7 @@ def cmd_stall_check(args):
         if prior:
             reason += " (last summary: %s)" % prior
 
-        live["status"] = "stalled"
-        live["summary"] = reason
-        live["updated"] = now()
-        live["announced"] = live["updated"]  # a stall flip always announces
-        # #155 fix 1: a genuine stall confirms the nudge did not work - clear the
-        # nudge-in-progress annotation along with the flip itself, since `stalled`
-        # (not a still-'working' render) is now the accurate signal to show.
-        live.pop("nudged_at", None)
-        write_json(status_file, live)
+        _impose_stall(args.id, status_file, live, "liveness", reason)
     # This stall episode is over (flipped) - clear the watcher's own sidecars
     # too, or a future episode's first flip would inherit a stale refused-nudge
     # count (or a stale delivered-nudge marker) from this one (issue #214, §3.6
@@ -1964,18 +2030,16 @@ def cmd_wedge_check(args):
         if prior:
             reason += " (last summary: %s)" % prior
 
-        live["status"] = "stalled"
-        live["summary"] = reason
-        live["updated"] = now()
-        live["announced"] = live["updated"]  # a stall flip always announces
-        live.pop("nudged_at", None)
-        # Clear the FIELD only after its text has already been copied into
-        # `reason` above - a false positive must never destroy an open
-        # question. Leaving it set would also make cmd_needs_attention's
-        # `blocker or delivery or artifact_url or artifact or summary` note
-        # surface the stale question instead of this stall reason.
-        live.pop("blocker", None)
-        write_json(status_file, live)
+        # clear_blocker=True: the FIELD is popped only after its text has
+        # already been copied into `reason` above AND captured as
+        # `prev_blocker` by _impose_stall itself (from `live`, before the
+        # pop) - a false positive must never destroy an open question, and a
+        # revert must be able to restore it losslessly. Leaving the field set
+        # would also make cmd_needs_attention's `blocker or delivery or
+        # artifact_url or artifact or summary` note surface the stale
+        # question instead of this stall reason.
+        _impose_stall(cid, status_file, live, "wedge", reason,
+                       clear_blocker=True, extra={"wedge_pid": desc_pid})
 
     with with_locked(crew_json_path()):
         roster = load_roster()
@@ -2469,20 +2533,6 @@ def _review_has_live_waker(cid, grace_secs):
     return age < grace_secs
 
 
-def _human_duration(seconds):
-    """A short, human-readable rendering of a whole number of seconds, used
-    only for the resurface reminder's "unchanged for %s" wording. Prefers
-    the coarsest exact unit (hours, then minutes) so the generous-default
-    cadence (6h) reads as "6h" rather than "21600s"; a --window-secs value
-    that doesn't divide evenly falls back to plain seconds."""
-    seconds = int(seconds)
-    if seconds % 3600 == 0:
-        return "%dh" % (seconds // 3600)
-    if seconds % 60 == 0:
-        return "%dm" % (seconds // 60)
-    return "%ds" % seconds
-
-
 def cmd_review_resurface_check(args):
     """Advance the bounded-resurface check for every `review` member with no
     live dependency watcher (issue #187): a `review` member surfaces once, on
@@ -2586,29 +2636,51 @@ def cmd_review_resurface_check(args):
             write_json(review_resurfaced_path(), store)
 
 
-def _forward_motion_signature(candidate, children):
-    """Hash of the candidate's own (summary, blocker, artifact, delivery,
-    parked) plus the sorted (child_id, child_status, child_announced) tuple
-    for every one of `children` (already filtered to LIVE_STATES by the
-    caller). `announced` (falling back to `updated` only when absent) is used
-    for each child - not `updated` - matching the exact idiom
-    cmd_review_resurface_check/cmd_needs_attention already use elsewhere in
-    this file: `updated` bumps on every routine same-status summary refresh,
-    so keying on it would let an actively-narrating-but-not-actually-
-    progressing report reset the staleness clock forever. See
-    cmd_forward_motion_check's own docstring for the full rationale. `parked`
-    (#203) is included so parking or unparking an item resets the staleness
-    clock directly - a lead now spends materially more time sitting in
-    `working` with active reports (it no longer flips to `blocked` for a
-    single parked item), which is exactly the shape this check polices."""
-    own = (candidate.get("summary"), candidate.get("blocker"),
-           candidate.get("artifact"), candidate.get("delivery"),
-           tuple(sorted((p.get("ref"), p.get("note")) for p in candidate.get("parked") or [])))
-    child_tuples = sorted(
+def _child_tuples(children):
+    """Sorted (child_id, child_status, child_announced) tuple for every one of
+    `children` (already filtered to LIVE_STATES by the caller). `announced`
+    (falling back to `updated` only when absent) is used for each child - not
+    `updated` - matching the exact idiom cmd_review_resurface_check/
+    cmd_needs_attention already use elsewhere in this file: `updated` bumps on
+    every routine same-status summary refresh, so keying on it would let an
+    actively-narrating-but-not-actually-progressing report reset the
+    staleness clock forever. Extracted out of _forward_motion_signature
+    (issue #235) so cmd_stall_recheck's forward-motion clearing predicate can
+    hash just the reports half on its own - see _children_signature - without
+    duplicating this construction."""
+    return sorted(
         (c["id"], c.get("status"), c.get("announced") or c.get("updated"))
         for c in children
     )
-    payload = json.dumps([own, child_tuples], sort_keys=True, default=str)
+
+
+def _children_signature(children):
+    """Hash of _child_tuples(children) alone - the reports half of
+    _forward_motion_signature, with none of the candidate's own (summary,
+    blocker, artifact, delivery, parked). While a member is latched
+    'stalled', nothing writes ITS OWN summary/blocker/artifact/delivery (that
+    is the latch), so the only half of the flip's signature that CAN move is
+    the reports half - this is what cmd_stall_recheck's forward-motion
+    clearing predicate compares against the `children_sig` recorded at flip
+    time (see _impose_stall)."""
+    payload = json.dumps(_child_tuples(children), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _forward_motion_signature(candidate, children):
+    """Hash of the candidate's own (summary, blocker, artifact, delivery,
+    parked) plus _child_tuples(children) (see its own docstring for why
+    `announced`, not `updated`, is the per-child key). `parked` (#203) is
+    included so parking or unparking an item resets the staleness clock
+    directly - a lead now spends materially more time sitting in `working`
+    with active reports (it no longer flips to `blocked` for a single parked
+    item), which is exactly the shape this check polices. Output is
+    byte-identical to before _child_tuples was extracted out of this
+    function (issue #235) - the construction moved, not the shape."""
+    own = (candidate.get("summary"), candidate.get("blocker"),
+           candidate.get("artifact"), candidate.get("delivery"),
+           tuple(sorted((p.get("ref"), p.get("note")) for p in candidate.get("parked") or [])))
+    payload = json.dumps([own, _child_tuples(children)], sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2760,12 +2832,18 @@ def cmd_forward_motion_check(args):
                 continue
             elapsed = (stamp_dt - anchor_dt).total_seconds()
             if elapsed >= window_secs:
-                to_flip.append((rid, len(children), r.get("summary"), r.get("updated")))
+                # children_sig (issue #235): the reports-only half of this
+                # candidate's own signature, captured now (the same children
+                # list just used above) so cmd_stall_recheck's forward-motion
+                # clearing predicate has a baseline to compare a later,
+                # freshly-recomputed children list against.
+                to_flip.append((rid, len(children), r.get("summary"), r.get("updated"),
+                                 _children_signature(children)))
 
         if changed:
             write_json(forward_motion_path(), store)
 
-    for rid, n_reports, prior_summary, updated_snapshot in to_flip:
+    for rid, n_reports, prior_summary, updated_snapshot, children_sig in to_flip:
         status_file = status_path(rid)
         with with_locked(status_file):
             current = read_json(status_file, None)
@@ -2785,12 +2863,8 @@ def cmd_forward_motion_check(args):
             if prior:
                 reason += " (last summary: %s)" % prior
 
-            live["status"] = "stalled"
-            live["summary"] = reason
-            live["updated"] = now()
-            live["announced"] = live["updated"]  # a stall flip always announces
-            live.pop("nudged_at", None)
-            write_json(status_file, live)
+            _impose_stall(rid, status_file, live, "forward-motion", reason,
+                           extra={"children_sig": children_sig})
 
         with with_locked(crew_json_path()):
             roster = load_roster()
@@ -2801,6 +2875,254 @@ def cmd_forward_motion_check(args):
             write_json(crew_json_path(), roster)
         render_board()
         print("stalled %s" % rid)
+
+
+def _valid_stall(stall):
+    """Whole-object validation gating cmd_stall_recheck (issue #235) - guard
+    #1 of the governing fail-closed invariant. True iff `stall` is a dict,
+    its `source` is one of the three known detectors, `since` parses, and
+    `prev_status` is a status a revert could legally restore. Anything else
+    (absent, malformed, or a legacy 'stalled' record flipped before this
+    feature shipped, so with no `stall` object at all) makes the record
+    UNREVERTABLE by this mechanism - it exits the same way it always did:
+    the member's own next self-report (cmd_crew_set), or a human via
+    bin/crew-takeover/bin/crew-standdown. Checked once, up front, before any
+    evidence is even read - a record that fails this is never touched, no
+    streak started, no write made."""
+    return (
+        isinstance(stall, dict)
+        and stall.get("source") in ("liveness", "wedge", "forward-motion")
+        and _parse_updated(stall.get("since")) is not None
+        and stall.get("prev_status") in ("working", "blocked")
+    )
+
+
+def _stall_contradicted(stall, pane_changed, pane_pid, root_grace, cid):
+    """True iff the evidence THIS stall's own imposing detector would use to
+    flip again no longer supports the classification (issue #235) - guard #2
+    of the governing fail-closed invariant, dispatching on stall['source'].
+    The caller (cmd_stall_recheck) has already validated the whole object via
+    _valid_stall before this is ever called.
+
+    Every branch is written evidence-first: it returns False - 'not
+    contradicted' - the instant the evidence it needs is missing, malformed,
+    or unreadable, rather than treating that absence as a reason to revert.
+    A false 'not contradicted' costs one extra poll of latency (self-
+    correcting); a false 'contradicted' reverts the record AND rewrites
+    `updated`, closing the detector's own re-flip gate for a full
+    WM_WEDGE_SECS/WM_FORWARD_MOTION_SECS (30 minutes by default) - see the
+    plan's "The governing invariant: fail closed" for why this asymmetry
+    makes fail-open unacceptable here even as a rare edge case.
+
+    source == 'liveness': contradicted iff `pane_changed` (the caller's own
+    PANE_STABLE-derived snapshot - never absent) OR
+    _longest_running_descendant(pane_pid, root_grace) is not None. Both terms
+    are POSITIVE evidence of life, so this branch needs no extra guard: an
+    unreadable/pid-0 process tree makes _longest_running_descendant return
+    None on its own (already 'not contradicted'), never something that reads
+    as 'dead'.
+
+    source == 'wedge': contradicted iff `_ps_tree(pane_pid)` is non-empty AND
+    the recorded `wedge_pid` is absent from it. The non-emptiness check is
+    the fail-closed guard and is load-bearing: an EMPTY tree is what
+    `--pane-pid 0`, an unreadable `ps`, or a momentarily unresolvable pane
+    all look like, and none of them may ever be read as 'the wedging process
+    is gone' - _ps_tree returns {} for all three, indistinguishable from a
+    genuinely dead tree, which is exactly why membership alone (the naive,
+    fail-open spelling) is wrong. A `stall` with no integer `wedge_pid` is
+    not contradicted at all - there is no recorded process to look for.
+
+    source == 'forward-motion': contradicted iff the roster read is
+    trustworthy AND `children_sig` was recorded AND the freshly recomputed
+    live-children signature differs from it. Two guards: a `stall` with no
+    `children_sig` is never contradicted (no baseline). And - the subtle
+    one - `load_roster()` returns [] both for a candidate whose every report
+    has genuinely finished (real forward motion) AND for an unreadable/
+    truncated crew.json (indistinguishable from the former by emptiness
+    alone) - so the discriminator is not 'are there zero live children' but
+    'is cid ITSELF present in this roster read'. If the roster does not even
+    contain the record being rechecked, the read is untrustworthy and this
+    returns False; if it does, an empty live-children list is genuine.
+
+    Unknown/absent `source` (defensive only - the caller already rejects
+    this via _valid_stall): never contradicted."""
+    source = stall.get("source")
+
+    if source == "liveness":
+        if pane_changed:
+            return True
+        return _longest_running_descendant(pane_pid, root_grace) is not None
+
+    if source == "wedge":
+        wedge_pid = stall.get("wedge_pid")
+        if not isinstance(wedge_pid, int):
+            return False
+        tree = _ps_tree(pane_pid)
+        if not tree:
+            return False
+        return wedge_pid not in tree
+
+    if source == "forward-motion":
+        children_sig = stall.get("children_sig")
+        if not isinstance(children_sig, str):
+            return False
+        roster = load_roster()
+        if not any(r.get("id") == cid for r in roster):
+            return False
+        children = []
+        for r in roster:
+            if parent_of(r) != cid:
+                continue
+            m = merged(r)
+            if m.get("status") in LIVE_STATES:
+                children.append(m)
+        return _children_signature(children) != children_sig
+
+    return False
+
+
+_STALL_CLEAR_EVIDENCE = {
+    "liveness": "its pane is repainting again and/or its process tree holds a late-started descendant",
+    "forward-motion": "at least one of its reports has changed state",
+}
+
+
+def _stall_clear_evidence(stall):
+    """The per-source evidence phrase for cmd_stall_recheck's clear reason
+    text (see "The revert" in the plan for the exact three wordings). wedge
+    is composed here (it needs the recorded pid), the other two are a plain
+    lookup."""
+    source = stall.get("source")
+    if source == "wedge":
+        return ("the foreground process (pid %s) that wedged it is gone from "
+                "its pane's process tree" % stall.get("wedge_pid"))
+    return _STALL_CLEAR_EVIDENCE.get(source, "")
+
+
+def cmd_stall_recheck(args):
+    """Re-evaluate a 'stalled' record against ONLY the evidence its own
+    imposing detector recorded at flip time (issue #235): before this,
+    'stalled' was a one-way latch - nothing ever re-ran the probe that
+    produced it, so a member that resumed activity stayed flagged until a
+    human noticed. Dispatches via _stall_contradicted on stall['source'] so a
+    wedge-stalled (#202) or forward-motion-stalled (#199) member - both of
+    which have a live process tree BY CONSTRUCTION - can never be cleared by
+    a uniform liveness check; only its OWN evidence can clear it. See the
+    plan's "The central principle" for why a naive uniform liveness revert
+    would silently delete both of those mechanisms outright.
+
+    Whole-object validation (_valid_stall) gates everything up front: an
+    absent or malformed `stall` object - including a pre-migration 'stalled'
+    record flipped before this feature shipped, so with no `stall` object at
+    all - is never reverted by any number of calls; see "Migration".
+
+    A single contradicting poll never reverts. `stall.clear_polls` increments
+    on each consecutive contradicting poll and is deleted the moment a poll
+    agrees with the classification again; the revert fires once it reaches
+    max(2, --confirmations) - the floor is HARD-CLAMPED in code, not merely
+    defaulted, because a watcher's very first poll for any member always
+    reads PANE_STABLE=0 (no prior hash), which reads as pane_changed - a
+    --confirmations of 1 would let every watcher restart clear every
+    liveness stall. See the plan's "The confirmation gate".
+
+    The evidence probe (a process-tree walk, a roster read) runs OUTSIDE the
+    status-file lock - it can take a moment - then the actual read-modify-
+    write re-validates status/stall.since fresh under with_locked(status_
+    path(cid)), the identical TOCTOU guard every flip site already uses, so
+    a self-report landing in between always wins over a stale nomination.
+
+    On a revert: status/summary/blocker are restored from the stall object's
+    own prev_* triple - `blocker` losslessly, even though a wedge flip
+    cleared the FIELD (the TEXT survived in `prev_blocker`). `announced`
+    advances ONLY when prev_status == 'blocked' (a genuinely open question
+    nobody answered re-surfaces exactly once through the ordinary
+    needs-attention path); reverting to 'working' leaves `announced`
+    untouched, since 'working' is not an ATTENTION_STATE and the record
+    simply drops off needs-attention with no wake possible - the silence is
+    structural, not something this function has to suppress. This is
+    deliberately silent on the wake channel: an auto-clear corrects the
+    supervisor's OWN prior conclusion, so it owes nobody a notification - the
+    caller (bin/watch-fleet) logs this call's stdout to stall-recheck.log and
+    fires nothing. See the plan's "The revert".
+
+    Prints '<id> <source> cleared after <N> polls' on a revert - exactly the
+    three fields the call site's log line and the E2E test consume - nothing
+    otherwise. Idempotent and safe to call every poll for every 'stalled'
+    member."""
+    ensure_home()
+    cid = args.id
+    status_file = status_path(cid)
+    live = read_json(status_file, None)
+    if not isinstance(live, dict) or live.get("status") != "stalled":
+        return
+    stall = live.get("stall")
+    if not _valid_stall(stall):
+        return
+    since_snapshot = stall["since"]
+
+    contradicted = _stall_contradicted(stall, args.pane_changed, args.pane_pid, args.root_grace, cid)
+    confirmations = max(2, args.confirmations)
+
+    with with_locked(status_file):
+        current = read_json(status_file, None)
+        if not isinstance(current, dict) or current.get("status") != "stalled":
+            return
+        cur_stall = current.get("stall")
+        if not _valid_stall(cur_stall) or cur_stall.get("since") != since_snapshot:
+            return  # the record moved under us since the snapshot above - a fresh flip, not this one
+
+        if not contradicted:
+            if "clear_polls" in cur_stall or "clear_since" in cur_stall:
+                cur_stall.pop("clear_polls", None)
+                cur_stall.pop("clear_since", None)
+                current["stall"] = cur_stall
+                write_json(status_file, current)
+            return
+
+        polls = cur_stall.get("clear_polls", 0) + 1
+        if polls < confirmations:
+            cur_stall["clear_polls"] = polls
+            cur_stall.setdefault("clear_since", now())
+            current["stall"] = cur_stall
+            write_json(status_file, current)
+            return
+
+        # Confirmed across `confirmations` consecutive contradicting polls - revert.
+        source = cur_stall["source"]
+        prev_status = cur_stall["prev_status"]
+        stamp = now()
+        since_dt = _parse_updated(cur_stall["since"])
+        stamp_dt = _parse_updated(stamp)
+        age = (stamp_dt - since_dt).total_seconds() if since_dt is not None and stamp_dt is not None else 0
+
+        clear_reason = (
+            "'stalled' auto-cleared by the supervisor's own re-probe: %s, sustained "
+            "across %d consecutive polls. The classification was imposed %s ago by "
+            "%s and is no longer supported by the evidence that produced it."
+            % (_stall_clear_evidence(cur_stall), polls, _human_duration(age), source)
+        )
+        prev_summary = cur_stall.get("prev_summary")
+        if prev_summary:
+            clear_reason += " (last self-reported summary: %s)" % prev_summary
+
+        current["status"] = prev_status
+        current["summary"] = clear_reason
+        current["blocker"] = cur_stall.get("prev_blocker")
+        current["updated"] = stamp
+        if prev_status == "blocked":
+            current["announced"] = stamp
+        current.pop("stall", None)
+        write_json(status_file, current)
+
+    with with_locked(crew_json_path()):
+        roster = load_roster()
+        for r in roster:
+            if r.get("id") == cid:
+                r["status"] = prev_status
+                r["updated"] = stamp
+        write_json(crew_json_path(), roster)
+    render_board()
+    print("%s %s cleared after %d polls" % (cid, source, polls))
 
 
 def cmd_ack(args):
@@ -3213,8 +3535,14 @@ def _long_shell_warn_seconds():
 
 
 def _human_duration(seconds):
-    """'47s' / '22m' / '1h5m' - short, human-scale duration for the nudge and
-    long-shell annotations."""
+    """'47s' / '22m' / '1h5m' - short, human-scale duration, used across the
+    nudge/long-shell annotations, the wedge/forward-motion/review-resurface
+    reason text, and cmd_stall_recheck's own clear reason and age
+    annotation (_stalled_annotation). The only definition in the module -
+    an earlier, shadowed duplicate at what was line 2472 (coarsest-exact-
+    unit only, no callers actually reached it since a later definition of
+    the same name always wins at call time) was removed rather than kept
+    as a second source of truth."""
     seconds = max(0, int(seconds))
     if seconds < 60:
         return "%ds" % seconds
@@ -3257,7 +3585,12 @@ def _stall_annotation(r):
     applies, and unconditionally for any status other than 'working'/
     'blocked' (nudged_at/long_shell_* can briefly outlive either in the
     record, e.g. between a stalled flip and the next render, but any OTHER
-    status is never annotated)."""
+    status is never annotated) - EXCEPT 'stalled' itself, which gets its own
+    dedicated annotation via _stalled_annotation (issue #235): the gate below
+    is restructured, not widened, so these two existing halves stay exactly
+    as they were for 'working'/'blocked'."""
+    if r.get("status") == "stalled":
+        return _stalled_annotation(r)
     if r.get("status") not in ("working", "blocked"):
         return ""
     parts = []
@@ -3271,6 +3604,45 @@ def _stall_annotation(r):
     elapsed = r.get("long_shell_elapsed")
     if elapsed is not None and elapsed >= _long_shell_warn_seconds():
         parts.append("1 shell running %s, longer than usual" % _human_duration(elapsed))
+    if not parts:
+        return ""
+    return " (%s)" % "; ".join(parts)
+
+
+def _stalled_annotation(r):
+    """Short parenthetical suffix for a 'stalled' status cell (issue #235).
+    Unlike _stall_annotation's two halves above, the first half here is
+    ALWAYS shown, not gated on anything: `flagged <duration> ago`, anchored
+    on stall.since - or, for a pre-migration record with no `stall` object at
+    all (see "Migration"), falling back to the record's own `updated`. This
+    half needs no probe and no live watcher to be correct: it renders
+    straight from whatever is already on disk, which is exactly what makes
+    it trustworthy even for a fleet whose watcher has itself died - precisely
+    when a stale classification is most likely to mislead a pilot glancing at
+    the board.
+
+    The second half - `showing activity for <duration> - classification may
+    be stale` - appears only while cmd_stall_recheck has a recovery streak in
+    progress (stall.clear_since is set), i.e. the classification has been
+    CONTRADICTED at least once but not yet for enough consecutive polls to
+    auto-revert. This is the render-side half of the R6 mitigation the plan
+    documents: a pilot about to act on a stale 'stalled' report sees the
+    warning before attaching, rather than discovering after the fact that the
+    member had already recovered."""
+    stall = r.get("stall")
+    since = (stall or {}).get("since") or r.get("updated")
+    parts = []
+    since_dt = _parse_updated(since)
+    if since_dt is not None:
+        age = (datetime.datetime.now(datetime.timezone.utc) - since_dt).total_seconds()
+        if age >= 0:
+            parts.append("flagged %s ago" % _human_duration(age))
+    if isinstance(stall, dict):
+        clear_since_dt = _parse_updated(stall.get("clear_since"))
+        if clear_since_dt is not None:
+            clear_age = (datetime.datetime.now(datetime.timezone.utc) - clear_since_dt).total_seconds()
+            if clear_age >= 0:
+                parts.append("showing activity for %s - classification may be stale" % _human_duration(clear_age))
     if not parts:
         return ""
     return " (%s)" % "; ".join(parts)
@@ -3733,6 +4105,23 @@ def build_parser():
     a.add_argument("--owner", default=None)
     a.add_argument("--window-secs", type=int, default=1800, dest="window_secs")  # 30 min default
     a.set_defaults(fn=cmd_forward_motion_check)
+
+    # The stalled re-evaluation (issue #235): re-runs the SAME detector's own
+    # evidence recorded on a 'stalled' record's `stall` object at flip time
+    # (see _stall_contradicted), and reverts the record only on a sustained
+    # (--confirmations, hard-floored to 2) contradiction. Called once per
+    # member per bin/watch-fleet poll, immediately before the
+    # `review|stalled) continue` that used to make 'stalled' a one-way latch.
+    # --pane-pid 0 is a valid, deliberate "cannot tell" (a pane whose pid did
+    # not resolve this poll), not an error - every branch of
+    # _stall_contradicted must still answer correctly for it.
+    a = sub.add_parser("stall-recheck")
+    a.add_argument("--id", required=True)
+    a.add_argument("--pane-pid", type=int, default=0, dest="pane_pid")
+    a.add_argument("--pane-changed", type=int, default=0, dest="pane_changed")
+    a.add_argument("--root-grace", type=int, required=True, dest="root_grace")
+    a.add_argument("--confirmations", type=int, default=2)
+    a.set_defaults(fn=cmd_stall_recheck)
 
     a = sub.add_parser("ack")
     a.add_argument("--id", required=True)
