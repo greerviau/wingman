@@ -123,7 +123,12 @@ too, since it's the difference between "N crew died, work may be lost" and
 actually gone." A `died` member whose worktree was dirty at the moment of
 death also has its state auto-anchored at `refs/wip/<id>` (`bin/crew-takeover
 <id>` surfaces it) - mention this too if the pilot asks about uncommitted
-work specifically, though it's not part of the note's own text.
+work specifically, though it's not part of the note's own text. If the
+shared tmux server itself is what died (issue #218),
+`~/.wingman/tmux-guardian-events.log` - written by a process independent of
+the server that just died, so it survives to report on it - may have the
+death timestamp, a last-known-good heartbeat, and (for a revival) the new
+server's process ancestry; worth checking before relaying.
 
 ### `correlated:api-outage` / `correlated:api-outage-death` / `outage-detected` — wingman-only
 
