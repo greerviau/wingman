@@ -59,7 +59,12 @@
 #   --stop   - signal a running instance to exit and wait briefly for it.
 #   --status - print whether an instance is running and the most recent
 #              heartbeat/event, then exit. Read-only.
-# bash-3.2-safe.
+#
+# Linux/systemd-only, not bash-3.2-safe like most of this repo's bin/
+# scripts: its entire reason to exist is a systemd-specific cgroup-teardown
+# failure mode (the `systemd-run --user --scope` check bin/wingman gates on
+# before ever launching this), so portability to a non-systemd host buys
+# nothing. Uses GNU-only `ps --ppid`/`/proc` accordingly.
 set -u
 . "$(dirname "$0")/common.sh"
 
@@ -149,7 +154,13 @@ _gd_log_event() {
   if [ -f "$EVENTS" ]; then
     _le_lines="$(wc -l < "$EVENTS" 2>/dev/null || echo 0)"
     if [ "${_le_lines:-0}" -gt "$MAX_EVENT_LINES" ]; then
-      tail -n "$MAX_EVENT_LINES" "$EVENTS" > "$EVENTS.tmp" 2>/dev/null && mv -f "$EVENTS.tmp" "$EVENTS"
+      # A plain `tail -n` cut can land mid-record (each event is several
+      # lines starting with a "=== ..." marker) - drop everything before
+      # the first surviving marker too, so a reader never has to guess
+      # whether a truncated-looking record at the top is real or an
+      # artifact of where the line-count cutoff happened to fall.
+      tail -n "$MAX_EVENT_LINES" "$EVENTS" 2>/dev/null | sed -n '/^=== /,$p' > "$EVENTS.tmp" \
+        && mv -f "$EVENTS.tmp" "$EVENTS"
     fi
   fi
   {
@@ -171,7 +182,20 @@ _gd_log_event() {
 _gd_pidfile_live() {
   [ -f "$PIDFILE" ] || return 1
   _pl_pid="$(cat "$PIDFILE" 2>/dev/null)"
-  [ -n "$_pl_pid" ] && kill -0 "$_pl_pid" 2>/dev/null
+  [ -n "$_pl_pid" ] || return 1
+  kill -0 "$_pl_pid" 2>/dev/null || return 1
+  # Confirm the live pid is actually this script, not an unrelated process
+  # that happens to have been assigned the same pid number since. A pidfile
+  # from an instance that died without its own trap running (any signal not
+  # in cmd_daemon's TERM/INT/HUP list) is never cleaned up, so without this
+  # check pid reuse would eventually make this always report "already
+  # running" against a process that has nothing to do with the guardian -
+  # permanently and silently disabling it until something notices and
+  # manually removes the stale pidfile. An unreadable/non-matching cmdline
+  # is treated as "not confirmed" rather than "confirmed alive", the safer
+  # direction: worst case a redundant instance briefly starts, never a
+  # wedged one that can't.
+  tr '\0' '\n' < "/proc/$_pl_pid/cmdline" 2>/dev/null | grep -q "tmux-guardian\.sh"
 }
 
 cmd_status() {
@@ -213,21 +237,39 @@ cmd_daemon() {
     [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE" 2>/dev/null
     exit 0
   }
-  trap _gd_cleanup TERM INT
+  # HUP is defense in depth, not the primary protection: the launcher
+  # (bin/wingman) is what actually keeps this process out of the tmux
+  # server's terminal session via `setsid`, so a dying pane's controlling
+  # terminal never reaches this process as a HUP target in the first place.
+  # This trap only matters if something upstream ever launches the daemon
+  # without setsid - it should not be relied on as the sole defense.
+  trap _gd_cleanup TERM INT HUP
 
-  # Was the server down as of the last poll? Tracked separately from
-  # $_last_pid (which only ever holds the most recent PID actually seen) so
-  # a prolonged outage does not need periodic re-logging to stay
+  # $_last_pid holds the most recent pid actually seen (empty while down),
+  # so a prolonged outage does not need periodic re-logging to stay
   # distinguishable from "just started" - the single server-died event
   # already describes the whole outage until something changes.
+  #
+  # $_ever_seen_up is distinct from "was the server down last poll": it
+  # tracks whether THIS guardian instance has ever confirmed the server
+  # alive, at least once. A guardian started while the server happens to
+  # already be down has nothing to "revive" - calling its first-ever
+  # sighting "server-revived" would misdescribe a guardian startup as a
+  # recovery from a death it never actually observed.
   _last_pid=""
-  _was_down=0
+  _ever_seen_up=0
   while :; do
     _cur_pid="$(_gd_server_pid)"
     if [ -n "$_cur_pid" ]; then
-      _gd_snapshot_heartbeat "$_cur_pid"
+      # Detect and log BEFORE overwriting the heartbeat: server-changed's
+      # whole value is showing what the OLD (now-dead) server last looked
+      # like, and _gd_log_event reads $HEARTBEAT for that. Snapshotting
+      # first would overwrite it with the NEW server's own state before the
+      # event ever reads it - destroying exactly the evidence a fast
+      # turnover (no observed gap) is supposed to carry, silently, on every
+      # such event.
       if [ -z "$_last_pid" ]; then
-        if [ "$_was_down" -eq 1 ]; then
+        if [ "$_ever_seen_up" -eq 1 ]; then
           _gd_log_event server-revived "server pid $_cur_pid answered again" "$_cur_pid"
         else
           _gd_log_event server-first-seen "guardian started, server pid $_cur_pid already up" "$_cur_pid"
@@ -235,12 +277,12 @@ cmd_daemon() {
       elif [ "$_cur_pid" != "$_last_pid" ]; then
         _gd_log_event server-changed "pid $_last_pid -> $_cur_pid with no observed gap (turnover faster than the ${INTERVAL}s poll interval)" "$_cur_pid"
       fi
-      _was_down=0
+      _gd_snapshot_heartbeat "$_cur_pid"
+      _ever_seen_up=1
     else
       if [ -n "$_last_pid" ]; then
         _gd_log_event server-died "tracked pid $_last_pid no longer answers"
       fi
-      _was_down=1
     fi
     _last_pid="$_cur_pid"
     sleep "$INTERVAL"

@@ -47,8 +47,20 @@ export WINGMAN_RUN_ID
 # or the very first boot - never spawns a duplicate. Best-effort, like the
 # self-pane registration above: no systemd-run available just means weaker
 # (but still better than nothing) protection, never a launch failure.
+#
+# `setsid` is not optional here: a bare `systemd-run --user --scope -- CMD &`
+# puts CMD in a separate cgroup but leaves it in the SAME terminal session as
+# this pane, still a member of the controlling tty's foreground process
+# group. When the tmux server dies, its ptys close and the kernel sends
+# SIGHUP to that foreground group - the guardian would die with zero events
+# written, exactly the failure it exists to catch, with the cgroup isolation
+# doing nothing to prevent it (cgroups and terminal sessions are unrelated
+# kernel concepts; only setsid detaches the latter). Reproduced directly:
+# without setsid, killing the tracked server produces zero server-died
+# events; with it, one. The daemon's own HUP trap (tmux-guardian.sh) is
+# defense in depth, not a substitute for this.
 if wm_have systemd-run && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
-  systemd-run --user --scope --collect --quiet -- "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 &
+  systemd-run --user --scope --collect --quiet -- setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 &
 else
   setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 < /dev/null &
 fi
