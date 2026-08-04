@@ -116,7 +116,14 @@ Relay it plainly ("N crew members died together around \<time\>, looks like a
 host/tmux crash") and **confirm with the pilot before running
 `bin/crew-resume --all-died`** - resuming sessions is the same costly act as
 any other spawn - unless the pilot has separately pre-authorized auto-recovery
-for this specific effort.
+for this specific effort. The note itself also states how many of the batch
+have a confirmed-intact session transcript (`N/M`, issue #251) - relay that
+too, since it's the difference between "N crew died, work may be lost" and
+"N crew died, M of them are confirmed resumable, none of the work is
+actually gone." A `died` member whose worktree was dirty at the moment of
+death also has its state auto-anchored at `refs/wip/<id>` (`bin/crew-takeover
+<id>` surfaces it) - mention this too if the pilot asks about uncommitted
+work specifically, though it's not part of the note's own text.
 
 ### `correlated:api-outage` / `correlated:api-outage-death` / `outage-detected` — wingman-only
 

@@ -64,7 +64,9 @@ The merged view of a crew member = its crew.json base record with the live
 crew/<id>.json overlaid on top (status/summary/blocker/parked/artifact/
 artifact_url/delivery/updated).
 crew.json is the roster of record; crew/<id>.json is the live signal. Wingman
-reads the merge; it never ingests panes or transcripts.
+reads the merge; it never ingests panes or transcripts - the one exception is
+is_resumable() below, which checks a died member's transcript for existence
+only, never content (issue #251).
 
 All JSON is handled here in Python so the shell scripts stay bash-3.2-safe and the
 tool works whether or not jq is installed.
@@ -72,6 +74,7 @@ tool works whether or not jq is installed.
 import argparse
 import contextlib
 import datetime
+import glob
 import hashlib
 import json
 import os
@@ -228,6 +231,84 @@ def _sanitize_id(cid):
 
 def pane_tail_path(cid):
     return os.path.join(home(), "pane-tail-%s.txt" % _sanitize_id(cid))
+
+
+def claude_projects_dir():
+    """Root of Claude Code's OWN per-project transcript store - a different
+    tree than $WINGMAN_HOME entirely. Honors $CLAUDE_CONFIG_DIR (confirmed
+    against the shipped CLI: `join(env.CLAUDE_CONFIG_DIR ?? join(homedir(),
+    ".claude"), "projects")` - review round 1, MF-3) the same way the CLI
+    itself does, so a machine that relocates its Claude Code home is not
+    silently read against the wrong (default) one. Override for tests via
+    $WM_CLAUDE_PROJECTS_DIR, the same per-test isolation convention
+    $WM_CLAUDE_USER_SETTINGS already uses for ~/.claude/settings.json - this
+    one wins outright, even over $CLAUDE_CONFIG_DIR, so a test's isolation
+    can never be defeated by a stray CLAUDE_CONFIG_DIR in its environment."""
+    if os.environ.get("WM_CLAUDE_PROJECTS_DIR"):
+        return os.environ["WM_CLAUDE_PROJECTS_DIR"]
+    claude_home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.join(claude_home, "projects")
+
+
+def _claude_project_slug(path):
+    """Mirror the Claude Code CLI's own project-directory naming for a cwd:
+    the REAL (symlink-resolved) path with every character that is not
+    alphanumeric or '-' replaced by '-' (confirmed against this machine's own
+    ~/.claude/projects entries - e.g. /home/greer/.treehouse/x ->
+    -home-greer--treehouse-x, the dot becoming a second dash alongside the
+    slash). realpath, not abspath (review round 1, MF-3): the CLI derives its
+    project directory from the process's own cwd, and getcwd(3) - what both
+    Node's process.cwd() and Python's os.getcwd() report - resolves symlinks,
+    which abspath does not; a `repo` that reaches its checkout through a
+    symlink would otherwise slug to a directory that never exists."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", os.path.realpath(path))
+
+
+def crew_transcript_path(record):
+    """The DERIVED path to a crew record's Claude Code session transcript -
+    i.e. the one candidate wm-state can compute directly from (repo,
+    session_id), without touching the filesystem beyond the one exact-path
+    check is_resumable() makes. Not the sole source of truth: is_resumable()
+    also falls back to a glob scan when this exact path misses (review round
+    1, MF-3 - the CLI truncates+hashes a slug past 200 chars, which this
+    function has no equivalent for). Returns None when either input is
+    missing (a pre-session-id record, or one with no repo - review round 1,
+    MF-2's orphan-adoption case)."""
+    repo = record.get("repo")
+    session_id = record.get("session_id")
+    if not repo or not session_id:
+        return None
+    return os.path.join(claude_projects_dir(), _claude_project_slug(repo), session_id + ".jsonl")
+
+
+def is_resumable(record):
+    """True iff record's Claude Code session transcript still exists on disk -
+    the resumability signal for a `died` member (issue #251): crew.json
+    already stores session_id, and the transcript survives independent of
+    the worktree, so `claude --resume <session_id>` recovers it regardless of
+    whether the worktree is still around. Shared by crew-list/crew-tree
+    rendering, crew-get's JSON (consumed by bin/crew-takeover), and the
+    death-flip notification text.
+
+    Two checks, in order (review round 1, MF-3): the exact derived path
+    first (cheap, no directory scan), then - only on a miss, and only when a
+    session_id is present at all - a glob for `<projects>/*/<session_id>.jsonl`.
+    Session ids are UUIDs, so a match is unambiguous. The fallback exists
+    because the derivation above has known blind spots even after the
+    realpath/CLAUDE_CONFIG_DIR fixes above: the CLI's own 200-char slug
+    truncation+hash has no equivalent here, and any future change to the
+    CLI's own naming scheme would otherwise silently read as "not
+    resumable" - which, per this same review round, is exactly the failure
+    mode issue #251 itself was filed over. A `bin/crew-takeover` degraded
+    branch never trusts a bare `False` from this function alone to withhold
+    the resume command outright - see its own comment for why."""
+    session_id = record.get("session_id")
+    if not session_id:
+        return False
+    path = crew_transcript_path(record)
+    if path and os.path.isfile(path):
+        return True
+    return bool(glob.glob(os.path.join(glob.escape(claude_projects_dir()), "*", session_id + ".jsonl")))
 
 
 def _clear_stall_nudge_sidecars(cid):
@@ -1010,6 +1091,11 @@ def cmd_crew_set(args):
                 # (wm_tmux_adopt_strays) keeps an exact identity to match on.
                 if getattr(args, "window_id", None) is not None:
                     r["window_id"] = args.window_id
+                # Roster-only (issue #251): a successful resume clears the WIP-anchor
+                # pointer/error from the death it just recovered from.
+                if getattr(args, "clear_wip_anchor", False):
+                    r.pop("wip_ref_sha", None)
+                    r.pop("wip_anchor_error", None)
                 r["updated"] = live["updated"]
         write_json(crew_json_path(), roster)
     render_board()
@@ -1070,7 +1156,12 @@ def cmd_crew_get(args):
     roster = load_roster()
     for r in roster:
         if r.get("id") == args.id:
-            print(json.dumps(merged(r), indent=2, sort_keys=True))
+            m = merged(r)
+            # Computed, not persisted: freshest at read time, and meaningful only
+            # for a died member (bin/crew-takeover's own consumer of this field).
+            if m.get("status") == "died":
+                m["resumable"] = is_resumable(m)
+            print(json.dumps(m, indent=2, sort_keys=True))
             return
     sys.exit("wm-state: no crew member '%s'" % args.id)
 
@@ -1115,6 +1206,109 @@ def cmd_render_board(_args):
     print(render_board())
 
 
+# Wall-clock ceiling for each git subprocess _anchor_died_worktree runs
+# (review round 1, nice-to-have 1): this executes inline under cmd_reconcile's
+# global roster flock, so a git call that hangs (a network filesystem, lock
+# contention with something else touching the same worktree) would otherwise
+# block every other wm-state caller fleet-wide - and a correlated mass death
+# multiplies that by N. 30s is generous for a purely local git operation
+# regardless of worktree size (no network I/O, no object transfer); a hang
+# past that is itself surfaced as the anchor's own failure reason (MF-4)
+# rather than silently propagating as a wedged reconcile call.
+_WIP_ANCHOR_TIMEOUT = 30
+
+
+def _anchor_died_worktree(record_id, worktree):
+    """update-ref refs/wip/<id> to a snapshot commit of a died member's dirty
+    worktree (issue #251, generalizing the by-hand salvage done for issue #198
+    during the 2026-08-04 fleet-loss incident: refs/wip/issue-198-fleet-loss-
+    salvage - see review round 1 for why that precedent does not actually
+    establish "untracked files are fine to drop": 3b6c694 has none only
+    because they happened to already be staged).
+
+    Returns (sha, None) on a successful anchor, (None, None) when there was
+    genuinely nothing to anchor (no worktree, not a git checkout, or a
+    confirmed-clean tree), and (None, "<reason>") when an anchor was
+    ATTEMPTED and failed - review round 1, MF-4: the two None cases used to
+    be indistinguishable, which silently hid the single likeliest real-world
+    failure (a stale .git/index.lock left by the very crash this function
+    exists to survive) behind the exact same signal as "nothing was dirty".
+    The caller (cmd_reconcile) records the reason on the roster so
+    bin/crew-takeover can surface it instead of reading as a clean death.
+
+    Captures the WHOLE dirty state, tracked and untracked alike (review round
+    1, MF-1): `git stash create` - this function's first implementation -
+    silently drops any file never `git add`ed, with no `-u` equivalent, which
+    made the notification text's own claim of "your uncommitted work was
+    anchored" false for exactly the files an agent killed mid-task is most
+    likely to still be holding (a new module, a new test, not yet staged).
+    Built through a SCRATCH index instead of the real one - GIT_INDEX_FILE
+    points every index-touching command below at a throwaway file for this
+    call only - so the zero-disruption property still holds exactly as
+    before: neither the working tree, the real index, nor HEAD is ever
+    touched. `git add -A` still respects .gitignore, matching ordinary `git
+    add -A` behavior (an ignored build artifact is not "uncommitted work").
+
+    A tree that comes back identical to HEAD's own tree (nothing staged in
+    the scratch index differs from a clean checkout, tracked or untracked) is
+    the genuine "nothing to anchor" case - no ref is created or moved for it,
+    so a member that dies clean twice in a row does not spuriously overwrite
+    an otherwise-meaningful ref with a no-op commit.
+
+    `refs/wip/` sits outside `refs/heads/`, so it is invisible to branch
+    listings and never pollutes commit history; overwriting the ref on a
+    repeat, genuinely-dirty death (a resumed-then-died-again member) is fine
+    - it is always meant to reflect the LATEST anchored state, not a history
+    of every death.
+
+    Every git call is subprocess-timeout-bounded (see _WIP_ANCHOR_TIMEOUT);
+    this runs inline in the death-flip path under the roster lock and must
+    never itself hang or fail a reconcile call - any exception (a timeout, a
+    stale index.lock, git not on PATH) is caught and reported as a failure
+    reason, never raised."""
+    if not worktree or not os.path.isdir(worktree):
+        return None, None
+    tmp_index = None
+    try:
+        fd, tmp_index = tempfile.mkstemp(prefix="wm-wip-index-")
+        os.close(fd)
+        os.remove(tmp_index)  # git read-tree creates it fresh; a pre-existing empty file is not a valid index
+        env = dict(os.environ, GIT_INDEX_FILE=tmp_index)
+        _run = lambda args, **kw: subprocess.run(  # noqa: E731
+            args, cwd=worktree, env=env, timeout=_WIP_ANCHOR_TIMEOUT,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True, **kw)
+        head_tree = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+            cwd=worktree, timeout=_WIP_ANCHOR_TIMEOUT, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
+        ).stdout.strip()
+        _run(["git", "read-tree", "HEAD"])
+        _run(["git", "add", "-A", "."])
+        new_tree = _run(["git", "write-tree"]).stdout.strip()
+        if new_tree == head_tree:
+            return None, None  # genuinely clean: tracked and untracked alike
+        sha = subprocess.run(
+            ["git", "commit-tree", new_tree, "-p", "HEAD", "-m", "wip anchor: %s" % record_id],
+            cwd=worktree, timeout=_WIP_ANCHOR_TIMEOUT, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/wip/%s" % _sanitize_id(record_id), sha],
+            cwd=worktree, timeout=_WIP_ANCHOR_TIMEOUT, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return sha, None
+    except Exception as e:
+        return None, str(e) or e.__class__.__name__
+    finally:
+        if tmp_index:
+            try:
+                os.remove(tmp_index)
+            except OSError:
+                pass
+
+
 def cmd_reconcile(args):
     """Mark live-but-windowless crew as 'died'. Given the current tmux windows,
     any crew member still in a live state whose window is gone is flagged.
@@ -1125,6 +1319,18 @@ def cmd_reconcile(args):
     death_cause="api-outage" on the roster record, otherwise death_cause stays
     unset - see cmd_group_attention for how this feeds the correlated-batch
     split and cmd_outage_update for the fleet-wide signal it feeds.
+
+    Uncommitted-work anchor (issue #251): each flip also attempts
+    _anchor_died_worktree against the record's own `worktree` - a dirty
+    worktree gets snapshotted and pointed at by refs/wip/<id> before the flip
+    is written, so a died member's uncommitted work (tracked, staged, AND
+    untracked - review round 1, MF-1) is never one `rm -rf`/disk-cleanup pass
+    from gone (see that function's own docstring). Unconditional (not
+    owner-scoped): whichever caller's reconcile call happens to observe the
+    death first performs the anchor, exactly like the death flip itself. A
+    failed anchor attempt (as opposed to nothing to anchor) is recorded on
+    the roster as `wip_anchor_error` (review round 1, MF-4) rather than
+    silently reading identically to a clean tree.
 
     Dead-owner re-adopt (Fix B / #11), run ONLY under wingman's watcher
     (--owner ""): after the death flip, any still-live worker whose window is alive
@@ -1149,6 +1355,15 @@ def cmd_reconcile(args):
                 r["updated"] = now()
                 if _apierr_match(read_text(pane_tail_path(r["id"])), apierr_re):
                     r["death_cause"] = "api-outage"
+                wip_sha, wip_error = _anchor_died_worktree(r["id"], r.get("worktree"))
+                if wip_sha:
+                    r["wip_ref_sha"] = wip_sha
+                    r.pop("wip_anchor_error", None)
+                elif wip_error:
+                    # A genuine attempt failed (review round 1, MF-4) - never
+                    # overwrite a still-valid PRIOR wip_ref_sha with this
+                    # failure; the earlier anchor is still real and reachable.
+                    r["wip_anchor_error"] = wip_error
                 # reflect into the status file too
                 live = read_json(status_path(r["id"]), {"id": r["id"]})
                 live["status"] = "died"
@@ -2136,6 +2351,20 @@ def cmd_needs_attention(args):
             # than the local path when both are present.
             note = (r.get("blocker") or r.get("delivery")
                     or r.get("artifact_url") or r.get("artifact") or r.get("summary") or "")
+            # Resumability (issue #251): a died member's session_id and transcript
+            # survive independent of its worktree - lead with recovery rather than
+            # letting a bare "died" read as a dead end (the exact misreading the
+            # 2026-08-04 postmortem documents). Checked fresh, not cached: cheap
+            # (existence-only, see is_resumable), and correct even for a record
+            # written before this field existed.
+            if r.get("status") == "died":
+                if is_resumable(r):
+                    note = note + (" Session state survived and is resumable: "
+                                    "`bin/crew-takeover %s` or `bin/crew-resume %s`."
+                                    % (rid, rid))
+                if r.get("wip_ref_sha"):
+                    note = note + (" Uncommitted worktree changes were auto-anchored "
+                                    "at `refs/wip/%s`." % _sanitize_id(rid))
             # Stale Remote Control caveat (issue #96): nothing can deregister a
             # died member's Remote Control entry after the fact (no mechanism
             # exists - see the plan), so make the staleness visible in the one
@@ -2145,6 +2374,11 @@ def cmd_needs_attention(args):
             if r.get("status") == "died" and r.get("remote_control", True):
                 note = note + (" (Remote Control may still show 'wm-%s' as connected "
                                 "- this is stale; disregard it.)" % rid)
+            # A leading space would otherwise appear whenever the base note (the
+            # blocker/delivery/artifact_url/artifact/summary chain above) is
+            # empty and only an appended clause (resumability, wip-ref, stale-RC)
+            # follows it (review round 1, nice-to-have 6).
+            note = note.strip()
             print("%s\t%s\t%s\t%s" % (
                 rid, r["status"], upd or "", note))
 
@@ -2207,9 +2441,31 @@ def cmd_group_attention(args):
     # same stale-Remote-Control caveat cmd_needs_attention already adds to a
     # single died row. Absent reads as True (see cmd_crew_add's comment).
     remote_control_by_id = {}
+    # merged() view by id, so resumability (below) can be looked up WITHOUT a
+    # second load_roster() pass - this dict itself costs nothing extra (every
+    # record here was already being merged() for the two lookups above, on
+    # every group-attention call, before issue #251 touched this function).
+    roster_by_id = {}
     for r in load_roster():
-        death_cause_by_id[r.get("id")] = merged(r).get("death_cause")
-        remote_control_by_id[r.get("id")] = merged(r).get("remote_control", True)
+        m = merged(r)
+        rid = r.get("id")
+        death_cause_by_id[rid] = m.get("death_cause")
+        remote_control_by_id[rid] = m.get("remote_control", True)
+        roster_by_id[rid] = m
+
+    def _resumable_count(ids):
+        # Resumability (issue #251): the exact scenario this batch collapses -
+        # many members dying together, most plausibly a tmux/host crash - is the
+        # incident this issue was written from, where the correlated note's own
+        # "resume" framing was the one place resumability was NOT actually in
+        # doubt (session transcripts survive independent of the crash), yet
+        # nothing said so explicitly. is_resumable() stats a file on disk, unlike
+        # every other per-record lookup in this function (roster-JSON-only) - so
+        # this is called ONLY for the ids of a batch that is actually about to be
+        # reported (from inside a collapse block below), never eagerly for the
+        # whole roster on every group-attention call regardless of whether any
+        # died row exists at all.
+        return sum(1 for i in ids if is_resumable(roster_by_id.get(i, {})))
 
     died_rows = [r for r in rows if r[1] == "died"]
     outage_death_rows = [r for r in died_rows if death_cause_by_id.get(r[0]) == "api-outage"]
@@ -2250,8 +2506,12 @@ def cmd_group_attention(args):
                 continue
             emitted_mass = True
             names = ", ".join("`%s`" % i for i in (r[0] for r in crash_death_rows))
+            resumable_count = _resumable_count(crash_ids)
             synth_note = ("%d crew members died together (likely a tmux/host crash): %s. "
-                          "Default remedy: `%s`." % (len(crash_death_rows), names, resume_cmd))
+                          "This is not lost work: %d/%d still have an intact session transcript "
+                          "on disk and are resumable regardless of worktree state. "
+                          "Default remedy: `%s`." % (len(crash_death_rows), names, resumable_count,
+                                                      len(crash_death_rows), resume_cmd))
             if any(remote_control_by_id.get(i, True) for i in crash_ids):
                 synth_note += (" Some of these may also still show as connected in "
                                 "Remote Control; disregard any such entry.")
@@ -2262,12 +2522,16 @@ def cmd_group_attention(args):
                 continue
             emitted_outage_death = True
             names = ", ".join("`%s`" % i for i in (r[0] for r in outage_death_rows))
+            resumable_count = _resumable_count(outage_death_ids)
             synth_note = ("%d crew members died together during a detected API outage: %s. "
-                          "Do NOT resume yet - the same root cause as a correlated api-outage "
+                          "%d/%d already have an intact, resumable session transcript on disk - "
+                          "the work is not lost, only paused. Do NOT resume yet, though - the "
+                          "same root cause as a correlated api-outage "
                           "stall (an Anthropic-side burst, not a tmux/host crash), so resuming "
                           "now risks immediate re-death. Once the outage clears, `%s` runs "
                           "automatically for these (pre-authorized auto-recovery, issue #23)."
-                          % (len(outage_death_rows), names, resume_cmd))
+                          % (len(outage_death_rows), names, resumable_count,
+                             len(outage_death_rows), resume_cmd))
             if any(remote_control_by_id.get(i, True) for i in outage_death_ids):
                 synth_note += (" Some of these may also still show as connected in "
                                 "Remote Control; disregard any such entry.")
@@ -3648,13 +3912,24 @@ def _stalled_annotation(r):
     return " (%s)" % "; ".join(parts)
 
 
+def _died_annotation(r):
+    """' (resumable)' for a `died` member whose Claude Code session transcript
+    still exists on disk (issue #251) - a bare `died` status otherwise reads
+    as a dead end even when `claude --resume <session_id>` would recover it
+    in full, independent of whether the worktree survived. "" for every other
+    status, and for a died member whose transcript is genuinely gone."""
+    if r.get("status") != "died":
+        return ""
+    return " (resumable)" if is_resumable(r) else ""
+
+
 def render_roster_text(rows):
     if not rows:
         return "(no crew)"
     lines = []
     for r in rows:
         line = "  [%-10s] %-22s %-9s %s%s" % (
-            r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r),
+            r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r) + _died_annotation(r),
             (r.get("summary") or "").split("\n")[0][:60], _git_suffix(r),
         )
         lines.append(line)
@@ -3667,6 +3942,8 @@ def render_roster_text(rows):
             lines.append("      delivery: %s" % r["delivery"])
         if r.get("artifact_url"):
             lines.append("      artifact-url: %s" % r["artifact_url"])
+        if r.get("wip_ref_sha"):
+            lines.append("      wip-ref: refs/wip/%s (%s)" % (_sanitize_id(r.get("id", "")), r["wip_ref_sha"]))
         if r.get("allow_merge"):
             lines.append("      merge: AUTHORIZED for this effort (issue #46)")
         if r.get("review_gate_waived"):
@@ -3683,7 +3960,7 @@ def render_tree_text(rows):
     for r, depth in ordered:
         indent = "  " * depth
         line = "%s[%s] %s %s %s" % (
-            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r),
+            indent, r.get("type", "?"), r.get("id", "?"), r.get("status", "?") + _stall_annotation(r) + _died_annotation(r),
             (r.get("summary") or "").split("\n")[0][:50],
         )
         lines.append(line.rstrip())
@@ -3696,6 +3973,8 @@ def render_tree_text(rows):
             lines.append("%s    delivery: %s" % (indent, r["delivery"]))
         if r.get("artifact_url"):
             lines.append("%s    artifact-url: %s" % (indent, r["artifact_url"]))
+        if r.get("wip_ref_sha"):
+            lines.append("%s    wip-ref: refs/wip/%s (%s)" % (indent, _sanitize_id(r.get("id", "")), r["wip_ref_sha"]))
         if r.get("allow_merge"):
             lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
         if r.get("review_gate_waived"):
@@ -3742,7 +4021,7 @@ def render_board():
         out.append("|---|---|---|---|---|")
         for r in done:
             out.append("| %s | %s | %s | %s | %s |" % (
-                r.get("type", ""), r.get("id", ""), r.get("status", ""), _cell(r.get("delivery")),
+                r.get("type", ""), r.get("id", ""), r.get("status", "") + _died_annotation(r), _cell(r.get("delivery")),
                 _cell(r.get("artifact_url")),
             ))
     else:
@@ -3856,6 +4135,12 @@ def build_parser():
     a.add_argument("--remote-control-connected", default=None, choices=("true", "false"), dest="remote_control_connected")
     # Re-register the window id after crew-resume replaces the window. Roster-only.
     a.add_argument("--window-id", default=None, dest="window_id")
+    # Roster-only (issue #251, review round 1, nice-to-have 3): a successful
+    # bin/crew-resume clears a died member's WIP-anchor pointer/error, since
+    # both describe a death that is now over - a live `working` member should
+    # not keep rendering `wip-ref: refs/wip/<id> (<sha>)` for a crash it just
+    # recovered from.
+    a.add_argument("--clear-wip-anchor", action="store_true", dest="clear_wip_anchor")
     # Roster-only, explicit-token write (issue #135): bin/crew-resume's own
     # relaunch of a died `reviewer` passes a freshly generated token here so
     # the resumed session's stale, pre-crash commitments are replaced before

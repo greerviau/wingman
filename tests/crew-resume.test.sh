@@ -75,6 +75,30 @@ assert_contains "the resume script exports a high CLAUDE_CODE_RESUME_THRESHOLD_M
   "$launch" "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #251, review round 1, nice-to-have 3: a successful resume clears a
+# died member's WIP-anchor pointer/error - both describe a death that is now
+# over, and a live `working` member should not keep rendering `wip-ref:
+# refs/wip/<id> (<sha>)` for a crash it just recovered from -------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rw1 --type developer --objective x --repo /tmp --window wm-rw1 --session-id sess-rw1 >/dev/null
+wm_state crew-set --id rw1 --status died >/dev/null
+uv run --no-project --quiet python -c '
+import json, sys
+path = sys.argv[1]
+d = json.load(open(path))
+for r in d:
+    if r.get("id") == "rw1":
+        r["wip_ref_sha"] = "deadbeef"
+        r["wip_anchor_error"] = "stale index.lock"
+json.dump(d, open(path, "w"))
+' "$WINGMAN_HOME/crew.json"
+out_rw="$(WM_AGENT="$ALIVE_STUB" "$CR" rw1 2>&1)"
+assert_contains "the resume succeeds" "$out_rw" "1 resumed"
+assert_eq "wip_ref_sha is cleared on successful resume" "$(field_of rw1 wip_ref_sha)" ""
+assert_eq "wip_anchor_error is cleared on successful resume too" "$(field_of rw1 wip_anchor_error)" ""
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- issue #214, §3.7 row 7: an undelivered resume nudge is queued, not lost --
 # The relaunched window lands on a startup gate instead of an idle prompt, so
 # the resume nudge (WM_CLEAR_KEYS="") refuses with rc 2. The resume itself
