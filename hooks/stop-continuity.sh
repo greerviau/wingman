@@ -15,10 +15,16 @@
 # until its own lifetime budget would be exceeded, the fleet empties, or
 # something genuinely worth reporting happens. Only then does it either
 # rewake with what happened (exit 2) or let the stop stand (exit 0). The
-# lifetime budget self-clamps to this hook's own registered `timeout` (issue
-# #231, see continuity_registered_timeout below) rather than trusting the
-# registration surface to have moved in lockstep - a session already running
-# when a timeout change lands keeps its old, smaller bound until it restarts.
+# lifetime budget self-clamps to this hook's own REGISTERED `timeout` (issue
+# #231, see continuity_registered_timeout below) - but that is the on-disk
+# value, not necessarily what THIS session's own harness is actually bound
+# to (Claude Code binds hooks at session start, and the on-disk value moves
+# the instant a new registration is deployed). RESTARTING every session that
+# was already running when a `timeout` change lands is required, not merely
+# advisable - the clamp only covers the narrower case where the on-disk
+# value itself is still stale (unreadable, or a scope not yet reconciled).
+# See the clamp's own comment below and docs/guards.md for the honest scope
+# of what this actually protects.
 #
 # Recursion is NOT guarded by stop_hook_active - see the self-owned in-flight
 # marker below and docs/plans/2026-08-02-issue-185-asyncrewake-autoarm-plan.md
@@ -149,13 +155,19 @@ Fleet continuity is fully automatic for this session - do NOT run /watch and do 
 }
 
 # continuity_registered_timeout <settings_file> <command_marker>
-# Prints the `timeout` of the Stop entry whose command contains
-# <command_marker>, or nothing if the file is missing/unparseable or carries
-# no such entry - never a hard failure, just an empty result the caller
-# folds into its own fallback. Used by the lifetime self-clamp below to read
-# this hook's own registration rather than trust the registration surface
-# (four separate declaration sites - see the plan) to have moved in
-# lockstep.
+# Prints the MINIMUM `timeout` across every Stop entry whose command contains
+# <command_marker>, as a single value - never one line per match - or
+# nothing if the file is missing/unparseable or carries no such entry; never
+# a hard failure, just an empty result the caller folds into its own
+# fallback. A single value matters: two Stop entries matching the same
+# marker (e.g. absolute paths from two different checkouts of this repo)
+# would otherwise hand the caller a multi-line capture, which is either a
+# silent `integer expected` on stderr (if the OTHER lookup already produced
+# a value) or a fatal, invocation-ending arithmetic error (if it did not) -
+# print(min(...)) removes both by construction. Used by the lifetime
+# self-clamp below to read this hook's own registration rather than trust
+# the registration surface (four separate declaration sites - see the plan)
+# to have moved in lockstep.
 continuity_registered_timeout() {
   $WM_UV python -c '
 import json, sys
@@ -164,12 +176,15 @@ try:
     d = json.load(open(path))
 except Exception:
     sys.exit(0)
+found = []
 for entry in (d.get("hooks") or {}).get("Stop", []) or []:
     for h in entry.get("hooks") or []:
         cmd = h.get("command", "")
         t = h.get("timeout")
         if marker in cmd and isinstance(t, int):
-            print(t)
+            found.append(t)
+if found:
+    print(min(found))
 ' "$1" "$2" 2>/dev/null
 }
 
@@ -192,9 +207,22 @@ lifetime="${WM_STOP_CONTINUITY_LIFETIME:-$WM_CONTINUITY_LIFETIME_DEFAULT}"
 # `timeout` (issue #231). Finding 1 of the companion analysis is that a hook
 # killed AT its own `timeout` has its exit code silently discarded, so
 # trusting the configured lifetime blindly would go dark on exactly the
-# session this exists to protect: Claude Code binds hooks at session start,
-# so a session already running when a timeout change lands keeps its old,
-# smaller bound until it restarts (docs/guards.md).
+# session this exists to protect.
+#
+# What this clamp does NOT cover, honestly: Claude Code binds hooks at
+# session start, but the value read here is the CURRENT on-disk
+# registration, which moves the instant a new `timeout` is deployed - the
+# same commit that ships this script. A session already running when that
+# happens keeps executing the new script off disk while its own harness
+# binding still kills it at the OLD timeout, and by the time its next Stop
+# event runs this clamp, the on-disk value already reads the NEW (larger)
+# timeout - so the clamp computes a lifetime that fits the NEW binding, not
+# the OLD one it is actually still killed at, and provides no protection at
+# all for that session. RESTARTING every such session is required, not
+# optional; this clamp is not a substitute for it. What it DOES cover: the
+# narrower window where the on-disk value itself is genuinely still stale -
+# unreadable/missing, or one scope (typically crew-scope, reconciled only at
+# the next spawn/resume) not yet caught up with the other.
 #
 # Read BOTH candidate settings files rather than choosing one by
 # WINGMAN_CREW_ID: a crew session whose project root IS this repo loads both

@@ -119,8 +119,9 @@ def main():
         # A same-command entry is already present but disagrees with the
         # given entry_options (e.g. a stale `timeout`) - rewrite it in place
         # rather than appending a duplicate group for the same command, which
-        # would leave two live registrations racing each other.
-        existing.clear()
+        # would leave two live registrations racing each other. Merged, not
+        # cleared-and-replaced: a key this call never named (a pilot's own
+        # addition, a future Claude Code field) survives untouched.
         existing.update(desired_entry(args.hook, entry_options))
         with open(args.settings, "w") as f:
             json.dump(settings, f, indent=2)

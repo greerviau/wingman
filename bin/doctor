@@ -728,7 +728,7 @@ if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
 fi
 if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop \
-    --timeout "$WM_CONTINUITY_TIMEOUT_MIN" --check >/dev/null 2>&1; then
+    --async-rewake --timeout "$WM_CONTINUITY_TIMEOUT_MIN" --rewake-summary "$STOP_CONTINUITY_CREW_SUMMARY" --check >/dev/null 2>&1; then
   continuity_crew_hooks_ok=0
 fi
 if [ ! -x "$STOP_GUARD_CREW_HOOK" ] || [ ! -x "$STOP_CONTINUITY_CREW_HOOK" ]; then

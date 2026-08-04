@@ -152,7 +152,9 @@ def apply_changes(settings, missing, stale):
 
     for hook, command, _event, existing in stale:
         entry_options = hook.get("entry_options", {})
-        existing.clear()
+        # Merged, not cleared-and-replaced: a key this manifest entry never
+        # named survives untouched (the group's own `matcher` sits one level
+        # up and is never touched either way).
         existing.update(desired_entry(command, entry_options))
 
 

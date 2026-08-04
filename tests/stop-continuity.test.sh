@@ -453,19 +453,31 @@ unset WM_PROJECT_SETTINGS WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_L
 # so this proves it a different way: override WM_CONTINUITY_TIMEOUT_MARGIN
 # (env-overridable for exactly this) so 600-margin lands on the window
 # exactly, the same one-window proof as above.
+#
+# Both candidate settings files are pointed at missing paths EXPLICITLY here
+# (issue #231 review round 1, NH4) - not left to rely on test_new_home's own
+# WM_CLAUDE_USER_SETTINGS fixture (a real, but hook-free, file) happening to
+# yield nothing for the user-scope lookup too. That reliance would make this
+# case fragile to an unrelated change in tests/lib.sh's own fixture shape,
+# or to a future case written without new_home first.
 new_home
 add_crew_window d7f2
 wm_state crew-set --id d7f2 --status working --summary busy >/dev/null
 export WM_STOP_CONTINUITY_WINDOW=2
 export WM_STOP_CONTINUITY_LIFETIME=3300
 export WM_PROJECT_SETTINGS="$WINGMAN_HOME/does-not-exist-7f2.json"
+export WM_CLAUDE_USER_SETTINGS="$WINGMAN_HOME/does-not-exist-7f2-user.json"
 export WM_CONTINUITY_TIMEOUT_MARGIN=598
 out7f2="$(run_hook 30)"; rc7f2=$?
 armed7f2="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
 assert_eq "an unreadable registration falls back to the historical 600s, clamping to a single window" "$armed7f2" "1"
 assert_eq "the hook exits 2" "$rc7f2" "2"
 assert_contains "the single-window break reports a clean rollover" "$out7f2" "window rolled"
-unset WM_PROJECT_SETTINGS WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+# Restored, not merely unset: the next new_home call would re-seed
+# WM_CLAUDE_USER_SETTINGS anyway, but WM_STOP_CONTINUITY_LIFETIME is the
+# file-level lever and must be explicitly restored, not left unset.
+unset WM_PROJECT_SETTINGS WM_CLAUDE_USER_SETTINGS WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN
+export WM_STOP_CONTINUITY_LIFETIME=1
 
 # --- (8) A deterministically failing fleet: backoff + standdown markers ------
 new_home
