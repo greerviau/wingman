@@ -15,7 +15,7 @@
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"",
             "asyncRewake": true,
-            "timeout": 600,
+            "timeout": 3600,
             "rewakeSummary": "Wingman fleet continuity"
           }
         ]

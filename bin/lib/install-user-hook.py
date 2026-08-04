@@ -16,9 +16,15 @@ PreToolUse, covering crew sessions in any repo). A project-level entry in
 this repo's .claude/settings.json never loads for those sessions.
 
 Merges additively: existing hook groups (this tool's own or anyone else's)
-are preserved untouched. Detected as "already registered" by an exact match
-of the hook command string in an existing group under the same event, so
-re-running is a no-op per event. Never overwrites the file if its existing
+are preserved untouched. Detected as "already registered" by matching the
+hook command string in an existing group under the same event, plus - when
+--async-rewake/--timeout/--rewake-summary are supplied - every attribute they
+name (issue #231, via bin/lib/user_hook_entry.py's opt-in comparison): a
+caller that supplies none of the three matches on command alone, exactly as
+before. A same-command entry that mismatches on a supplied attribute (e.g. a
+stale `timeout`) is rewritten in place rather than left alone or duplicated -
+appending a second group for the same command would leave two live
+registrations racing each other. Never overwrites the file if its existing
 content is not valid JSON - that is the pilot's own file and may carry other
 settings.
 
@@ -38,6 +44,10 @@ import json
 import os
 import sys
 
+# Sibling import - both scripts live in bin/lib/, and `uv run script.py` puts
+# the script's own directory at sys.path[0] automatically.
+from user_hook_entry import desired_entry, entry_matches
+
 
 def load_settings(path):
     if not os.path.exists(path):
@@ -49,17 +59,20 @@ def load_settings(path):
     return json.loads(text)
 
 
-def is_registered(settings, hook_command, event):
+def find_entry(settings, hook_command, event):
+    """The hook dict registered for `hook_command` under `event`, or None if
+    no entry names that command at all (regardless of its other
+    attributes)."""
     groups = (settings.get("hooks") or {}).get(event) or []
     if not isinstance(groups, list):
-        return False
+        return None
     for group in groups:
         if not isinstance(group, dict):
             continue
         for h in group.get("hooks") or []:
             if isinstance(h, dict) and h.get("command") == hook_command:
-                return True
-    return False
+                return h
+    return None
 
 
 def main():
@@ -80,7 +93,20 @@ def main():
         print(f"error: could not read {args.settings}: {e}", file=sys.stderr)
         sys.exit(2)
 
-    registered = is_registered(settings, args.hook, args.event)
+    # Opt-in attribute comparison (issue #231): entry_options only carries a
+    # key for a flag the caller actually supplied, so a caller that supplies
+    # none of the three (every call site but the fleet-continuity pair)
+    # compares `command` alone, exactly as before.
+    entry_options = {}
+    if args.async_rewake:
+        entry_options["asyncRewake"] = True
+    if args.timeout is not None:
+        entry_options["timeout"] = args.timeout
+    if args.rewake_summary is not None:
+        entry_options["rewakeSummary"] = args.rewake_summary
+
+    existing = find_entry(settings, args.hook, args.event)
+    registered = existing is not None and entry_matches(existing, args.hook, entry_options)
 
     if args.check:
         sys.exit(0 if registered else 1)
@@ -89,13 +115,21 @@ def main():
         print(f"already registered in {args.settings}")
         sys.exit(0)
 
-    hook_entry = {"type": "command", "command": args.hook}
-    if args.async_rewake:
-        hook_entry["asyncRewake"] = True
-    if args.timeout is not None:
-        hook_entry["timeout"] = args.timeout
-    if args.rewake_summary is not None:
-        hook_entry["rewakeSummary"] = args.rewake_summary
+    if existing is not None:
+        # A same-command entry is already present but disagrees with the
+        # given entry_options (e.g. a stale `timeout`) - rewrite it in place
+        # rather than appending a duplicate group for the same command, which
+        # would leave two live registrations racing each other. Merged, not
+        # cleared-and-replaced: a key this call never named (a pilot's own
+        # addition, a future Claude Code field) survives untouched.
+        existing.update(desired_entry(args.hook, entry_options))
+        with open(args.settings, "w") as f:
+            json.dump(settings, f, indent=2)
+            f.write("\n")
+        print(f"updated in {args.settings}")
+        sys.exit(0)
+
+    hook_entry = desired_entry(args.hook, entry_options)
 
     group = {"hooks": [hook_entry]}
     # A Stop event has no tool to match against - the existing project-scoped

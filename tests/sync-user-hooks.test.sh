@@ -188,7 +188,7 @@ for g in d['hooks']['Stop']:
             print(h.get('rewakeSummary'))
 ")"
 assert_eq "stop-continuity-crew.sh sets asyncRewake" "$(printf '%s\n' "$continuity_entry" | sed -n 1p)" "True"
-assert_eq "stop-continuity-crew.sh sets timeout 600" "$(printf '%s\n' "$continuity_entry" | sed -n 2p)" "600"
+assert_eq "stop-continuity-crew.sh sets timeout 3600" "$(printf '%s\n' "$continuity_entry" | sed -n 2p)" "3600"
 assert_eq "stop-continuity-crew.sh sets the crew rewakeSummary" "$(printf '%s\n' "$continuity_entry" | sed -n 3p)" "Wingman fleet continuity (crew)"
 guard_entry_options="$(uv run --no-project --quiet python -c "
 import json
@@ -199,6 +199,43 @@ for g in d['hooks']['Stop']:
             print('asyncRewake' in h, 'timeout' in h, 'rewakeSummary' in h)
 ")"
 assert_eq "stop-guard-crew.sh (no entry_options in the manifest) carries none of those keys" "$guard_entry_options" "False False False"
+
+# --- test 8b (issue #231): a stale entry_options attribute is corrected in place, not read as already-registered ---
+# The pre-#231 command-only match would read a continuity-crew entry already
+# present at the old timeout as "registered" forever, so raising the
+# manifest's own value would change nothing on a machine that has already
+# run this reconciler once. Pre-seed exactly that stale entry.
+STOP_CONTINUITY_CREW_CMD="$TEST_REPO/hooks/stop-continuity-crew.sh"
+SETTINGS8B="$WORK/stale-timeout.json"
+cat > "$SETTINGS8B" <<JSON
+{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "$STOP_CONTINUITY_CREW_CMD", "asyncRewake": true, "timeout": 600, "rewakeSummary": "Wingman fleet continuity (crew)"}]}
+    ]
+  }
+}
+JSON
+if run_sync --settings "$SETTINGS8B" --repo "$TEST_REPO" --check >/dev/null 2>&1; then
+  fail "--check against a stale-timeout entry reports fully registered"
+else
+  ok "--check flags the stale-timeout entry as needing work beforehand"
+fi
+run_sync --settings "$SETTINGS8B" --repo "$TEST_REPO" >/dev/null
+stale_corrected="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS8B'))
+cmds = [h for g in d['hooks']['Stop'] for h in g['hooks'] if h['command'] == '$STOP_CONTINUITY_CREW_CMD']
+print(len(cmds))
+print(cmds[0].get('timeout') if cmds else None)
+")"
+assert_eq "write mode leaves exactly one entry for the stale command" "$(printf '%s\n' "$stale_corrected" | sed -n 1p)" "1"
+assert_eq "write mode rewrites the stale timeout to 3600 in place" "$(printf '%s\n' "$stale_corrected" | sed -n 2p)" "3600"
+if run_sync --settings "$SETTINGS8B" --repo "$TEST_REPO" --check >/dev/null 2>&1; then
+  ok "--check reports fully registered after the correction"
+else
+  fail "--check reports fully registered after the correction"
+fi
 
 # --- a settings path whose parent directory does not exist yet ---------------
 # A first-ever run on a machine with no ~/.claude/ at all yet is exactly this

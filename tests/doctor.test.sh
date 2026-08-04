@@ -141,7 +141,7 @@ cat > "$PROJ_SETTINGS_OK" <<'JSON'
   "hooks": {
     "Stop": [
       {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-guard.sh\""}]},
-      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"", "asyncRewake": true}]}
+      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"", "asyncRewake": true, "timeout": 3600}]}
     ]
   }
 }
@@ -152,7 +152,44 @@ printf '#!/usr/bin/env bash\n' > "$PROJ_CONTINUITY_SH"; chmod +x "$PROJ_CONTINUI
 out3="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_OK" \
         WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "both entries present and executable: doctor reports registered" "$out3" "fleet-continuity Stop hooks registered"
+assert_contains "both entries present and executable, timeout >= min: doctor reports registered" "$out3" "fleet-continuity Stop hooks registered"
+
+# A continuity entry present but carrying a stale (< WM_CONTINUITY_TIMEOUT_MIN)
+# `timeout` (issue #231's migration hazard) - warns exactly like a missing
+# entry, never silently accepted as "registered".
+PROJ_SETTINGS_STALE_TIMEOUT="$WORK/proj-settings-stale-timeout.json"
+cat > "$PROJ_SETTINGS_STALE_TIMEOUT" <<'JSON'
+{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-guard.sh\""}]},
+      {"hooks": [{"type": "command", "command": "\"$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"", "asyncRewake": true, "timeout": 600}]}
+    ]
+  }
+}
+JSON
+out3b="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_STALE_TIMEOUT" \
+        WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a stale (< min) registered timeout: doctor warns" "$out3b" "fleet-continuity Stop hooks (issue #185) not registered"
+
+# NH3 (round-2 review of the #231 plan): the manifest/doctor equality test
+# below covers sites 2/3 but nothing in the suite ever reads the REAL
+# checked-in .claude/settings.json's own continuity timeout - assert it
+# directly against the shell constant that is now its single source of truth,
+# so a forgotten site-1 edit fails loudly here instead of degrading silently
+# to "the clamp saves it, but the fix does nothing for wingman's own session".
+real_project_timeout="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$TEST_REPO/.claude/settings.json'))
+for g in d['hooks']['Stop']:
+    for h in g['hooks']:
+        if h['command'] == '\"\$CLAUDE_PROJECT_DIR/hooks/stop-continuity.sh\"':
+            print(h.get('timeout'))
+")"
+wm_continuity_timeout_min="$(bash -c '. "$1/hooks/lib/watcher-liveness.sh"; printf "%s" "$WM_CONTINUITY_TIMEOUT_MIN"' _ "$TEST_REPO")"
+assert_eq "the real checked-in .claude/settings.json's continuity timeout matches WM_CONTINUITY_TIMEOUT_MIN" \
+  "$real_project_timeout" "$wm_continuity_timeout_min"
 
 # One entry missing (stop-continuity.sh's own Stop entry absent) - warns, and
 # never attempts to write/install anything into the version-controlled file.
@@ -217,8 +254,37 @@ for g in d['hooks']['Stop']:
             print(h.get('rewakeSummary'))
 ")"
 assert_eq "the registered continuity entry sets asyncRewake" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 1p)" "True"
-assert_eq "the registered continuity entry sets timeout 600" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 2p)" "600"
+assert_eq "the registered continuity entry sets timeout 3600" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 2p)" "3600"
 assert_eq "the registered continuity entry sets the crew rewakeSummary" "$(printf '%s\n' "$crew_continuity_entry" | sed -n 3p)" "Wingman fleet continuity (crew)"
+
+# Stale-entry correction (issue #231's migration hazard, crew scope): a
+# continuity-crew entry already present but still carrying the old timeout
+# 600 - doctor's own --check must NOT read that as "already registered"
+# (the pre-#231 command-only match would), and the install path must rewrite
+# it in place rather than leave it stale or duplicate it.
+SETTINGS_STALE="$WORK/crew-continuity-settings-stale.json"
+cat > "$SETTINGS_STALE" <<JSON
+{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "$CREW_CONTINUITY_SH", "asyncRewake": true, "timeout": 600, "rewakeSummary": "Wingman fleet continuity (crew)"}]}
+    ]
+  }
+}
+JSON
+out_stale="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS_STALE" \
+        WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH" \
+        "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a stale (timeout 600) crew continuity entry: doctor reports it as not registered" "$out_stale" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+stale_corrected_entry="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS_STALE'))
+cmds = [h for g in d['hooks']['Stop'] for h in g['hooks'] if h['command'] == '$CREW_CONTINUITY_SH']
+print(len(cmds))
+print(cmds[0].get('timeout') if cmds else None)
+")"
+assert_eq "the stale entry is corrected to exactly one entry for that command" "$(printf '%s\n' "$stale_corrected_entry" | sed -n 1p)" "1"
+assert_eq "the stale entry's timeout is rewritten to 3600 in place" "$(printf '%s\n' "$stale_corrected_entry" | sed -n 2p)" "3600"
 
 # Idempotent: re-running reports already registered, does not duplicate.
 out7="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS5" \
