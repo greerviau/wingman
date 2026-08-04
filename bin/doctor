@@ -7,6 +7,9 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+# WM_CONTINUITY_TIMEOUT_MIN (issue #231) - the single source of truth for the
+# registered `timeout` the fleet-continuity Stop hooks below must carry.
+. "$WM_REPO/hooks/lib/watcher-liveness.sh"
 
 AUTO_YES=0
 for arg in "$@"; do
@@ -673,6 +676,7 @@ try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(1)
+min_timeout = int(sys.argv[2])
 stops = d.get("hooks", {}).get("Stop", [])
 guard_ok = False
 continuity_ok = False
@@ -681,10 +685,11 @@ for entry in stops:
         cmd = h.get("command", "")
         if "stop-guard.sh" in cmd:
             guard_ok = True
-        if "stop-continuity.sh" in cmd and h.get("asyncRewake") is True:
+        if "stop-continuity.sh" in cmd and h.get("asyncRewake") is True \
+                and isinstance(h.get("timeout"), int) and h["timeout"] >= min_timeout:
             continuity_ok = True
 sys.exit(0 if (guard_ok and continuity_ok) else 1)
-' "$PROJECT_SETTINGS" >/dev/null 2>&1; then
+' "$PROJECT_SETTINGS" "$WM_CONTINUITY_TIMEOUT_MIN" >/dev/null 2>&1; then
   continuity_hooks_ok=0
 fi
 if [ ! -x "$STOP_GUARD_SCRIPT" ] || [ ! -x "$STOP_CONTINUITY_SCRIPT" ]; then
@@ -695,8 +700,9 @@ if [ "$continuity_hooks_ok" = 1 ]; then
 else
   wm_warn "fleet-continuity Stop hooks (issue #185) not registered/executable in $PROJECT_SETTINGS"
   printf '    expected a Stop entry referencing hooks/stop-guard.sh and one referencing\n'
-  printf '    hooks/stop-continuity.sh with "asyncRewake": true, both scripts executable\n'
-  printf '    this file is version-controlled - re-check the checkout or chmod +x, not an install\n'
+  printf '    hooks/stop-continuity.sh with "asyncRewake": true and "timeout" >= %s, both\n' "$WM_CONTINUITY_TIMEOUT_MIN"
+  printf '    scripts executable - this file is version-controlled, so the remedy is\n'
+  printf '    re-checking the checkout or chmod +x, never an install\n'
 fi
 
 # --- fleet-continuity Stop hooks (issue #199), crew sessions, user scope ----
@@ -721,7 +727,8 @@ if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
   continuity_crew_hooks_ok=0
 fi
 if ! uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
-    --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop --check >/dev/null 2>&1; then
+    --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop \
+    --timeout "$WM_CONTINUITY_TIMEOUT_MIN" --check >/dev/null 2>&1; then
   continuity_crew_hooks_ok=0
 fi
 if [ ! -x "$STOP_GUARD_CREW_HOOK" ] || [ ! -x "$STOP_CONTINUITY_CREW_HOOK" ]; then
@@ -742,11 +749,11 @@ else
     case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
   else
     wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $STOP_GUARD_CREW_HOOK --event Stop"
-    wm_warn "            and: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $STOP_CONTINUITY_CREW_HOOK --event Stop --async-rewake --timeout 600 --rewake-summary '$STOP_CONTINUITY_CREW_SUMMARY'"
+    wm_warn "            and: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $STOP_CONTINUITY_CREW_HOOK --event Stop --async-rewake --timeout $WM_CONTINUITY_TIMEOUT_MIN --rewake-summary '$STOP_CONTINUITY_CREW_SUMMARY'"
   fi
   if [ "$do_it" = 1 ]; then
     if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$STOP_GUARD_CREW_HOOK" --event Stop >/dev/null \
-        && uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop --async-rewake --timeout 600 --rewake-summary "$STOP_CONTINUITY_CREW_SUMMARY" >/dev/null; then
+        && uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$STOP_CONTINUITY_CREW_HOOK" --event Stop --async-rewake --timeout "$WM_CONTINUITY_TIMEOUT_MIN" --rewake-summary "$STOP_CONTINUITY_CREW_SUMMARY" >/dev/null; then
       wm_ok "registered fleet-continuity Stop hooks (crew)"
     else
       wm_err "failed to register fleet-continuity Stop hooks (crew)"
