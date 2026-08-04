@@ -214,6 +214,19 @@ wm_track() { WM_TRACKED_PIDS="$WM_TRACKED_PIDS $1"; }
 WM_TRACKED_TMUX=""
 wm_track_tmux() { WM_TRACKED_TMUX="$WM_TRACKED_TMUX $1"; }
 
+# Stop a guardian a real bin/wingman invocation spawned against the CURRENT
+# $WINGMAN_HOME, right away rather than waiting for this file's own
+# end-of-run cleanup (_wm_live_guardian_pids/wm_cleanup_all, above) to reap
+# it. The guardian polls the box's real default tmux socket (it has no
+# per-test isolation the way WM_TMUX_SESSION gives ordinary tmux operations),
+# forking a handful of tmux/ps processes every couple of seconds - genuinely
+# real, continuous background load for however long it survives, which is
+# otherwise "until this whole file's trap fires," not "until the one
+# assertion that needed it is done." A test invoking real bin/wingman
+# (tests/session-guard-hook-sync.test.sh) should call this immediately after
+# each such invocation, before its assertions even run.
+wm_stop_guardian() { "$TEST_REPO/bin/lib/tmux-guardian.sh" --stop 2>/dev/null; }
+
 # Every $WINGMAN_HOME test_new_home has ever pointed at in this file (see
 # test_new_home above) - not pids, paths. wm_cleanup_all reads each one's
 # watch.pid/watch-*.pid to learn which watch-fleet cycles might still be
