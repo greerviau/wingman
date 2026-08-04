@@ -238,6 +238,28 @@ _wm_live_watch_pids() {
   done
 }
 
+# Same shape as _wm_live_watch_pids, for bin/lib/tmux-guardian.sh's own
+# tmux-guardian.pid (issue #218). Kept as a separate helper, not folded into
+# the one above, because it is a genuinely different daemon with a different
+# lifecycle - but it needs the identical treatment: any test that runs a
+# real bin/wingman (e.g. tests/session-guard-hook-sync.test.sh) launches one
+# of these as a deliberately detached, scope-wrapped background process (the
+# whole point of the guardian is to survive a death nothing else in its
+# tmux server survives), so nothing about a normal test teardown (killing
+# tracked pids, killing tracked tmux sessions) would ever stop it on its
+# own. Without this, every such test would leak one guardian process per
+# invocation, forever polling a now-deleted $WINGMAN_HOME after this file's
+# own rm -rf runs.
+_wm_live_guardian_pids() {
+  for _h in $WM_TRACKED_HOMES; do
+    _pf="$_h/tmux-guardian.pid"
+    [ -f "$_pf" ] || continue
+    _p="$(cat "$_pf" 2>/dev/null)"
+    case "$_p" in ''|*[!0-9]*) continue ;; esac
+    printf '%s ' "$_p"
+  done
+}
+
 # Register teardown logic beyond "kill this pid / this session / remove this
 # glob-cleaned temp path" (e.g. an explicit `rm -f "$CFG"` for a config file
 # wm_mktemp_dir/wm_mktemp_file didn't create). Appends to a list the shared
@@ -297,8 +319,16 @@ wm_cleanup_all() {
       eval "$_cmd"
     done <<<"$_cmds"
   fi
-  _wait_pids="$(_wm_live_watch_pids) $WM_TRACKED_PIDS"
+  _guardian_pids="$(_wm_live_guardian_pids)"
+  _wait_pids="$(_wm_live_watch_pids) $_guardian_pids $WM_TRACKED_PIDS"
   [ -n "$WM_TRACKED_PIDS" ] && kill $WM_TRACKED_PIDS 2>/dev/null
+  # Unlike a watch-fleet pid (expected to already have been stopped by the
+  # test's own explicit `--stop` call, so this loop is purely a backstop), no
+  # test here knows to stop a guardian a real bin/wingman invocation happened
+  # to spawn - so it gets an explicit, immediate TERM (its own trap handles
+  # it in well under the 5s wait-then-SIGKILL window below) rather than
+  # sitting through the full grace window on every such test for no reason.
+  [ -n "$_guardian_pids" ] && kill $_guardian_pids 2>/dev/null
   WM_TRACKED_PIDS=""
   if [ -n "$WM_TRACKED_TMUX" ]; then
     for _s in $WM_TRACKED_TMUX; do
