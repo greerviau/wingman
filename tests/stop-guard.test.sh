@@ -64,6 +64,32 @@ assert_eq "a foreign-run standdown is treated as inactive: silent" "$out4d" ""
 unset WINGMAN_RUN_ID
 rm -f "$WINGMAN_HOME/watch.suppressed"
 
+# --- issue #198, R2 regression: the standdown holds under the kill switch too -
+# WM_STOP_AUTOARM=0 has never meant "ignore a deliberate standdown" - before
+# this fix, the kill switch was tested FIRST, so an active standdown was never
+# even consulted under it. The standdown must now be tested first and win.
+export WM_STOP_AUTOARM=0
+export WINGMAN_RUN_ID=this-run
+printf '%s\n%s\n' "this-run" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
+out4r2="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "R2: WM_STOP_AUTOARM=0 plus an active standdown still surfaces the composed remedy text" "$out4r2" "test remedy text"
+assert_not_contains "R2: WM_STOP_AUTOARM=0 plus an active standdown does NOT fall back to the routine nudge" "$out4r2" "Arm one by running 'bin/watch-fleet'"
+unset WM_STOP_AUTOARM
+unset WINGMAN_RUN_ID
+rm -f "$WINGMAN_HOME/watch.suppressed"
+
+# --- a marker whose line 2+ is empty falls back to $WM_STANDDOWN_FALLBACK -----
+# A pre-fix marker (or a truncated write) must still refuse on the model's
+# behalf - never fall back to the routine arm-demanding nudge, which would be
+# R1 again for any legacy marker.
+export WINGMAN_RUN_ID=this-run
+printf '%s\n' "this-run" > "$WINGMAN_HOME/watch.suppressed"
+out4e="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "an empty-body marker falls back to WM_STANDDOWN_FALLBACK" "$out4e" "supervision is standing down"
+assert_not_contains "an empty-body marker does NOT fall back to the routine nudge" "$out4e" "Arm one by running"
+unset WINGMAN_RUN_ID
+rm -f "$WINGMAN_HOME/watch.suppressed"
+
 # --- pending ask with no live waiter blocks the stop --------------------------
 # A caller asked a delegate but did not arm the wait; it would sleep forever with
 # the answer never waking it. The hook must catch this like the no-watcher case.

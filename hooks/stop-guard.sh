@@ -116,25 +116,35 @@ else
   elif [ "${active_crew:-0}" -gt 0 ] && [ "$watcher_up" = 0 ]; then
     # Fleet continuity (hooks/stop-continuity.sh) owns re-arming tokenlessly
     # now; this branch is the fallback for the kill switch and the safety net
-    # while a spurious-repeated standdown holds (see the plan's "The gate
-    # condition is a bare, deterministic switch" and "The spurious-repeated
-    # standdown must still nag" sections, issue #185). Nested inside the
-    # unchanged active_crew/watcher_up precondition above - NOT a replacement
-    # for it - so WM_STOP_AUTOARM=0 and the standdown branch only ever apply
-    # to the one condition they've always applied to: crew in flight with no
-    # live cycle.
-    if [ "${WM_STOP_AUTOARM:-1}" = "0" ]; then
-      reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
-    elif wm_run_scoped_marker_active "$suppressedfile"; then
+    # while a spurious-repeated standdown holds (issue #185, extended by
+    # #198). Nested inside the unchanged active_crew/watcher_up precondition
+    # above - NOT a replacement for it - so the standdown check and
+    # WM_STOP_AUTOARM=0 only ever apply to the one condition they've always
+    # applied to: crew in flight with no live cycle.
+    #
+    # The standdown is tested FIRST, unconditionally - before the kill
+    # switch, not after it (issue #198, R2). WM_STOP_AUTOARM=0 means "do not
+    # auto-arm"; it has never meant "ignore a deliberate standdown", and
+    # testing it first conflated the two: under the kill switch, a tripped
+    # budget was silently unrepresented and unconsulted, so this hook nagged
+    # with the routine arm-demanding text instead - #198's original
+    # complaint, verbatim. `bin/watch-fleet --classify` now writes the
+    # standdown marker itself, wherever the trip is observed, so it is
+    # representable under the kill switch too; this ordering is what makes
+    # that representable.
+    if wm_run_scoped_marker_active "$suppressedfile"; then
       # Nag with the standdown's OWN composed remedy text (count/hint/log
-      # pointer), not the routine nudge above - the routine text would tell
-      # the model to arm a cycle, and the resulting arm would clear the
-      # standdown prematurely (see "The spurious-repeated standdown must nag
-      # with the correct text"). Falls back to the routine text only if the
-      # marker's own stored reason comes back empty (a pre-fix marker, or a
-      # truncated write) - a generic nag beats silence.
+      # pointer), never the routine nudge below - the routine text would
+      # tell the model to arm a cycle, and the resulting arm would clear the
+      # standdown prematurely (issue #198, R1). Falls back to
+      # $WM_STANDDOWN_FALLBACK, never the routine nudge, if the marker's own
+      # stored reason comes back empty (a pre-fix marker, or a truncated
+      # write) - the fallback still refuses on the model's behalf; the
+      # routine nudge would not.
       reason="$(tail -n +2 "$suppressedfile" 2>/dev/null)"
-      [ -n "$reason" ] || reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
+      [ -n "$reason" ] || reason="$WM_STANDDOWN_FALLBACK"
+    elif [ "${WM_STOP_AUTOARM:-1}" = "0" ]; then
+      reason="You have crew in flight but no live watcher cycle. Arm one by running 'bin/watch-fleet' as a harness-tracked background task so its exit wakes you when crew need you, then you may stop."
     fi
   fi
 fi

@@ -48,6 +48,33 @@ wait_for_gone() {
   ! kill -0 "$1" 2>/dev/null
 }
 
+wait_for_pid_alive() {
+  # wait_for_pid_alive <pid> [tries (x0.2s)] - the inverse of wait_for_gone,
+  # for the narrow gap between $PIDFILE becoming non-empty (wait_for_file)
+  # and the pid it names being confirmed live: the file is written by the
+  # process itself, so the pid always exists by then, but a loaded runner can
+  # still delay this script's own kill -0 past that instant (same CI-runner
+  # load class documented on wait_for_file above) - not a design race in
+  # bin/watch-fleet, just this test's own check needing the same bounded
+  # patience every other liveness check here already gets.
+  _wfpa_tries="${2:-100}"; _wfpa_n=0
+  while ! kill -0 "$1" 2>/dev/null && [ "$_wfpa_n" -lt "$_wfpa_tries" ]; do sleep 0.2; _wfpa_n=$((_wfpa_n+1)); done
+  kill -0 "$1" 2>/dev/null
+}
+
+wait_for_content() {
+  # wait_for_content <path> <needle> [tries (x0.2s)] - for a genuine ordering
+  # gap in the real code, not just a test-side race: bin/watch-fleet writes
+  # $PIDFILE (:806) well before it prints "armed pid=..." to its own stdout
+  # (:849, captured into $armlog by the caller's redirect) - claiming the
+  # cycle and clearing markers happen in between. wait_for_file on $PIDFILE
+  # alone can return inside that gap, before $armlog has the line a caller
+  # then wants to assert against.
+  _wfc_tries="${3:-100}"; _wfc_n=0
+  while ! grep -q -- "$2" "$1" 2>/dev/null && [ "$_wfc_n" -lt "$_wfc_tries" ]; do sleep 0.2; _wfc_n=$((_wfc_n+1)); done
+  grep -q -- "$2" "$1" 2>/dev/null
+}
+
 wait_for_file_gone() {
   # wait_for_file_gone <path> [tries (x0.2s)] - the inverse of wait_for_file.
   # bin/watch-fleet writes $PIDFILE, then a few lines later clears the three
@@ -160,7 +187,7 @@ printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook4c.out" 2>&1 &
 h4c=$!; wm_track "$h4c"
 assert_true "the SIGTERM'd cycle is classified and a fresh cycle is armed, with no model turn" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 _after_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
-assert_true "the fresh cycle is a real, distinct live process" "[ -n '$_after_pid' ] && kill -0 $_after_pid"
+assert_true "the fresh cycle is a real, distinct live process" "[ -n '$_after_pid' ] && wait_for_pid_alive $_after_pid"
 kill -TERM "$h4c" 2>/dev/null
 [ -n "$_after_pid" ] && kill "$_after_pid" 2>/dev/null
 wait "$h4c" 2>/dev/null
@@ -519,7 +546,7 @@ assert_false "no spurious-count file exists yet" "[ -f '$WINGMAN_HOME/watch-spur
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sre.out" 2>&1 &
 hpe=$!; wm_track "$hpe"
 assert_true "the child claims and arms" "wait_for_file '$WINGMAN_HOME/watch.pid'"
-assert_contains "the child genuinely armed (not merely attempted)" "$(cat "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)" "armed pid="
+assert_true "the child genuinely armed (not merely attempted)" "wait_for_content '$WINGMAN_HOME/stop-autoarm.log' 'armed pid='"
 cpide="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpide" 2>/dev/null
 assert_true "the hook notices the death and exits" "wait_for_gone $hpe 100"
@@ -549,7 +576,7 @@ export WM_STOP_CONTINUITY_WINDOW=30
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/srf.out" 2>&1 &
 hpf=$!; wm_track "$hpf"
 assert_true "the child claims and arms" "wait_for_file '$WINGMAN_HOME/watch.pid'"
-assert_contains "the child genuinely armed (not merely attempted)" "$(cat "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)" "armed pid="
+assert_true "the child genuinely armed (not merely attempted)" "wait_for_content '$WINGMAN_HOME/stop-autoarm.log' 'armed pid='"
 kill -TERM "$hpf" 2>/dev/null
 assert_true "the hook notices and exits" "wait_for_gone $hpf 100"
 wait "$hpf" 2>/dev/null
@@ -573,11 +600,16 @@ add_crew_window d8b
 wm_state crew-set --id d8b --status working --summary busy >/dev/null
 export WM_STOP_CONTINUITY_WINDOW=30
 _trip_out=""
+_trip_err=""
 _round=0
 while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
   _round=$((_round+1))
   _prev_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
-  printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sr$_round.out" 2>&1 &
+  # stdout (the JSON-wrapped block decision) and stderr (rewake()'s own raw
+  # body, printed unwrapped) are captured to SEPARATE files - the raw-body
+  # capture is what lets the R1 regression checks below compare against the
+  # marker's own stored text byte-for-byte, with no JSON escaping in the way.
+  printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sr$_round.out" 2>"$WINGMAN_HOME/sr$_round.err" &
   hp=$!; wm_track "$hp"
   _n=0
   while kill -0 "$hp" 2>/dev/null && [ "$_n" -lt 100 ]; do
@@ -591,11 +623,22 @@ while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
   wait_for_gone "$hp" 100 >/dev/null 2>&1
   wait "$hp" 2>/dev/null
   _trip_out="$(cat "$WINGMAN_HOME/sr$_round.out" 2>/dev/null)"
+  _trip_err="$(cat "$WINGMAN_HOME/sr$_round.err" 2>/dev/null)"
 done
 assert_true "the standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
 assert_contains "the tripping invocation rewakes via manual-remedy (no do-not-arm sentence)" "$_trip_out" "fleet supervision is not being maintained"
 assert_not_contains "the tripping invocation is not auto mode" "$_trip_out" "do NOT arm a watch-fleet cycle"
 assert_contains "the standdown marker carries the composed remedy text on line 2+" "$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)" "fleet supervision is not being maintained"
+# issue #198: --classify (not this hook) now authors the marker - the trip's
+# own rewake body is read back from it, not recomposed, so the two can never
+# drift (one author, two consumers).
+assert_eq "the tripping rewake body equals the marker's line 2+ (one author, two consumers)" "$_trip_err" "$(tail -n +2 "$WINGMAN_HOME/watch.suppressed" 2>/dev/null)"
+# The direct R1 regression: against REAL composed text from a REAL trip (not
+# a synthetic marker body), the standdown must never instruct the model to
+# resume/arm - that instruction is exactly what let a compliant model
+# dissolve its own standdown.
+assert_not_contains "R1 regression: the real trip text never says to resume by running /watch" "$_trip_out" "Resume it by running"
+assert_not_contains "R1 regression: the real trip text never says to arm bin/watch-fleet directly" "$_trip_out" "arming bin/watch-fleet"
 before_spur="$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)"
 suppressed_out="$(run_hook)"
 assert_eq "while suppressed, a subsequent invocation exits 0 with no rewake" "$suppressed_out" ""

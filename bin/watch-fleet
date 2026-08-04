@@ -141,6 +141,17 @@
 #                          $PIDFILE/$BEATFILE (it legitimately reads both via
 #                          the cycle_live check). Intended caller: the `/watch`
 #                          skill, immediately after its armed cycle exits.
+#   watch-fleet --clear-standdown [--owner <id>]
+#                          lift a tripped spurious-repeated failure-budget
+#                          standdown (issue #198): removes $SUPPRESSEDFILE and
+#                          exits 0. Does NOT arm a cycle - fleet continuity
+#                          (hooks/stop-continuity.sh) does that on the next
+#                          Stop event, which is the only path that produces a
+#                          genuinely supervised cycle. A no-op, exit 0, if no
+#                          standdown is in force. The explicit, pilot-directed
+#                          way out of a standdown; hooks/no-foreground-
+#                          watcher-guard.sh denies every other arm attempt
+#                          while one holds.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -167,9 +178,9 @@ MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --owner) OWNER="${2:-}"; shift 2 ;;
-    --status|--stop|--start|--classify|arm|__loop) MODE="$1"; shift ;;
+    --status|--stop|--start|--classify|--clear-standdown|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,86p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,155p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -448,6 +459,37 @@ cycle_live() {
   [ "$(beat_age)" -lt "$GRACE" ]
 }
 
+# spurious_repeated_reason <count> <hint>
+# Composes the standdown's own text - stored verbatim in $SUPPRESSEDFILE and
+# re-delivered by both Stop hooks on every subsequent Stop event while the
+# standdown holds (issue #198). Split into a pilot-facing diagnosis/remedy and
+# a model-facing instruction, deliberately: the root cause of #198 was pilot-
+# facing remedy prose lifted verbatim into a Stop-hook `reason`, which reads
+# to the model as an instruction to arm - ending with "Resume it by running
+# /watch again or arming bin/watch-fleet directly" is a direct order to
+# dissolve the very standdown it appears in. This composes the two audiences
+# separately instead, and the model-facing half is explicit that arming is
+# refused, not merely discouraged.
+spurious_repeated_reason() {
+  _srr_count="$1"; _srr_hint="$2"
+  _srr_body="Fleet supervision is standing down: the watcher for this session has died $_srr_count times in a row with no successful cycle in between (see $SPURLOG); fleet supervision is not being maintained.
+
+YOUR action: report the paragraph above to the pilot, together with the pilot remedy below, then stop. Do NOT arm a watch-fleet cycle and do NOT run /watch in response to this. The standdown is deliberate - a successful claim clears it, which is exactly the re-arm churn the failure budget exists to prevent - and an arm attempt from a tool call is denied outright while it holds."
+  # The way out is a shared tail, appended after EVERY hint-selected
+  # paragraph - never only on the default hint. A pilot who has just cleared
+  # a stale claim lock still needs to be told the standdown itself does not
+  # clear on its own; without this tail that branch names no exit at all
+  # (issue #198 plan review, MUST-FIX 1).
+  _srr_clear="Once the cause of the repeated deaths is understood, lift the standdown with 'bin/watch-fleet --clear-standdown' (or restart wingman, which clears it with the run); fleet continuity re-arms automatically on the next Stop event."
+  case "$_srr_hint" in
+    stale-claim-lock)
+      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent. $_srr_clear" ;;
+    *)
+      _srr_remedy="$_srr_clear" ;;
+  esac
+  printf '%s\n\nPILOT REMEDY (their action, not yours - relay it): %s' "$_srr_body" "$_srr_remedy"
+}
+
 case "$MODE" in
   --classify)
     # Dispatched here, alongside --status/--stop/--start, deliberately BEFORE
@@ -519,6 +561,16 @@ case "$MODE" in
       # reports it, so a lone stray death long after a genuine recovery is
       # once again absorbed as ordinary `spurious`, not an immediate re-trip.
       spurlog spurious-repeated "$_hint"
+      # Record the standdown HERE, wherever the trip is observed - not only
+      # when hooks/stop-continuity.sh happens to be the caller (issue #198,
+      # R3) - so a model-driven `/watch` classify and a bare diagnostic call
+      # both leave the same durable trace. Written before the printed
+      # outcome below so a consumer that reacts to it by reading the marker
+      # in the same breath always finds it.
+      {
+        printf '%s\n' "${WINGMAN_RUN_ID:-}"
+        spurious_repeated_reason "$_count" "$_hint"
+      } > "$SUPPRESSEDFILE"
       printf '0\n' > "$SPURCOUNTFILE"
       printf 'spurious-repeated %s %s\n' "$_count" "$_hint"
     else
@@ -550,6 +602,23 @@ case "$MODE" in
   --start)
     wm_warn "watch-fleet --start is deprecated: arm 'bin/watch-fleet' as a harness-tracked background task instead. Blocking now."
     ;;
+  --clear-standdown)
+    # The one explicit, pilot-directed way out of a spurious-repeated
+    # standdown (issue #198). Only removes the marker - never arms a cycle
+    # itself: fleet continuity (hooks/stop-continuity.sh) does that on the
+    # next Stop event, which is the only path that produces a genuinely
+    # supervised cycle (a bare arm from a human's own terminal is not
+    # harness-tracked and wakes nobody). $SPURCOUNTFILE is left untouched:
+    # the trip that led here already reset it to 0 (rule 3 above), so there
+    # is nothing to clear, and writing it here would add a fourth count-file
+    # writer outside --classify, which the comment at rule 2 above forbids.
+    if [ -f "$SUPPRESSEDFILE" ]; then
+      rm -f "$SUPPRESSEDFILE"
+      wm_ok "standdown lifted; fleet continuity will re-arm on the next Stop event"
+    else
+      wm_info "no standdown in force"
+    fi
+    exit 0 ;;
   *) : ;;   # arm/__loop/"" fall through to arm
 esac
 
