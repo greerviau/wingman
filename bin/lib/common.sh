@@ -60,6 +60,22 @@ wm_warn()  { printf '%s! %s%s\n' "$_WM_Y" "$*" "$_WM_0" >&2; }
 wm_err()   { printf '%s\xe2\x9c\x97 %s%s\n' "$_WM_R" "$*" "$_WM_0" >&2; }
 wm_die()   { wm_err "$*"; exit 1; }
 
+# wm_launch_failure <component> <reason> - record why a launch refused to
+# proceed, durably. bin/wingman's own stderr goes to a tmux pane that is
+# destroyed moments later (its systemd unit is Type=oneshot/RemainAfterExit
+# with ExecStart=`tmux new-session -d`, which returns before bin/wingman ever
+# runs, so a wm_die message alone reaches nobody once the pane closes);
+# bin/doctor surfaces this file on its next run instead. Overwrites, never
+# appends - it answers exactly one question, "did the most recent launch
+# attempt refuse, and why?" - and every internal failure path returns 0
+# rather than let a diagnostic aid fail a launch of its own accord.
+wm_launch_failure() {
+  mkdir -p "$WM_HOME" 2>/dev/null || return 0
+  { printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1"
+    printf '%s\n' "$2"
+  } > "$WM_HOME/last-launch-failure" 2>/dev/null || return 0
+}
+
 # --- the settings file ------------------------------------------------------
 # config.local.toml: wingman's one configuration file - declarative, gitignored,
 # templated by config.example.toml, read by bin/lib/wm_config.py. Overridable so
