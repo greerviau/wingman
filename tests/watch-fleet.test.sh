@@ -1314,7 +1314,12 @@ assert_contains "same-run re-arm reports healthy" "$outsame" "healthy"
 assert_true "same-run re-arm leaves the cycle running" "kill -0 $oldpid"
 
 # No run id on the arming side: ownership cannot be certified, legacy healthy.
-outnone="$(wm_timeout 45 "$WF" 2>&1)"
+# env -u makes this genuinely run-id-less regardless of what the invoking
+# session exports (issue #170) - test_new_home already unsets WINGMAN_RUN_ID,
+# but this test's whole point is the run-id-less path, so it asserts the
+# precondition directly rather than relying on that unset holding by the time
+# execution reaches here.
+outnone="$(wm_timeout 45 env -u WINGMAN_RUN_ID "$WF" 2>&1)"
 assert_contains "run-id-less arm keeps legacy healthy" "$outnone" "healthy"
 assert_true "run-id-less arm leaves the cycle running" "kill -0 $oldpid"
 
