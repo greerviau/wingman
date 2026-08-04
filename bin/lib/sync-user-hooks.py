@@ -34,6 +34,10 @@ import os
 import stat
 import sys
 
+# Sibling import - both scripts live in bin/lib/, and `uv run script.py` puts
+# the script's own directory at sys.path[0] automatically.
+from user_hook_entry import desired_entry, entry_matches
+
 
 def default_repo():
     # bin/lib/sync-user-hooks.py -> bin/lib -> bin -> repo root, the same
@@ -91,39 +95,52 @@ def load_settings(path):
     return json.loads(text)
 
 
-def is_registered(settings, command, event):
+def find_entry(settings, command, event):
+    """The hook dict registered for `command` under `event`, or None if no
+    entry names that command at all (regardless of its other attributes)."""
     groups = (settings.get("hooks") or {}).get(event) or []
     if not isinstance(groups, list):
-        return False
+        return None
     for group in groups:
         if not isinstance(group, dict):
             continue
         for h in group.get("hooks") or []:
             if isinstance(h, dict) and h.get("command") == command:
-                return True
-    return False
+                return h
+    return None
 
 
-def compute_missing(manifest, repo, settings):
+def compute_changes(manifest, repo, settings):
+    """(missing, stale) - `missing` entries need a brand-new group appended;
+    `stale` entries already exist (same command) but disagree with the
+    manifest on an attribute the manifest's own entry_options names (e.g. an
+    older `timeout`), so they need updating in place rather than duplicated.
+    A hook whose manifest entry carries no entry_options at all can never be
+    stale (entry_matches then compares `command` alone), matching the
+    pre-#231 behavior for every hook but the fleet-continuity pair."""
     missing = []
+    stale = []
     for _group, hook, command, event, matcher in flat_entries(manifest, repo):
-        if not is_registered(settings, command, event):
+        entry_options = hook.get("entry_options", {})
+        existing = find_entry(settings, command, event)
+        if existing is None:
             missing.append((hook, command, event, matcher))
-    return missing
+        elif not entry_matches(existing, command, entry_options):
+            stale.append((hook, command, event, existing))
+    return missing, stale
 
 
-def apply_missing(settings, missing):
-    """Append one group per missing hook entry, in the same shape
-    bin/lib/install-user-hook.py writes. Mutates `settings` in place."""
+def apply_changes(settings, missing, stale):
+    """Append one new group per missing hook entry, and rewrite each stale
+    entry's dict in place (never appending a duplicate group for a command
+    already present) - a same-command entry read as "missing" just because
+    an old `timeout` didn't match would otherwise leave two Stop groups both
+    invoking the same script, the shorter-timeout one of which is the one
+    that kills continuity. Mutates `settings` (and, for `stale`, the entry
+    dicts nested inside it) in place."""
     for hook, command, event, matcher in missing:
         entry_options = hook.get("entry_options", {})
-        hook_entry = {"type": "command", "command": command}
-        if entry_options.get("asyncRewake"):
-            hook_entry["asyncRewake"] = True
-        if "timeout" in entry_options:
-            hook_entry["timeout"] = entry_options["timeout"]
-        if "rewakeSummary" in entry_options:
-            hook_entry["rewakeSummary"] = entry_options["rewakeSummary"]
+        hook_entry = desired_entry(command, entry_options)
 
         group = {"hooks": [hook_entry]}
         if event != "Stop":
@@ -132,6 +149,11 @@ def apply_missing(settings, missing):
         settings.setdefault("hooks", {})
         settings["hooks"].setdefault(event, [])
         settings["hooks"][event].append(group)
+
+    for hook, command, _event, existing in stale:
+        entry_options = hook.get("entry_options", {})
+        existing.clear()
+        existing.update(desired_entry(command, entry_options))
 
 
 def write_settings(path, settings):
@@ -171,15 +193,17 @@ def main():
         print(f"error: could not read {args.settings}: {e}", file=sys.stderr)
         sys.exit(2)
 
-    missing = compute_missing(manifest, repo, settings)
+    missing, stale = compute_changes(manifest, repo, settings)
 
-    if not missing:
+    if not missing and not stale:
         sys.exit(0)
 
     if args.check:
         if args.report:
             for _hook, command, event, _matcher in missing:
                 print(f"{event}: {command}")
+            for _hook, command, event, _existing in stale:
+                print(f"{event}: {command} (stale)")
         sys.exit(1)
 
     # --- write mode: serialise via a sidecar lock, then re-check under it ----
@@ -201,12 +225,14 @@ def main():
             print(f"error: could not read {args.settings}: {e}", file=sys.stderr)
             sys.exit(2)
 
-        missing = compute_missing(manifest, repo, settings)
-        if missing:
-            apply_missing(settings, missing)
+        missing, stale = compute_changes(manifest, repo, settings)
+        if missing or stale:
+            apply_changes(settings, missing, stale)
             write_settings(args.settings, settings)
             for _hook, command, event, _matcher in missing:
                 print(f"registered {event} hook: {command}", file=sys.stderr)
+            for _hook, command, event, _existing in stale:
+                print(f"updated {event} hook: {command}", file=sys.stderr)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
