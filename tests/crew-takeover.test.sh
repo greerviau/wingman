@@ -36,7 +36,9 @@ assert_contains "prints the exact resume command with the right repo" "$out1" "c
 assert_contains "prints the exact resume command with the right session id" "$out1" "--resume sess-t1"
 assert_contains "also offers bin/crew-resume as the automated path" "$out1" "bin/crew-resume t1"
 
-# --- died + transcript gone: honest, no false recovery promise --------------
+# --- died + transcript NOT found: honest, but never withholds the resume
+# command outright (review round 1, MF-3) - a negative existence check has
+# known blind spots, so this degrades to "try anyway", not "dead end" -------
 test_new_home
 PROJDIR2="$(wm_mktemp_dir)"
 export WM_CLAUDE_PROJECTS_DIR="$PROJDIR2"
@@ -47,10 +49,36 @@ wm_state crew-set --id t2 --status died >/dev/null
 # deliberately no transcript seeded
 
 out2="$("$CT" t2 2>&1)"
-assert_contains "says the transcript is gone" "$out2" "transcript is gone"
-assert_contains "says the conversation is not recoverable" "$out2" "not recoverable"
+assert_contains "explains the transcript wasn't found at the expected location" \
+  "$out2" "no session transcript was found at the expected location"
+assert_contains "frames it as a possible false negative, not a certainty" "$out2" "false negative"
+assert_contains "still offers the resume command despite the negative check (MF-3)" "$out2" "--resume sess-t2"
 assert_false "never claims session state survived when it did not" \
   "printf '%s\n' \"$out2\" | grep -q 'session state survived'"
+
+# --- MF-2 regression: a died member with an EMPTY session_id (the exact
+# shape wm-state's own orphan-window adoption produces, issue #79) must not
+# misparse - tab-IFS splitting used to collapse the empty field and shift
+# every subsequent one, landing the resumable flag in the STATUS slot
+# ("status=false") and printing the tmux WINDOW NAME as if it were the
+# session id. It must instead take the distinct "no session to resume"
+# branch, offering no bogus `--resume ''` command at all. --------------------
+test_new_home
+PROJDIR2b="$(wm_mktemp_dir)"
+export WM_CLAUDE_PROJECTS_DIR="$PROJDIR2b"
+REPO_B2="$(wm_mktemp_dir)/repo-b2"
+mkdir -p "$REPO_B2"
+wm_state crew-add --id t2b --type developer --objective x --repo "$REPO_B2" --window wm-t2b --session-id "" >/dev/null
+wm_state crew-set --id t2b --status died >/dev/null
+
+out2b="$("$CT" t2b 2>&1)"
+assert_contains "names the exact reason: no session_id was ever recorded" "$out2b" "no session_id was ever recorded"
+assert_false "never misparses the empty field into status=false (MF-2)" \
+  "printf '%s\n' \"$out2b\" | grep -q 'status=false'"
+assert_false "never prints the tmux window name as the session id" \
+  "printf '%s\n' \"$out2b\" | grep -q -- '--resume wm-t2b'"
+assert_false "never offers a bogus empty --resume command" \
+  "printf '%s\n' \"$out2b\" | grep -q -- \"--resume ''\""
 
 # --- non-died, non-live (finished normally): unchanged generic messaging ----
 test_new_home
@@ -87,8 +115,35 @@ wm_state crew-set --id t4 --status died >/dev/null
 
 out4="$("$CT" t4 2>&1)"
 assert_contains "surfaces the auto-anchored wip ref even with no transcript" "$out4" "auto-anchored"
-assert_contains "prints the exact recovery command" "$out4" "git -C '$REPO_D' stash apply $WIP_SHA"
+assert_contains "prints a recovery command into a FRESH location, never $REPO_D's own working tree" \
+  "$out4" "git -C '$REPO_D' worktree add /tmp/t4-wip-recovery $WIP_SHA"
 assert_contains "notes the ref is safe to retry" "$out4" "safe to retry"
+
+# --- a genuine anchor FAILURE (review round 1, MF-4) is surfaced distinctly,
+# even without any WIP ref existing at all ------------------------------------
+test_new_home
+PROJDIR4b="$(wm_mktemp_dir)"
+export WM_CLAUDE_PROJECTS_DIR="$PROJDIR4b"
+REPO_D2="$(wm_mktemp_dir)/repo-d2"
+mkdir -p "$REPO_D2"
+wm_state crew-add --id t4b --type developer --objective x --repo "$REPO_D2" --window wm-t4b --session-id sess-t4b \
+  --worktree "$(wm_mktemp_dir)/some-worktree" >/dev/null
+wm_state crew-set --id t4b --status died >/dev/null
+# Directly set wip_anchor_error on the roster - crew-takeover only READS this
+# field (cmd_reconcile is what writes it; see reconcile-wip-anchor.test.sh for
+# that side), so setting it by hand here isolates the render half.
+uv run --no-project --quiet python -c '
+import json, sys
+path = sys.argv[1]
+d = json.load(open(path))
+for r in d:
+    if r.get("id") == "t4b":
+        r["wip_anchor_error"] = "stale index.lock"
+json.dump(d, open(path, "w"))
+' "$WINGMAN_HOME/crew.json"
+
+out4b="$("$CT" t4b 2>&1)"
+assert_contains "surfaces the failure reason" "$out4b" "could not be auto-anchored at death: stale index.lock"
 
 # --- a live member is unaffected (pre-existing behavior, still parses the
 # widened field list correctly) ------------------------------------------------

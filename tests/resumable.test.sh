@@ -92,6 +92,60 @@ wm_state crew-add --id m4 --type developer --objective x --repo /tmp --window wm
 wm_state crew-set --id m4 --status died >/dev/null
 assert_eq "an empty session_id reads as not resumable, not an error" "$(resumable_field m4)" "false"
 
+# --- MF-3: a repo path reached through a symlink resolves via realpath, not
+# abspath - the CLI's own getcwd(3) resolves symlinks, so a slug computed
+# from the unresolved symlink path would never match the CLI's own transcript
+# directory -------------------------------------------------------------------
+test_new_home
+PROJDIR4="$(wm_mktemp_dir)"
+export WM_CLAUDE_PROJECTS_DIR="$PROJDIR4"
+REAL_REPO="$(wm_mktemp_dir)/real-repo"
+mkdir -p "$REAL_REPO"
+SYMLINK_REPO="$(wm_mktemp_dir)/symlink-repo"
+ln -s "$REAL_REPO" "$SYMLINK_REPO"
+wm_state crew-add --id m5 --type developer --objective x --repo "$SYMLINK_REPO" --window wm-m5 --session-id sess-m5 >/dev/null
+wm_state crew-set --id m5 --status died >/dev/null
+# Seed the transcript under the REAL (resolved) path's slug, not the symlink's.
+seed_transcript "$PROJDIR4" "$REAL_REPO" sess-m5
+
+assert_eq "a repo reached through a symlink still resolves to its real transcript (realpath, MF-3)" \
+  "$(resumable_field m5)" "true"
+
+# --- MF-3: a session transcript under a slug the exact derivation doesn't
+# predict (a naming-scheme drift, a truncated+hashed slug) is still found via
+# the session-id-keyed glob fallback -------------------------------------------
+test_new_home
+PROJDIR5="$(wm_mktemp_dir)"
+export WM_CLAUDE_PROJECTS_DIR="$PROJDIR5"
+REPO_E="$(wm_mktemp_dir)/repo-e"
+mkdir -p "$REPO_E"
+wm_state crew-add --id m6 --type developer --objective x --repo "$REPO_E" --window wm-m6 --session-id sess-m6 >/dev/null
+wm_state crew-set --id m6 --status died >/dev/null
+# Seed the transcript under a completely unrelated slug directory name - the
+# exact derived path is a guaranteed miss, so only the glob fallback can find it.
+mkdir -p "$PROJDIR5/some-other-slug-entirely"
+: > "$PROJDIR5/some-other-slug-entirely/sess-m6.jsonl"
+
+assert_eq "a transcript under an unpredicted slug is still found via the glob fallback (MF-3)" \
+  "$(resumable_field m6)" "true"
+
+# --- CLAUDE_CONFIG_DIR is honored (MF-3) - $WM_CLAUDE_PROJECTS_DIR still wins
+# outright when both are set, since it is the test-isolation escape hatch ----
+test_new_home
+unset WM_CLAUDE_PROJECTS_DIR
+CCD="$(wm_mktemp_dir)/relocated-claude-home"
+export CLAUDE_CONFIG_DIR="$CCD"
+REPO_F="$(wm_mktemp_dir)/repo-f"
+mkdir -p "$REPO_F"
+wm_state crew-add --id m7 --type developer --objective x --repo "$REPO_F" --window wm-m7 --session-id sess-m7 >/dev/null
+wm_state crew-set --id m7 --status died >/dev/null
+mkdir -p "$CCD/projects/$(slugify "$REPO_F")"
+: > "$CCD/projects/$(slugify "$REPO_F")/sess-m7.jsonl"
+
+assert_eq "a transcript under a relocated \$CLAUDE_CONFIG_DIR is found (MF-3)" \
+  "$(resumable_field m7)" "true"
+unset CLAUDE_CONFIG_DIR
+
 # --- the mass-death correlated batch note reports how many of the batch are
 # actually resumable, not just a bare "resume" pointer -------------------------
 test_new_home
