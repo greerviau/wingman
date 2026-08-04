@@ -14,6 +14,21 @@ export WM_WATCH_INTERVAL=1
 # Reap any backgrounded watcher on exit so a blocking one can never outlive the
 # test and leak into later suites (lib.sh's shared trap; wm_track registers it).
 
+# Bounded poll for a backgrounded watcher's own exit (fire), rather than a fixed
+# sleep: a fixed `sleep 3` assumed at least 2-3 WM_WATCH_INTERVAL=1 polls would
+# land inside that window, but each poll runs several `uv run --no-project`
+# subprocesses of its own (crew-list, needs-attention, reconcile) - a loaded
+# test-suite run (many concurrent files, real tmux windows) can push a single
+# poll's own wall-clock cost past 3s outright, which is exactly the shape
+# observed flaking here under full-suite load (same class already documented
+# in tests/stop-continuity.test.sh's own wait_for_gone). This only widens the
+# UPPER bound; a healthy fire still returns as soon as the pid exits.
+wait_for_gone() {
+  _wfg_tries="${2:-75}"; _wfg_n=0
+  while kill -0 "$1" 2>/dev/null && [ "$_wfg_n" -lt "$_wfg_tries" ]; do sleep 0.2; _wfg_n=$((_wfg_n+1)); done
+  ! kill -0 "$1" 2>/dev/null
+}
+
 # --- owner-scoped surfacing (escalation bubble-up) ---------------------------
 test_new_home
 wm_state crew-add --id lead1 --type lead  --objective big --repo /tmp --window wm-lead1 --session-id s1 >/dev/null
@@ -81,15 +96,13 @@ assert_true "lead watcher uses an owner-keyed pidfile"   "test -f '$WINGMAN_HOME
 
 # A worker event fires ONLY the lead's watcher; the top keeps blocking.
 wm_state crew-set --id wkr1 --status blocked --blocker "need input" >/dev/null
-sleep 3
-assert_false "lead watcher fired on its worker"                "kill -0 $lpid"
+assert_true  "lead watcher fired on its worker"                     "wait_for_gone $lpid"
 assert_true  "top watcher keeps blocking (worker not its concern)" "kill -0 $tpid"
 assert_contains "lead wake file names the worker" "$(cat "$WINGMAN_HOME/wake-lead1")" "wkr1"
 
 # A top-level event fires the top watcher.
 wm_state crew-set --id lead1 --status done --summary "wrapped up" >/dev/null
-sleep 3
-assert_false "top watcher fired on its own layer" "kill -0 $tpid"
+assert_true "top watcher fired on its own layer" "wait_for_gone $tpid"
 kill "$tpid" "$lpid" 2>/dev/null
 
 test_summary
