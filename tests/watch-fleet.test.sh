@@ -187,6 +187,40 @@ assert_contains "parked member is never flagged" "$(wm_state crew-get --id z3)" 
 kill "$ppid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #234: a parked lead with a live report is never nudged either ------
+# Q4 inverted: the same armed-watcher shape as z3 above, but this time the
+# member also owns a live report - the exact shape the D1 guard exists to
+# exempt from stage 1 (the check-in nudge), not only stage 2 (the flip).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id z3b --type lead --objective g --repo /tmp --window wm-z3b --session-id s10b >/dev/null
+wm_state crew-set --id z3b --status working --summary "supervising the crew" >/dev/null
+wm_state crew-add --id z3b-dev --type developer --objective gg --repo /tmp --window wm-z3b-dev \
+  --session-id s10c --parent z3b >/dev/null
+wm_state crew-set --id z3b-dev --status working --summary "implementing the fix" >/dev/null
+# `& wait` keeps the pane root alive as the parent (a bare trailing command would
+# be exec'd by the pane shell, collapsing the tree to one idle process).
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-z3b 'sleep 4; sleep 600 & wait'
+wm_age_status z3b
+WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 \
+  "$WF" >/dev/null 2>&1 &
+qppid=$!
+wm_track "$qppid"
+# Typing the nudge into the pane resets that window's tmux activity age, so a
+# fixture that DOES get nudged would drop out of candidacy for a full
+# WM_STALL_IDLE afterward. Wait comfortably past 2x WM_STALL_IDLE + 2x
+# WM_WATCH_INTERVAL (10s) so a merely-late nudge cannot pass as a suppressed one.
+sleep 16
+assert_true "watcher keeps blocking on a parked lead with a live report" "kill -0 $qppid"
+assert_contains "parked lead with a live report is never flagged" \
+  "$(wm_state crew-get --id z3b)" '"status": "working"'
+assert_false "the stall nudge marker is never stamped" \
+  "[ -f '$WINGMAN_HOME/stall-z3b.nudged' ]"
+z3b_nudge_count="$(tmux capture-pane -p -S -1000 -t "$WM_TMUX_SESSION:wm-z3b" | grep -c "Checking in: if you're mid-task")"
+assert_eq "the pane is never typed into with the check-in nudge" "$z3b_nudge_count" "0"
+kill "$qppid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- permission freeze stays the more specific diagnosis ----------------------
 # A real frozen dialog: question phrase + numbered options at the bottom of a
 # static pane. Detection needs two identical polls, so the flip lands on the
@@ -1042,6 +1076,29 @@ assert_contains "the fire note explains the pause" "$out_od" "new spawns paused"
 assert_contains "outage state file flips to active" \
   "$(cat "$WINGMAN_HOME/api-outage-state.json")" '"state": "active"'
 assert_contains "the wake file explains the outage" "$(cat "$WINGMAN_HOME/wake")" "API outage detected"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# issue #234 guard-placement check: the D1 liveness-probe guard must sit AFTER
+# api_error_check, never above it, or _OUTAGE_API_SIGNALS silently stops
+# counting a member the guard exempts from the nudge. od1/od2 above cannot
+# tell a correct placement from an early one - neither of its fixtures holds a
+# late-started descendant, so the guard never fires there. Here exactly one of
+# two members (oe2) does, and the population size is load-bearing: the
+# collapse condition is count>=2 AND ratio>=0.5, so with the guard correctly
+# placed both members still signal (2 of 2, fires), while with the guard
+# misplaced above api_error_check only oe1 signals (1 of 2 - count<2, does
+# not fire). A third fixture added to od1/od2 instead would not discriminate
+# (2 of 3 still satisfies both thresholds either way).
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id oe1 --type developer --objective o --repo /tmp --window wm-oe1 --session-id soe1 >/dev/null
+wm_state crew-add --id oe2 --type developer --objective p --repo /tmp --window wm-oe2 --session-id soe2 >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-oe1 'echo "Error: overloaded_error (529)"; sleep 600'
+# `& wait` keeps the pane root alive as the parent (a bare trailing command would
+# be exec'd by the pane shell, collapsing the tree to one idle process).
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-oe2 'echo "Error: overloaded_error (529)"; sleep 4; sleep 600 & wait'
+out_oe="$(wm_timeout 60 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 WM_OUTAGE_QUIET=3 "$WF" 2>/dev/null)"
+assert_contains "outage-detected still fires with one exempt member counted" "$out_oe" "outage-detected:"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # active -> clear after WM_OUTAGE_QUIET seconds of zero signal, naming any
