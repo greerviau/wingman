@@ -57,12 +57,23 @@ So the old assumption - a `stalled` fire is always post-nudge, never a first
 response - only holds for case 1. Check the reason text before assuming a
 nudge already ran.
 
+Also check the reason text for a live-report count (issue #234): when it names
+one or more live reports, the flipped member is very likely a lead whose own
+wake chain (its armed watcher, its Stop-hook re-arm) died over a sub-crew that
+is still live, not a member whose own agent errored. `bin/crew-takeover <id>`
+or `bin/crew-standdown <id>` would each interrupt or discard a session that
+was doing nothing wrong; relay `bin/crew-say <id> <nudge>` first instead - it
+makes the member re-arm and resume supervising its reports with no session
+lost - and reach for takeover/stand-down only if that nudge itself goes
+unanswered.
+
 Relay it once with the remedy - `bin/crew-takeover <id>` to inspect, or
-`bin/crew-standdown <id>` to reap - then **leave it running**; like `blocked`
-and `review`, the pilot decides its disposition. Lead with the plain-language
-state ("the `<repo>` effort has gone quiet") before the command, not the id;
-keep relaying the exact `bin/crew-takeover <id>` command regardless - the
-pilot may need to run it themselves, and that is the actionable pointer, not
+`bin/crew-standdown <id>` to reap (or, per the paragraph above, `bin/crew-say
+<id> <nudge>` when the reason names live reports) - then **leave it running**;
+like `blocked` and `review`, the pilot decides its disposition. Lead with the
+plain-language state ("the `<repo>` effort has gone quiet") before the
+command, not the id; keep relaying the exact command regardless - the pilot
+may need to run it themselves, and that is the actionable pointer, not
 narration.
 
 An invalid `--model` value is one cause of case 1: the agent CLI accepts it at
