@@ -252,6 +252,17 @@ assert_eq "lead8 stays stalled until explicitly resumed" "$status8" "stalled"
 # test-affordable --probe-gap (confirmed directly against _probe_cpu_delta
 # while drafting this coverage) - only a genuinely CPU-bound tree exercises
 # this branch deterministically, within a short gap, on real hardware.
+#
+# Cases 9-11 (the ones that need an independent TRUE reprieve reading) use
+# --probe-gap 3, not 1: at gap=1 the spin loop must cross a whole-second
+# `ps -o time=` boundary inside a 1-second window, which under the same
+# tests/run.sh contention that motivated the spin-loop choice above
+# (nproc-wide parallelism, and this very file holding two dedicated spin
+# loops) measurably fails often enough to flake - gap=3 was measured clean
+# across every contention level tested. Cases 12-14 never reach
+# _probe_cpu_delta at all (a non-working child, an unresolvable pid, and no
+# --pane-pids-stdin respectively), so their --probe-gap 1 is inert and left
+# alone.
 # ============================================================================
 
 # --- 9. the core fix: a busy working child reprieves the candidate -----------
@@ -265,12 +276,12 @@ spawn_bg sh -c 'while :; do :; done'
 dev9_pid=$!
 
 printf 'wm-dev9 %s\n' "$dev9_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
 since9a="$(anchor_since lead9)"
 
 sleep 2.5
 out9a="$(printf 'wm-dev9 %s\n' "$dev9_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin)"
 assert_eq "a busy working child reprieves the candidate: no flip" "$out9a" ""
 since9b="$(anchor_since lead9)"
 if [ "$since9b" != "$since9a" ]; then ok "the anchor's since visibly advances on reprieve"; else fail "the anchor's since visibly advances on reprieve"; fi
@@ -279,7 +290,7 @@ assert_eq "lead9 is still working" "$status9a" "working"
 
 sleep 2.5
 out9b="$(printf 'wm-dev9 %s\n' "$dev9_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin)"
 assert_eq "reprieved again on the next window: still no flip" "$out9b" ""
 since9c="$(anchor_since lead9)"
 if [ "$since9c" != "$since9b" ]; then ok "the anchor's since advances again on the next reprieve"; else fail "the anchor's since advances again on the next reprieve"; fi
@@ -305,10 +316,10 @@ dev10_pid=$!
 sleep 5   # let the late child exist and lag the root well past any root-grace
 
 printf 'wm-dev10 %s\n' "$dev10_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
 sleep 2.5
 out10="$(printf 'wm-dev10 %s\n' "$dev10_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin)"
 assert_contains "an idle armed-watcher child does not reprieve: candidate still flips" "$out10" "stalled lead10"
 
 # --- 11. withdraw liveness: a reprieve self-heals rather than permanently
@@ -331,10 +342,10 @@ spawn_bg sh -c 'while :; do :; done'
 dev11_pid=$!
 
 printf 'wm-dev11 %s\n' "$dev11_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
 sleep 2.5   # elapsed >= window(2); probe samples while dev11 is still genuinely spinning
 out11a="$(printf 'wm-dev11 %s\n' "$dev11_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin)"
 assert_eq "reprieved once while busy: no flip" "$out11a" ""
 status11a="$(wm_state crew-get --id lead11 | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])")"
 assert_eq "lead11 is still working after the reprieve" "$status11a" "working"
@@ -343,7 +354,7 @@ kill -STOP "$dev11_pid" 2>/dev/null   # freeze: same pid, genuinely idle from he
 
 sleep 4   # well past a fresh window(2) from the reset
 out11b="$(printf 'wm-dev11 %s\n' "$dev11_pid" \
-  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 3 --cpu-eps 0.01 --pane-pids-stdin)"
 assert_contains "frozen (genuinely idle) on the next full window: the reprieve self-heals and it flips" "$out11b" "stalled lead11"
 
 kill -CONT "$dev11_pid" 2>/dev/null

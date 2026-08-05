@@ -336,9 +336,10 @@ WM_REVIEW_RESURFACE_SECS="${WM_REVIEW_RESURFACE_SECS:-21600}"   # 6h, generous d
 WM_REVIEW_WAKER_GRACE="${WM_REVIEW_WAKER_GRACE:-120}"           # > pr-watch's own 30s default poll interval
 # Structural forward-motion / logical-stall detection (issue #199, Gap B): a
 # WORKING member with active reports (a lead) flips to 'stalled' once its own
-# roster-shape signature has shown no change for this window, even with a
-# fully healthy, armed watcher cycle - see bin/lib/wm-state.py's
-# forward-motion-check.
+# roster-shape signature has shown no change for this window AND, checked
+# once at that point (issue #244), none of its working children's process
+# trees show measurable CPU spend either - even with a fully healthy, armed
+# watcher cycle - see bin/lib/wm-state.py's forward-motion-check.
 WM_FORWARD_MOTION_SECS="${WM_FORWARD_MOTION_SECS:-1800}"   # 30 min default
 # API/connectivity-error pane signature (#23): a member showing one of these and
 # then going quiet is a likely local network blip or Anthropic-side outage, not a

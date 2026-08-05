@@ -239,6 +239,13 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # whole-second cputime resolution means a sleep-heavy pane would never show a
 # measurable delta) is reprieved every time its window is re-approached and
 # never flips.
+#
+# --probe-gap 3, not the module's own default 10 or a tighter 1-2: at gap=1-2
+# the spin loop must cross a whole-second `ps -o time=` boundary inside a
+# short window, which under this same file's own nproc-wide parallelism
+# (holding a second dedicated spin loop of its own, at lead16 below) measurably
+# fails often enough to flake this assertion - gap=3 was measured clean at
+# every contention level tested (PR #266 review round 1).
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id lead15 --type lead --objective g --repo /tmp --window wm-lead15 --session-id s15 >/dev/null
@@ -248,11 +255,11 @@ wm_state crew-add --id dev15 --type developer --objective h --repo /tmp --window
   --session-id s15d --parent lead15 >/dev/null
 wm_state crew-set --id dev15 --status working --summary "implementing the fix" >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-dev15 'while :; do :; done'
-WM_FORWARD_MOTION_SECS=6 WM_STALL_PROBE_GAP=2 WM_STALL_CPU_EPS=0.01 WM_WATCH_INTERVAL=2 \
+WM_FORWARD_MOTION_SECS=6 WM_STALL_PROBE_GAP=3 WM_STALL_CPU_EPS=0.01 WM_WATCH_INTERVAL=2 \
   "$WF" >/dev/null 2>&1 &
 fmpid=$!
 wm_track "$fmpid"
-sleep 14
+sleep 16
 assert_true "watcher keeps blocking on a lead with a genuinely busy delegate" "kill -0 $fmpid"
 assert_contains "the lead with a busy delegate is never flagged" \
   "$(wm_state crew-get --id lead15)" '"status": "working"'

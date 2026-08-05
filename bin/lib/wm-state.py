@@ -1679,12 +1679,18 @@ def _probe_cpu_delta(root_pid, gap, eps):
     """True iff root_pid's process tree shows summed cputime delta >= eps
     over a `gap`-second sampling window - _probe_execution's branch (b),
     extracted as its own callable (issue #244) so a caller that wants ONLY
-    this evidence (cmd_forward_motion_check - see its own docstring for why
-    branch (a) is the wrong signal there) can get it without branch (a)
-    short-circuiting first. _probe_execution calls this for its own branch
-    (b) below, so the two can never drift apart. False if either sample is
-    unreadable (the tree vanished, or ps could not be read) - the same
-    fail-open contract _probe_execution itself already has."""
+    this evidence can get it without branch (a) (any descendant that
+    started after root_grace - see _probe_execution's own docstring)
+    short-circuiting first. cmd_forward_motion_check is exactly such a
+    caller: branch (a) alone would read a child merely parked on its own
+    idle armed watcher as "alive" for free (an armed watcher is itself a
+    late-started descendant), silently defeating that detector for its most
+    ordinary population - see the "Flip-time liveness probe" comment ahead
+    of cmd_forward_motion_check's call site for the full reasoning.
+    _probe_execution calls this for its own branch (b) below, so the two
+    can never drift apart. False if either sample is unreadable (the tree
+    vanished, or ps could not be read) - the same fail-open contract
+    _probe_execution itself already has."""
     first = _ps_tree(root_pid)
     if not first:
         return False
@@ -3037,10 +3043,11 @@ def cmd_forward_motion_check(args):
     ever requested, a CI run nobody is watching) rather than special-casing
     each one. Once a candidate's elapsed time reaches --window-secs, its
     `working` children (only) are probed via _probe_cpu_delta - deliberately
-    branch (b) only, never _probe_execution (issue #244; see this module's
-    own "why branch (a) alone is the wrong tool here" reasoning) - using pane
-    pids supplied by the caller via --pane-pids-stdin, before it is added to
-    the flip set; a live probe resets the anchor exactly like a genuine
+    branch (b) only, never _probe_execution (issue #244; see _probe_cpu_delta's
+    own docstring, and the "Flip-time liveness probe" comment ahead of its
+    call site below, for why branch (a) alone is the wrong tool here) - using
+    pane pids supplied by the caller via --pane-pids-stdin, before it is added
+    to the flip set; a live probe resets the anchor exactly like a genuine
     signature change, deferring re-evaluation another full window rather
     than skipping just this poll.
 
@@ -3174,14 +3181,29 @@ def cmd_forward_motion_check(args):
     # spend over the sample window - deliberately _probe_cpu_delta only,
     # never _probe_execution, so a child merely parked on an idle armed
     # watcher (which always has a late-started descendant) cannot
-    # short-circuit past branch (a) and read "alive" for free; see this
-    # module's own "why branch (a) alone is the wrong tool here" reasoning.
-    # Only `working` children are probed - a report parked in
-    # review/blocked/stalled is supposed to be idle, and a `review` member
-    # parked on its own live pr-watch would show genuine CPU delta from that
-    # watcher's own polling too. `break` on the first reprieving child - one
-    # live child is sufficient evidence, and the probe is not cheap to run N
-    # times once it reaches its own sleep.
+    # short-circuit past branch (a) and read "alive" for free; see
+    # _probe_cpu_delta's own docstring for why branch (a) is the wrong tool
+    # for this question. Only `working` children are probed - a report
+    # parked in review/blocked/stalled is supposed to be idle, and a
+    # `review` member parked on its own live pr-watch would show genuine CPU
+    # delta from that watcher's own polling too. `break` on the first
+    # reprieving child - one live child is sufficient evidence, and the
+    # probe is not cheap to run N times once it reaches its own sleep.
+    #
+    # Two known, narrower residual gaps, both self-correcting rather than
+    # designed around: (1) _probe_cpu_delta sums cputime only over pids
+    # present in BOTH samples, so a delegate whose spend is dominated by
+    # short-lived tool subprocesses that start and exit inside the gap - the
+    # same fork-churn shape issue #244's own reproduction used - has no
+    # remaining evidence in its favor here, since branch (a) is deliberately
+    # excluded; (2) this probe widens the pre-existing TOCTOU window between
+    # reading `children` above and this candidate's actual current state - a
+    # concurrent genuine change is caught by the re-check against
+    # (episode_announced, signature) just below, but a change that lands
+    # AFTER that re-check is not. Both are bounded the same way the
+    # "Known, accepted false positive" above already is: a spurious flip
+    # here still clears on the candidate's own next crew-set call, or via
+    # cmd_stall_recheck's children_sig baseline.
     to_flip = []
     for rid, children, announced, signature, n_reports, prior_summary, updated_snapshot, children_sig in at_window:
         reprieved = False
