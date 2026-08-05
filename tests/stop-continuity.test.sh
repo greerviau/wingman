@@ -342,15 +342,32 @@ unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore
 new_home
 add_crew_window d7c
 wm_state crew-set --id d7c --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=10
-export WM_STOP_CONTINUITY_LIFETIME=60
+# WM_STOP_CONTINUITY_WINDOW=10 (issue #237 round-2 review): if the kill -9
+# below lands inside bin/watch-fleet's own pidfile-write-to-armed window, the
+# re-claim it triggers has to wait out $CLAIMLOCK's own CLAIM_STALE_AGE
+# (default 4s) before it can proceed - and the SECOND iteration's own
+# `uv run` startup overhead on top of that can push the total close to or
+# past a 10s window under load. If the window's own referee fires first, it
+# kills that re-claim attempt and stamps a "rolled" outcome, which reaches
+# --classify as a non-spurious result and resets $SPURCOUNTFILE before this
+# test ever reads it - a false failure of this test, not of the reclaim
+# itself. A much larger window gives the re-claim room to always win that
+# race instead of occasionally losing it to CI-runner variance.
+export WM_STOP_CONTINUITY_WINDOW=60
+export WM_STOP_CONTINUITY_LIFETIME=90
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7c.out" 2>&1 &
 h7c=$!; wm_track "$h7c"
 assert_true "the first iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid7c="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpid7c" 2>/dev/null
+# Bounded at 250 tries (50s), not 100 (10s): widening the window above
+# removed the referee's ability to cut a slow re-claim short at 10s, so this
+# poll must now be willing to wait at least as long as a re-claim is allowed
+# to legitimately take (up to the window itself) - a bound shorter than the
+# window it is meant to observe would just move the same flake here instead
+# of fixing it.
 _armed7c=0; _n7c=0
-while [ "$_armed7c" -lt 2 ] && [ "$_n7c" -lt 100 ]; do
+while [ "$_armed7c" -lt 2 ] && [ "$_n7c" -lt 250 ]; do
   _armed7c="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
   _armed7c="${_armed7c:-0}"
   sleep 0.2; _n7c=$((_n7c+1))
