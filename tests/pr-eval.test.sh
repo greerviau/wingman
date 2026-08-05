@@ -205,4 +205,76 @@ else
   ok "omitting --my-crew-id exits non-zero (no silent fallback to the always-wrong login-only rule)"
 fi
 
+# --- headRefOid settle-gate: a head must be confirmed on two consecutive
+# --- polls before an empty/resolved rollup can satisfy checks-passed
+# --- (issue #257) -------------------------------------------------------------
+# A fresh push - including the FIRST push of a brand-new PR, the moment
+# bin/pr-watch is armed immediately after `gh pr create` - can leave
+# statusCheckRollup empty for the NEW head for the 20-30s window before
+# Actions registers any check runs for it, identical at the data level to a
+# genuine no-CI PR. checks-passed/merge-ready must not fire until the SAME
+# head has been observed on two consecutive polls.
+
+# regression pin: a FRESH cursor (no prior poll at all) with headRefOid
+# present and an empty rollup must NOT fire on its very first poll - this is
+# the case a naive "baseline the first observation" design misses, since a
+# fresh cursor is exactly what a brand-new PR's first poll sees.
+rm -f "$CUR"
+echo '{"number":30,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_eq "a fresh cursor with headRefOid present and an empty rollup does NOT fire on the first poll" "$(ev)" ""
+assert_contains "the SAME head confirmed on a second poll fires checks-passed" "$(ev)" "checks-passed: #30"
+assert_eq "a settled poll after that does not re-fire" "$(ev)" ""
+
+# fix-up push race: an established head (already confirmed, already fired
+# once) changes mid-flight; the new head must independently earn its own
+# two-poll confirmation before checks-passed re-fires for it.
+rm -f "$CUR"
+echo '{"number":31,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-old"}' > "$PRJ"
+assert_eq "seed: old head's CI in progress, nothing fires" "$(ev)" ""
+echo '{"number":31,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_eq "a fix-up push landing (new head, rollup now empty) does NOT fire checks-passed on this same poll" "$(ev)" ""
+assert_contains "a follow-up poll with the SAME new head and still-empty rollup fires checks-passed" "$(ev)" "checks-passed: #31"
+
+# empty -> CI actually registers -> green: checks-passed must fire only on
+# the poll that confirms green for the confirmed head, never on the
+# transient empty reading that preceded CI registering at all.
+rm -f "$CUR"
+echo '{"number":32,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-x"}' > "$PRJ"
+assert_eq "fresh cursor, empty rollup, head not yet confirmed - nothing fires" "$(ev)" ""
+echo '{"number":32,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-x"}' > "$PRJ"
+assert_eq "same head now shows CI actually pending - still nothing (an ordinary pending rollup)" "$(ev)" ""
+echo '{"number":32,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-x"}' > "$PRJ"
+assert_contains "same head now green fires checks-passed" "$(ev)" "checks-passed: #32"
+
+# a caller that never supplies headRefOid at all (older/degraded gh output,
+# or every existing fixture in this file above) never gates - byte-identical
+# to pre-fix behavior. The existing "a no-CI PR fires checks-passed on first
+# poll" case (line 25-27 of this file, unmodified) already covers this; no
+# new fixture is needed to prove it, since none of the file's existing
+# fixtures carry the field.
+
+# the same settle-gate applies to merge-ready (same ready computation,
+# allow_merge layered on top). $CRJ is set fresh here so this case does not
+# depend on whatever the last --crew-record section above left it holding.
+rm -f "$CUR"
+echo '{"allow_merge":true}' > "$CRJ"
+echo '{"number":33,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-y"}' > "$PRJ"
+assert_eq "fresh cursor, allow_merge granted, head not yet confirmed - merge-ready withheld" "$(ev_cr)" ""
+assert_contains "the SAME head confirmed on a second poll fires merge-ready" "$(ev_cr)" "merge-ready: #33"
+
+# pin: a poll that fires a DIFFERENT, higher-priority event for a newly-changed
+# head still advances the recorded head - so the very next poll can confirm and
+# fire checks-passed, without a second full settle poll for the head itself.
+# This is intended (head-tracking is unconditional and independent of which
+# event a poll returns), but was unpinned before this case - see the plan's
+# "Risks / follow-ups" section for why this means the settle delay is "at
+# least one more poll," not always a full $WM_PR_WATCH_INTERVAL.
+rm -f "$CUR"
+echo '{"number":34,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-old"}' > "$PRJ"
+assert_eq "seed (interleaved-event case): old head's CI in progress, nothing fires" "$(ev)" ""
+echo '{"number":34,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-10T12:00:00Z","author":{"login":"rev"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_contains "head changes AND a fresh comment land on the same poll - comment wins priority, but the head still advances" "$(ev)" "comment: #34"
+echo '{"number":34,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-10T12:00:00Z","author":{"login":"rev"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_contains "the SAME head, confirmed on the very next poll, fires checks-passed - only one poll after the comment, not one full interval after the head change" "$(ev)" "checks-passed: #34"
+
 test_summary
