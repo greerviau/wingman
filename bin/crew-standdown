@@ -44,6 +44,14 @@ for cid in $AFFECTED; do
     "$_sd_roster_json" "$_sd_windows_csv" "$_sd_windows_valid"
   WINDOW="wm-$cid"
 
+  # Reap any watch-fleet cycle scoped to this id (issue #237, part 1): a
+  # stood-down owner's watcher is otherwise never told to stop and keeps
+  # polling forever, orphaned off the pane's process tree. Safe to call
+  # unconditionally for every affected id, including the overwhelming
+  # majority that never armed a scoped cycle at all - see --stop's own exit-0
+  # no-cycle branch.
+  "$(dirname "$0")/watch-fleet" --owner "$cid" --stop >/dev/null 2>&1
+
   # One roster read per id, extended (issue #96) to also pull the Remote
   # Control fields alongside the existing worktree/repo read for the fallback
   # below - no separate lookup for either purpose.
