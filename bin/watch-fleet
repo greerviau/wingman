@@ -1419,7 +1419,11 @@ for tid in ids:
     # directory itself is gone" as the cause, so an empty result reaching
     # here is a transient read failure - left for a later poll to resolve,
     # never guessed at.
-    _cf_stamped="$(cat "$CODEFILE" 2>/dev/null)"
+    # A bash builtin read (no cat fork) in the common case a fresh claim
+    # already stamped $CODEFILE - this check runs on every poll, so avoiding
+    # a second subprocess here (beyond code_fingerprint's own cksum) matters
+    # more than it would for a once-per-arm read.
+    if [ -f "$CODEFILE" ]; then _cf_stamped="$(< "$CODEFILE")"; else _cf_stamped=""; fi
     if [ "$_cf_now" != "$_cf_stamped" ]; then
       # Consecutive-mismatch streak (issue #219's own anti-spin bound,
       # mirroring $OWNERCHECKFILE's shape but NOT its claim-time clearing -
