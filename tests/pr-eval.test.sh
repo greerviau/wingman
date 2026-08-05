@@ -262,4 +262,19 @@ echo '{"number":33,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments"
 assert_eq "fresh cursor, allow_merge granted, head not yet confirmed - merge-ready withheld" "$(ev_cr)" ""
 assert_contains "the SAME head confirmed on a second poll fires merge-ready" "$(ev_cr)" "merge-ready: #33"
 
+# pin: a poll that fires a DIFFERENT, higher-priority event for a newly-changed
+# head still advances the recorded head - so the very next poll can confirm and
+# fire checks-passed, without a second full settle poll for the head itself.
+# This is intended (head-tracking is unconditional and independent of which
+# event a poll returns), but was unpinned before this case - see the plan's
+# "Risks / follow-ups" section for why this means the settle delay is "at
+# least one more poll," not always a full $WM_PR_WATCH_INTERVAL.
+rm -f "$CUR"
+echo '{"number":34,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-old"}' > "$PRJ"
+assert_eq "seed (interleaved-event case): old head's CI in progress, nothing fires" "$(ev)" ""
+echo '{"number":34,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-10T12:00:00Z","author":{"login":"rev"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_contains "head changes AND a fresh comment land on the same poll - comment wins priority, but the head still advances" "$(ev)" "comment: #34"
+echo '{"number":34,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-10T12:00:00Z","author":{"login":"rev"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_contains "the SAME head, confirmed on the very next poll, fires checks-passed - only one poll after the comment, not one full interval after the head change" "$(ev)" "checks-passed: #34"
+
 test_summary
