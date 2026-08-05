@@ -1675,15 +1675,44 @@ def _ps_tree(root_pid):
     return tree
 
 
+def _probe_cpu_delta(root_pid, gap, eps):
+    """True iff root_pid's process tree shows summed cputime delta >= eps
+    over a `gap`-second sampling window - _probe_execution's branch (b),
+    extracted as its own callable (issue #244) so a caller that wants ONLY
+    this evidence can get it without branch (a) (any descendant that
+    started after root_grace - see _probe_execution's own docstring)
+    short-circuiting first. cmd_forward_motion_check is exactly such a
+    caller: branch (a) alone would read a child merely parked on its own
+    idle armed watcher as "alive" for free (an armed watcher is itself a
+    late-started descendant), silently defeating that detector for its most
+    ordinary population - see the "Flip-time liveness probe" comment ahead
+    of cmd_forward_motion_check's call site for the full reasoning.
+    _probe_execution calls this for its own branch (b) below, so the two
+    can never drift apart. False if either sample is unreadable (the tree
+    vanished, or ps could not be read) - the same fail-open contract
+    _probe_execution itself already has."""
+    first = _ps_tree(root_pid)
+    if not first:
+        return False
+    time.sleep(gap)
+    second = _ps_tree(root_pid)
+    if not second:
+        return False
+    delta = 0.0
+    for pid in set(first) & set(second):
+        delta += max(0.0, second[pid][0] - first[pid][0])
+    return delta >= eps
+
+
 def _probe_execution(root_pid, root_grace, gap, eps):
     """True if the pane's process tree shows positive evidence of execution or an
     armed wake source: (a) any descendant whose start lags the root's by more than
     root_grace seconds (an in-flight tool shell, or an armed background watcher
     that will exit and wake the session; launch-time children like MCP servers
     start with the root and do not count), else (b) summed cputime delta over pids
-    present in two samples `gap` seconds apart >= eps. If the tree cannot be read
-    at all, returns False (fall back to the staleness verdict; window liveness is
-    reconcile's job)."""
+    present in two samples `gap` seconds apart >= eps (see _probe_cpu_delta). If
+    the tree cannot be read at all, returns False (fall back to the staleness
+    verdict; window liveness is reconcile's job)."""
     first = _ps_tree(root_pid)
     if not first:
         return False
@@ -1693,14 +1722,7 @@ def _probe_execution(root_pid, root_grace, gap, eps):
         # start-time parsing, so the comparison is locale-safe.
         if pid != root_pid and (root_elapsed - elapsed) > root_grace:
             return True
-    time.sleep(gap)
-    second = _ps_tree(root_pid)
-    if not second:
-        return False
-    delta = 0.0
-    for pid in set(first) & set(second):
-        delta += max(0.0, second[pid][0] - first[pid][0])
-    return delta >= eps
+    return _probe_cpu_delta(root_pid, gap, eps)
 
 
 def _longest_running_descendant(root_pid, root_grace):
@@ -2948,6 +2970,39 @@ def _forward_motion_signature(candidate, children):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _read_pane_pid_map(args):
+    """{crew_id: pid} parsed from --pane-pids-stdin's 'wm-<id> <pid>' lines
+    (bin/watch-fleet's own window-naming convention: tmux list-panes -s -F
+    '#{window_name} #{pane_pid}', one line per pane in the session). {} if
+    the flag was not passed - opt-in only, so a caller with nothing to probe
+    (every existing test, and any invocation with no working children in
+    scope) never blocks reading stdin.
+
+    A line that does not split into exactly two whitespace-separated fields,
+    whose first field does not start with 'wm-', or whose second field is
+    not an integer, is silently dropped. A crew id absent from the resulting
+    map - whether because its line was dropped, or bin/watch-fleet's tmux
+    snapshot simply had nothing for it - is indistinguishable from one this
+    caller was never told about at all: cmd_forward_motion_check treats a
+    missing id exactly like _probe_execution/_probe_cpu_delta already treat
+    an unreadable process tree, failing open toward a flip rather than
+    inferring liveness from the absence of contrary evidence. First-wins on
+    a duplicate window name (setdefault, not overwrite), matching
+    wm_tmux_pane_pid's own head -1 convention - tmux does not enforce unique
+    window names."""
+    if not getattr(args, "pane_pids_stdin", False):
+        return {}
+    out = {}
+    for line in sys.stdin.read().splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].startswith("wm-"):
+            try:
+                out.setdefault(parts[0][len("wm-"):], int(parts[1]))
+            except ValueError:
+                pass
+    return out
+
+
 def cmd_forward_motion_check(args):
     """Flip a WORKING candidate with active reports to 'stalled' the moment
     its own situation has shown no forward motion for --window-secs, even
@@ -2986,7 +3041,15 @@ def cmd_forward_motion_check(args):
     record to a reviewer's), and uniformly covers every "any wait" shape the
     issue names (a dropped usage-limit-reset fire, a reviewer verdict nobody
     ever requested, a CI run nobody is watching) rather than special-casing
-    each one.
+    each one. Once a candidate's elapsed time reaches --window-secs, its
+    `working` children (only) are probed via _probe_cpu_delta - deliberately
+    branch (b) only, never _probe_execution (issue #244; see _probe_cpu_delta's
+    own docstring, and the "Flip-time liveness probe" comment ahead of its
+    call site below, for why branch (a) alone is the wrong tool here) - using
+    pane pids supplied by the caller via --pane-pids-stdin, before it is added
+    to the flip set; a live probe resets the anchor exactly like a genuine
+    signature change, deferring re-evaluation another full window rather
+    than skipping just this poll.
 
     Anchor/reset persistence (mirrors cmd_review_resurface_check's own
     pattern) in a new store, forward-motion.json: {"<id>": {
@@ -3037,12 +3100,12 @@ def cmd_forward_motion_check(args):
     (unlike cmd_review_resurface_check) a repeating REMINDER note.
 
     Known, accepted false positive: a candidate that is genuinely, correctly
-    heads-down for longer than --window-secs without making any crew-set
-    call of its own, and without any report changing state, flips too. This
-    is self-healing by construction: the candidate's own next routine
-    crew-set call is itself a genuine transition out of 'stalled', clearing
-    the flag immediately - the cost is one avoidable board line, not a stuck
-    or corrupted state.
+    heads-down for longer than --window-secs with no report changing state
+    and no working child measurably spending CPU either flips too. This is
+    self-healing by construction: the candidate's own next routine crew-set
+    call is itself a genuine transition out of 'stalled', clearing the flag
+    immediately - the cost is one avoidable board line, not a stuck or
+    corrupted state.
 
     Prints 'stalled <id>' for each candidate flipped this cycle, one per
     line; pure side effect otherwise (a candidate whose anchor has not yet
@@ -3051,8 +3114,9 @@ def cmd_forward_motion_check(args):
     ensure_home()
     owner = getattr(args, "owner", None)
     window_secs = args.window_secs
+    pane_pids = _read_pane_pid_map(args)
 
-    to_flip = []
+    at_window = []
 
     with with_locked(forward_motion_path()):
         store = read_json(forward_motion_path(), {})
@@ -3100,12 +3164,75 @@ def cmd_forward_motion_check(args):
                 # candidate's own signature, captured now (the same children
                 # list just used above) so cmd_stall_recheck's forward-motion
                 # clearing predicate has a baseline to compare a later,
-                # freshly-recomputed children list against.
-                to_flip.append((rid, len(children), r.get("summary"), r.get("updated"),
-                                 _children_signature(children)))
+                # freshly-recomputed children list against. Liveness (issue
+                # #244) is probed AFTER this lock releases (the probe can
+                # sleep; nothing may hold forward_motion_path()'s lock across
+                # that), so this candidate is only staged here, not yet
+                # queued to flip.
+                at_window.append((rid, children, announced, signature, len(children),
+                                   r.get("summary"), r.get("updated"), _children_signature(children)))
 
         if changed:
             write_json(forward_motion_path(), store)
+
+    # Flip-time liveness probe (issue #244): a candidate that has genuinely
+    # reached --window-secs is reprieved if any of its `working` children's
+    # process trees (resolved via --pane-pids-stdin) shows a genuine CPU
+    # spend over the sample window - deliberately _probe_cpu_delta only,
+    # never _probe_execution, so a child merely parked on an idle armed
+    # watcher (which always has a late-started descendant) cannot
+    # short-circuit past branch (a) and read "alive" for free; see
+    # _probe_cpu_delta's own docstring for why branch (a) is the wrong tool
+    # for this question. Only `working` children are probed - a report
+    # parked in review/blocked/stalled is supposed to be idle, and a
+    # `review` member parked on its own live pr-watch would show genuine CPU
+    # delta from that watcher's own polling too. `break` on the first
+    # reprieving child - one live child is sufficient evidence, and the
+    # probe is not cheap to run N times once it reaches its own sleep.
+    #
+    # Three known, narrower residual gaps, all self-correcting rather than
+    # designed around: (1) _probe_cpu_delta sums cputime only over pids
+    # present in BOTH samples, so a delegate whose spend is dominated by
+    # short-lived tool subprocesses that start and exit inside the gap - the
+    # same fork-churn shape issue #244's own reproduction used - has no
+    # remaining evidence in its favor here, since branch (a) is deliberately
+    # excluded; (2) this probe widens the pre-existing TOCTOU window between
+    # reading `children` above and this candidate's actual current state - a
+    # concurrent genuine change is caught by the re-check against
+    # (episode_announced, signature) just below, but a change that lands
+    # AFTER that re-check is not; (3) a reprieve resets the anchor rather
+    # than merely skipping one poll, so a delegate that burns CPU
+    # indefinitely without its roster signature ever otherwise changing
+    # reprieves its lead forever - this is the fix issue #244 asked for, not
+    # a defect, and a lead genuinely wedged underneath such a delegate stays
+    # covered by that DELEGATE's own wedge-check, not lost. All three are
+    # bounded the same way the "Known, accepted false positive" above
+    # already is: a spurious flip here still clears on the candidate's own
+    # next crew-set call, or via cmd_stall_recheck's children_sig baseline.
+    to_flip = []
+    for rid, children, announced, signature, n_reports, prior_summary, updated_snapshot, children_sig in at_window:
+        reprieved = False
+        for c in children:
+            if c.get("status") != "working":
+                continue
+            pid = pane_pids.get(c["id"])
+            if pid and _probe_cpu_delta(pid, args.probe_gap, args.cpu_eps):
+                reprieved = True
+                break
+        if reprieved:
+            with with_locked(forward_motion_path()):
+                store2 = read_json(forward_motion_path(), {})
+                cur = store2.get(rid) if isinstance(store2, dict) else None
+                # Re-check the SAME episode/signature we evaluated above - a
+                # concurrent genuine reported-state change already reset this
+                # entry between the two locks and must not be clobbered by a
+                # now-stale reprieve.
+                if isinstance(cur, dict) and cur.get("episode_announced") == announced \
+                        and cur.get("signature") == signature:
+                    store2[rid] = {"episode_announced": announced, "signature": signature, "since": now()}
+                    write_json(forward_motion_path(), store2)
+            continue
+        to_flip.append((rid, n_reports, prior_summary, updated_snapshot, children_sig))
 
     for rid, n_reports, prior_summary, updated_snapshot, children_sig in to_flip:
         status_file = status_path(rid)
@@ -4385,10 +4512,18 @@ def build_parser():
     # iteration BY THE CANDIDATE'S OWN PARENT's cycle (see
     # cmd_forward_motion_check's own docstring for why) - --owner "" is
     # wingman's own top-level cycle, examining its own direct reports as
-    # candidates.
+    # candidates. Liveness-aware since issue #244: once a candidate reaches
+    # --window-secs, its working children's pane pids (from
+    # --pane-pids-stdin) are probed via _probe_cpu_delta before flipping -
+    # see cmd_forward_motion_check's own docstring. No --root-grace: that
+    # parameter is _probe_execution's branch (a) alone, which this call path
+    # never reaches.
     a = sub.add_parser("forward-motion-check")
     a.add_argument("--owner", default=None)
     a.add_argument("--window-secs", type=int, default=1800, dest="window_secs")  # 30 min default
+    a.add_argument("--probe-gap", type=int, default=10, dest="probe_gap")
+    a.add_argument("--cpu-eps", type=float, default=0.5, dest="cpu_eps")
+    a.add_argument("--pane-pids-stdin", action="store_true", dest="pane_pids_stdin")
     a.set_defaults(fn=cmd_forward_motion_check)
 
     # The stalled re-evaluation (issue #235): re-runs the SAME detector's own
