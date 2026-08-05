@@ -3190,7 +3190,7 @@ def cmd_forward_motion_check(args):
     # reprieving child - one live child is sufficient evidence, and the
     # probe is not cheap to run N times once it reaches its own sleep.
     #
-    # Two known, narrower residual gaps, both self-correcting rather than
+    # Three known, narrower residual gaps, all self-correcting rather than
     # designed around: (1) _probe_cpu_delta sums cputime only over pids
     # present in BOTH samples, so a delegate whose spend is dominated by
     # short-lived tool subprocesses that start and exit inside the gap - the
@@ -3200,10 +3200,15 @@ def cmd_forward_motion_check(args):
     # reading `children` above and this candidate's actual current state - a
     # concurrent genuine change is caught by the re-check against
     # (episode_announced, signature) just below, but a change that lands
-    # AFTER that re-check is not. Both are bounded the same way the
-    # "Known, accepted false positive" above already is: a spurious flip
-    # here still clears on the candidate's own next crew-set call, or via
-    # cmd_stall_recheck's children_sig baseline.
+    # AFTER that re-check is not; (3) a reprieve resets the anchor rather
+    # than merely skipping one poll, so a delegate that burns CPU
+    # indefinitely without its roster signature ever otherwise changing
+    # reprieves its lead forever - this is the fix issue #244 asked for, not
+    # a defect, and a lead genuinely wedged underneath such a delegate stays
+    # covered by that DELEGATE's own wedge-check, not lost. All three are
+    # bounded the same way the "Known, accepted false positive" above
+    # already is: a spurious flip here still clears on the candidate's own
+    # next crew-set call, or via cmd_stall_recheck's children_sig baseline.
     to_flip = []
     for rid, children, announced, signature, n_reports, prior_summary, updated_snapshot, children_sig in at_window:
         reprieved = False
