@@ -33,6 +33,18 @@ updated_of() {
     "$WINGMAN_HOME/crew/$1.json"
 }
 
+# issue #244: forward-motion.json's per-candidate anchor "since" stamp.
+anchor_since() {
+  wm_py -c '
+import json, sys, os
+p = sys.argv[1]
+d = json.load(open(p)) if os.path.exists(p) else {}
+print((d.get(sys.argv[2]) or {}).get("since", ""))
+' "$WINGMAN_HOME/forward-motion.json" "$1"
+}
+
+spawn_bg() { "$@" & wm_track "$!"; }
+
 # --- 1. baseline fire: a lead + 3 developers all review, no reviewer --------
 test_new_home
 wm_state crew-add --id lead1 --type developer --objective x --repo /tmp --window wm-lead1 --session-id s1 >/dev/null
@@ -220,5 +232,184 @@ out8c="$(wm_state forward-motion-check --owner "" --window-secs 2)"
 assert_eq "still silent on yet another cycle" "$out8c" ""
 status8="$(wm_state crew-get --id lead8 | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])")"
 assert_eq "lead8 stays stalled until explicitly resumed" "$status8" "stalled"
+
+# ============================================================================
+# issue #244: flip-time liveness probe. A candidate whose elapsed time
+# reaches --window-secs gets one more chance before flipping: its `working`
+# children's pane pids (fed via --pane-pids-stdin, one 'wm-<id> <pid>' line
+# per line, mirroring bin/watch-fleet's own tmux list-panes -s snapshot) are
+# probed for genuine CPU spend via _probe_cpu_delta - deliberately branch (b)
+# only, never _probe_execution's branch (a), so a child merely parked on its
+# own idle armed watcher (which always has a late-started descendant) cannot
+# read "alive" for free and permanently suppress the detector. Every case
+# below reuses spawn_bg/wm_track from tests/lead-liveness-exemption.test.sh.
+#
+# A genuine CPU-spinning loop (`while :; do :; done`), not the fork/sleep
+# spawn-loop shape section 2's manual reproduction uses, stands in for "a
+# continuously busy process tree" in the cases below that need one: `ps -o
+# time=` only has whole-second resolution, and empirically the fork/sleep
+# shape's cumulative cputime never crosses a full second within any
+# test-affordable --probe-gap (confirmed directly against _probe_cpu_delta
+# while drafting this coverage) - only a genuinely CPU-bound tree exercises
+# this branch deterministically, within a short gap, on real hardware.
+# ============================================================================
+
+# --- 9. the core fix: a busy working child reprieves the candidate -----------
+test_new_home
+wm_state crew-add --id lead9 --type developer --objective x --repo /tmp --window wm-lead9 --session-id s9 >/dev/null
+wm_state crew-set --id lead9 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev9 --type developer --objective x --repo /tmp --window wm-dev9 --session-id s-dev9 --parent lead9 >/dev/null
+wm_state crew-set --id dev9 --status working --summary "coding away" >/dev/null
+
+spawn_bg sh -c 'while :; do :; done'
+dev9_pid=$!
+
+printf 'wm-dev9 %s\n' "$dev9_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+since9a="$(anchor_since lead9)"
+
+sleep 2.5
+out9a="$(printf 'wm-dev9 %s\n' "$dev9_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_eq "a busy working child reprieves the candidate: no flip" "$out9a" ""
+since9b="$(anchor_since lead9)"
+if [ "$since9b" != "$since9a" ]; then ok "the anchor's since visibly advances on reprieve"; else fail "the anchor's since visibly advances on reprieve"; fi
+status9a="$(wm_state crew-get --id lead9 | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])")"
+assert_eq "lead9 is still working" "$status9a" "working"
+
+sleep 2.5
+out9b="$(printf 'wm-dev9 %s\n' "$dev9_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_eq "reprieved again on the next window: still no flip" "$out9b" ""
+since9c="$(anchor_since lead9)"
+if [ "$since9c" != "$since9b" ]; then ok "the anchor's since advances again on the next reprieve"; else fail "the anchor's since advances again on the next reprieve"; fi
+
+kill "$dev9_pid" 2>/dev/null
+wait "$dev9_pid" 2>/dev/null
+
+# --- 10. MF2/MF-A regression guard: an idle armed-watcher child must NOT
+# reprieve. Branch (a) alone would read this tree "alive" (a late-started
+# descendant); _probe_cpu_delta's CPU-delta sample must not, and the
+# candidate must still flip on schedule. This is the control that
+# distinguishes this design from a draft that called _probe_execution
+# (branch (a) OR (b)) instead of _probe_cpu_delta directly - branch (a)
+# would have short-circuited on this exact fixture.
+test_new_home
+wm_state crew-add --id lead10 --type developer --objective x --repo /tmp --window wm-lead10 --session-id s10 >/dev/null
+wm_state crew-set --id lead10 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev10 --type developer --objective x --repo /tmp --window wm-dev10 --session-id s-dev10 --parent lead10 >/dev/null
+wm_state crew-set --id dev10 --status working --summary "waiting on its own armed watcher" >/dev/null
+
+spawn_bg sh -c 'sleep 4; sleep 600 & wait'
+dev10_pid=$!
+sleep 5   # let the late child exist and lag the root well past any root-grace
+
+printf 'wm-dev10 %s\n' "$dev10_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+sleep 2.5
+out10="$(printf 'wm-dev10 %s\n' "$dev10_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_contains "an idle armed-watcher child does not reprieve: candidate still flips" "$out10" "stalled lead10"
+
+# --- 11. withdraw liveness: a reprieve self-heals rather than permanently
+# suppressing the candidate. The SAME pid is busy through the first reprieve,
+# then genuinely idle (frozen via SIGSTOP - no descendant, no further CPU,
+# but still a live, resolvable pid) with no reported-state change either: the
+# very next full window from the last reprieve eventually flips. SIGSTOP,
+# not a bounded `timeout`+exit, so the CPU-accumulating pid never dies mid-
+# probe: _probe_cpu_delta only counts a pid present in BOTH samples, so a
+# child that finishes/dies between the two samples loses credit for whatever
+# it spent right before dying - freezing it in place instead avoids that
+# entirely and isolates the one thing this case actually tests.
+test_new_home
+wm_state crew-add --id lead11 --type developer --objective x --repo /tmp --window wm-lead11 --session-id s11 >/dev/null
+wm_state crew-set --id lead11 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev11 --type developer --objective x --repo /tmp --window wm-dev11 --session-id s-dev11 --parent lead11 >/dev/null
+wm_state crew-set --id dev11 --status working --summary "coding away" >/dev/null
+
+spawn_bg sh -c 'while :; do :; done'
+dev11_pid=$!
+
+printf 'wm-dev11 %s\n' "$dev11_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+sleep 2.5   # elapsed >= window(2); probe samples while dev11 is still genuinely spinning
+out11a="$(printf 'wm-dev11 %s\n' "$dev11_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_eq "reprieved once while busy: no flip" "$out11a" ""
+status11a="$(wm_state crew-get --id lead11 | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])")"
+assert_eq "lead11 is still working after the reprieve" "$status11a" "working"
+
+kill -STOP "$dev11_pid" 2>/dev/null   # freeze: same pid, genuinely idle from here on
+
+sleep 4   # well past a fresh window(2) from the reset
+out11b="$(printf 'wm-dev11 %s\n' "$dev11_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_contains "frozen (genuinely idle) on the next full window: the reprieve self-heals and it flips" "$out11b" "stalled lead11"
+
+kill -CONT "$dev11_pid" 2>/dev/null
+kill "$dev11_pid" 2>/dev/null
+wait "$dev11_pid" 2>/dev/null
+
+# --- 12. working-only scoping: a non-working child's busy pane is never
+# probed. A candidate whose only child is parked in `review` with a busy
+# process tree at that child's resolved pane pid still flips - a non-
+# `working` report is never probed regardless of what its pane shows
+# (matching NF5's own point about a `review` member parked on a live
+# pr-watch otherwise always reading busy).
+test_new_home
+wm_state crew-add --id lead12 --type developer --objective x --repo /tmp --window wm-lead12 --session-id s12 >/dev/null
+wm_state crew-set --id lead12 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev12 --type developer --objective x --repo /tmp --window wm-dev12 --session-id s-dev12 --parent lead12 >/dev/null
+wm_state crew-set --id dev12 --status review --summary "PR up" --delivery "https://gh/pr/12" >/dev/null
+
+spawn_bg sh -c 'while :; do :; done'
+dev12_pid=$!
+
+printf 'wm-dev12 %s\n' "$dev12_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+sleep 2.5
+out12="$(printf 'wm-dev12 %s\n' "$dev12_pid" \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_contains "a review-parked child's busy pane is ignored: the candidate still flips" "$out12" "stalled lead12"
+
+kill "$dev12_pid" 2>/dev/null
+wait "$dev12_pid" 2>/dev/null
+
+# --- 13. unresolvable pid: fail-open toward flipping. --pane-pids-stdin
+# supplied but with no line for the candidate's child id: the candidate
+# flips as if no liveness data existed at all, matching _probe_cpu_delta's
+# own "tree cannot be read" fail-open contract.
+test_new_home
+wm_state crew-add --id lead13 --type developer --objective x --repo /tmp --window wm-lead13 --session-id s13 >/dev/null
+wm_state crew-set --id lead13 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev13 --type developer --objective x --repo /tmp --window wm-dev13 --session-id s-dev13 --parent lead13 >/dev/null
+wm_state crew-set --id dev13 --status working --summary "coding away" >/dev/null
+
+printf 'wm-someone-else 99999\n' \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin >/dev/null
+sleep 2.5
+out13="$(printf 'wm-someone-else 99999\n' \
+  | wm_state forward-motion-check --owner "" --window-secs 2 --probe-gap 1 --cpu-eps 0.01 --pane-pids-stdin)"
+assert_contains "no pane-pid line for the candidate's child: fails open and flips" "$out13" "stalled lead13"
+
+# --- 14. no --pane-pids-stdin at all: identical to today's behavior, zero
+# probing attempted (the regression floor, made explicit as its own
+# assertion rather than only inferred from the untouched cases 1-8 above).
+test_new_home
+wm_state crew-add --id lead14 --type developer --objective x --repo /tmp --window wm-lead14 --session-id s14 >/dev/null
+wm_state crew-set --id lead14 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev14 --type developer --objective x --repo /tmp --window wm-dev14 --session-id s-dev14 --parent lead14 >/dev/null
+wm_state crew-set --id dev14 --status working --summary "coding away" >/dev/null
+
+spawn_bg sh -c 'while :; do :; done'
+dev14_pid=$!
+
+wm_state forward-motion-check --owner "" --window-secs 2 >/dev/null
+sleep 2.5
+out14="$(wm_state forward-motion-check --owner "" --window-secs 2)"
+assert_contains "no --pane-pids-stdin: no probing attempted, flips exactly as before" "$out14" "stalled lead14"
+
+kill "$dev14_pid" 2>/dev/null
+wait "$dev14_pid" 2>/dev/null
 
 test_summary
