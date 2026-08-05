@@ -32,6 +32,19 @@ print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1], "r
 check_owner() {
   _co_owner="$1"; _co_label="$2"
   test_new_home
+  # A real roster record for a non-empty owner (issue #237, Fix 2b): without
+  # one, that owner's cycle sees an AMBIGUOUS crew-get read every poll (no
+  # such id in the roster at all) - a legitimate, working-as-designed trigger
+  # for Fix 2b's own debounce counter to start writing $OWNERCHECKFILE again
+  # shortly after claim, racing the "stays cleared after claim" assertion
+  # below for a reason that has nothing to do with path derivation, the only
+  # thing this test is actually about. A genuine 'working' record keeps that
+  # read definite (never touches the file), which is also the realistic
+  # shape - a live lead's cycle always has a roster record.
+  if [ -n "$_co_owner" ]; then
+    wm_state crew-add --id "$_co_owner" --type lead --objective x --repo /tmp --window "wm-$_co_owner" --session-id "s-$_co_owner" >/dev/null
+    wm_state crew-set --id "$_co_owner" --status working --summary busy >/dev/null
+  fi
   # wm_owner_paths' own derivation for this owner.
   ( . "$LIB"; wm_owner_paths "$_co_owner" "$WINGMAN_HOME"
     printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pidfile" "$beatfile" "$stopfile" "$suppressedfile" "$claimfailfile" "$ownerlock" "$ownercheckfile" \

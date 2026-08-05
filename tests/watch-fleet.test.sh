@@ -1782,6 +1782,17 @@ out3="$(cat "$WINGMAN_HOME/hg2-takeover.log")"
 assert_contains "the arm detects the wedge and announces a takeover" "$out3" "treating as wedged and taking over"
 assert_contains "the takeover claims a fresh cycle (armed, not healthy)" "$out3" "watcher: armed"
 assert_true "the fresh claimant's pid is genuinely live" "kill -0 $newhg2pid"
+# Poll, not a bare one-shot read: $PIDFILE is written well before this
+# process's own "armed" line, so this assertion process reading a value
+# already committed is the ordinary case - but this is, like every such
+# check elsewhere in this suite, a third, independent process reading state
+# another process wrote, and a loaded CI runner can delay that visibility
+# past the instant "armed" was matched above (mirrors wait_for_content's own
+# documented rationale in tests/stop-continuity.test.sh).
+_hg2pid_i=0
+while [ "$(cat "$WINGMAN_HOME/watch-hg2.pid" 2>/dev/null)" != "$newhg2pid" ] && [ "$_hg2pid_i" -lt 50 ]; do
+  sleep 0.2; _hg2pid_i=$((_hg2pid_i + 1))
+done
 assert_eq "the pidfile now names the fresh claimant" "$(cat "$WINGMAN_HOME/watch-hg2.pid" 2>/dev/null)" "$newhg2pid"
 kill "$newhg2pid" 2>/dev/null
 unset WM_WATCH_HARD_GRACE
