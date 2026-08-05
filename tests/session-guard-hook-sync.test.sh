@@ -96,6 +96,7 @@ exit 0
 EOF
 chmod +x "$STUBDIR1/claude"
 out11a="$(PATH="$STUBDIR1:$PATH" "$MIRROR_OK1/bin/wingman" 2>&1)"; rc11a=$?
+wm_stop_guardian
 assert_eq "bin/wingman: a healthy repo exits 0" "$rc11a" "0"
 assert_true "bin/wingman: claude was execed (session created)" "[ -f '$CLAUDE_MARKER1' ]"
 assert_eq "bin/wingman: every manifest hook is registered before exec" \
@@ -153,6 +154,7 @@ exit 0
 EOF
 chmod +x "$STUBDIR4/claude"
 out12a="$(PATH="$STUBDIR4:$PATH" "$MIRROR_BAD1/bin/wingman" 2>&1)"; rc12a=$?
+wm_stop_guardian
 assert_true "bin/wingman: a broken repo exits non-zero" "[ $rc12a -ne 0 ]"
 assert_false "bin/wingman: claude was never execed" "[ -f '$CLAUDE_MARKER4' ]"
 assert_contains "bin/wingman: the refusal names the remedy" "$out12a" "bin/doctor -y"
@@ -210,6 +212,7 @@ mk_mirror "$MIRROR_BAD4" "hooks/no-direct-edit-guard.sh" missing
 STUBDIR5="$(wm_mktemp_dir)"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBDIR5/claude"; chmod +x "$STUBDIR5/claude"
 PATH="$STUBDIR5:$PATH" "$MIRROR_BAD4/bin/wingman" >/dev/null 2>&1
+wm_stop_guardian
 assert_true "the failure sink is written on a forced sync failure" "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
 sink_content="$(cat "$WINGMAN_HOME/last-launch-failure" 2>/dev/null)"
 assert_contains "the sink names the guard-hook-sync component" "$sink_content" "guard-hook sync"
@@ -229,6 +232,7 @@ assert_contains "bin/doctor's surfaced message names the component" "$doctor_out
 MIRROR_OK4="$(wm_mktemp_dir)/mirror-ok"
 mk_mirror "$MIRROR_OK4"
 PATH="$STUBDIR5:$PATH" "$MIRROR_OK4/bin/wingman" >/dev/null 2>&1
+wm_stop_guardian
 assert_false "a successful launch clears the failure sink" "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
 
 # doctor no longer surfaces anything once it is cleared.
