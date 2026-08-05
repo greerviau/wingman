@@ -1986,4 +1986,142 @@ assert_contains "the die message names the owner lock" "$out6" "failed to create
 assert_false "no pidfile is left behind" "[ -f '$WINGMAN_HOME/watch-ol2.pid' ]"
 assert_false "no blocking loop was entered (beat file untouched)" "[ -f '$WINGMAN_HOME/watch-ol2.beat' ]"
 
+# ============================================================================
+# issue #219: a cycle notices its own code went stale on disk and exits
+# cleanly (never externally killed) to be freshly re-armed
+# ============================================================================
+
+# Like wait_for_owner_status above, but against an arbitrary watch-fleet
+# binary rather than always $WF - these tests arm a throwaway copy so its
+# lib/common.sh can be safely mutated out from under the running cycle.
+wait_for_scoped_status() {
+  _wss_i=0
+  while [ "$_wss_i" -lt 50 ]; do
+    "$1" --owner "$2" --status >/dev/null 2>&1 && return 0
+    sleep 0.2
+    _wss_i=$((_wss_i + 1))
+  done
+  return 1
+}
+
+# --- SC1: a genuine content edit to lib/common.sh is noticed within a couple
+# of polls, classifies as exactly stale-code, never consumes the
+# spurious-failure budget, and a fresh re-arm from the same (now-edited)
+# files comes up live again with its own fingerprint stamp matching the new
+# content and no lingering codecheck streak - the ordinary, single-
+# occurrence auto-heal path staying entirely silent and self-clearing. ------
+test_new_home
+SC1_DIR="$(wm_mktemp_dir)"
+cp "$WF" "$SC1_DIR/watch-fleet"
+chmod +x "$SC1_DIR/watch-fleet"
+cp -r "$TEST_REPO/bin/lib" "$SC1_DIR/lib"
+"$SC1_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc1.log" 2>&1 &
+sc1pid=$!
+wm_track "$sc1pid"
+assert_true "sc1's cycle comes up live" "wait_for_scoped_status '$SC1_DIR/watch-fleet' ''"
+printf '\n# sc1 marker\n' >> "$SC1_DIR/lib/common.sh"
+assert_true "the cycle self-exits within a couple of poll intervals once its own code changes on disk" "wait_for_pid_gone $sc1pid"
+sc1classify="$(wm_timeout 10 "$WF" --owner "" --classify 2>/dev/null)"
+assert_eq "the stale-code self-exit classifies as exactly stale-code" "$sc1classify" "stale-code"
+assert_eq "a stale-code exit never consumes the spurious-failure budget" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+"$SC1_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc1-refresh.log" 2>&1 &
+sc1refreshpid=$!
+wm_track "$sc1refreshpid"
+assert_true "a fresh re-arm from the same, now-edited files comes up live again" "wait_for_scoped_status '$SC1_DIR/watch-fleet' ''"
+assert_eq "the fresh cycle's own fingerprint stamp matches the new on-disk content" "$(cat "$WINGMAN_HOME/watch.code" 2>/dev/null)" "$(cksum "$SC1_DIR/watch-fleet" "$SC1_DIR/lib/common.sh")"
+sleep 3
+assert_false "the fresh cycle's own first poll(s) find a match, clearing any codecheck streak" "[ -e '$WINGMAN_HOME/watch.codecheck' ]"
+kill "$sc1refreshpid" 2>/dev/null
+
+# --- SC2: a bare mtime bump with no content change never trips the check - --
+# the direct proof this is a content-hash check, not an mtime check. --------
+test_new_home
+SC2_DIR="$(wm_mktemp_dir)"
+cp "$WF" "$SC2_DIR/watch-fleet"
+chmod +x "$SC2_DIR/watch-fleet"
+cp -r "$TEST_REPO/bin/lib" "$SC2_DIR/lib"
+"$SC2_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc2.log" 2>&1 &
+sc2pid=$!
+wm_track "$sc2pid"
+assert_true "sc2's cycle comes up live" "wait_for_scoped_status '$SC2_DIR/watch-fleet' ''"
+touch "$SC2_DIR/lib/common.sh"
+sleep 5
+assert_true "a bare mtime bump with no content change never trips the stale-code check" "kill -0 $sc2pid"
+kill "$sc2pid" 2>/dev/null
+
+# --- SC3: the anti-spin loop bound - a SECOND consecutive fresh arm also ----
+# mismatching on its own first poll is a malfunction (e.g. an unwritable
+# $CODEFILE), not a genuine code update, and correctly falls through to the
+# EXISTING spurious-failure budget instead of spinning silently forever. Four
+# arms total: the first is the genuine (if malfunction-caused) stale-code
+# exit; the next three are what actually trips spurious-repeated. ----------
+test_new_home
+SC3_DIR="$(wm_mktemp_dir)"
+cp "$WF" "$SC3_DIR/watch-fleet"
+chmod +x "$SC3_DIR/watch-fleet"
+cp -r "$TEST_REPO/bin/lib" "$SC3_DIR/lib"
+# $CODEFILE's own path, pre-created as a directory: `code_fingerprint >
+# "$CODEFILE"` fails (EISDIR) on every claim, and `cat` on it always reads
+# empty - deterministic and platform-independent, unlike chmod 0444 (which a
+# root-run suite would ignore).
+mkdir "$WINGMAN_HOME/watch.code"
+
+"$SC3_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc3-1.log" 2>&1 &
+sc3pid1=$!
+wm_track "$sc3pid1"
+assert_true "arm 1 exits on its own (an unwritable \$CODEFILE can never stamp a fingerprint to match against)" "wait_for_pid_gone $sc3pid1"
+sc3c1="$(wm_timeout 10 "$WF" --owner "" --classify 2>/dev/null)"
+assert_eq "arm 1 classifies as stale-code (streak 1 - its own claim never actually wrote a stamp)" "$sc3c1" "stale-code"
+assert_eq "the stale-code exit resets the spurious-failure count to 0" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+
+"$SC3_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc3-2.log" 2>&1 &
+sc3pid2=$!
+wm_track "$sc3pid2"
+assert_true "arm 2 also exits on its own (streak reaches 2 - a malfunction, not a code update)" "wait_for_pid_gone $sc3pid2"
+sc3c2="$(wm_timeout 10 "$WF" --owner "" --classify 2>/dev/null)"
+assert_contains "arm 2's death falls through to the ordinary no-record hint logic, feeding the REAL failure budget" "$sc3c2" "spurious 1 "
+
+"$SC3_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc3-3.log" 2>&1 &
+sc3pid3=$!
+wm_track "$sc3pid3"
+assert_true "arm 3 exits on its own too (streak 3)" "wait_for_pid_gone $sc3pid3"
+sc3c3="$(wm_timeout 10 "$WF" --owner "" --classify 2>/dev/null)"
+assert_contains "arm 3 continues feeding the real budget" "$sc3c3" "spurious 2 "
+
+"$SC3_DIR/watch-fleet" --owner "" >"$WINGMAN_HOME/sc3-4.log" 2>&1 &
+sc3pid4=$!
+wm_track "$sc3pid4"
+assert_true "arm 4 exits on its own too (streak 4)" "wait_for_pid_gone $sc3pid4"
+sc3c4="$(wm_timeout 10 "$WF" --owner "" --classify 2>/dev/null)"
+assert_contains "the real budget trips spurious-repeated on the fourth arm overall" "$sc3c4" "spurious-repeated 3 "
+assert_true "a standdown is durably recorded" "[ -f '$WINGMAN_HOME/watch.suppressed' ]"
+"$WF" --clear-standdown >/dev/null 2>&1
+
+# --- SC4: the worktree-removal self-check still wins the ordering race - a --
+# removed $SELF_BIN_DIR classifies as `stopped`, never `stale-code` (the
+# stale-code check's own fail-closed handling of an uncomputable fingerprint
+# correctly defers to the check immediately above it rather than racing
+# ahead of it). Modeled directly on the existing Fix 2a worktree-removal
+# test above. --------------------------------------------------------------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-scwt1 'sleep 600'
+SCWT_PARENT="$(wm_mktemp_dir)"
+SCWT_DIR="$SCWT_PARENT/fake-worktree"
+mkdir -p "$SCWT_DIR"
+cp "$WF" "$SCWT_DIR/watch-fleet"
+chmod +x "$SCWT_DIR/watch-fleet"
+ln -s "$TEST_REPO/bin/lib" "$SCWT_DIR/lib"
+wm_state crew-add --id scwt1 --type lead --objective x --repo /tmp --window wm-scwt1 --session-id sscwt1 >/dev/null
+wm_state crew-set --id scwt1 --status working --summary "in progress" >/dev/null
+"$SCWT_DIR/watch-fleet" --owner scwt1 >"$WINGMAN_HOME/scwt1.log" 2>&1 &
+scwt1pid=$!
+wm_track "$scwt1pid"
+assert_true "the cycle armed from the throwaway worktree comes up live" "wait_for_owner_status scwt1"
+rm -rf "$SCWT_PARENT"
+assert_true "the cycle self-exits once its own worktree directory is gone" "wait_for_pid_gone $scwt1pid"
+scwt1classify="$(wm_timeout 10 "$WF" --owner scwt1 --classify 2>/dev/null)"
+assert_eq "a removed worktree classifies as stopped, never stale-code" "$scwt1classify" "stopped"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary
