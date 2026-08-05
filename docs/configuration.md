@@ -112,6 +112,9 @@ Machine-local runtime state, created on first run, never committed:
 - `watch.pid.owner/` (a directory, `owner` file inside) - the authoritative singleton-lifetime liveness record for that same cycle: the claiming process's pid plus its process start time, checked identity-first rather than by beacon freshness alone, so a reused pid or a merely-stalled-but-alive cycle is never mistaken for dead.
   One character away from `watch.pid.lock/owner` (the separate, sub-second claim lock) - do not confuse the two.
   A lead's cycle keys this `watch-<owner>.pid.owner/` the same way as its pid/beat files above; `watch.ownercheck` (owner-scoped cycles only) is the small debounce counter for a transiently-unreadable owner-status read.
+- `watch.code` - a content fingerprint (`cksum` of `watch-fleet` + `lib/common.sh`) stamped at arm time; compared every poll so a cycle notices its own code went stale on disk and exits (`stale-code`) rather than running superseded logic indefinitely (issue #219).
+  A lead's watcher keys its own `watch-<owner>.code` the same way as its pid/beat/run files.
+- `watch.codecheck` - a small consecutive-mismatch streak counter guarding the check above against spinning: a SECOND consecutive freshly-armed cycle whose own first poll also mismatches is treated as a malfunction, not a real code update, and falls through to the ordinary spurious-failure accounting instead of repeating `stale-code`. Unlike `watch.ownercheck`, this one is deliberately NOT cleared at claim time - it has to persist across the exact re-arm the malfunction it detects would otherwise be invisible across.
 - `wake` - the attention list wingman's watcher writes when it fires; a lead's watcher writes `wake-<owner>`.
 - `acked.json` - the last `announced` stamp surfaced per crew id, so a surfaced event (blocked/review/done/died) is delivered once instead of on every watcher arm and Stop-hook check.
   A new `announced` (a genuine state change) re-surfaces.
