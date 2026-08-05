@@ -94,7 +94,7 @@ ME="$($GH api user --jq .login 2>/dev/null || true)"
 # Prints the reason line (and returns 0) iff there is a fresh actionable event.
 poll_once() {
   _pr_json="$($GH pr view "$PR" \
-    --json state,mergedAt,statusCheckRollup,reviews,comments,number,url,mergeable,mergeStateStatus \
+    --json state,mergedAt,statusCheckRollup,reviews,comments,number,url,mergeable,mergeStateStatus,headRefOid \
     2>/dev/null)" || return 1
   [ -n "$_pr_json" ] || return 1
 

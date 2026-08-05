@@ -11,7 +11,9 @@ canned JSON. It reads:
 
   --pr-json <path|->        output of `gh pr view <pr> --json
                             state,mergedAt,statusCheckRollup,reviews,comments,number,url,
-                            mergeable,mergeStateStatus`
+                            mergeable,mergeStateStatus,headRefOid` - headRefOid (the
+                            SHA of the commit the rollup describes) gates checks-passed/
+                            merge-ready, see the settle-gate paragraph below
   --review-comments <path>  a JSON array of inline review-thread comments
                             (`gh api repos/{owner}/{repo}/pulls/{n}/comments`), optional
   --cursor <path>           the on-disk cursor of what has already been surfaced
@@ -74,6 +76,19 @@ to move into `review` the moment it settles. It sits below `comment` so
 unaddressed feedback is handled before the member parks, and it re-arms (fires
 again) once checks or mergeability go back to pending/failing/conflicting and
 settle anew.
+
+`checks-passed`/`merge-ready` are additionally gated on `headRefOid` (issue #257):
+an empty or fully-resolved `statusCheckRollup` is trusted only once the SAME head
+has been observed on two consecutive polls, including a fresh cursor's very first
+poll. Right after a push (a fix-up commit, or the first push of a brand-new PR),
+`statusCheckRollup` can be transiently empty for the new head for the 20-30s
+window before Actions registers any check runs for it - a snapshot
+indistinguishable, at the data level, from a genuine no-CI PR's permanently-empty
+rollup. Requiring two consecutive polls to agree on the head before trusting that
+snapshot closes the race for both the fix-up-push case and the arm-immediately-
+after-`gh pr create` case. A PR whose `--pr-json` carries no `headRefOid` at all
+(an older/degraded caller, or a test fixture omitting the field) never gates -
+this is byte-identical to pre-#257 behavior.
 
 `merge-ready` occupies the exact same slot as `checks-passed` but fires instead
 of it when `--crew-record` reports `allow_merge: true`: the PR being green and
@@ -237,6 +252,25 @@ def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False):
     if "conv_hwm" not in cur:
         cur["conv_hwm"] = convo_max
 
+    # headRefOid settle-gate (issue #257): a fresh push - including the very
+    # first push of a brand-new PR, the moment bin/pr-watch is armed
+    # immediately after `gh pr create` - can leave statusCheckRollup empty
+    # for the NEW head for the 20-30s window before Actions registers any
+    # check runs for it, identical at the data level to a genuine no-CI PR's
+    # rollup. Require the SAME head to be observed on two consecutive polls
+    # before an empty/resolved rollup can satisfy `ready` - uniformly,
+    # including a fresh cursor's very first poll (there is no legitimate
+    # "trust it immediately" case: a no-CI PR settles one poll later instead,
+    # a real race is closed both on a fix-up push AND on a brand-new PR). A
+    # PR carrying no headRefOid at all (an older/degraded caller, or a test
+    # fixture omitting the field) never gates - head_confirmed is False and
+    # head_oid is empty, and `or not head_oid` below restores exactly the
+    # pre-fix behavior.
+    head_oid = (pr.get("headRefOid") or "").strip().lower()
+    head_confirmed = bool(head_oid) and cur.get("head_ref_oid") == head_oid
+    if head_oid:
+        cur["head_ref_oid"] = head_oid
+
     state = str(pr.get("state") or "").upper()
     if state == "MERGED" or pr.get("mergedAt"):
         return ("merged: %s" % _pr_ref(pr), cur)
@@ -295,7 +329,8 @@ def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False):
     # merge-ready still fires on the very next poll with no dependency on any
     # further PR-side event - closing the gap where a mid-flight allow_merge
     # grant lands on an already-settled PR.
-    ready = (not fail) and (not checks_pending(pr)) and mergeability == "MERGEABLE"
+    ready = (not fail) and (not checks_pending(pr)) and mergeability == "MERGEABLE" \
+        and (head_confirmed or not head_oid)
     merge_ready = ready and allow_merge
     if mergeability == "UNKNOWN":
         pass  # not yet resolved - leave both cursors exactly as they were
