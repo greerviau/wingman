@@ -419,6 +419,15 @@ assert_contains "a stall under hard grace is still denied - the old beacon-only 
 # hard-grace term back to unconditional protection would make every assertion
 # above still pass - only this one actually exercises the change.
 wm_age_path "$WINGMAN_HOME/watch.beat" 400
+# Confirmed directly, not only inferred from the guard's own output below: a
+# wm_age_path failure could, in principle, leave the beat file missing rather
+# than genuinely aged, and a MISSING beat file also reads as "not protected"
+# to protected_pids() - which would make the assertion below pass vacuously
+# without the hard-grace term itself ever actually being exercised.
+assert_true "the beat file survives aging (still exists, not deleted)" "[ -f '$WINGMAN_HOME/watch.beat' ]"
+_beat_mtime="$(uv run --no-project --quiet python -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$WINGMAN_HOME/watch.beat" 2>/dev/null)"
+_beat_age=$(( $(date +%s) - _beat_mtime ))
+assert_true "the beat file is genuinely aged past the 300s default hard grace" "[ $_beat_age -ge 300 ]"
 out2="$(run_hook "kill $hgpid")"
 assert_eq "a stall past hard grace is no longer protected - the changed half of the correction" "$out2" ""
 

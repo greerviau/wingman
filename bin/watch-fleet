@@ -667,15 +667,20 @@ case "$MODE" in
     else
       pid=""
     fi
+    printf 'stopped\n' > "$EXITFILE"
     if [ -n "$pid" ]; then
-      printf 'stopped\n' > "$EXITFILE"
       kill "$pid" 2>/dev/null
-      rm -f "$PIDFILE" "$RUNFILE"; rm -rf "$OWNERLOCK"
       wm_ok "watch-fleet stopped"
     else
-      printf 'stopped\n' > "$EXITFILE"
       wm_info "no watch-fleet cycle to stop"
     fi
+    # Unconditional, not only on the "found a pid to kill" branch: an
+    # existing-but-EMPTY $PIDFILE (pid="" from a successful `cat` of nothing)
+    # took the "nothing to stop" message above under the old structure, but
+    # left the stale (empty) pidfile itself in place - which then classifies
+    # as hung-or-stale-pidfile forever, since $PIDFILE existing is exactly
+    # what --classify's own hint logic treats as "something to explain".
+    rm -f "$PIDFILE" "$RUNFILE"; rm -rf "$OWNERLOCK"
     exit 0 ;;
   --start)
     wm_warn "watch-fleet --start is deprecated: arm 'bin/watch-fleet' as a harness-tracked background task instead. Blocking now."
@@ -1262,11 +1267,12 @@ while :; do
   # The generic per-poll outbox scan (issue #169): runs in EVERY watcher,
   # unconditionally on $OWNER, every poll, before anything else can `exit 0`
   # this poll - fire()'s own exit 0 is below (see the needs-attention check at
-  # the bottom of this loop), the worktree-removal/owner-status self-checks
-  # (issue #237, Fix 2a/2b) just below this are a second, and the self-pane
-  # check just below THAT is a third, so this scan sits ahead of all THREE: a
-  # member's outbox must not go unswept for however many polls those paths
-  # keep firing.
+  # the bottom of this loop) is the first; the worktree-removal self-check
+  # (issue #237, Fix 2a) just below this is a second; the owner-status
+  # self-check (Fix 2b) right after it is a third, independent one; and the
+  # self-pane check just below THAT is a fourth - so this scan sits ahead of
+  # all FOUR: a member's outbox must not go unswept for however many polls
+  # those paths keep firing.
   # Placed before wm_tmux_adopt_strays/wm_state reconcile below, so a member
   # that dies during poll N first becomes visible to the scan on poll N+1 -
   # one extra poll of latency, still within the ~5s bound this design claims

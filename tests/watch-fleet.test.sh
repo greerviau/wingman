@@ -1581,8 +1581,15 @@ wait_for_pid_gone() {
 # self-stops within one poll, with no standdown ever involved - the incident's
 # own single most distinctive fact ("the worktree ... no longer existed").
 # $0 is resolved from inside a throwaway directory (mirroring this plan's own
-# reproduction), which is then removed out from under the running cycle.
+# reproduction), which is then removed out from under the running cycle. wt1
+# is backed by a real tmux window (issue #209, and round-2 review MF-4's own
+# finding): without one, reconcile flips a windowless "working" record to
+# died on an early poll, and Fix 2b's own owner-status self-check then races
+# ahead of the worktree-removal self-check this test means to isolate -
+# masking the real assertions behind a coincidentally-similar outcome.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-wt1 'sleep 600'
 WT_PARENT="$(wm_mktemp_dir)"
 WT_DIR="$WT_PARENT/fake-worktree"
 mkdir -p "$WT_DIR"
@@ -1599,10 +1606,15 @@ rm -rf "$WT_PARENT"
 assert_true "the cycle self-exits once its own worktree directory is gone" "wait_for_pid_gone $wt1pid"
 wtclassify="$(wm_timeout 10 "$WF" --owner wt1 --classify 2>/dev/null)"
 assert_eq "the worktree-removal self-stop classifies as a deliberate stop, not a spurious failure" "$wtclassify" "stopped"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 2b: a cycle self-stops once its owner is irrecoverably died, with no
 # standdown ever called (a crashed lead nobody has stood down yet) -----------
+# A real tmux window keeps the only cause of death here the explicit crew-set
+# below, not reconcile racing ahead of it for an unrelated reason.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-dead1 'sleep 600'
 wm_state crew-add --id dead1 --type lead --objective x --repo /tmp --window wm-dead1 --session-id sdead1 >/dev/null
 wm_state crew-set --id dead1 --status working --summary "in progress" >/dev/null
 "$WF" --owner dead1 >"$WINGMAN_HOME/dead1.log" 2>&1 &
@@ -1613,12 +1625,16 @@ wm_state crew-set --id dead1 --status died >/dev/null
 assert_true "the cycle self-stops once its owner is irrecoverably died" "wait_for_pid_gone $dead1pid"
 deadclassify="$(wm_timeout 10 "$WF" --owner dead1 --classify 2>/dev/null)"
 assert_eq "the died-owner self-stop classifies as a deliberate stop" "$deadclassify" "stopped"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 2b: died-but-RESUMABLE does NOT self-stop (issue #254 interaction) --
 # A died member's session transcript surviving on disk is exactly the case
 # #254's own takeover path exists for - self-stopping the watcher here would
-# strand that recovery path's own wake channel.
+# strand that recovery path's own wake channel. A real tmux window keeps the
+# only cause of death the explicit crew-set below, not reconcile.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-resume1 'sleep 600'
 PROJDIR="$(wm_mktemp_dir)"
 export WM_CLAUDE_PROJECTS_DIR="$PROJDIR"
 RESUME_SLUG="$(printf '%s' /tmp | sed -E 's/[^A-Za-z0-9-]/-/g')"
@@ -1636,6 +1652,7 @@ sleep 4
 assert_true "a resumable died owner's cycle keeps polling, not self-stopped" "kill -0 $resume1pid"
 kill "$resume1pid" 2>/dev/null
 unset WM_CLAUDE_PROJECTS_DIR
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 2b: a genuinely vanished-from-roster owner self-stops, debounced ----
 # wm_state has no delete subcommand; bin/crew-prune (via `wm_state prune`)
@@ -1656,7 +1673,14 @@ assert_eq "the vanished-owner self-stop classifies as a deliberate stop" "$gonec
 # --- Fix 2b SF1: a crew-get failure does not immediately self-stop a healthy
 # owner's watcher - it debounces across WM_OWNER_MISSING_CONFIRMS consecutive
 # ambiguous reads before acting -----------------------------------------------
+# A real tmux window (round-2 review MF-4's own finding, applied here too):
+# without one, reconcile flips sf1's record to died on an early poll, and
+# once the stub's own recovery call (poll 3+) falls through to the REAL
+# crew-get, it would read "died" instead of "working" - self-stopping the
+# cycle for a reason this test does not mean to exercise at all.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-sf1 'sleep 600'
 wm_state crew-add --id sf1 --type lead --objective x --repo /tmp --window wm-sf1 --session-id ssf1 >/dev/null
 wm_state crew-set --id sf1 --status working --summary "in progress" >/dev/null
 
@@ -1693,12 +1717,17 @@ done
 assert_true "the stub was actually exercised past its own 2-failure window" "[ \"\$(cat '$COUNTER_A' 2>/dev/null)\" -ge 3 ]"
 assert_true "two transient ambiguous reads (below the confirm threshold) never self-stop a healthy owner" "kill -0 $sf1pid"
 kill "$sf1pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # The genuinely-and-persistently-ambiguous case: the stub fails every poll,
 # standing in for a sustained inability to resolve the owner's status - the
 # same debounce applies, but self-stop follows once the confirm threshold
-# (WM_OWNER_MISSING_CONFIRMS, default 3) is actually reached.
+# (WM_OWNER_MISSING_CONFIRMS, default 3) is actually reached. The stub never
+# falls through to a real crew-get here, so no tmux window is needed for
+# correctness - added anyway for consistency with the rest of this file.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-sf2 'sleep 600'
 wm_state crew-add --id sf2 --type lead --objective x --repo /tmp --window wm-sf2 --session-id ssf2 >/dev/null
 wm_state crew-set --id sf2 --status working --summary "in progress" >/dev/null
 
@@ -1722,10 +1751,17 @@ assert_true "sf2's cycle comes up live" "wait_for_owner_status sf2"
 assert_true "a persistently ambiguous owner read self-stops once the confirm threshold is reached" "wait_for_pid_gone $sf2pid"
 sf2classify="$(wm_timeout 10 "$WF" --owner sf2 --classify 2>/dev/null)"
 assert_eq "the confirmed-gone self-stop classifies as a deliberate stop" "$sf2classify" "stopped"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 3 MF2: a stall under the hard-grace threshold is never stolen from -
-# (mirrors this plan's own repro 2, at the new, coarser threshold)
+# (mirrors this plan's own repro 2, at the new, coarser threshold). A real
+# tmux window (round-2 review MF-4's own finding, applied here too): without
+# one, reconcile flips hg1 to died mid-test and Fix 2b's own self-check
+# would remove the very pidfile this test polls, for a reason unrelated to
+# the hard-grace behavior actually under test.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-hg1 'sleep 600'
 wm_state crew-add --id hg1 --type lead --objective x --repo /tmp --window wm-hg1 --session-id shg1 >/dev/null
 wm_state crew-set --id hg1 --status working --summary "in progress" >/dev/null
 export WM_WATCH_HARD_GRACE=20
@@ -1743,13 +1779,21 @@ assert_eq "the pidfile is unchanged - no rival claim while under hard grace" "$a
 kill -CONT "$hg1pid" 2>/dev/null
 kill "$hg1pid" 2>/dev/null
 unset WM_WATCH_HARD_GRACE
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 3 MF2 (round-2 MF-A): a wedge beyond hard grace is taken over, ------
 # escalating SIGTERM -> SIGKILL, since a genuinely SIGSTOPped process cannot
 # process a SIGTERM until it is continued or killed outright - the same
 # unresponsive-to-SIGTERM shape a cycle wedged in a blocking foreground child
-# (e.g. a hung tmux call) exhibits, per this plan's own repro 3.
+# (e.g. a hung tmux call) exhibits, per this plan's own repro 3. A real tmux
+# window (round-2 review MF-4's own finding): without one, reconcile flips
+# hg2 to died shortly after the takeover's fresh claim, and Fix 2b's own
+# self-check then self-stops the fresh claimant for a reason unrelated to
+# the wedge-takeover behavior this test actually means to exercise - this
+# case is about taking over a genuinely WEDGED holder, not a dead owner.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-hg2 'sleep 600'
 wm_state crew-add --id hg2 --type lead --objective x --repo /tmp --window wm-hg2 --session-id shg2 >/dev/null
 wm_state crew-set --id hg2 --status working --summary "in progress" >/dev/null
 export WM_WATCH_HARD_GRACE=2
@@ -1782,38 +1826,50 @@ out3="$(cat "$WINGMAN_HOME/hg2-takeover.log")"
 assert_contains "the arm detects the wedge and announces a takeover" "$out3" "treating as wedged and taking over"
 assert_contains "the takeover claims a fresh cycle (armed, not healthy)" "$out3" "watcher: armed"
 assert_true "the fresh claimant's pid is genuinely live" "kill -0 $newhg2pid"
-# Poll, not a bare one-shot read: $PIDFILE is written well before this
-# process's own "armed" line, so this assertion process reading a value
-# already committed is the ordinary case - but this is, like every such
-# check elsewhere in this suite, a third, independent process reading state
-# another process wrote, and a loaded CI runner can delay that visibility
-# past the instant "armed" was matched above (mirrors wait_for_content's own
-# documented rationale in tests/stop-continuity.test.sh).
-_hg2pid_i=0
-while [ "$(cat "$WINGMAN_HOME/watch-hg2.pid" 2>/dev/null)" != "$newhg2pid" ] && [ "$_hg2pid_i" -lt 50 ]; do
-  sleep 0.2; _hg2pid_i=$((_hg2pid_i + 1))
-done
+# A bare read, not a poll: $PIDFILE is written well before this process's own
+# "armed" line (already matched above), so by this point it is a same-machine
+# read of a file another process already committed - not the kind of gap a
+# poll defends against. With hg2 backed by a real tmux window (above), the
+# fresh claimant also never self-stops out from under this assertion the way
+# it did before that fixture existed.
 assert_eq "the pidfile now names the fresh claimant" "$(cat "$WINGMAN_HOME/watch-hg2.pid" 2>/dev/null)" "$newhg2pid"
 kill "$newhg2pid" 2>/dev/null
 unset WM_WATCH_HARD_GRACE
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 3 MF1: a reused pid does not falsely pass identity verification ----
 # Pre-seeds $OWNERLOCK with the test harness's own live pid ($$) and a
 # mismatched start-time stamp - the cheapest available stand-in for a
 # reboot-inherited reused pid, since it is trivially live but is not a
-# watch-fleet cycle at all.
+# watch-fleet cycle at all. NOT wm_timeout: identity verification failing
+# means owner_lock_alive() is false, so this arm falls straight through to a
+# normal claim and BLOCKS (it is the fresh live cycle) - a foreground
+# wm_timeout would only ever return once its own deadline force-kills it,
+# stalling this case for its full bound every run for no reason. Backgrounded
+# instead, with a real tmux window (round-2 review MF-4's own finding,
+# applied here too) so reconcile never flips ri1 to died out from under it.
 test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ri1 'sleep 600'
 wm_state crew-add --id ri1 --type lead --objective x --repo /tmp --window wm-ri1 --session-id sri1 >/dev/null
 wm_state crew-set --id ri1 --status working --summary "in progress" >/dev/null
 mkdir "$WINGMAN_HOME/watch-ri1.pid.owner"
 printf '%s\n%s\n' "$$" "not-a-real-start-time" > "$WINGMAN_HOME/watch-ri1.pid.owner/owner"
-out4="$(wm_timeout 15 "$WF" --owner ri1 2>&1)"
+"$WF" --owner ri1 >"$WINGMAN_HOME/ri1.log" 2>&1 &
+ri1pid=$!
+wm_track "$ri1pid"
+_ri1_i=0
+while ! grep -q "watcher: armed" "$WINGMAN_HOME/ri1.log" 2>/dev/null && [ "$_ri1_i" -lt 75 ]; do
+  sleep 0.2; _ri1_i=$((_ri1_i + 1))
+done
+out4="$(cat "$WINGMAN_HOME/ri1.log")"
 assert_contains "a fresh arm claims normally over a reused-pid stamp mismatch" "$out4" "watcher: armed"
 assert_not_contains "the fresh arm never reports healthy against the mismatched stamp" "$out4" "healthy"
 assert_not_contains "no takeover is attempted against the harness's own process" "$out4" "taking over"
 assert_true "the test harness's own process ($$) is left untouched" "kill -0 $$"
-riclean_pid="$(cat "$WINGMAN_HOME/watch-ri1.pid" 2>/dev/null)"
-kill "$riclean_pid" 2>/dev/null
+assert_true "the fresh claimant's pid is genuinely live" "kill -0 $ri1pid"
+kill "$ri1pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation - the mkdir itself fails -
 # and is fatal on failure - never a silently-unprotected cycle. The

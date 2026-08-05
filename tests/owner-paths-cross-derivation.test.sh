@@ -32,16 +32,21 @@ print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1], "r
 check_owner() {
   _co_owner="$1"; _co_label="$2"
   test_new_home
-  # A real roster record for a non-empty owner (issue #237, Fix 2b): without
-  # one, that owner's cycle sees an AMBIGUOUS crew-get read every poll (no
-  # such id in the roster at all) - a legitimate, working-as-designed trigger
-  # for Fix 2b's own debounce counter to start writing $OWNERCHECKFILE again
-  # shortly after claim, racing the "stays cleared after claim" assertion
-  # below for a reason that has nothing to do with path derivation, the only
-  # thing this test is actually about. A genuine 'working' record keeps that
-  # read definite (never touches the file), which is also the realistic
-  # shape - a live lead's cycle always has a roster record.
+  # A real roster record AND a real tmux window for a non-empty owner (issue
+  # #237, Fix 2b - round-2 review's own MF-3/MF-4 finding): without a roster
+  # record at all, that owner's cycle sees an AMBIGUOUS crew-get read every
+  # poll, a legitimate trigger for Fix 2b's own debounce counter to start
+  # writing $OWNERCHECKFILE again shortly after claim. A record alone is not
+  # enough, though: without a matching LIVE window, reconcile flips it to
+  # died (not resumable) within a couple of polls, and Fix 2b's self-check
+  # then self-stops the cycle outright - removing $PIDFILE/$OWNERLOCK and
+  # invalidating every assertion below it for a reason that has nothing to
+  # do with path derivation, the only thing this test is actually about. Both
+  # together keep the owner genuinely, indefinitely alive - also the
+  # realistic shape, since a live lead always has both.
   if [ -n "$_co_owner" ]; then
+    tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+    tmux new-window -d -t "$WM_TMUX_SESSION" -n "wm-$_co_owner" 'sleep 600'
     wm_state crew-add --id "$_co_owner" --type lead --objective x --repo /tmp --window "wm-$_co_owner" --session-id "s-$_co_owner" >/dev/null
     wm_state crew-set --id "$_co_owner" --status working --summary busy >/dev/null
   fi
@@ -110,6 +115,7 @@ check_owner() {
   assert_true "$_co_label: the pid stamped at the lib's predicted OWNERLOCK path is genuinely this claim" "[ \"\$(sed -n '1p' '$_lib_ownerlock/owner' 2>/dev/null)\" = '$_co_pid' ]"
   kill "$_co_pid" 2>/dev/null
   unset WINGMAN_CREW_ID
+  [ -n "$_co_owner" ] && tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 }
 
 check_owner "" unscoped
