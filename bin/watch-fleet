@@ -2239,7 +2239,25 @@ EOF_USAGE
   # fresh status in the very same cycle it was written, exactly the same
   # ordering relationship the per-id stall-check loop above already has with
   # this same needs-attention call.
-  wm_state forward-motion-check --owner "$OWNER" --window-secs "$WM_FORWARD_MOTION_SECS" >/dev/null 2>&1
+  #
+  # Liveness-aware since issue #244: hand forward-motion-check a session-wide
+  # pane-pid snapshot (one tmux call, no extra wm_state subprocess) so that,
+  # ONLY for a candidate that has actually reached --window-secs this poll, it
+  # can probe that candidate's working children's process trees for genuine
+  # CPU spend over a sampling gap before flipping. A live probe resets the
+  # anchor instead of flipping - the same treatment a genuine reported-state
+  # change already gets. Deliberately CPU-delta evidence only (_probe_cpu_delta,
+  # not _probe_execution and not the cheap liveness-probe used elsewhere in
+  # this file for issue #234): a delegate merely parked on its own idle armed
+  # watcher always has a late-started descendant, so anything that answers
+  # branch (a)'s question would read it "alive" too and silently defeat this
+  # detector for its most ordinary population - see bin/lib/wm-state.py's
+  # cmd_forward_motion_check docstring. No --root-grace: that parameter is
+  # branch (a)'s alone, and this call path never uses it.
+  wm_tmux list-panes -s -t "$WM_TMUX_TARGET" -F '#{window_name} #{pane_pid}' 2>/dev/null \
+    | wm_state forward-motion-check --owner "$OWNER" --window-secs "$WM_FORWARD_MOTION_SECS" \
+        --probe-gap "$STALL_PROBE_GAP" --cpu-eps "$STALL_CPU_EPS" \
+        --pane-pids-stdin >/dev/null 2>&1
   # Who needs this owner right now? Scoped to the owner's own direct reports, so a
   # lead's worker never wakes wingman and vice versa. Checked at the top of the loop
   # so an event already pending on arm fires immediately (at-least-once re-arms).
