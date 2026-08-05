@@ -33,13 +33,18 @@ self-heal window already ran:
      a best-effort clear of the stray nudge text from its composer, but that
      clear is sent and never verified, so check the pane when you attach
      rather than assuming it is clean.
-2. **The probe-free structural forward-motion stall** (`cmd_forward_motion_check`,
+2. **The structural forward-motion stall** (`cmd_forward_motion_check`,
    issue #199) - a lead (or sub-lead) whose own roster shape (its
    `summary`/`blocker`/`artifact`/`delivery`, plus every active report's
    status/announced) hasn't changed for `WM_FORWARD_MOTION_SECS` despite it
-   still reporting `working`. **No nudge is sent first** - this flips directly,
-   with no liveness signal to nudge in the first place (the session may be
-   actively orchestrating, just making no forward progress on its roster).
+   still reporting `working`, **and** none of its `working` children's
+   process trees showed measurable CPU spend when probed at flip time (issue
+   #244) - a delegate merely parked on its own idle armed watcher does not
+   count as evidence against the flip, but a genuinely busy one reprieves it
+   and resets the window instead. **No nudge is sent first** - this flips
+   directly (the session may be actively orchestrating, just making no
+   forward progress on its roster, with none of its working children
+   measurably active either).
 3. **The probe-free wedge stall** (`wm_state wedge-check`, issue #202) - a
    member's pane has repainted *continuously*, never idle at a prompt, for
    `WM_WEDGE_SECS` while its own record went unwritten and a
