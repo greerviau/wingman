@@ -22,6 +22,21 @@ dead_pid() {
   echo "$_dp"
 }
 
+# stamp_ownerlock <pid> [owner-suffix] - fabricate a genuine $OWNERLOCK for a
+# real backgrounded pid, matching exactly what a real arm's own claim step
+# writes (pid + process start time). Needed wherever a test fabricates
+# $WINGMAN_HOME/watch[-<key>].pid directly rather than going through a real
+# bin/watch-fleet arm: owner_lock_alive() (issue #237) now requires this
+# identity stamp, not just the bare pidfile, to treat a pid as the genuine
+# owner.
+stamp_ownerlock() {
+  _so_pid="$1"
+  _so_suffix="${2:-}"
+  _so_start="$(ps -o lstart= -p "$_so_pid" | sed -e 's/^ *//' -e 's/ *$//')"
+  mkdir -p "$WINGMAN_HOME/watch${_so_suffix}.pid.owner"
+  printf '%s\n%s\n' "$_so_pid" "$_so_start" > "$WINGMAN_HOME/watch${_so_suffix}.pid.owner/owner"
+}
+
 # --- argument-parser acceptance: --classify never hits "unknown arg" ---------
 test_new_home
 out="$(wm_timeout 10 "$WF" --classify 2>&1)"
@@ -69,8 +84,8 @@ sleep 300 &
 livepid=$!
 wm_track "$livepid"
 echo "$livepid" > "$WINGMAN_HOME/watch.pid"
-# No BEATFILE at all: beat_age() reads as 999999 (definitely stale), so
-# cycle_live is false despite the pid being alive.
+# No $OWNERLOCK at all here: owner_lock_alive() (and so cycle_healthy())
+# reads false despite the pid being genuinely alive.
 out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "pidfile naming a live pid, stale beacon: hung-or-stale-pidfile" "$out" "spurious 1 hung-or-stale-pidfile"
 kill "$livepid" 2>/dev/null
@@ -78,9 +93,9 @@ kill "$livepid" 2>/dev/null
 test_new_home
 mkdir "$WINGMAN_HOME/watch.pid.lock"
 out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
-assert_eq "a leaked claim lock, no cycle live: stale-claim-lock" "$out" "spurious 1 stale-claim-lock"
+assert_eq "a leaked claim lock, no cycle healthy: stale-claim-lock" "$out" "spurious 1 stale-claim-lock"
 
-# --- r7 ordering regression: cycle_live wins over a coexisting leaked lock ----
+# --- r7 ordering regression: cycle_healthy wins over a coexisting leaked lock -
 # A stale, unrelated lock (left over from some earlier, already-resolved
 # incident) coexisting with a genuinely live, healthy cycle must never be
 # misclassified as that cycle's own failure.
@@ -91,7 +106,7 @@ wm_track "$livepid2"
 sleep 2
 mkdir "$WINGMAN_HOME/watch.pid.lock"
 out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
-assert_eq "cycle_live is checked, and wins, before the lock check is ever reached" "$out" "healthy"
+assert_eq "cycle_healthy is checked, and wins, before the lock check is ever reached" "$out" "healthy"
 kill "$livepid2" 2>/dev/null
 rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null
 
@@ -130,6 +145,7 @@ livepid3=$!
 wm_track "$livepid3"
 echo "$livepid3" > "$WINGMAN_HOME/watch.pid"
 : > "$WINGMAN_HOME/watch.beat"
+stamp_ownerlock "$livepid3"
 # Stamp RUNFILE to match this arm's own $WINGMAN_RUN_ID - exactly what a
 # genuine arm's claim step writes (see bin/watch-fleet) - rather than leaving
 # it absent. The run-id ownership check (#162) compares the fabricated
@@ -251,10 +267,11 @@ livepid4=$!
 wm_track "$livepid4"
 echo "$livepid4" > "$WINGMAN_HOME/watch.pid"
 : > "$WINGMAN_HOME/watch.beat"
+stamp_ownerlock "$livepid4"
 out3="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "a healthy classification resets the count" "$out3" "healthy"
 kill "$livepid4" 2>/dev/null
-rm -f "$WINGMAN_HOME/watch.pid" "$WINGMAN_HOME/watch.beat"
+rm -rf "$WINGMAN_HOME/watch.pid" "$WINGMAN_HOME/watch.beat" "$WINGMAN_HOME/watch.pid.owner"
 out4="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "the next spurious after a reset starts fresh at 1, not 3" "$out4" "spurious 1 clean-exit-or-sigterm"
 
@@ -430,5 +447,43 @@ assert_false "--clear-standdown arms nothing (no watch.pid appears)" "[ -f '$WIN
 noop_out="$(wm_timeout 10 "$WF" --clear-standdown 2>&1)"; noop_rc=$?
 assert_eq "--clear-standdown is a no-op with no marker present (still exits 0)" "$noop_rc" "0"
 assert_contains "--clear-standdown with no marker reports nothing to do" "$noop_out" "no standdown in force"
+
+# ============================================================================
+# issue #237: --classify against the new identity-verified/hard-grace guard
+# ============================================================================
+
+# --- a stall under hard grace still classifies as healthy, never spurious ---
+# (mirrors this plan's own repro 2, and the plan's Fix 3 test case 4a)
+test_new_home
+"$WF" >"$WINGMAN_HOME/hg-a.log" 2>&1 &
+hgapid=$!
+wm_track "$hgapid"
+sleep 2
+kill -STOP "$hgapid"
+sleep 3   # well under the default 300s hard grace
+out="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "a stall under hard grace still classifies as healthy" "$out" "healthy"
+assert_eq "the spurious count stays at 0" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+kill -CONT "$hgapid" 2>/dev/null
+kill "$hgapid" 2>/dev/null
+
+# --- a wedge PAST hard grace correctly falls through to the EXISTING --------
+# hung-or-stale-pidfile spurious hint - never misclassified as healthy -------
+# (mirrors the plan's Fix 3 test case 4b's stall depth)
+test_new_home
+"$WF" >"$WINGMAN_HOME/hg-b.log" 2>&1 &
+hgbpid=$!
+wm_track "$hgbpid"
+sleep 2
+kill -STOP "$hgbpid"
+sleep 4   # past a 2s hard grace
+out2="$(wm_timeout 10 env WM_WATCH_HARD_GRACE=2 "$WF" --classify 2>/dev/null)"
+assert_eq "a wedge past hard grace classifies as spurious hung-or-stale-pidfile, not healthy" "$out2" "spurious 1 hung-or-stale-pidfile"
+# CONT then a plain TERM (not KILL): the process is only SIGSTOPped, not
+# genuinely wedged, so a graceful signal lets it run its own trap-based
+# teardown - a bare SIGKILL here would still work, but bash logs a "Killed"
+# line for it that reads like a test failure in the suite's own output.
+kill -CONT "$hgbpid" 2>/dev/null
+kill "$hgbpid" 2>/dev/null
 
 test_summary

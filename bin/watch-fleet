@@ -96,16 +96,20 @@
 # cycle firing and wingman arming the next - a second crew member finishing in
 # that window is surfaced by the next arm, not lost.
 #
-# Singleton: a live cycle (pid alive + fresh beacon) makes a second arm print
-# `watcher: healthy` and exit without starting a rival loop, so wingman can re-arm
-# defensively without spawning duplicates. Read the printed status line - `armed`,
-# `healthy`, or a `blocked:/review:/done:/died:/stalled:` reason - as the source
-# of truth. `healthy` is run-scoped (#162): each cycle stamps its arming
-# session's $WINGMAN_RUN_ID, and an arm from a different run replaces a live
-# foreign cycle (an orphan from a prior, ended run cannot wake the current
-# session) instead of adopting it - it prints `armed`, never `healthy`, in
-# that case. Only when the arming session has no run id at all is a live
-# cycle accepted as healthy without an ownership check.
+# Singleton: a genuinely live cycle (identity-verified pid+start-time match,
+# not a beacon-freshness proxy - issue #237) makes a second arm print `watcher:
+# healthy` and exit without starting a rival loop, so wingman can re-arm
+# defensively without spawning duplicates. A cycle that holds the lock but has
+# gone quiet for WM_WATCH_HARD_GRACE (default 300s) is wedged, not healthy -
+# the next arm takes it over (SIGTERM, then SIGKILL if that doesn't reap it)
+# rather than reporting it healthy forever. Read the printed status line -
+# `armed`, `healthy`, or a `blocked:/review:/done:/died:/stalled:` reason - as
+# the source of truth. `healthy` is run-scoped (#162): each cycle stamps its
+# arming session's $WINGMAN_RUN_ID, and an arm from a different run replaces a
+# live foreign cycle (an orphan from a prior, ended run cannot wake the
+# current session) instead of adopting it - it prints `armed`, never
+# `healthy`, in that case. Only when the arming session has no run id at all
+# is a live cycle accepted as healthy without an ownership check.
 #
 # Owner scope: each cycle watches exactly one owner's direct reports. Wingman arms
 # its own cycle (--owner "" - it has no $WINGMAN_CREW_ID) and never sees a lead's
@@ -138,9 +142,10 @@
 #                          `--stop`, not a failure - never auto-re-arm on this
 #                          alone. Dispatched before claim-lock acquisition:
 #                          never creates the claim lock, never mutates
-#                          $PIDFILE/$BEATFILE (it legitimately reads both via
-#                          the cycle_live check). Intended caller: the `/watch`
-#                          skill, immediately after its armed cycle exits.
+#                          $PIDFILE/$BEATFILE/$OWNERLOCK (it legitimately
+#                          reads all three via the cycle_healthy check).
+#                          Intended caller: the `/watch` skill, immediately
+#                          after its armed cycle exits.
 #   watch-fleet --clear-standdown [--owner <id>]
 #                          lift a tripped spurious-repeated failure-budget
 #                          standdown (issue #198): removes $SUPPRESSEDFILE and
@@ -155,6 +160,14 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+
+# Resolved once, at startup (issue #237, part 1): the worktree-removal
+# self-check below tests this directory's continued existence every poll. A
+# cycle armed from a worktree that is later removed (a developer's tree
+# deleted at merge/close time) has nothing left to watch from - resolving
+# this once, up front, means the check itself costs one plain directory test,
+# no subprocess.
+SELF_BIN_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 # Immunize the wake loop against SIGURG (signal 16). This script is armed as a
 # harness-tracked background task, and its exit is the only channel that wakes an
@@ -209,6 +222,10 @@ if [ -n "$OWNER" ]; then
   STOPFILE="$WM_HOME/watch-$_key.stopped"
   SUPPRESSEDFILE="$WM_HOME/watch-$_key.suppressed"
   CLAIMFAILFILE="$WM_HOME/stop-continuity-$_key.claimfail"
+  # Fix 2b's per-owner debounce counter (issue #237, part 1): consecutive
+  # ambiguous crew-get reads before the owner-status self-check treats the
+  # owner as genuinely gone. Owner-keyed exactly like the files above.
+  OWNERCHECKFILE="$WM_HOME/watch-$_key.ownercheck"
 else
   PIDFILE="$WM_HOME/watch.pid"
   WAKEFILE="$WM_HOME/wake"
@@ -220,11 +237,20 @@ else
   STOPFILE="$WM_HOME/watch.stopped"
   SUPPRESSEDFILE="$WM_HOME/watch.suppressed"
   CLAIMFAILFILE="$WM_HOME/stop-continuity.claimfail"
+  # Unused - Fix 2b is skipped for owner="" - kept only for naming symmetry
+  # with the rest of this block, matching how STOPFILE/SUPPRESSEDFILE both
+  # keep a legacy unscoped name here too.
+  OWNERCHECKFILE="$WM_HOME/watch.ownercheck"
 fi
 # The claim-lock path is needed both by --classify's stale-claim-lock check
 # (dispatched before claim-lock acquisition) and by the claim loop itself
 # further below, so it is defined once, here, ahead of both.
 CLAIMLOCK="$PIDFILE.lock"
+# The true singleton-lifetime lock (issue #237, part 2): unlike $CLAIMLOCK
+# (held only across the sub-second check-then-claim), $OWNERLOCK is held for
+# the cycle's entire lifetime and is what the singleton guard trusts for "is
+# anything holding this at all" - see owner_lock_alive() below.
+OWNERLOCK="$PIDFILE.owner"
 # One shared forensic log across every owner (never owner-keyed): each line
 # carries its own owner column, so a human reading it after the fact sees the
 # whole fleet's history in one place rather than needing to know which
@@ -235,10 +261,15 @@ spurlog() {
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${OWNER:-<top>}" "$1" "$2" >> "$SPURLOG"
 }
 INTERVAL="${WM_WATCH_INTERVAL:-5}"
-# A cycle is "live" iff its recorded pid is alive AND its beacon is fresher than
-# this grace window. Touched every loop iteration, so a genuinely blocking watcher
-# always looks live and a crashed/killed one goes stale within the grace.
-GRACE="${WM_WATCH_GRACE:-30}"
+# Hard-staleness threshold (issue #237, part 2): far above any ordinary
+# stall, so it can never fire on one - only a cycle that has produced zero
+# beacon progress for this long is treated as wedged. The singleton guard
+# (owner_lock_alive()/cycle_healthy() below) trusts identity, not beacon
+# freshness, for ordinary "is this claimed at all" liveness; this threshold's
+# only job is bounding recovery from a genuine wedge, never exclusivity - a
+# cycle stalled for anywhere under this is never stolen from. 10x the former
+# WM_WATCH_GRACE default (30s) by default.
+WM_WATCH_HARD_GRACE="${WM_WATCH_HARD_GRACE:-300}"
 # Silent-stall detection. STALL_IDLE seconds of BOTH pane-output silence AND
 # status-file staleness nominates a 'working' member; it is flagged stalled only if
 # the execution probe (see wm-state stall-check) then finds no late-started
@@ -451,12 +482,33 @@ beat_age() {
   echo $(( $(date +%s) - m ))
 }
 
-# A live cycle exists iff the pidfile names a live process and its beacon is fresh.
-cycle_live() {
-  [ -f "$PIDFILE" ] || return 1
-  pid="$(cat "$PIDFILE" 2>/dev/null)"
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
-  [ "$(beat_age)" -lt "$GRACE" ]
+# True singleton-lifetime liveness (issue #237, part 2), identity-verified
+# (issue #237 round-1 MF1): a bare pid match is not enough - a reused pid
+# after e.g. a host reboot (nothing clears $WM_HOME at run start) would
+# otherwise read as the true owner still alive. Stamping pid + process start
+# time and requiring both to match closes that without adding any time-since
+# term - a stalled-but-alive iteration is still, correctly, alive.
+owner_lock_alive() {
+  [ -d "$OWNERLOCK" ] || return 1
+  _ola_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
+  # Validate before kill -0 (issue #237 round-1 MF3): a corrupt/truncated
+  # stamp like "0" or "-1" would otherwise read as the caller's own process
+  # group and report alive forever. Identical guard to the claim-lock's own
+  # owner-pid validation, reused verbatim.
+  case "$_ola_pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  kill -0 "$_ola_pid" 2>/dev/null || return 1
+  _ola_stamped_start="$(sed -n '2p' "$OWNERLOCK/owner" 2>/dev/null)"
+  _ola_cur_start="$(ps -o lstart= -p "$_ola_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+  [ -n "$_ola_stamped_start" ] && [ "$_ola_stamped_start" = "$_ola_cur_start" ]
+}
+
+# True iff a genuinely healthy cycle is live: identity-verified (MF1) AND has
+# produced a beacon touch within the hard-grace window. A cycle that holds
+# the lock but has gone quiet longer than that is wedged, not healthy -
+# callers that would otherwise report "healthy" must not.
+cycle_healthy() {
+  owner_lock_alive || return 1
+  [ "$(beat_age)" -lt "$WM_WATCH_HARD_GRACE" ]
 }
 
 # spurious_repeated_reason <count> <hint>
@@ -494,15 +546,18 @@ case "$MODE" in
   --classify)
     # Dispatched here, alongside --status/--stop/--start, deliberately BEFORE
     # claim-lock acquisition below: this call must never mkdir "$CLAIMLOCK",
-    # never mutate $PIDFILE/$BEATFILE (cycle_live legitimately reads both),
-    # and never enter the blocking loop. Order, exactly as verified correct
-    # through seven review rounds: (1) exit-record present - trust it and
-    # stop; (2) else cycle_live - a live cycle always means healthy,
-    # regardless of any leaked lock coexisting with it; only within the
-    # "no cycle live" branch: (3) a leaked claim-lock; (4) the exhaustive
-    # pidfile-residue hints. Checking cycle_live before the lock is what
-    # keeps a stale, unrelated leaked lock from being misclassified as a
-    # live cycle's own failure.
+    # never mutate $PIDFILE/$BEATFILE ($OWNERLOCK-based checks legitimately
+    # read both), and never enter the blocking loop. Order, exactly as
+    # verified correct through seven review rounds: (1) exit-record present -
+    # trust it and stop; (2) else cycle_healthy - a genuinely healthy cycle
+    # always means healthy, regardless of any leaked lock coexisting with it;
+    # only within the "not healthy" branch: (3) a leaked claim-lock; (4) the
+    # exhaustive pidfile-residue hints. Checking cycle_healthy before the lock
+    # is what keeps a stale, unrelated leaked lock from being misclassified
+    # as a live cycle's own failure. A wedged (beyond-hard-grace) cycle
+    # deliberately does NOT short-circuit here - it falls through to the
+    # hung-or-stale-pidfile hint below, so a sustained wedge correctly
+    # consumes the spurious-failure budget over repeated classify calls.
     if [ -f "$EXITFILE" ]; then
       _outcome="$(cat "$EXITFILE" 2>/dev/null)"
       rm -f "$EXITFILE"
@@ -515,7 +570,7 @@ case "$MODE" in
       printf '%s\n' "$_outcome"
       exit 0
     fi
-    if cycle_live; then
+    if cycle_healthy; then
       printf '0\n' > "$SPURCOUNTFILE"
       printf 'healthy\n'
       exit 0
@@ -539,8 +594,9 @@ case "$MODE" in
         # survived pidfile naming a dead pid is diagnostic of exactly that.
         _hint="sigkill-suspected"
       else
-        # pidfile present, pid alive, beacon stale (cycle_live already ruled
-        # out "and beacon fresh") - a wedged process, not a clean death.
+        # pidfile present, pid alive, beacon stale (cycle_healthy already
+        # ruled out "and beacon fresh within hard grace") - a wedged process,
+        # not a clean death.
         _hint="hung-or-stale-pidfile"
       fi
     fi
@@ -583,21 +639,48 @@ case "$MODE" in
   --status)
     # The documented, scriptable liveness check: exit 0 iff a cycle is live, 1
     # otherwise, so a caller can test `bin/watch-fleet --status >/dev/null 2>&1`
-    # without parsing text.
-    if cycle_live; then wm_ok "watch-fleet cycle live (pid $(cat "$PIDFILE"), beacon $(beat_age)s)"; exit 0
-    else wm_info "no live watch-fleet cycle"; exit 1; fi
+    # without parsing text. Three outcomes, not two (issue #237 round-1 MF2):
+    # a wedged cycle is reported distinctly from the genuinely-absent case, so
+    # a human running this manually is not told "no live cycle" when one
+    # actually exists and is merely wedged - actionable, not noise. The
+    # exit-code contract is unchanged either way.
+    if cycle_healthy; then
+      wm_ok "watch-fleet cycle live (pid $(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null), beacon $(beat_age)s)"; exit 0
+    elif owner_lock_alive; then
+      wm_warn "watch-fleet cycle held by pid $(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null) but WEDGED (beacon $(beat_age)s >= hard grace ${WM_WATCH_HARD_GRACE}s) - the next arm will take over"; exit 1
+    else
+      wm_info "no live watch-fleet cycle"; exit 1
+    fi
     ;;
   --stop)
     if [ -f "$PIDFILE" ]; then
       pid="$(cat "$PIDFILE" 2>/dev/null)"
-      printf 'stopped\n' > "$EXITFILE"
-      [ -n "$pid" ] && kill "$pid" 2>/dev/null
-      rm -f "$PIDFILE" "$RUNFILE"
+    elif owner_lock_alive; then
+      # $PIDFILE can, in principle, go missing while $OWNERLOCK - now the
+      # authoritative liveness record (issue #237, part 2) - still names a
+      # genuinely live cycle (external interference, a partial failure
+      # elsewhere): fall back to the lock's own stamped pid rather than
+      # reporting nothing to stop. Cheap, and worth the extra robustness now
+      # that bin/crew-standdown calls --stop unconditionally for every id it
+      # stands down (Fix 1).
+      pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
+    else
+      pid=""
+    fi
+    printf 'stopped\n' > "$EXITFILE"
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null
       wm_ok "watch-fleet stopped"
     else
-      printf 'stopped\n' > "$EXITFILE"
       wm_info "no watch-fleet cycle to stop"
     fi
+    # Unconditional, not only on the "found a pid to kill" branch: an
+    # existing-but-EMPTY $PIDFILE (pid="" from a successful `cat` of nothing)
+    # took the "nothing to stop" message above under the old structure, but
+    # left the stale (empty) pidfile itself in place - which then classifies
+    # as hung-or-stale-pidfile forever, since $PIDFILE existing is exactly
+    # what --classify's own hint logic treats as "something to explain".
+    rm -f "$PIDFILE" "$RUNFILE"; rm -rf "$OWNERLOCK"
     exit 0 ;;
   --start)
     wm_warn "watch-fleet --start is deprecated: arm 'bin/watch-fleet' as a harness-tracked background task instead. Blocking now."
@@ -750,6 +833,44 @@ while :; do
   sleep 0.1
 done
 
+# takeover_kill <pid> <label> - supervised reap: SIGTERM first, escalated to
+# SIGKILL after a bounded wait if the pid hasn't exited (issue #237 round-2
+# MF-A). A plain SIGTERM alone cannot reliably reap a cycle genuinely wedged
+# inside a blocking foreground child (e.g. a hung tmux call, repro 3's
+# leading candidate): bash defers running its own TERM trap until that child
+# returns, so a wedged cycle's trap-based teardown never actually runs on
+# SIGTERM (demonstrated: survives 8s+ of SIGTERM in testing) - without the
+# escalation, every takeover attempt against a truly wedged holder degrades
+# to the wm_die dead end below, silently removing the one manual `kill`
+# remedy that works today. SIGKILL cannot be deferred the same way - the
+# kernel tears the process down regardless of what it is blocked in - so it
+# is the mechanism that actually recovers a wedge; SIGTERM is tried first
+# only to give a non-wedged holder the chance to run its own clean teardown
+# (removing $OWNERLOCK etc.) before being killed outright. wm_die fires only
+# if even SIGKILL fails to reap it within its own bounded wait - a
+# kernel-level uninterruptible-sleep hang, not something this mechanism can
+# be expected to recover from on its own.
+takeover_kill() {
+  _tk_pid="$1"; _tk_label="$2"
+  kill "$_tk_pid" 2>/dev/null
+  _tk_tries=0
+  _tk_escalated=0
+  while kill -0 "$_tk_pid" 2>/dev/null; do
+    _tk_tries=$((_tk_tries+1))
+    if [ "$_tk_tries" -ge 50 ]; then
+      if [ "$_tk_escalated" -eq 0 ]; then
+        wm_warn "watcher: the $_tk_label cycle (pid $_tk_pid) did not exit within 5s of SIGTERM - escalating to SIGKILL."
+        kill -KILL "$_tk_pid" 2>/dev/null
+        _tk_escalated=1
+        _tk_tries=0
+      else
+        wm_die "watcher: the $_tk_label cycle (pid $_tk_pid) did not exit within 5s of SIGKILL - it may be stuck in an uninterruptible kernel wait; stop it manually (bin/watch-fleet --stop) and re-arm"
+      fi
+    fi
+    sleep 0.1
+  done
+}
+
 # --- singleton guard --------------------------------------------------------
 # If a genuinely live cycle already holds the lock, do not start a rival loop.
 # The reworded line leads with "already armed" (mirroring what the caller just
@@ -758,6 +879,14 @@ done
 # in the incident this closes. The `watcher: healthy` token prefix is unchanged
 # so CLAUDE.md's documented arm-status parsing contract still holds.
 #
+# Liveness is now identity-verified, not beacon-freshness-proxied (issue #237
+# part 2): owner_lock_alive() requires both a live pid AND a matching process
+# start time (MF1), so a reused pid after e.g. a host reboot cannot be
+# mistaken for the true owner. A cycle merely stalled for anywhere under
+# WM_WATCH_HARD_GRACE is never stolen from - only owner_lock_alive() being
+# false (the true owner has actually exited), a foreign-run mismatch, or a
+# beyond-hard-grace wedge (MF2) reach the claim below.
+#
 # Run-id ownership check (#162): `healthy` must certify not just "a cycle is
 # alive" but "a cycle whose exit can wake THIS session". A cycle armed by a
 # previous, now-ended wingman run can outlive its session (a child of
@@ -765,44 +894,59 @@ done
 # leaves the current run permanently unwakeable while board.md looks fine.
 # Each claim below stamps its arming session's $WINGMAN_RUN_ID into $RUNFILE;
 # an arm whose own run id differs from the live cycle's stamp is looking at a
-# foreign cycle and replaces it - stops it (waiting for the pid to actually
-# exit, so the dying cycle's own TERM trap cannot clobber the fresh claim),
-# then falls through to claim its own tracked cycle. With no run id on the
-# arming side ($WINGMAN_RUN_ID unset - e.g. `claude` started directly, not via
+# foreign cycle and replaces it via the supervised takeover_kill() above, then
+# falls through to claim its own tracked cycle. With no run id on the arming
+# side ($WINGMAN_RUN_ID unset - e.g. `claude` started directly, not via
 # bin/wingman) ownership cannot be certified either way, so legacy behavior
 # stands: a live cycle reads as healthy.
-if cycle_live && [ -n "${WINGMAN_RUN_ID:-}" ] \
-  && [ "$(cat "$RUNFILE" 2>/dev/null)" != "$WINGMAN_RUN_ID" ]; then
-  _old_pid="$(cat "$PIDFILE" 2>/dev/null)"
-  _old_run="$(cat "$RUNFILE" 2>/dev/null)"
-  wm_warn "watcher: live cycle (pid ${_old_pid:-unknown}) was armed by run '${_old_run:-unknown}', not this run - its exit cannot wake this session. Replacing it with a cycle this run tracks."
-  [ -n "$_old_pid" ] && kill "$_old_pid" 2>/dev/null
-  _takeover_tries=0
-  while [ -n "$_old_pid" ] && kill -0 "$_old_pid" 2>/dev/null; do
-    _takeover_tries=$((_takeover_tries+1))
-    [ "$_takeover_tries" -ge 50 ] \
-      && wm_die "watcher: the foreign cycle (pid $_old_pid) did not exit within 5s of SIGTERM - stop it manually (bin/watch-fleet --stop) and re-arm"
-    sleep 0.1
-  done
-  # The dead cycle's TERM trap already removed $PIDFILE; sweep the rest of its
-  # residue so the fresh claim below starts clean. Its unclassified death is
-  # deliberate replacement, never a spurious failure, so no exit record is
-  # written for it.
-  rm -f "$PIDFILE" "$BEATFILE" "$RUNFILE"
-elif cycle_live; then
-  wm_ok "watcher: already armed and healthy - one cycle is live (pid $(cat "$PIDFILE"), beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
-  # Non-clobbering: a `fire`/`remote-control-dropped` record from the live
-  # cycle this redundant arm just raced against outranks a `healthy` write -
-  # --classify's own cycle_live check already derives `healthy` independently
-  # from "record absent + a cycle is live", so skipping this write when a
-  # record already exists costs nothing and protects the one write that
-  # cannot be reconstructed after the fact.
-  [ -f "$EXITFILE" ] || printf 'healthy\n' > "$EXITFILE"
-  release_claim
-  exit 0
+if owner_lock_alive; then
+  _lock_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
+  if [ -n "${WINGMAN_RUN_ID:-}" ] && [ "$(cat "$RUNFILE" 2>/dev/null)" != "$WINGMAN_RUN_ID" ]; then
+    _old_run="$(cat "$RUNFILE" 2>/dev/null)"
+    wm_warn "watcher: live cycle (pid $_lock_pid) was armed by run '${_old_run:-unknown}', not this run - its exit cannot wake this session. Replacing it with a cycle this run tracks."
+    takeover_kill "$_lock_pid" "foreign"
+    # The dead cycle's TERM trap may already have removed $PIDFILE/$OWNERLOCK
+    # if it exited cleanly on SIGTERM; sweep the rest of its residue
+    # unconditionally so the fresh claim below starts clean regardless of
+    # whether SIGTERM or the SIGKILL escalation actually reaped it. Its
+    # unclassified death is deliberate replacement, never a spurious failure,
+    # so no exit record is written for it.
+    rm -f "$PIDFILE" "$BEATFILE" "$RUNFILE"; rm -rf "$OWNERLOCK"
+  elif [ "$(beat_age)" -lt "$WM_WATCH_HARD_GRACE" ]; then
+    wm_ok "watcher: already armed and healthy - one cycle is live (pid $_lock_pid, beacon $(beat_age)s ago). Nothing to do; this pid is the EXISTING watcher, never a target to stop or kill."
+    # Non-clobbering: a `fire`/`remote-control-dropped` record from the live
+    # cycle this redundant arm just raced against outranks a `healthy` write -
+    # --classify's own cycle_healthy check already derives `healthy`
+    # independently from "record absent + a cycle is healthy", so skipping
+    # this write when a record already exists costs nothing and protects the
+    # one write that cannot be reconstructed after the fact.
+    [ -f "$EXITFILE" ] || printf 'healthy\n' > "$EXITFILE"
+    release_claim
+    exit 0
+  else
+    # Wedged takeover (issue #237 round-1 MF2): identity-alive, but zero
+    # beacon progress for >= WM_WATCH_HARD_GRACE - treat as stuck and take
+    # over via the same supervised takeover_kill() as the foreign-run branch
+    # above, rather than refusing forever.
+    wm_warn "watcher: live cycle (pid $_lock_pid) has not advanced its beacon in $(beat_age)s (>= WM_WATCH_HARD_GRACE ${WM_WATCH_HARD_GRACE}s) - treating as wedged and taking over."
+    takeover_kill "$_lock_pid" "wedged"
+    rm -f "$PIDFILE" "$BEATFILE" "$RUNFILE"; rm -rf "$OWNERLOCK"
+  fi
 fi
+# Falls through to "claim the cycle" whenever owner_lock_alive was false, or
+# any takeover branch above just cleared it.
 
 # --- claim the cycle --------------------------------------------------------
+# Computed before the pidfile write below, not alongside the owner-lock
+# creation further down where it conceptually belongs: it is a constant for
+# this process (its own start time never changes), so there is no correctness
+# reason to compute it inside the window between the pidfile write and this
+# cycle's own "armed" line - and hooks/stop-continuity.sh:425-432 documents
+# that exact window as the one a SIGKILL landing inside it cannot recover
+# from cleanly (a dead-owner $CLAIMLOCK left behind that a re-arm must wait
+# out CLAIM_STALE_AGE for). Every subprocess fork this claim sequence can
+# avoid inside that window narrows it back down.
+_ol_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
 echo $$ > "$PIDFILE"
 # Stamp the arming session's run id (possibly empty) so a later arm from a
 # different run can recognize this cycle as foreign - see the singleton
@@ -843,9 +987,61 @@ fi
 # right now is still in flight, so it is left to age out by its own time
 # bound instead (see hooks/stop-continuity.sh).
 rm -f "$STOPFILE" "$SUPPRESSEDFILE" "$CLAIMFAILFILE"
+# A fresh cycle has observed nothing yet - any leftover debounce streak from
+# a previous, crashed cycle must not carry over into this one's owner-status
+# self-check (Fix 2b below).
+rm -f "$OWNERCHECKFILE"
+# Create the true singleton-lifetime lock (issue #237 part 2). Safe to
+# attempt unconditionally, with no age check or verification dance (unlike
+# $CLAIMLOCK's own claim, which does need one, for a different reason): by
+# construction, execution only reaches this point while $CLAIMLOCK is held
+# continuously from before the singleton guard's check through here, so no
+# rival process can be concurrently touching $OWNERLOCK at this moment. Any
+# leftover directory here is guaranteed stale - the guard already
+# established owner_lock_alive was false, or a takeover branch just cleared
+# it, before this process could have reached this point at all. What must be
+# verified is not exclusivity (none is at risk) but that the mkdir/write
+# actually succeeded before trusting the lock for the rest of the cycle's
+# life - a full disk, a permissions problem, or an rm -rf that didn't
+# actually clear a leftover reproduces the original defect with no stall
+# required: owner_lock_alive would read false forever for a perfectly
+# healthy cycle, so the very next arm would claim the pidfile out from under
+# it.
+# [ -e ] first (a builtin test, no fork) rather than an unconditional rm -rf:
+# in the common case (a healthy fresh claim, no leftover from a takeover or a
+# SIGKILL) there is nothing here to remove at all, so this skips the rm(1)
+# fork entirely rather than paying for it against an empty path every time.
+[ -e "$OWNERLOCK" ] && rm -rf "$OWNERLOCK" 2>/dev/null
+_ol_ok=0
+if mkdir "$OWNERLOCK" 2>/dev/null; then
+  { printf '%s\n' "$$"; printf '%s\n' "$_ol_start"; } > "$OWNERLOCK/owner" 2>/dev/null
+  # issue #237 round-2 MF-B: verify the stamp WRITE itself, not just the
+  # mkdir - a directory that exists but is not writable, or a disk that fills
+  # up mid-write, can make mkdir succeed while the write above silently fails
+  # or truncates, leaving $OWNERLOCK/owner absent or wrong even though mkdir
+  # alone reported success. Read back what was actually written and compare
+  # against what this process intended to write; anything else is treated
+  # exactly like a failed mkdir - fatal, never a silently unprotected cycle.
+  # A single `read` pair off the file (a shell builtin) rather than two `sed`
+  # invocations - one less fork inside the same SIGKILL-sensitive window.
+  _ol_readback_pid=""; _ol_readback_start=""
+  { IFS= read -r _ol_readback_pid; IFS= read -r _ol_readback_start; } < "$OWNERLOCK/owner" 2>/dev/null
+  if [ "$_ol_readback_pid" = "$$" ] && [ "$_ol_readback_start" = "$_ol_start" ]; then
+    _ol_ok=1
+  fi
+fi
+if [ "$_ol_ok" -ne 1 ]; then
+  # Roll back the pidfile/runfile writes from the top of this section -
+  # mirroring the #197 EXITFILE-refusal rollback just above - so a failed
+  # claim never leaves a pidfile behind naming a cycle that was never
+  # actually protected.
+  rm -f "$PIDFILE" "$RUNFILE"
+  release_claim
+  wm_die "watcher: failed to create the owner lock at $OWNERLOCK - refusing to arm a cycle that could never be protected against a rival claim"
+fi
 : > "$BEATFILE" || true
 release_claim
-trap 'rm -f "$PIDFILE"; exit 0' INT TERM
+trap 'rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"; exit 0' INT TERM
 wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
 # Forensics only - prevents nothing (issue #202, plan section 2.4: a
 # foreground and a `run_in_background: true` Bash call are indistinguishable
@@ -1035,13 +1231,30 @@ fire() {
   # racing `healthy` write from a redundant arm evaluating the singleton guard
   # in the narrow window before this process's own $PIDFILE removal below.
   printf 'fire\n' > "$EXITFILE"
-  rm -f "$PIDFILE"
+  rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
   exit 0
 }
 
 # --- the blocking loop ------------------------------------------------------
 while :; do
   : > "$BEATFILE" || true   # liveness beacon for the singleton guard + Stop hook
+
+  # Belt-and-braces self-ownership check (issue #237, nice-to-have): MF1+MF2
+  # close the paths that made a subverted $OWNERLOCK matter in practice, but
+  # this zero-subprocess check makes any future subversion self-limiting
+  # rather than silent - if $OWNERLOCK no longer names this process (e.g. a
+  # takeover raced past this process's own death), stop touching shared state
+  # immediately rather than continuing to run alongside whatever now
+  # legitimately owns the lock. Deliberately not classified via $EXITFILE:
+  # this path should be unreachable given the claim-lock exclusivity argument
+  # at claim time, so if it ever fires it is itself a symptom worth surfacing
+  # as an ordinary unclassified exit rather than being laundered into a clean
+  # `stopped`. Deliberately does not remove $PIDFILE/$OWNERLOCK either - by
+  # the time this fires, they legitimately belong to whichever process does
+  # own them now.
+  _self_owner_pid=""
+  IFS= read -r _self_owner_pid < "$OWNERLOCK/owner" 2>/dev/null
+  [ "$_self_owner_pid" = "$$" ] || exit 0
 
   # Fleet-wide outage-state signal accumulators (#23, item 0), reset every
   # iteration regardless of owner scope or tmux-session liveness: only
@@ -1054,9 +1267,12 @@ while :; do
   # The generic per-poll outbox scan (issue #169): runs in EVERY watcher,
   # unconditionally on $OWNER, every poll, before anything else can `exit 0`
   # this poll - fire()'s own exit 0 is below (see the needs-attention check at
-  # the bottom of this loop), and there is a second exit 0 on the self-pane
-  # check just below this, so this scan sits ahead of BOTH: a member's outbox
-  # must not go unswept for however many polls those paths keep firing.
+  # the bottom of this loop) is the first; the worktree-removal self-check
+  # (issue #237, Fix 2a) just below this is a second; the owner-status
+  # self-check (Fix 2b) right after it is a third, independent one; and the
+  # self-pane check just below THAT is a fourth - so this scan sits ahead of
+  # all FOUR: a member's outbox must not go unswept for however many polls
+  # those paths keep firing.
   # Placed before wm_tmux_adopt_strays/wm_state reconcile below, so a member
   # that dies during poll N first becomes visible to the scan on poll N+1 -
   # one extra poll of latency, still within the ~5s bound this design claims
@@ -1139,6 +1355,72 @@ for tid in ids:
     fi
   fi
 
+  # Worktree-removal self-check (issue #237, part 1): a cycle armed from a
+  # worktree that has since been removed (a developer's tree deleted at merge
+  # time, independent of whether anyone ever stood the owner down) has nothing
+  # left to watch from. Zero subprocess cost - a plain directory test - and
+  # zero false positives: a cycle armed from $WINGMAN_BIN in the main repo
+  # checkout can never trip it.
+  if [ ! -d "$SELF_BIN_DIR" ]; then
+    printf 'stopped\n' > "$EXITFILE"
+    rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
+    exit 0
+  fi
+
+  # Owner-status self-check (issue #237, part 1): a cycle scoped to a
+  # non-empty $OWNER has nothing left to watch once that owner is stood down,
+  # irrecoverably died, or done - or no longer in the roster at all. Owner ""
+  # (wingman's own top-level cycle) is exempt: it has no roster record of
+  # itself to check.
+  if [ -n "$OWNER" ]; then
+    _owner_json="$(wm_state crew-get --id "$OWNER" 2>/dev/null)"
+    if [ -n "$_owner_json" ]; then
+      _owner_status="$(printf '%s' "$_owner_json" | grep -m1 '"status"' \
+        | sed -E 's/^[^:]*: *"([^"]*)".*/\1/')"
+      _owner_resumable=0
+      printf '%s' "$_owner_json" | grep -q '"resumable": true' && _owner_resumable=1
+    else
+      _owner_status=""
+    fi
+    case "$_owner_status" in
+      stood-down|done)
+        _owner_gone=1 ;;
+      died)
+        # died is reversible (#254 lets a resumable died member be taken
+        # over) - only treat it as gone once it is no longer resumable, so a
+        # transient window death does not permanently strand a recoverable
+        # lead's watcher.
+        if [ "$_owner_resumable" -eq 1 ]; then _owner_gone=0; else _owner_gone=1; fi ;;
+      "")
+        # Ambiguous: crew-get produced nothing, which is indistinguishable at
+        # this point between "genuinely no longer in the roster" and a
+        # transient failure (a uv/venv hiccup, a torn read, momentary OOM) -
+        # cmd_crew_get prints nothing to stdout on every failure path alike.
+        # Debounced below rather than acted on immediately.
+        _owner_gone="" ;;
+      *)
+        _owner_gone=0 ;;   # working/blocked/review - still owned, definitely
+    esac
+    if [ "$_owner_gone" = 1 ]; then
+      rm -f "$OWNERCHECKFILE" 2>/dev/null
+      printf 'stopped\n' > "$EXITFILE"
+      rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
+      exit 0
+    elif [ -z "$_owner_gone" ]; then
+      _streak="$(cat "$OWNERCHECKFILE" 2>/dev/null)"
+      case "$_streak" in ''|*[!0-9]*) _streak=0 ;; esac
+      _streak=$((_streak + 1))
+      if [ "$_streak" -ge "${WM_OWNER_MISSING_CONFIRMS:-3}" ]; then
+        printf 'stopped\n' > "$EXITFILE"
+        rm -f "$PIDFILE" "$OWNERCHECKFILE"; rm -rf "$OWNERLOCK"
+        exit 0
+      fi
+      printf '%s\n' "$_streak" > "$OWNERCHECKFILE"
+    else
+      rm -f "$OWNERCHECKFILE" 2>/dev/null
+    fi
+  fi
+
   # Wingman's own Remote Control disconnect (ask 2, detect-only - see
   # self_pane_check's own docstring for why this never injects). Checked first,
   # every cycle, independent of $WM_TMUX_SESSION: wingman's own registered pane
@@ -1154,7 +1436,7 @@ for tid in ids:
     } > "$WAKEFILE"
     echo "remote-control-dropped: wingman run /remote-control in this session to restore it"
     printf 'remote-control-dropped\n' > "$EXITFILE"
-    rm -f "$PIDFILE"
+    rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
     exit 0
   fi
 
@@ -1768,7 +2050,7 @@ for r in roster if isinstance(roster, list) else []:
         } > "$WAKEFILE"
         echo "outage-detected: fleet-wide API-error signal crossed the mass threshold - new spawns paused (bin/spawn-crew denied by hooks/api-outage-spawn-guard.sh; override with --force-during-outage if truly needed). Already-running crew are untouched."
         printf 'fire\n' > "$EXITFILE"
-        rm -f "$PIDFILE"
+        rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
         exit 0
         ;;
       outage-cleared)
@@ -1799,7 +2081,7 @@ print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-out
         } > "$WAKEFILE"
         echo "outage-cleared: fleet-wide API-error signal has quieted for ${WM_OUTAGE_QUIET}s - new spawns unpaused.${_outage_died_ids:+ Outage-tagged died member(s) ($_outage_died_ids): pre-authorized auto-recovery, run bin/crew-resume --all-died now.}"
         printf 'fire\n' > "$EXITFILE"
-        rm -f "$PIDFILE"
+        rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
         exit 0
         ;;
     esac
@@ -1932,7 +2214,7 @@ EOF_USAGE
         } > "$WAKEFILE"
         echo "usage-limit-approaching: $_usage_window_label usage window at $_usage_pct_text (resets at epoch $_usage_resets_at) - new spawns paused (bin/spawn-crew denied by hooks/usage-limit-spawn-guard.sh; override with --force-during-usage-limit if truly needed). Already-running crew are untouched and can still hit the hard limit on their own. Ask the pilot wait-vs-continue and record the answer with usage-decide."
         printf 'fire\n' > "$EXITFILE"
-        rm -f "$PIDFILE"
+        rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
         exit 0
         ;;
       usage-limit-reset)
@@ -1944,7 +2226,7 @@ EOF_USAGE
         } > "$WAKEFILE"
         echo "usage-limit-reset: the usage window reset - new spawns unpaused again."
         printf 'fire\n' > "$EXITFILE"
-        rm -f "$PIDFILE"
+        rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
         exit 0
         ;;
     esac
