@@ -1552,4 +1552,278 @@ assert_contains "wb1 is genuinely back to blocked" "$(wm_state crew-get --id wb1
 
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# ============================================================================
+# issue #237: orphan-watcher-lifecycle - the owner-scoped self-checks (Fix 2),
+# the identity-verified singleton lock and hard-staleness takeover (Fix 3)
+# ============================================================================
+
+wait_for_owner_status() {
+  _wos_i=0
+  while [ "$_wos_i" -lt 50 ]; do
+    "$WF" --owner "$1" --status >/dev/null 2>&1 && return 0
+    sleep 0.2
+    _wos_i=$((_wos_i + 1))
+  done
+  return 1
+}
+
+wait_for_pid_gone() {
+  _wpg_i=0
+  while [ "$_wpg_i" -lt 75 ]; do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.2
+    _wpg_i=$((_wpg_i + 1))
+  done
+  return 1
+}
+
+# --- Fix 2a: a cycle armed from a worktree that has since been removed -------
+# self-stops within one poll, with no standdown ever involved - the incident's
+# own single most distinctive fact ("the worktree ... no longer existed").
+# $0 is resolved from inside a throwaway directory (mirroring this plan's own
+# reproduction), which is then removed out from under the running cycle.
+test_new_home
+WT_PARENT="$(wm_mktemp_dir)"
+WT_DIR="$WT_PARENT/fake-worktree"
+mkdir -p "$WT_DIR"
+cp "$WF" "$WT_DIR/watch-fleet"
+chmod +x "$WT_DIR/watch-fleet"
+ln -s "$TEST_REPO/bin/lib" "$WT_DIR/lib"
+wm_state crew-add --id wt1 --type lead --objective x --repo /tmp --window wm-wt1 --session-id swt1 >/dev/null
+wm_state crew-set --id wt1 --status working --summary "in progress" >/dev/null
+"$WT_DIR/watch-fleet" --owner wt1 >"$WINGMAN_HOME/wt1.log" 2>&1 &
+wt1pid=$!
+wm_track "$wt1pid"
+assert_true "the cycle armed from the throwaway worktree comes up live" "wait_for_owner_status wt1"
+rm -rf "$WT_PARENT"
+assert_true "the cycle self-exits once its own worktree directory is gone" "wait_for_pid_gone $wt1pid"
+wtclassify="$(wm_timeout 10 "$WF" --owner wt1 --classify 2>/dev/null)"
+assert_eq "the worktree-removal self-stop classifies as a deliberate stop, not a spurious failure" "$wtclassify" "stopped"
+
+# --- Fix 2b: a cycle self-stops once its owner is irrecoverably died, with no
+# standdown ever called (a crashed lead nobody has stood down yet) -----------
+test_new_home
+wm_state crew-add --id dead1 --type lead --objective x --repo /tmp --window wm-dead1 --session-id sdead1 >/dev/null
+wm_state crew-set --id dead1 --status working --summary "in progress" >/dev/null
+"$WF" --owner dead1 >"$WINGMAN_HOME/dead1.log" 2>&1 &
+dead1pid=$!
+wm_track "$dead1pid"
+assert_true "dead1's scoped cycle comes up live" "wait_for_owner_status dead1"
+wm_state crew-set --id dead1 --status died >/dev/null
+assert_true "the cycle self-stops once its owner is irrecoverably died" "wait_for_pid_gone $dead1pid"
+deadclassify="$(wm_timeout 10 "$WF" --owner dead1 --classify 2>/dev/null)"
+assert_eq "the died-owner self-stop classifies as a deliberate stop" "$deadclassify" "stopped"
+
+# --- Fix 2b: died-but-RESUMABLE does NOT self-stop (issue #254 interaction) --
+# A died member's session transcript surviving on disk is exactly the case
+# #254's own takeover path exists for - self-stopping the watcher here would
+# strand that recovery path's own wake channel.
+test_new_home
+PROJDIR="$(wm_mktemp_dir)"
+export WM_CLAUDE_PROJECTS_DIR="$PROJDIR"
+RESUME_SLUG="$(printf '%s' /tmp | sed -E 's/[^A-Za-z0-9-]/-/g')"
+mkdir -p "$PROJDIR/$RESUME_SLUG"
+: > "$PROJDIR/$RESUME_SLUG/sresume1.jsonl"
+wm_state crew-add --id resume1 --type lead --objective x --repo /tmp --window wm-resume1 --session-id sresume1 >/dev/null
+wm_state crew-set --id resume1 --status working --summary "in progress" >/dev/null
+"$WF" --owner resume1 >"$WINGMAN_HOME/resume1.log" 2>&1 &
+resume1pid=$!
+wm_track "$resume1pid"
+assert_true "resume1's scoped cycle comes up live" "wait_for_owner_status resume1"
+wm_state crew-set --id resume1 --status died >/dev/null
+assert_contains "resume1 is genuinely resumable (transcript on disk)" "$(wm_state crew-get --id resume1)" '"resumable": true'
+sleep 4
+assert_true "a resumable died owner's cycle keeps polling, not self-stopped" "kill -0 $resume1pid"
+kill "$resume1pid" 2>/dev/null
+unset WM_CLAUDE_PROJECTS_DIR
+
+# --- Fix 2b: a genuinely vanished-from-roster owner self-stops, debounced ----
+# wm_state has no delete subcommand; bin/crew-prune (via `wm_state prune`)
+# removes fully-closed (stood-down) records, reaching the genuinely-missing-
+# record path with no hand-crafted fixture.
+test_new_home
+wm_state crew-add --id gone1 --type lead --objective x --repo /tmp --window wm-gone1 --session-id sgone1 >/dev/null
+wm_state standdown --id gone1 >/dev/null
+wm_state prune >/dev/null
+assert_eq "gone1's record is genuinely gone from the roster" "$(wm_state crew-get --id gone1 2>/dev/null)" ""
+"$WF" --owner gone1 >"$WINGMAN_HOME/gone1.log" 2>&1 &
+gone1pid=$!
+wm_track "$gone1pid"
+assert_true "the vanished-owner cycle self-stops (debounced) once confirmed gone" "wait_for_pid_gone $gone1pid"
+goneclassify="$(wm_timeout 10 "$WF" --owner gone1 --classify 2>/dev/null)"
+assert_eq "the vanished-owner self-stop classifies as a deliberate stop" "$goneclassify" "stopped"
+
+# --- Fix 2b SF1: a crew-get failure does not immediately self-stop a healthy
+# owner's watcher - it debounces across WM_OWNER_MISSING_CONFIRMS consecutive
+# ambiguous reads before acting -----------------------------------------------
+test_new_home
+wm_state crew-add --id sf1 --type lead --objective x --repo /tmp --window wm-sf1 --session-id ssf1 >/dev/null
+wm_state crew-set --id sf1 --status working --summary "in progress" >/dev/null
+
+STUB_A="$(wm_mktemp_file)"
+COUNTER_A="$(wm_mktemp_file)"; rm -f "$COUNTER_A"
+cat > "$STUB_A" <<STUBEOF
+#!/usr/bin/env bash
+case "\$1" in
+  */wm-state.py)
+    if [ "\$2" = "crew-get" ] && [ "\$3" = "--id" ] && [ "\$4" = "sf1" ]; then
+      n="\$(cat "$COUNTER_A" 2>/dev/null)"; case "\$n" in ''|*[!0-9]*) n=0 ;; esac
+      n=\$((n+1))
+      printf '%s\n' "\$n" > "$COUNTER_A"
+      [ "\$n" -le 2 ] && exit 1
+    fi
+    ;;
+esac
+exec uv run --no-project --quiet "\$@"
+STUBEOF
+chmod +x "$STUB_A"
+WM_UV="$STUB_A" "$WF" --owner sf1 >"$WINGMAN_HOME/sf1.log" 2>&1 &
+sf1pid=$!
+wm_track "$sf1pid"
+assert_true "sf1's cycle comes up live despite a failing stub in place" "wait_for_owner_status sf1"
+# Poll (bounded, generous) for the stub to have actually been called at
+# least 3 times - i.e. genuinely past its own 2-failure window - rather than
+# a fixed sleep: every wm_py/wm_state call in this cycle routes through the
+# stub (WM_UV is process-wide), so poll cadence is not assumed.
+_sf1_i=0
+while { _sf1_n="$(cat "$COUNTER_A" 2>/dev/null)"; case "$_sf1_n" in ''|*[!0-9]*) _sf1_n=0 ;; esac; [ "$_sf1_n" -lt 3 ]; } \
+  && [ "$_sf1_i" -lt 100 ]; do
+  sleep 0.2; _sf1_i=$((_sf1_i + 1))
+done
+assert_true "the stub was actually exercised past its own 2-failure window" "[ \"\$(cat '$COUNTER_A' 2>/dev/null)\" -ge 3 ]"
+assert_true "two transient ambiguous reads (below the confirm threshold) never self-stop a healthy owner" "kill -0 $sf1pid"
+kill "$sf1pid" 2>/dev/null
+
+# The genuinely-and-persistently-ambiguous case: the stub fails every poll,
+# standing in for a sustained inability to resolve the owner's status - the
+# same debounce applies, but self-stop follows once the confirm threshold
+# (WM_OWNER_MISSING_CONFIRMS, default 3) is actually reached.
+test_new_home
+wm_state crew-add --id sf2 --type lead --objective x --repo /tmp --window wm-sf2 --session-id ssf2 >/dev/null
+wm_state crew-set --id sf2 --status working --summary "in progress" >/dev/null
+
+STUB_B="$(wm_mktemp_file)"
+cat > "$STUB_B" <<STUBEOF
+#!/usr/bin/env bash
+case "\$1" in
+  */wm-state.py)
+    if [ "\$2" = "crew-get" ] && [ "\$3" = "--id" ] && [ "\$4" = "sf2" ]; then
+      exit 1
+    fi
+    ;;
+esac
+exec uv run --no-project --quiet "\$@"
+STUBEOF
+chmod +x "$STUB_B"
+WM_UV="$STUB_B" "$WF" --owner sf2 >"$WINGMAN_HOME/sf2.log" 2>&1 &
+sf2pid=$!
+wm_track "$sf2pid"
+assert_true "sf2's cycle comes up live" "wait_for_owner_status sf2"
+assert_true "a persistently ambiguous owner read self-stops once the confirm threshold is reached" "wait_for_pid_gone $sf2pid"
+sf2classify="$(wm_timeout 10 "$WF" --owner sf2 --classify 2>/dev/null)"
+assert_eq "the confirmed-gone self-stop classifies as a deliberate stop" "$sf2classify" "stopped"
+
+# --- Fix 3 MF2: a stall under the hard-grace threshold is never stolen from -
+# (mirrors this plan's own repro 2, at the new, coarser threshold)
+test_new_home
+wm_state crew-add --id hg1 --type lead --objective x --repo /tmp --window wm-hg1 --session-id shg1 >/dev/null
+wm_state crew-set --id hg1 --status working --summary "in progress" >/dev/null
+export WM_WATCH_HARD_GRACE=20
+"$WF" --owner hg1 >"$WINGMAN_HOME/hg1.log" 2>&1 &
+hg1pid=$!
+wm_track "$hg1pid"
+assert_true "hg1's cycle comes up live" "wait_for_owner_status hg1"
+kill -STOP "$hg1pid"
+sleep 3   # well under the 20s hard grace
+before_pid="$(cat "$WINGMAN_HOME/watch-hg1.pid" 2>/dev/null)"
+out2="$(wm_timeout 15 "$WF" --owner hg1 2>&1)"
+assert_contains "a stall under hard grace reports healthy, not a takeover" "$out2" "healthy"
+after_pid="$(cat "$WINGMAN_HOME/watch-hg1.pid" 2>/dev/null)"
+assert_eq "the pidfile is unchanged - no rival claim while under hard grace" "$after_pid" "$before_pid"
+kill -CONT "$hg1pid" 2>/dev/null
+kill "$hg1pid" 2>/dev/null
+unset WM_WATCH_HARD_GRACE
+
+# --- Fix 3 MF2 (round-2 MF-A): a wedge beyond hard grace is taken over, ------
+# escalating SIGTERM -> SIGKILL, since a genuinely SIGSTOPped process cannot
+# process a SIGTERM until it is continued or killed outright - the same
+# unresponsive-to-SIGTERM shape a cycle wedged in a blocking foreground child
+# (e.g. a hung tmux call) exhibits, per this plan's own repro 3.
+test_new_home
+wm_state crew-add --id hg2 --type lead --objective x --repo /tmp --window wm-hg2 --session-id shg2 >/dev/null
+wm_state crew-set --id hg2 --status working --summary "in progress" >/dev/null
+export WM_WATCH_HARD_GRACE=2
+"$WF" --owner hg2 >"$WINGMAN_HOME/hg2.log" 2>&1 &
+hg2pid=$!
+wm_track "$hg2pid"
+assert_true "hg2's cycle comes up live" "wait_for_owner_status hg2"
+kill -STOP "$hg2pid"
+sleep 4   # past the 2s hard grace
+# NOT wm_timeout: a winning takeover falls through into "claim the cycle" and
+# then BLOCKS (it is the fresh live cycle), so it never exits on its own -
+# capturing it via a bounded foreground wm_timeout would only ever return
+# once wm_timeout's own deadline force-kills it, discarding the very pid this
+# block needs to assert is genuinely live. Background it instead, exactly
+# like every other "arm a cycle" case in this suite, and poll its own log for
+# its own "watcher: armed" line - the takeover completing (the old holder
+# actually dying) is a strict PREFIX of that, so waiting for "armed" directly
+# is the correct completion signal; waiting only for the old pid's death
+# races ahead of the fresh claimant finishing its own claim sequence
+# (teardown, OWNERLOCK creation, etc.) afterward.
+"$WF" --owner hg2 >"$WINGMAN_HOME/hg2-takeover.log" 2>&1 &
+newhg2pid=$!
+wm_track "$newhg2pid"
+_hg2_i=0
+while ! grep -q "watcher: armed" "$WINGMAN_HOME/hg2-takeover.log" 2>/dev/null && [ "$_hg2_i" -lt 100 ]; do
+  sleep 0.2; _hg2_i=$((_hg2_i + 1))
+done
+assert_true "the wedged (SIGSTOPped) holder is actually reaped by the takeover" "! kill -0 $hg2pid 2>/dev/null"
+out3="$(cat "$WINGMAN_HOME/hg2-takeover.log")"
+assert_contains "the arm detects the wedge and announces a takeover" "$out3" "treating as wedged and taking over"
+assert_contains "the takeover claims a fresh cycle (armed, not healthy)" "$out3" "watcher: armed"
+assert_true "the fresh claimant's pid is genuinely live" "kill -0 $newhg2pid"
+assert_eq "the pidfile now names the fresh claimant" "$(cat "$WINGMAN_HOME/watch-hg2.pid" 2>/dev/null)" "$newhg2pid"
+kill "$newhg2pid" 2>/dev/null
+unset WM_WATCH_HARD_GRACE
+
+# --- Fix 3 MF1: a reused pid does not falsely pass identity verification ----
+# Pre-seeds $OWNERLOCK with the test harness's own live pid ($$) and a
+# mismatched start-time stamp - the cheapest available stand-in for a
+# reboot-inherited reused pid, since it is trivially live but is not a
+# watch-fleet cycle at all.
+test_new_home
+wm_state crew-add --id ri1 --type lead --objective x --repo /tmp --window wm-ri1 --session-id sri1 >/dev/null
+wm_state crew-set --id ri1 --status working --summary "in progress" >/dev/null
+mkdir "$WINGMAN_HOME/watch-ri1.pid.owner"
+printf '%s\n%s\n' "$$" "not-a-real-start-time" > "$WINGMAN_HOME/watch-ri1.pid.owner/owner"
+out4="$(wm_timeout 15 "$WF" --owner ri1 2>&1)"
+assert_contains "a fresh arm claims normally over a reused-pid stamp mismatch" "$out4" "watcher: armed"
+assert_not_contains "the fresh arm never reports healthy against the mismatched stamp" "$out4" "healthy"
+assert_not_contains "no takeover is attempted against the harness's own process" "$out4" "taking over"
+assert_true "the test harness's own process ($$) is left untouched" "kill -0 $$"
+riclean_pid="$(cat "$WINGMAN_HOME/watch-ri1.pid" 2>/dev/null)"
+kill "$riclean_pid" 2>/dev/null
+
+# --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation is verified end-to-end ----
+# and fatal on failure - never a silently-unprotected cycle. The obstruction
+# is chmod 500 on the pre-created $OWNERLOCK directory itself (with a file
+# already inside it), which genuinely survives the code's own unconditional
+# `rm -rf "$OWNERLOCK"` (removing that inner file needs write permission ON
+# $OWNERLOCK, which is denied) - unlike a bare pre-created regular file, whose
+# removal only needs write on ITS PARENT and is therefore silently cleared by
+# that same rm -rf, which is exactly why the original form of this test could
+# never fail.
+test_new_home
+wm_state crew-add --id ol1 --type lead --objective x --repo /tmp --window wm-ol1 --session-id sol1 >/dev/null
+wm_state crew-set --id ol1 --status working --summary "in progress" >/dev/null
+mkdir "$WINGMAN_HOME/watch-ol1.pid.owner"
+: > "$WINGMAN_HOME/watch-ol1.pid.owner/owner"
+chmod 500 "$WINGMAN_HOME/watch-ol1.pid.owner"
+out5="$(wm_timeout 15 "$WF" --owner ol1 2>&1)"; rc5=$?
+chmod 700 "$WINGMAN_HOME/watch-ol1.pid.owner" 2>/dev/null
+assert_true "the arm dies loudly rather than proceeding with an unwritable owner lock" "[ $rc5 -ne 0 ]"
+assert_contains "the die message names the owner lock" "$out5" "failed to create the owner lock"
+assert_false "no pidfile is left behind" "[ -f '$WINGMAN_HOME/watch-ol1.pid' ]"
+assert_false "no blocking loop was entered (beat file untouched)" "[ -f '$WINGMAN_HOME/watch-ol1.beat' ]"
+
 test_summary

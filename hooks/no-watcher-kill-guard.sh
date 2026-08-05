@@ -39,21 +39,24 @@
 #     background-armed watcher along with it.
 #
 # "Currently a live watch-fleet cycle" reuses bin/watch-fleet's own
-# cycle_live() definition exactly (bin/watch-fleet:250-255), never a bare
-# pid-alive check: the pidfile exists, its pid answers `kill -0`, AND its
-# companion beat file's mtime is younger than WM_WATCH_GRACE (default 30s).
-# This is what keeps a dead watcher's leaked pidfile (a SIGKILL skips the
-# INT/TERM trap that removes it) whose pid number is later reused by an
-# unrelated process from being falsely protected forever: a bare pid-alive
-# check would pass, but the beat file goes stale and stops refreshing since
-# nothing else touches it. The set of protected pids is recomputed fresh on
-# every hook invocation from $WM_HOME/watch.pid and $WM_HOME/watch-*.pid (the
-# owner-keyed naming bin/watch-fleet:107-123 uses for a lead's own cycle) -
-# never cached - so it can never disagree with what bin/watch-fleet's own arm
-# logic would currently classify as live.
+# owner_lock_alive() identity check exactly (issue #237, part 2): the
+# $PIDFILE.owner lock directory's stamped pid answers `kill -0` AND its
+# stamped process start time matches the pid's CURRENT start time - never a
+# bare pid-alive check, which a pid reused across a host reboot would
+# otherwise satisfy. On top of that, protection also requires the same
+# beacon-freshness-within-hard-grace term cycle_healthy() adds (issue #237
+# round-2 MF-A): a cycle whose beacon has gone stale for WM_WATCH_HARD_GRACE
+# (default 300s) is wedged, and bin/watch-fleet's own singleton guard is
+# legitimately trying to reap it via a supervised SIGTERM/SIGKILL takeover at
+# that point - this hook must never protect a pid that mechanism is entitled
+# to kill, or the takeover would deadlock against its own kill-guard. The set
+# of protected pids is recomputed fresh on every hook invocation from
+# $WM_HOME/watch*.pid.owner (the owner-keyed naming bin/watch-fleet uses for
+# a lead's own cycle) - never cached - so it can never disagree with what
+# bin/watch-fleet's own arm logic would currently classify as live/healthy.
 #
-# `kill -0` (the null-signal liveness probe cycle_live() itself uses, plus
-# bin/crew-ask and hooks/stop-guard.sh) is ALWAYS allowed, regardless of
+# `kill -0` (the null-signal liveness probe owner_lock_alive() itself uses,
+# plus bin/crew-ask and hooks/stop-guard.sh) is ALWAYS allowed, regardless of
 # target: the null signal is detected from the parsed signal spec, before any
 # target is even compared against the protected set, so this falls out of the
 # kill(1) grammar naturally rather than needing a bolted-on special case.
@@ -145,7 +148,7 @@ esac
 
 printf '%s' "$INPUT" | \
   WINGMAN_HOME="${WINGMAN_HOME:-$HOME/.wingman}" \
-  WM_WATCH_GRACE="${WM_WATCH_GRACE:-30}" \
+  WM_WATCH_HARD_GRACE="${WM_WATCH_HARD_GRACE:-300}" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
 import glob, json, os, re, subprocess, sys, time
 
@@ -163,9 +166,9 @@ tool_input = data.get("tool_input", {}) or {}
 command = tool_input.get("command", "") or ""
 home = os.path.expanduser(os.environ.get("WINGMAN_HOME") or "~/.wingman")
 try:
-    grace = int(os.environ.get("WM_WATCH_GRACE") or "30")
+    hard_grace = int(os.environ.get("WM_WATCH_HARD_GRACE") or "300")
 except ValueError:
-    grace = 30
+    hard_grace = 300
 
 
 def deny(reason):
@@ -264,33 +267,47 @@ def deny_dynamic(protected):
     deny(DYNAMIC_TARGET_REASON % sorted(protected)[0])
 
 
-# --- protected-pid discovery: the cycle_live() definition from
-# bin/watch-fleet, replicated exactly (pid alive via kill -0 AND beat file
-# fresher than the grace window),
-# never a bare pid-alive check. Recomputed fresh every call, never cached.
+# --- protected-pid discovery: bin/watch-fleet'"'"'s own owner_lock_alive()
+# identity check, replicated exactly (pid alive via kill -0 AND a matching
+# process start-time stamp - issue #237 part 2 MF1), PLUS the same
+# beacon-freshness-within-hard-grace term cycle_healthy() adds on top (issue
+# #237 round-2 MF-A) - a cycle beyond WM_WATCH_HARD_GRACE is wedged and
+# bin/watch-fleet'"'"'s own singleton guard is legitimately trying to reap it,
+# so this hook must not protect a pid that mechanism is entitled to kill.
+# Recomputed fresh every call, never cached.
 def protected_pids():
-    home_pidfiles = [os.path.join(home, "watch.pid")]
-    home_pidfiles += glob.glob(os.path.join(home, "watch-*.pid"))
     pids = set()
-    now = time.time()
-    for pidfile in home_pidfiles:
-        if not os.path.isfile(pidfile):
+    for ownerlock in glob.glob(os.path.join(home, "watch*.pid.owner")):
+        if not ownerlock.endswith(".pid.owner"):
             continue
+        ownerfile = os.path.join(ownerlock, "owner")
         try:
-            with open(pidfile) as fh:
-                pid = int(fh.read().strip())
-        except (OSError, ValueError):
+            with open(ownerfile) as fh:
+                lines = fh.read().splitlines()
+            pid = int(lines[0])
+            stamped_start = lines[1] if len(lines) > 1 else ""
+        except (OSError, ValueError, IndexError):
+            continue
+        if pid <= 0:
             continue
         try:
             os.kill(pid, 0)
         except OSError:
             continue
-        beatfile = pidfile[:-4] + ".beat" if pidfile.endswith(".pid") else pidfile + ".beat"
+        try:
+            cur_start = subprocess.check_output(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+        except Exception:
+            continue
+        if not stamped_start or stamped_start != cur_start:
+            continue
+        beatfile = ownerlock[: -len(".pid.owner")] + ".beat"
         try:
             mtime = os.path.getmtime(beatfile)
         except OSError:
             continue
-        if (now - mtime) < grace:
+        if (time.time() - mtime) < hard_grace:
             pids.add(pid)
     return pids
 

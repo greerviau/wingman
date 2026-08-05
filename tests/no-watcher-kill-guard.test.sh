@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # E2E: hooks/no-watcher-kill-guard.sh (issue #64). Denies kill/pkill/tmux
 # kill-window/tmux kill-session commands whose target resolves to a
-# currently live bin/watch-fleet cycle - reusing cycle_live()'s own two-part
-# definition (pid alive via kill -0 AND beat file fresher than the grace
-# window), never a bare pid-alive check, so a dead watcher's leaked pidfile
-# with a later-reused pid is not falsely protected. `kill -0` (the liveness
-# probe) is always allowed, and `bin/watch-fleet --stop` (the sanctioned
-# manual-stop path) never appears as a kill/pkill/tmux-kill-* shape at all.
-# Registered for every session - no crew-type gating - so these assertions
-# run with no WINGMAN_CREW_ID set, matching how the hook actually fires.
+# currently live bin/watch-fleet cycle - reusing bin/watch-fleet's own
+# owner_lock_alive() identity check (pid alive via kill -0 AND a matching
+# process start-time stamp - issue #237), never a bare pid-alive check, so a
+# dead watcher's leaked lock with a later-reused pid is not falsely
+# protected. Protection also requires the beacon to be fresher than
+# WM_WATCH_HARD_GRACE (default 300s, mirroring cycle_healthy()): a cycle
+# wedged beyond that is no longer protected, since bin/watch-fleet's own
+# singleton guard is by then entitled to take it over. `kill -0` (the
+# liveness probe) is always allowed, and `bin/watch-fleet --stop` (the
+# sanctioned manual-stop path) never appears as a kill/pkill/tmux-kill-*
+# shape at all. Registered for every session - no crew-type gating - so
+# these assertions run with no WINGMAN_CREW_ID set, matching how the hook
+# actually fires.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -151,17 +156,21 @@ assert_eq "bash -c \"bin/watch-fleet --stop\" is allowed (no output)" "$out" ""
 "$WF" --stop >/dev/null 2>&1
 
 # ============================================================================
-# scenario 4: stale pidfile / reused pid is not falsely protected
+# scenario 4: a reused pid is not falsely protected (issue #237:
+# protected_pids() requires the SAME pid+start-time identity
+# owner_lock_alive() itself requires, never a bare pid-alive check - a reused
+# pid after e.g. a host reboot carries a mismatched start-time stamp and is
+# never mistaken for the true owner)
 # ============================================================================
 test_new_home
 sleep 60 &
 reused=$!
 wm_track "$reused"
-echo "$reused" > "$WINGMAN_HOME/watch.pid"
+mkdir "$WINGMAN_HOME/watch.pid.owner"
+printf '%s\n%s\n' "$reused" "not-a-real-start-time" > "$WINGMAN_HOME/watch.pid.owner/owner"
 : > "$WINGMAN_HOME/watch.beat"
-wm_age_path "$WINGMAN_HOME/watch.beat" 60   # older than the default 30s grace
 out="$(run_hook "kill $reused")"
-assert_eq "a live-but-unrelated pid behind a stale beat file is allowed (no output)" "$out" ""
+assert_eq "a live-but-unrelated pid behind a mismatched identity stamp is allowed (no output)" "$out" ""
 kill "$reused" 2>/dev/null
 
 # ============================================================================
@@ -376,5 +385,33 @@ assert_eq "an unresolvable command mentioning no trigger word is allowed (pre-ga
 # ============================================================================
 out="$(run_hook "pgrep -f watch-fleet")"
 assert_eq "pgrep -f watch-fleet is allowed (no output) - read-only, never pkill" "$out" ""
+
+# ============================================================================
+# issue #237: a stall under hard grace stays protected. The old beacon-only
+# design (protected iff beat file fresher than 30s) had exactly this blind
+# spot - this plan's own repro 2 demonstrates a `kill <pid>` during a
+# beacon-stale-but-alive window was NOT denied by this guard before this fix.
+# The identity-verified, hard-grace-gated design (protected_pids() mirroring
+# cycle_healthy()) must keep protecting a merely-stalled (sub-hard-grace)
+# cycle - only a genuinely wedged (beyond-hard-grace) one should ever stop
+# being protected, which is exactly the population bin/watch-fleet's own
+# supervised takeover is now entitled to reap.
+# ============================================================================
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-hg1 'sleep 600'
+wm_state crew-add --id hg1 --type analyst --objective x --repo /tmp --window wm-hg1 --session-id shg1 >/dev/null
+wm_state crew-set --id hg1 --status working --summary "in progress" >/dev/null
+"$WF" >"$WINGMAN_HOME/hg.log" 2>&1 &
+hgpid=$!
+wm_track "$hgpid"
+assert_true "the cycle comes up live" "wait_for_cycle_live"
+kill -STOP "$hgpid"
+sleep 3   # well under the default 300s hard grace
+out="$(run_hook "kill $hgpid")"
+assert_contains "a stall under hard grace is still denied - the old beacon-only blind spot is closed" "$out" '"permissionDecision": "deny"'
+kill -CONT "$hgpid" 2>/dev/null
+kill "$hgpid" 2>/dev/null
+tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
 
 test_summary
