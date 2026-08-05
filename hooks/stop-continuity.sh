@@ -316,7 +316,7 @@ case "$classify_out" in
       exit 2
     fi
     ;;   # a crew-status row exists - stop-guard.sh already reports it; proceed to claim
-  healthy|spurious\ *|"")
+  healthy|spurious\ *|stale-code|"")
     : ;;   # proceed to claim - nothing to absorb
   *)
     : ;;   # unrecognized output - defensively proceed to claim rather than silently stopping
@@ -477,6 +477,13 @@ Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
         # Cannot spin: --classify's own consecutive-failure budget trips
         # spurious-repeated (above) on the third consecutive death.
         _continue=1; _quiet="spurious"; _mode="auto" ;;
+      stale-code)
+        # Continue in place, exactly like `spurious` (issue #219): the
+        # cycle noticed its OWN code was stale relative to disk and exited
+        # cleanly - not a failure, nothing to report. The very next claim
+        # in this same loop iteration spawns a fresh process that reads
+        # whatever is on disk NOW, which is what actually picks up the fix.
+        _continue=1; _quiet="stale-code"; _mode="auto" ;;
       "")
         _body=""; _mode="" ;;
       *)
@@ -529,6 +536,8 @@ except Exception: print(0)')"
   if [ $(( $(date +%s) - hook_start + window )) -gt "$lifetime" ]; then
     if [ "$_quiet" = "rolled" ]; then
       _body="Fleet continuity window rolled - no crew event yet. A fresh watch cycle is arming automatically."
+    elif [ "$_quiet" = "stale-code" ]; then
+      _body="Fleet continuity is re-arming to pick up an on-disk code update - nothing to report yet. A fresh watch cycle is arming automatically."
     else
       _body="Fleet continuity is re-arming after an unexpected watch-cycle exit - nothing to report yet. A fresh watch cycle is arming automatically."
     fi
