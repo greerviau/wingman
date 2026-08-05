@@ -48,9 +48,18 @@
 # round-2 MF-A): a cycle whose beacon has gone stale for WM_WATCH_HARD_GRACE
 # (default 300s) is wedged, and bin/watch-fleet's own singleton guard is
 # legitimately trying to reap it via a supervised SIGTERM/SIGKILL takeover at
-# that point - this hook must never protect a pid that mechanism is entitled
-# to kill, or the takeover would deadlock against its own kill-guard. The set
-# of protected pids is recomputed fresh on every hook invocation from
+# that point. This hook cannot actually deadlock against that takeover - a
+# PreToolUse Bash guard only ever inspects a SESSION's own tool-call command
+# string, never a plain in-process `kill` a script issues on its own, so
+# bin/watch-fleet's internal takeover kill was never subject to this hook in
+# the first place. The real reason to mirror the hard-grace term here is the
+# manual kill backstop this whole guard exists to preserve (issue #64): once
+# a holder is stale enough that bin/watch-fleet's own logic no longer treats
+# it as the protected owner, a human/session killing it manually is the same
+# recovery this file's own singleton guard is already entitled to perform -
+# staying out of sync here would leave a genuinely wedged watcher unkillable
+# by hand for no remaining reason. The set of protected pids is recomputed
+# fresh on every hook invocation from
 # $WM_HOME/watch*.pid.owner (the owner-keyed naming bin/watch-fleet uses for
 # a lead's own cycle) - never cached - so it can never disagree with what
 # bin/watch-fleet's own arm logic would currently classify as live/healthy.

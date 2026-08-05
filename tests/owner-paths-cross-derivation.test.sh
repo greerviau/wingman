@@ -34,23 +34,26 @@ check_owner() {
   test_new_home
   # wm_owner_paths' own derivation for this owner.
   ( . "$LIB"; wm_owner_paths "$_co_owner" "$WINGMAN_HOME"
-    printf '%s\n%s\n%s\n%s\n%s\n' "$pidfile" "$beatfile" "$stopfile" "$suppressedfile" "$claimfailfile" \
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pidfile" "$beatfile" "$stopfile" "$suppressedfile" "$claimfailfile" "$ownerlock" "$ownercheckfile" \
       > "$WINGMAN_HOME/lib-derived-paths.txt" )
   _lib_pidfile="$(sed -n '1p' "$WINGMAN_HOME/lib-derived-paths.txt")"
   _lib_beatfile="$(sed -n '2p' "$WINGMAN_HOME/lib-derived-paths.txt")"
   _lib_stopfile="$(sed -n '3p' "$WINGMAN_HOME/lib-derived-paths.txt")"
   _lib_suppressedfile="$(sed -n '4p' "$WINGMAN_HOME/lib-derived-paths.txt")"
   _lib_claimfailfile="$(sed -n '5p' "$WINGMAN_HOME/lib-derived-paths.txt")"
+  _lib_ownerlock="$(sed -n '6p' "$WINGMAN_HOME/lib-derived-paths.txt")"
+  _lib_ownercheckfile="$(sed -n '7p' "$WINGMAN_HOME/lib-derived-paths.txt")"
 
   # Pre-create files at the lib's own predicted stopfile/suppressedfile/
-  # claimfailfile paths, then let bin/watch-fleet claim for real. A
-  # successful claim clears all three unconditionally (see bin/watch-fleet's
-  # own claim-point comment) - if bin/watch-fleet's own derivation of any of
-  # these three names a DIFFERENT path than the lib predicts, the
-  # corresponding file here would survive the claim untouched.
+  # claimfailfile/ownercheckfile paths, then let bin/watch-fleet claim for
+  # real. A successful claim clears all four unconditionally (see
+  # bin/watch-fleet's own claim-point comment) - if bin/watch-fleet's own
+  # derivation of any of these four names a DIFFERENT path than the lib
+  # predicts, the corresponding file here would survive the claim untouched.
   printf 'x\n' > "$_lib_stopfile"
   printf 'x\ny\n' > "$_lib_suppressedfile"
   printf 'x\n' > "$_lib_claimfailfile"
+  printf '2\n' > "$_lib_ownercheckfile"
 
   # issue #198: the guard's own independent derivation of the marker path -
   # a marker at exactly the lib-predicted SUPPRESSEDFILE path, read under
@@ -83,6 +86,15 @@ check_owner() {
   assert_false "$_co_label: the claim cleared the lib-predicted STOPFILE (derivations agree)" "[ -f '$_lib_stopfile' ]"
   assert_false "$_co_label: the claim cleared the lib-predicted SUPPRESSEDFILE (derivations agree)" "[ -f '$_lib_suppressedfile' ]"
   assert_false "$_co_label: the claim cleared the lib-predicted CLAIMFAILFILE (derivations agree)" "[ -f '$_lib_claimfailfile' ]"
+  assert_false "$_co_label: the claim cleared the lib-predicted OWNERCHECKFILE (derivations agree)" "[ -f '$_lib_ownercheckfile' ]"
+  # $OWNERLOCK (issue #237) is CREATED and left in place, not cleared, so it
+  # gets the opposite check: it must exist at exactly the lib-predicted path,
+  # as a directory, stamped with this claim's own pid - if bin/watch-fleet's
+  # own derivation disagreed, nothing would ever appear at this path at all.
+  _n=0
+  while [ ! -d "$_lib_ownerlock" ] && [ "$_n" -lt 50 ]; do sleep 0.2; _n=$((_n+1)); done
+  assert_true "$_co_label: watch-fleet's own OWNERLOCK derivation matches wm_owner_paths' (a live claim created it there)" "[ -d '$_lib_ownerlock' ]"
+  assert_true "$_co_label: the pid stamped at the lib's predicted OWNERLOCK path is genuinely this claim" "[ \"\$(sed -n '1p' '$_lib_ownerlock/owner' 2>/dev/null)\" = '$_co_pid' ]"
   kill "$_co_pid" 2>/dev/null
   unset WINGMAN_CREW_ID
 }

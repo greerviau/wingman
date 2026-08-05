@@ -655,8 +655,21 @@ case "$MODE" in
   --stop)
     if [ -f "$PIDFILE" ]; then
       pid="$(cat "$PIDFILE" 2>/dev/null)"
+    elif owner_lock_alive; then
+      # $PIDFILE can, in principle, go missing while $OWNERLOCK - now the
+      # authoritative liveness record (issue #237, part 2) - still names a
+      # genuinely live cycle (external interference, a partial failure
+      # elsewhere): fall back to the lock's own stamped pid rather than
+      # reporting nothing to stop. Cheap, and worth the extra robustness now
+      # that bin/crew-standdown calls --stop unconditionally for every id it
+      # stands down (Fix 1).
+      pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
+    else
+      pid=""
+    fi
+    if [ -n "$pid" ]; then
       printf 'stopped\n' > "$EXITFILE"
-      [ -n "$pid" ] && kill "$pid" 2>/dev/null
+      kill "$pid" 2>/dev/null
       rm -f "$PIDFILE" "$RUNFILE"; rm -rf "$OWNERLOCK"
       wm_ok "watch-fleet stopped"
     else
@@ -919,6 +932,16 @@ fi
 # any takeover branch above just cleared it.
 
 # --- claim the cycle --------------------------------------------------------
+# Computed before the pidfile write below, not alongside the owner-lock
+# creation further down where it conceptually belongs: it is a constant for
+# this process (its own start time never changes), so there is no correctness
+# reason to compute it inside the window between the pidfile write and this
+# cycle's own "armed" line - and hooks/stop-continuity.sh:425-432 documents
+# that exact window as the one a SIGKILL landing inside it cannot recover
+# from cleanly (a dead-owner $CLAIMLOCK left behind that a re-arm must wait
+# out CLAIM_STALE_AGE for). Every subprocess fork this claim sequence can
+# avoid inside that window narrows it back down.
+_ol_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
 echo $$ > "$PIDFILE"
 # Stamp the arming session's run id (possibly empty) so a later arm from a
 # different run can recognize this cycle as foreign - see the singleton
@@ -979,8 +1002,11 @@ rm -f "$OWNERCHECKFILE"
 # required: owner_lock_alive would read false forever for a perfectly
 # healthy cycle, so the very next arm would claim the pidfile out from under
 # it.
-_ol_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-rm -rf "$OWNERLOCK" 2>/dev/null
+# [ -e ] first (a builtin test, no fork) rather than an unconditional rm -rf:
+# in the common case (a healthy fresh claim, no leftover from a takeover or a
+# SIGKILL) there is nothing here to remove at all, so this skips the rm(1)
+# fork entirely rather than paying for it against an empty path every time.
+[ -e "$OWNERLOCK" ] && rm -rf "$OWNERLOCK" 2>/dev/null
 _ol_ok=0
 if mkdir "$OWNERLOCK" 2>/dev/null; then
   { printf '%s\n' "$$"; printf '%s\n' "$_ol_start"; } > "$OWNERLOCK/owner" 2>/dev/null
@@ -991,8 +1017,10 @@ if mkdir "$OWNERLOCK" 2>/dev/null; then
   # alone reported success. Read back what was actually written and compare
   # against what this process intended to write; anything else is treated
   # exactly like a failed mkdir - fatal, never a silently unprotected cycle.
-  _ol_readback_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
-  _ol_readback_start="$(sed -n '2p' "$OWNERLOCK/owner" 2>/dev/null)"
+  # A single `read` pair off the file (a shell builtin) rather than two `sed`
+  # invocations - one less fork inside the same SIGKILL-sensitive window.
+  _ol_readback_pid=""; _ol_readback_start=""
+  { IFS= read -r _ol_readback_pid; IFS= read -r _ol_readback_start; } < "$OWNERLOCK/owner" 2>/dev/null
   if [ "$_ol_readback_pid" = "$$" ] && [ "$_ol_readback_start" = "$_ol_start" ]; then
     _ol_ok=1
   fi

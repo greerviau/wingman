@@ -410,6 +410,18 @@ kill -STOP "$hgpid"
 sleep 3   # well under the default 300s hard grace
 out="$(run_hook "kill $hgpid")"
 assert_contains "a stall under hard grace is still denied - the old beacon-only blind spot is closed" "$out" '"permissionDecision": "deny"'
+
+# The other, CHANGED half of this correction: once the same holder crosses
+# the hard-grace threshold, protected_pids() must stop protecting it - that
+# population is exactly what bin/watch-fleet's own supervised takeover is now
+# entitled to reap, and a guard that kept protecting it forever would be the
+# one thing left able to override that takeover's own kill. Reverting the
+# hard-grace term back to unconditional protection would make every assertion
+# above still pass - only this one actually exercises the change.
+wm_age_path "$WINGMAN_HOME/watch.beat" 400
+out2="$(run_hook "kill $hgpid")"
+assert_eq "a stall past hard grace is no longer protected - the changed half of the correction" "$out2" ""
+
 kill -CONT "$hgpid" 2>/dev/null
 kill "$hgpid" 2>/dev/null
 tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null

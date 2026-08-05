@@ -1804,15 +1804,17 @@ assert_true "the test harness's own process ($$) is left untouched" "kill -0 $$"
 riclean_pid="$(cat "$WINGMAN_HOME/watch-ri1.pid" 2>/dev/null)"
 kill "$riclean_pid" 2>/dev/null
 
-# --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation is verified end-to-end ----
-# and fatal on failure - never a silently-unprotected cycle. The obstruction
-# is chmod 500 on the pre-created $OWNERLOCK directory itself (with a file
-# already inside it), which genuinely survives the code's own unconditional
+# --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation - the mkdir itself fails -
+# and is fatal on failure - never a silently-unprotected cycle. The
+# obstruction is chmod 500 on the pre-created $OWNERLOCK directory itself
+# (with a file already inside it), which genuinely survives the code's own
 # `rm -rf "$OWNERLOCK"` (removing that inner file needs write permission ON
 # $OWNERLOCK, which is denied) - unlike a bare pre-created regular file, whose
 # removal only needs write on ITS PARENT and is therefore silently cleared by
 # that same rm -rf, which is exactly why the original form of this test could
-# never fail.
+# never fail. Note this specific fixture makes `mkdir` itself fail (EEXIST) -
+# it does not reach the readback-verification branch below (see ol2, which
+# does).
 test_new_home
 wm_state crew-add --id ol1 --type lead --objective x --repo /tmp --window wm-ol1 --session-id sol1 >/dev/null
 wm_state crew-set --id ol1 --status working --summary "in progress" >/dev/null
@@ -1825,5 +1827,37 @@ assert_true "the arm dies loudly rather than proceeding with an unwritable owner
 assert_contains "the die message names the owner lock" "$out5" "failed to create the owner lock"
 assert_false "no pidfile is left behind" "[ -f '$WINGMAN_HOME/watch-ol1.pid' ]"
 assert_false "no blocking loop was entered (beat file untouched)" "[ -f '$WINGMAN_HOME/watch-ol1.beat' ]"
+
+# --- Fix 3 MF3 (round-2 MF-B), the write itself: mkdir SUCCEEDS but the -----
+# stamp write into it fails - the genuine target of the readback verification,
+# distinct from ol1 above (which never reaches this branch at all). A `mkdir`
+# shim placed first on $PATH for this one arm creates the directory for real
+# (via /bin/mkdir, so mkdir's own exit code is 0) and then chmods it 0500
+# before returning, so the write immediately after is denied - deterministic,
+# no permission race, and it only ever matches a *.pid.owner argument, so the
+# unrelated $CLAIMLOCK (*.pid.lock) mkdir earlier in the same arm is
+# untouched.
+test_new_home
+wm_state crew-add --id ol2 --type lead --objective x --repo /tmp --window wm-ol2 --session-id sol2 >/dev/null
+wm_state crew-set --id ol2 --status working --summary "in progress" >/dev/null
+MKDIR_SHIM_DIR="$(wm_mktemp_dir)"
+cat > "$MKDIR_SHIM_DIR/mkdir" <<'SHIMEOF'
+#!/usr/bin/env bash
+/bin/mkdir "$@"
+_rc=$?
+for _a in "$@"; do
+  case "$_a" in
+    *.pid.owner) chmod 500 "$_a" 2>/dev/null ;;
+  esac
+done
+exit "$_rc"
+SHIMEOF
+chmod +x "$MKDIR_SHIM_DIR/mkdir"
+out6="$(wm_timeout 15 env PATH="$MKDIR_SHIM_DIR:$PATH" "$WF" --owner ol2 2>&1)"; rc6=$?
+chmod 700 "$WINGMAN_HOME/watch-ol2.pid.owner" 2>/dev/null
+assert_true "the arm dies loudly when the stamp write itself fails, even though mkdir succeeded" "[ $rc6 -ne 0 ]"
+assert_contains "the die message names the owner lock" "$out6" "failed to create the owner lock"
+assert_false "no pidfile is left behind" "[ -f '$WINGMAN_HOME/watch-ol2.pid' ]"
+assert_false "no blocking loop was entered (beat file untouched)" "[ -f '$WINGMAN_HOME/watch-ol2.beat' ]"
 
 test_summary
