@@ -16,7 +16,10 @@ canned JSON. It reads:
                             merge-ready, see the settle-gate paragraph below
   --review-comments <path>  a JSON array of inline review-thread comments
                             (`gh api repos/{owner}/{repo}/pulls/{n}/comments`), optional
-  --cursor <path>           the on-disk cursor of what has already been surfaced
+  --cursor <path>           the on-disk cursor of what has already been surfaced - read,
+                            evaluated, and written under an exclusive flock (bin/lib/wm_lock.py),
+                            so two overlapping invocations can never race on a lost cursor update
+                            (issue #180)
   --crew-record <path>      OPTIONAL: this session's own crew.json record (or a
                             file shaped like one), e.g. `wm-state crew-get --id
                             $WINGMAN_CREW_ID` written to a file the same way
@@ -104,8 +107,12 @@ cause a redundant `checks-passed` for a PR the member already knows is ready.
 """
 import argparse
 import json
+import os
 import re
 import sys
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from wm_lock import with_locked
 
 # CheckRun conclusions that count as a failure the crew should fix. NEUTRAL,
 # SKIPPED, STALE and SUCCESS are not failures; QUEUED/IN_PROGRESS have no
@@ -371,12 +378,13 @@ def main():
     if not isinstance(pr, dict):
         return  # no usable PR data (e.g. a transient gh failure) - not an event
     review_comments = read_json(args.review_comments, []) if args.review_comments else []
-    cursor = read_json(args.cursor, {})
     crew_record = read_json(args.crew_record, {}) if args.crew_record else {}
     allow_merge = bool(crew_record.get("allow_merge"))
 
-    reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id, allow_merge)
-    write_json(args.cursor, new_cursor)
+    with with_locked(args.cursor):
+        cursor = read_json(args.cursor, {})
+        reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id, allow_merge)
+        write_json(args.cursor, new_cursor)
     if reason:
         print(reason)
 

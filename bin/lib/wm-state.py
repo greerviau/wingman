@@ -72,7 +72,6 @@ All JSON is handled here in Python so the shell scripts stay bash-3.2-safe and t
 tool works whether or not jq is installed.
 """
 import argparse
-import contextlib
 import datetime
 import glob
 import hashlib
@@ -84,11 +83,6 @@ import subprocess
 import sys
 import tempfile
 import time
-
-try:
-    import fcntl
-except ImportError:  # non-POSIX platform; with_locked degrades to best-effort
-    fcntl = None
 
 # wingman's settings file reader, for the [prefs] layer under the per-run
 # preference store (see _config_prefs). This script's own directory is added to
@@ -103,6 +97,7 @@ try:
     import wm_config
 except ImportError:
     wm_config = None
+from wm_lock import with_locked, fcntl
 
 STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "delivery", "updated", "announced")
 # Display-only live-status fields (#155): never part of a member's own reported
@@ -361,46 +356,6 @@ def _apierr_match(text, pattern):
     that per-line anchoring for a Python re.search over a multi-line pane
     capture."""
     return bool(text) and re.search(pattern, text, re.MULTILINE) is not None
-
-
-@contextlib.contextmanager
-def with_locked(path):
-    """Serialize a read-modify-write of a shared store across processes.
-
-    write_json is atomic (os.replace), so no file is ever corrupted, but a
-    whole-dict read-modify-write from two processes is last-writer-wins - a
-    concurrent watcher fire()-and-ack and a Stop-hook ack can each discard the
-    other's key. Holding an exclusive flock on <path>.lock across the entire
-    read->modify->write closes that window. Best-effort only on a platform
-    without fcntl (fcntl is None): there is no lock to take there, so it
-    proceeds without one rather than hard-fail, since the atomic replace still
-    prevents corruption. On a POSIX system where fcntl IS available, a
-    flock() failure is never silently swallowed - it is re-raised so the
-    caller sees a loud, actionable error instead of silently losing the very
-    mutual exclusion this function exists to provide (issue #79)."""
-    lock_path = path + ".lock"
-    fh = None
-    try:
-        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-        fh = open(lock_path, "w")
-        if fcntl is not None:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            except OSError as e:
-                raise OSError(
-                    "with_locked: failed to acquire exclusive lock on %s (%s) - if "
-                    "WINGMAN_HOME is on a network filesystem, confirm it supports "
-                    "advisory (flock) locking" % (lock_path, e)
-                ) from e
-        yield
-    finally:
-        if fh is not None:
-            if fcntl is not None:
-                try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-            fh.close()
 
 
 def archive_path():
