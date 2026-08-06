@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # E2E: bin/watch-fleet --classify - the exit-record writes at each of watch-fleet's
 # own exit points, the classifier that turns a just-completed cycle's exit into
-# one of six outcomes (healthy/fire/remote-control-dropped/stopped/spurious/
-# spurious-repeated), the write-priority order between racing writers, the loud
-# claim-time drop log, and the pure consecutive-count failure budget with its
+# one of seven outcomes (healthy/fire/remote-control-dropped/stopped/
+# stale-code/spurious/spurious-repeated), the write-priority order between
+# racing writers, the loud claim-time drop log, and the pure consecutive-count
+# failure budget with its
 # three-rule writer invariant and reset-on-trip. See docs/plans/2026-07-13-
 # wingman-skills-for-robust-operation.md for the full design this proves.
 set -u
@@ -485,5 +486,16 @@ assert_eq "a wedge past hard grace classifies as spurious hung-or-stale-pidfile,
 # line for it that reads like a test failure in the suite's own output.
 kill -CONT "$hgbpid" 2>/dev/null
 kill "$hgbpid" 2>/dev/null
+
+# ============================================================================
+# issue #219: --classify against a hand-written stale-code exit record
+# ============================================================================
+
+test_new_home
+printf 'stale-code\n' > "$WINGMAN_HOME/watch-exit"
+scout="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "a hand-written stale-code exit record classifies as exactly stale-code" "$scout" "stale-code"
+assert_eq "a stale-code exit resets the spurious-failure count to 0" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+assert_false "the record is consumed (deleted) after being read" "[ -f '$WINGMAN_HOME/watch-exit' ]"
 
 test_summary

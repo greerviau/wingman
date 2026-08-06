@@ -58,6 +58,10 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
    - `spurious <count> <hint>` - one transient death, not yet at the failure
      budget. Report nothing to the pilot (nothing about the fleet actually
      changed), then proceed to step 2 immediately.
+   - `stale-code` - the watcher noticed its own code (`bin/watch-fleet` or
+     `lib/common.sh`) had changed on disk since it armed, and exited to pick
+     up the fix. Not a failure - report nothing to the pilot, then proceed
+     to step 2 immediately (the fresh arm reads the current on-disk code).
    - `spurious-repeated <count> <hint>` - the watcher has died `<count>`
      times in a row with no successful cycle in between; the failure budget
      has tripped, and `bin/watch-fleet --classify` has already recorded a
@@ -110,20 +114,20 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
      model-driven `/watch` and a hook-driven rewake never disagree on what
      the pilot is told or what the model is asked to do.
 
-   **`healthy` and `spurious` mean literally zero characters of chat output
-   this turn - not even a one-line acknowledgment.** "Nothing to report"
-   means producing no message, not producing a message that says there is
-   nothing to report. Never say things like "Watcher armed.", "Watcher
-   re-armed (transient blip, nothing to report).", or "Re-arming, all
-   quiet." on either of these two outcomes specifically - just do what that
-   outcome's bullet above says (arm the next cycle for `spurious`; end the
-   turn with no re-arm for `healthy`) and produce no text output at all.
-   This is a hard rule, not a style preference: `healthy` and `spurious`
-   carry no new information for the pilot, so any acknowledgment - however
-   short - is itself the mechanics leak CLAUDE.md's Report-altitude rule
-   forbids. This does not extend to `fire`, `stopped`, `remote-control-dropped`,
-   or `spurious-repeated`, which already report by design per the bullets
-   above.
+   **`healthy`, `spurious`, and `stale-code` mean literally zero characters of
+   chat output this turn - not even a one-line acknowledgment.** "Nothing to
+   report" means producing no message, not producing a message that says
+   there is nothing to report. Never say things like "Watcher armed.",
+   "Watcher re-armed (transient blip, nothing to report).", or "Re-arming,
+   all quiet." on any of these three outcomes specifically - just do what
+   that outcome's bullet above says (arm the next cycle for `spurious`/
+   `stale-code`; end the turn with no re-arm for `healthy`) and produce no
+   text output at all. This is a hard rule, not a style preference:
+   `healthy`, `spurious`, and `stale-code` carry no new information for the
+   pilot, so any acknowledgment - however short - is itself the mechanics
+   leak CLAUDE.md's Report-altitude rule forbids. This does not extend to
+   `fire`, `stopped`, `remote-control-dropped`, or `spurious-repeated`,
+   which already report by design per the bullets above.
 2. **Arm one fresh cycle, but only if none is already live and the failure
    budget was not just exceeded.** Arm it as a Bash call with
    `run_in_background: true`, on its own - not bundled onto another

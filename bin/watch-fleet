@@ -133,14 +133,19 @@
 #                          stdin: reads (and consumes) the exit-record this
 #                          script itself wrote at its own exit point, or, if
 #                          none is present, checks whether a fresh cycle is
-#                          already live. Prints exactly one of six outcomes on
+#                          already live. Prints exactly one of seven outcomes on
 #                          stdout - `healthy`, `fire`, `remote-control-dropped`,
-#                          `stopped` (bare tokens), or `spurious <count> <hint>` /
-#                          `spurious-repeated <count> <hint>` (a consecutive-
-#                          failure count and a forensic hint) - and exits 0.
+#                          `stopped`, `stale-code` (bare tokens), or
+#                          `spurious <count> <hint>` / `spurious-repeated
+#                          <count> <hint>` (a consecutive-failure count and
+#                          a forensic hint) - and exits 0.
 #                          `stopped` means the last cycle ended via a deliberate
 #                          `--stop`, not a failure - never auto-re-arm on this
-#                          alone. Dispatched before claim-lock acquisition:
+#                          alone. `stale-code` means this cycle's own code
+#                          (`bin/watch-fleet` or `lib/common.sh`) changed on
+#                          disk since it armed - also never a failure, resets
+#                          the spurious-failure count exactly like `stopped`/
+#                          `fire`. Dispatched before claim-lock acquisition:
 #                          never creates the claim lock, never mutates
 #                          $PIDFILE/$BEATFILE/$OWNERLOCK (it legitimately
 #                          reads all three via the cycle_healthy check).
@@ -168,6 +173,7 @@ set -u
 # this once, up front, means the check itself costs one plain directory test,
 # no subprocess.
 SELF_BIN_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+SELF_SCRIPT="$SELF_BIN_DIR/$(basename "$0")"
 
 # Immunize the wake loop against SIGURG (signal 16). This script is armed as a
 # harness-tracked background task, and its exit is the only channel that wakes an
@@ -209,6 +215,8 @@ if [ -n "$OWNER" ]; then
   EXITFILE="$WM_HOME/watch-exit-$_key"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count-$_key"
   RUNFILE="$WM_HOME/watch-$_key.run"
+  CODEFILE="$WM_HOME/watch-$_key.code"
+  CODECHECKFILE="$WM_HOME/watch-$_key.codecheck"
   # The pending-notice channel the outbox scan's `wake` mode writes into
   # (issue #169), keyed identically to the files above - a lead's own cycle
   # reads its own notices here.
@@ -233,6 +241,8 @@ else
   EXITFILE="$WM_HOME/watch-exit"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
   RUNFILE="$WM_HOME/watch.run"
+  CODEFILE="$WM_HOME/watch.code"
+  CODECHECKFILE="$WM_HOME/watch.codecheck"
   NOTICEFILE="$WM_HOME/pending-notices"
   STOPFILE="$WM_HOME/watch.stopped"
   SUPPRESSEDFILE="$WM_HOME/watch.suppressed"
@@ -510,6 +520,17 @@ owner_lock_alive() {
 cycle_healthy() {
   owner_lock_alive || return 1
   [ "$(beat_age)" -lt "$WM_WATCH_HARD_GRACE" ]
+}
+
+# Content fingerprint of the two files this cycle sourced/executed at start
+# (issue #219): cksum's CRC+size pair is one subprocess, no external hash
+# binary whose name varies by platform (md5 vs md5sum), and - unlike an
+# mtime/size check - immune to a touch or a checkout that rewrites
+# byte-identical content with a new mtime. Never a security boundary (a
+# CRC32 collision is trivially constructible) - only a change detector for
+# code an operator/pilot controls.
+code_fingerprint() {
+  cksum "$SELF_SCRIPT" "$SELF_BIN_DIR/lib/common.sh" 2>/dev/null
 }
 
 # spurious_repeated_reason <count> <hint>
@@ -992,6 +1013,13 @@ rm -f "$STOPFILE" "$SUPPRESSEDFILE" "$CLAIMFAILFILE"
 # a previous, crashed cycle must not carry over into this one's owner-status
 # self-check (Fix 2b below).
 rm -f "$OWNERCHECKFILE"
+# Stamp the current on-disk code fingerprint (issue #219) before this loop
+# ever runs, so the stale-code self-check below has something to compare
+# every poll against. This is the only write site for $CODEFILE - never also
+# written earlier alongside $RUNFILE, above the #197 refuse-to-arm check,
+# since a claim that refuses there has no reason to roll back a $CODEFILE
+# that was never written yet.
+code_fingerprint > "$CODEFILE"
 # Create the true singleton-lifetime lock (issue #237 part 2). Safe to
 # attempt unconditionally, with no age check or verification dance (unlike
 # $CLAIMLOCK's own claim, which does need one, for a different reason): by
@@ -1269,10 +1297,11 @@ while :; do
   # unconditionally on $OWNER, every poll, before anything else can `exit 0`
   # this poll - fire()'s own exit 0 is below (see the needs-attention check at
   # the bottom of this loop) is the first; the worktree-removal self-check
-  # (issue #237, Fix 2a) just below this is a second; the owner-status
-  # self-check (Fix 2b) right after it is a third, independent one; and the
-  # self-pane check just below THAT is a fourth - so this scan sits ahead of
-  # all FOUR: a member's outbox must not go unswept for however many polls
+  # (issue #237, Fix 2a) just below this is a second; the stale-code
+  # self-check (issue #219) right after it is a third; the owner-status
+  # self-check (Fix 2b) after that is a fourth, independent one; and the
+  # self-pane check just below THAT is a fifth - so this scan sits ahead of
+  # all FIVE: a member's outbox must not go unswept for however many polls
   # those paths keep firing.
   # Placed before wm_tmux_adopt_strays/wm_state reconcile below, so a member
   # that dies during poll N first becomes visible to the scan on poll N+1 -
@@ -1366,6 +1395,91 @@ for tid in ids:
     printf 'stopped\n' > "$EXITFILE"
     rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
     exit 0
+  fi
+
+  # Stale-code self-check (issue #219): this cycle sources lib/common.sh and
+  # its own body exactly once, at process start, so a merged fix to either
+  # file has zero effect on an already-armed cycle until it exits and is
+  # freshly re-armed - a fresh process re-sourcing both files is what
+  # actually picks up the fix, not anything this check does directly.
+  # Positioned after the outbox scan (issue #169's own "must not go unswept"
+  # guarantee outranks detecting staleness one poll earlier) and after the
+  # worktree-removal check immediately above (issue #237 Fix 2a's terminal
+  # `stopped` classification for a removed $SELF_BIN_DIR must never be
+  # pre-empted or relabeled `stale-code`) - still ahead of everything that
+  # mutates roster/tmux state below. cksum, not mtime: immune to a
+  # touch/checkout that rewrites identical bytes with a new mtime, so this
+  # never trips on a no-op.
+  # The `|| _cf_now=""` matters: cksum exits nonzero but still prints the
+  # readable file's own line if exactly ONE of the two files is unreadable
+  # (a transient permissions blip, a torn read on just one of them) - a bare
+  # "$(code_fingerprint)" would then read as non-empty-but-partial, passing
+  # the -n guard below and mismatching the two-line stamp on a read failure
+  # that was never a real code change. Forcing empty on any nonzero exit
+  # keeps a partial read on the SAME "uncomputable, skip this poll" path as
+  # the both-files-unreadable case the comment below already documents.
+  _cf_now="$(code_fingerprint)" || _cf_now=""
+  if [ -n "$_cf_now" ]; then
+    # Empty output means the fingerprint could not be computed (a removed
+    # dir, a permissions change, a torn read) - never treated as evidence of
+    # a change; skip the comparison entirely for this poll. The
+    # worktree-removal check immediately above already ruled out "the
+    # directory itself is gone" as the cause, so an empty result reaching
+    # here is a transient read failure - left for a later poll to resolve,
+    # never guessed at.
+    # A bash builtin read (no cat fork) in the common case a fresh claim
+    # already stamped $CODEFILE - this check runs on every poll, so avoiding
+    # a second subprocess here (beyond code_fingerprint's own cksum) matters
+    # more than it would for a once-per-arm read.
+    if [ -f "$CODEFILE" ]; then _cf_stamped="$(< "$CODEFILE")"; else _cf_stamped=""; fi
+    if [ "$_cf_now" != "$_cf_stamped" ]; then
+      # Consecutive-mismatch streak (issue #219's own anti-spin bound,
+      # mirroring $OWNERCHECKFILE's shape but NOT its claim-time clearing -
+      # see the claim-time comment above and the design doc's own
+      # explanation): a fresh claim always stamps the CURRENT on-disk
+      # fingerprint before this loop ever runs, so a second consecutive
+      # fresh cycle also mismatching on its own first poll is not a genuine
+      # code update - it is a malfunction (e.g. a $CODEFILE write that
+      # silently failed).
+      #
+      # MONOTONIC while unresolved: written BEFORE the branch below, and
+      # never reset inside the malfunction branch itself - only a poll that
+      # finds a genuine MATCH (the "fi" + rm -f below) ever clears it.
+      # Clearing it here instead would let a 'stale-code' exit's own
+      # unconditional $SPURCOUNTFILE reset (--classify's record branch)
+      # alternate forever against this streak: arm N writes 'stale-code'
+      # (real budget -> 0), arm N+1 finds the streak back at 0 so it ALSO
+      # writes 'stale-code' instead of continuing the malfunction path, and
+      # the real budget never accumulates past 1. Monotonic-until-matched is
+      # what makes a persistent malfunction actually reach spurious-repeated
+      # instead of oscillating invisibly forever.
+      _cc_streak="$(cat "$CODECHECKFILE" 2>/dev/null)"
+      case "$_cc_streak" in ''|*[!0-9]*) _cc_streak=0 ;; esac
+      _cc_streak=$((_cc_streak + 1))
+      printf '%s\n' "$_cc_streak" > "$CODECHECKFILE"
+      if [ "$_cc_streak" -ge 2 ]; then
+        # Malfunction, not a code update: fall through to --classify's
+        # ordinary no-record hint logic instead of writing 'stale-code'
+        # again - that path DOES feed the real, un-resettable
+        # spurious-failure budget and reaches spurious-repeated after three
+        # consecutive no-record deaths (this streak's 2nd, 3rd, 4th pass
+        # here) - unlike a repeated 'stale-code' write, which --classify's
+        # record branch resets $SPURCOUNTFILE to 0 for unconditionally,
+        # every time, and so could never trip it.
+        spurlog stale-code-repeat "two or more consecutive fresh arms have now detected a fingerprint mismatch immediately (streak $_cc_streak) - treating as a persistent malfunction (e.g. \$CODEFILE unwritable), not a genuine code update; falling through to the ordinary failure-budget accounting instead of a silent auto-heal"
+        rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
+        exit 0   # deliberately 0, matching every other self-directed exit in
+                 # this loop (worktree-removal, owner-status, the
+                 # self-ownership check) - --classify never reads the actual
+                 # process exit status, only $EXITFILE's presence/absence and
+                 # $PIDFILE's, both already accounted for above.
+      fi
+      spurlog stale-code "watch-fleet or lib/common.sh changed on disk since this cycle armed"
+      printf 'stale-code\n' > "$EXITFILE"
+      rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
+      exit 0
+    fi
+    [ -f "$CODECHECKFILE" ] && rm -f "$CODECHECKFILE"
   fi
 
   # Owner-status self-check (issue #237, part 1): a cycle scoped to a
@@ -2017,14 +2131,15 @@ for r in roster if isinstance(roster, list) else []:
   # Fleet-wide outage-state machine (#23, item 0): advanced every iteration,
   # wingman's own top-level cycle only (owner "" - concurrency/outage is
   # fleet-wide, not per-lead-team; a lead's cycle skips this entirely).
-  # Unlike self_pane_check above, this is deliberately NOT a sixth/seventh
+  # Unlike self_pane_check above, this is deliberately NOT an additional
   # top-level --classify outcome: it writes $EXITFILE "fire" (the same token
   # the ordinary fire() path below writes) so outage-detected/outage-cleared
-  # surface as ordinary fire reasons within the existing five-outcome
-  # classification (healthy/fire/remote-control-dropped/spurious/spurious-
-  # repeated) - structurally identical to a blocked/review/done/died/stalled
-  # reason line today, just fleet-scoped (no per-member id to ack) rather
-  # than routed through fire()'s needs-attention/group-attention machinery.
+  # surface as ordinary fire reasons within the existing outcome
+  # classification (healthy/fire/remote-control-dropped/stopped/stale-code/
+  # spurious/spurious-repeated) - structurally identical to a blocked/review/
+  # done/died/stalled reason line today, just fleet-scoped (no per-member id
+  # to ack) rather than routed through fire()'s needs-attention/group-
+  # attention machinery.
   if [ -z "$OWNER" ]; then
     _died_csv="$(printf '%s' "$_reconcile_died" | tr ' ' ',')"
     _outage_transition="$(wm_state outage-update --owner "" \
@@ -2097,7 +2212,7 @@ print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-out
   # WM_USAGE_STALE_SECS) and live (resets_at still in the future - see
   # wm_state usage-update's own docstring for why a frozen high reading
   # cannot be trusted on captured_at freshness alone). Dispatched as an
-  # ordinary `fire` reason line within the existing five-outcome --classify
+  # ordinary `fire` reason line within the existing --classify outcome
   # contract, exactly like outage-detected/outage-cleared above - no new
   # --classify outcome is introduced.
   #

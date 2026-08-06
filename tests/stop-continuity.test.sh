@@ -349,6 +349,20 @@ unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore
 # this case once that lands.
 echo "  SKIP - case 7c quarantined pending issue #263 (mid-window re-claim delay observed >50s under CI load)"
 
+# --- (219a) A mid-window stale-code exit re-claims in place, exactly like ---
+# (7c)'s own external-kill case above - the direct regression for issue #219:
+# a cycle that notices its own code went stale on disk exits cleanly, and the
+# tokenless continuity loop re-claims a fresh cycle in the same invocation
+# rather than ending the turn (a second "armed pid=" line in the arm log),
+# with the spurious-failure count left at 0 afterward (a stale-code exit is
+# not a failure). ---
+# QUARANTINED (issue #263, the identical mid-window re-claim path (7c)
+# exercises): a stale-code death re-claims through the exact same "foreground
+# bin/watch-fleet, then re-claim in place" mechanism whose delay has been
+# observed exceeding 50s in CI - a pre-existing defect unrelated to issue
+# #219 itself. Re-enable alongside (7c) once #263's investigation lands a fix.
+echo "  SKIP - case 219a quarantined pending issue #263 (mid-window re-claim delay observed >50s under CI load, same path as case 7c)"
+
 # --- (7c') The budget-exhaustion body names what actually happened - the
 # direct regression against conflating a clean rollover with a re-arm after
 # an unexpected watch-cycle exit. Mirror of test (9) sub-case (b), whose own
