@@ -184,6 +184,7 @@ if [ -f "$PIDFILE" ] && [ -f "$BEATFILE" ]; then
   fi
 fi
 echo $$ > "$PIDFILE"
+: > "$BEATFILE" || true
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
 wm_ok "pr-watch: armed pid=$$ (crew $WINGMAN_CREW_ID, pr $PR, polling every ${INTERVAL}s until an event fires)"
 
