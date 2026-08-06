@@ -1410,7 +1410,15 @@ for tid in ids:
   # mutates roster/tmux state below. cksum, not mtime: immune to a
   # touch/checkout that rewrites identical bytes with a new mtime, so this
   # never trips on a no-op.
-  _cf_now="$(code_fingerprint)"
+  # The `|| _cf_now=""` matters: cksum exits nonzero but still prints the
+  # readable file's own line if exactly ONE of the two files is unreadable
+  # (a transient permissions blip, a torn read on just one of them) - a bare
+  # "$(code_fingerprint)" would then read as non-empty-but-partial, passing
+  # the -n guard below and mismatching the two-line stamp on a read failure
+  # that was never a real code change. Forcing empty on any nonzero exit
+  # keeps a partial read on the SAME "uncomputable, skip this poll" path as
+  # the both-files-unreadable case the comment below already documents.
+  _cf_now="$(code_fingerprint)" || _cf_now=""
   if [ -n "$_cf_now" ]; then
     # Empty output means the fingerprint could not be computed (a removed
     # dir, a permissions change, a torn read) - never treated as evidence of
@@ -2123,14 +2131,15 @@ for r in roster if isinstance(roster, list) else []:
   # Fleet-wide outage-state machine (#23, item 0): advanced every iteration,
   # wingman's own top-level cycle only (owner "" - concurrency/outage is
   # fleet-wide, not per-lead-team; a lead's cycle skips this entirely).
-  # Unlike self_pane_check above, this is deliberately NOT a sixth/seventh
+  # Unlike self_pane_check above, this is deliberately NOT an additional
   # top-level --classify outcome: it writes $EXITFILE "fire" (the same token
   # the ordinary fire() path below writes) so outage-detected/outage-cleared
-  # surface as ordinary fire reasons within the existing five-outcome
-  # classification (healthy/fire/remote-control-dropped/spurious/spurious-
-  # repeated) - structurally identical to a blocked/review/done/died/stalled
-  # reason line today, just fleet-scoped (no per-member id to ack) rather
-  # than routed through fire()'s needs-attention/group-attention machinery.
+  # surface as ordinary fire reasons within the existing outcome
+  # classification (healthy/fire/remote-control-dropped/stopped/stale-code/
+  # spurious/spurious-repeated) - structurally identical to a blocked/review/
+  # done/died/stalled reason line today, just fleet-scoped (no per-member id
+  # to ack) rather than routed through fire()'s needs-attention/group-
+  # attention machinery.
   if [ -z "$OWNER" ]; then
     _died_csv="$(printf '%s' "$_reconcile_died" | tr ' ' ',')"
     _outage_transition="$(wm_state outage-update --owner "" \
@@ -2203,7 +2212,7 @@ print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-out
   # WM_USAGE_STALE_SECS) and live (resets_at still in the future - see
   # wm_state usage-update's own docstring for why a frozen high reading
   # cannot be trusted on captured_at freshness alone). Dispatched as an
-  # ordinary `fire` reason line within the existing five-outcome --classify
+  # ordinary `fire` reason line within the existing --classify outcome
   # contract, exactly like outage-detected/outage-cleared above - no new
   # --classify outcome is introduced.
   #
