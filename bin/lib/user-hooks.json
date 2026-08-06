@@ -69,6 +69,16 @@
       ]
     },
     {
+      "id": "foreground-poll-loop",
+      "issue": "#268",
+      "ok_text": "foreground-poll-loop guard hook",
+      "warn_text": "foreground-poll-loop guard hook (issue #268)",
+      "blurb": ["denies a foreground while/until+sleep polling loop from any session, machine-wide"],
+      "hooks": [
+        { "script": "hooks/no-foreground-poll-loop-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+      ]
+    },
+    {
       "id": "interactive-prompt",
       "issue": "#155",
       "ok_text": "interactive-prompt guard hook",

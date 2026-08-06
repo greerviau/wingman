@@ -410,6 +410,33 @@ print(cmds.count('$TEST_REPO/hooks/no-foreground-watcher-guard.sh'))
 ")"
 assert_eq "re-running does not duplicate the hook entry" "$foreground_watcher_guard_count" "1"
 
+# --- Foreground-poll-loop guard hook (issue #268), user scope ---------------
+# hooks/no-foreground-poll-loop-guard.sh, registered by its own real,
+# checked-in path exactly like the foreground-watcher guard above.
+SETTINGS13="$WORK/foreground-poll-loop-guard-settings.json"
+out13="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS13" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "fresh: doctor warns the foreground-poll-loop guard hook is not registered" "$out13" "foreground-poll-loop guard hook (issue #268) not registered"
+assert_contains "fresh: doctor registers the foreground-poll-loop guard hook" "$out13" "registered foreground-poll-loop guard hook"
+foreground_poll_loop_guard_cmd="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS13'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print('yes' if '$TEST_REPO/hooks/no-foreground-poll-loop-guard.sh' in cmds else 'no')
+")"
+assert_eq "the registered entry references the real hook path" "$foreground_poll_loop_guard_cmd" "yes"
+
+# Idempotent: re-running reports already registered, does not duplicate the
+# entry for this hook specifically.
+out14="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS13" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
+assert_contains "a second run reports the foreground-poll-loop guard hook already registered" "$out14" "foreground-poll-loop guard hook registered"
+foreground_poll_loop_guard_count="$(uv run --no-project --quiet python -c "
+import json
+d = json.load(open('$SETTINGS13'))
+cmds = [h['command'] for g in d['hooks']['PreToolUse'] for h in g['hooks']]
+print(cmds.count('$TEST_REPO/hooks/no-foreground-poll-loop-guard.sh'))
+")"
+assert_eq "re-running does not duplicate the hook entry" "$foreground_poll_loop_guard_count" "1"
+
 # --- manifest/doctor equality (issue #241, the drift proof) -----------------
 # bin/doctor still registers user-scope hooks the old way (one
 # install-user-hook.py call per group); bin/lib/user-hooks.json +
