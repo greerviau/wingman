@@ -91,11 +91,22 @@
 # run in the foreground at all. To stream output from an already-
 # backgrounded process instead of polling it, use the Monitor tool.
 #
-# Residual gap, deliberately out of scope: a loop hidden inside a script
-# FILE (`bash some-script.sh`, where the loop lives inside the script, not
-# in this Bash tool call's own `command` text) is invisible here - this
-# hook is text-only on the literal tool-call command. Neither reported
-# incident was this shape; both were typed directly into a Bash tool call.
+# Residual gaps, deliberately out of scope:
+#   - A loop hidden inside a script FILE (`bash some-script.sh`, where the
+#     loop lives inside the script, not in this Bash tool call's own
+#     `command` text) is invisible here - this hook is text-only on the
+#     literal tool-call command. Neither reported incident was this shape;
+#     both were typed directly into a Bash tool call.
+#   - A loop written as a `case` statement's branch action (e.g. `case $x
+#     in y) while true; do sleep 5; done ;; esac`) is also invisible:
+#     command_segments() only splits on `;`/`&&`/`||`/pipe, so a command
+#     immediately after a case pattern's `)` lands mid-segment rather than
+#     at a segment's own first token, and this hook's loop-opener check
+#     never sees it (issue #268 PR #271 review round 2). Layer B's
+#     detection backstop (`loop-wedge-check`), which matches a plain regex
+#     against a descendant's own `ps` text rather than depending on segment
+#     structure, still catches a real wedge of this shape - just later,
+#     not at the tool-call boundary.
 #
 # Registered user-level by bin/doctor (crew sessions have their project root
 # in other repos, where this repo's project settings never load) - same
