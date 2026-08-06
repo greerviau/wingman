@@ -226,4 +226,58 @@ done
 assert_true "the real blocking loop touches its own beacon" "[ -f '$BEAT' ]"
 kill "$bgpid" 2>/dev/null
 
+# --- singleton guard: a second arm on the same PR stands down, not a rival ---
+# (issue #180) Before the fix, bin/pr-watch has no check at all before starting
+# its blocking loop, so a second arm on the same PR/crew id starts a second,
+# fully independent `while :; do ... done` - proven here by actually launching
+# two real (non---once) background cycles against a PR fixture that never
+# settles (a permanently in-progress check, so neither cycle ever fires and
+# exits on its own) and observing whether the second one keeps running.
+test_new_home
+export WINGMAN_CREW_ID=sg1
+D3="$(wm_mktemp_dir)"
+GH3="$D3/gh"; make_fake_gh "$GH3"
+export WM_GH="$GH3"
+export FAKE_PR="$D3/pr.json"
+export WM_PR_WATCH_INTERVAL=1
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS"}],
+ "reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}
+JSON
+
+PIDF="$WINGMAN_HOME/pr-watch-sg1.pid"
+BEAT="$WINGMAN_HOME/pr-watch-sg1.beat"
+
+"$PRWATCH" --pr 42 >"$WINGMAN_HOME/loop1.log" 2>&1 &
+pid1=$!
+wm_track "$pid1"
+_i=0
+while [ "$_i" -lt 20 ]; do
+  [ -f "$BEAT" ] && break
+  sleep 0.2; _i=$((_i+1))
+done
+assert_true "the first cycle is live and beating" "kill -0 $pid1"
+
+"$PRWATCH" --pr 42 >"$WINGMAN_HOME/loop2.log" 2>&1 &
+pid2=$!
+wm_track "$pid2"
+
+# Give the second arm every chance to exit on its own if it's going to - well
+# past both WM_PR_WATCH_INTERVAL (1s) and WM_PR_WATCH_GRACE (90s default is
+# irrelevant here; the guard's liveness check runs once, at arm time, so this
+# only needs to outlast a few poll cycles for a second REAL loop to prove
+# itself alive, not the grace window itself).
+_i=0
+while [ "$_i" -lt 25 ]; do
+  kill -0 "$pid2" 2>/dev/null || break
+  sleep 0.2; _i=$((_i+1))
+done
+assert_false "a second arm on the same PR does not start a rival loop - it exits" "kill -0 $pid2"
+assert_contains "the second arm reports the live cycle as healthy" "$(cat "$WINGMAN_HOME/loop2.log")" "healthy"
+assert_true "the first cycle is still the one live watcher" "kill -0 $pid1"
+assert_eq "the surviving pidfile still names the first cycle's pid" "$(cat "$PIDF" 2>/dev/null)" "$pid1"
+
+kill "$pid1" 2>/dev/null
+
 test_summary

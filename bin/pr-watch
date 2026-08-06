@@ -43,6 +43,12 @@
 # issue #59). Firing advances only the fired dimension, so a co-occurring
 # lower-priority event still surfaces next cycle.
 #
+# A defensive re-arm on the same PR is a no-op, not a second rival loop: the
+# pidfile+beacon shape `bin/crew-ask await` already uses guards this loop too
+# (issue #180), keyed by $WINGMAN_CREW_ID (a member watches at most one PR at
+# a time). A second arm that finds the first cycle's pid alive and its beacon
+# fresh prints `healthy` and exits immediately.
+#
 # Each poll also re-reads this session's OWN crew.json record (`wm_state
 # crew-get`) for its live `allow_merge` value, so a mid-flight grant (the
 # ordinary way merge autonomy actually gets granted - after a human or lead
@@ -151,7 +157,35 @@ fi
 # with a fresh beacon keeps today's once-only review announcement, while one
 # with none (or a stale one, the loop having exited or died) becomes eligible
 # for a bounded reminder. Same sanitization idiom as pane-tail-<id>.txt et al.
-BEATFILE="$WM_HOME/pr-watch-$(printf '%s' "$WINGMAN_CREW_ID" | tr -c 'A-Za-z0-9._-' '_').beat"
+_key="$(printf '%s' "$WINGMAN_CREW_ID" | tr -c 'A-Za-z0-9._-' '_')"
+BEATFILE="$WM_HOME/pr-watch-$_key.beat"
+PIDFILE="$WM_HOME/pr-watch-$_key.pid"
+
+# --- singleton guard (issue #180) -------------------------------------------
+# A live cycle (pid alive + beacon touched within grace) already covers this
+# PR, so a second arm stands down instead of starting a rival loop - the same
+# pidfile+beacon shape bin/crew-ask await already uses (:198-215), keyed by
+# $WINGMAN_CREW_ID (a member watches at most one PR at a time, so the PR
+# number is not part of the key). Unlike watch-fleet's identity-verified,
+# atomically-claimed guard (issue #237), this has no atomic mkdir claim and no
+# takeover: pr-watch is armed and re-armed by the SAME crew session, never
+# adopted across a run boundary, so that machinery would solve a problem this
+# loop doesn't have. See the plan's "Why the lighter shape" section for the
+# residual TOCTOU window this accepts, and why it's an accepted tradeoff here.
+WM_PR_WATCH_GRACE="${WM_PR_WATCH_GRACE:-90}"   # comfortably above one poll_once() + one INTERVAL (default 30s)
+if [ -f "$PIDFILE" ] && [ -f "$BEATFILE" ]; then
+  _p="$(cat "$PIDFILE" 2>/dev/null)"
+  if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+    _bm="$(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$BEATFILE" 2>/dev/null)"
+    if [ -n "$_bm" ] && [ $(( $(date +%s) - _bm )) -lt "$WM_PR_WATCH_GRACE" ]; then
+      wm_ok "pr-watch: healthy pid=$_p (crew $WINGMAN_CREW_ID already watching PR $PR) - one cycle is live; nothing to do. This pid is the EXISTING watcher, never a target to stop or kill."
+      exit 0
+    fi
+  fi
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"; exit 0' INT TERM
+wm_ok "pr-watch: armed pid=$$ (crew $WINGMAN_CREW_ID, pr $PR, polling every ${INTERVAL}s until an event fires)"
 
 # Forensics only - prevents nothing (issue #202: a foreground and a
 # backgrounded Bash call are indistinguishable from inside this process, so
@@ -169,6 +203,7 @@ while :; do
   : > "$BEATFILE"
   if reason="$(poll_once)"; then
     printf '%s\n' "$reason"
+    rm -f "$PIDFILE"
     exit 0
   fi
   sleep "$INTERVAL"
