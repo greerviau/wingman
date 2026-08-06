@@ -89,6 +89,22 @@ assert_eq "allowed: a for-loop is naturally self-bounding" "$out" ""
 out="$(run_hook 'for i in 1 2 3; do sleep 1; done' true)"
 assert_eq "allowed (rib true too): a for-loop with sleep" "$out" ""
 
+# --- denied: a while/until+sleep loop NESTED inside a for/if block's own
+#     do/then, where the enclosing block is not itself a while/until - the
+#     loop-opener check must also look at the stripped body's first token,
+#     not just the segment's original one, or this shape is invisible
+#     (issue #268 PR #271 review round 1) --------------------------------------
+for cmd in \
+  'for item in a b c; do until grep -q done /tmp/x; do sleep 5; done; done' \
+  'if [ -f flag ]; then while ! grep -q done /tmp/x; do sleep 5; done; fi'
+do
+  out="$(run_hook "$cmd" omit)"
+  assert_contains "denied (nested while/until inside for/if): $cmd" "$out" '"permissionDecision": "deny"'
+  assert_contains "denial cites issue #268: $cmd" "$out" "issue #268"
+  out="$(run_hook "$cmd" true)"
+  assert_eq "allowed with run_in_background: true: $cmd" "$out" ""
+done
+
 # --- non-Bash payloads exit 0 silently, even when the text matches -----------
 out="$(uv run --no-project --quiet python -c '
 import json

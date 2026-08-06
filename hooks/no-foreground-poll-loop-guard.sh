@@ -220,21 +220,31 @@ try:
         if not seg:
             continue
 
-        # Step 4: loop-opener check runs on the segment'"'"'s OWN first
-        # token, exactly as originally lexed - never on the stripped `body`
-        # below. while/until are exactly the tokens a leading `do`/`then`/
-        # `else`/`elif` strip would consume for a DIFFERENT segment shape
-        # (a nested loop'"'"'s opener immediately following the outer
-        # loop'"'"'s own `do`), so reusing that strip here would consume the
-        # very token this check is looking for.
-        if loop_opener is None and basename(seg[0]) in LOOP_KEYWORDS:
-            loop_opener = (basename(seg[0]), " ".join(seg))
-
         # Step 3: strip AT MOST ONE leading shell keyword before checking
         # whether this segment invokes `sleep` - a segment immediately
         # following a loop'"'"'s own `;` starts with `do` (or `then`/`else`/
         # `elif`), not the command actually being run.
         body = seg[1:] if seg[0] in LEADING_KEYWORDS else seg
+
+        # Step 4: loop-opener check runs on the segment'"'"'s own first token
+        # AS LEXED, and ALSO on the stripped `body`'"'"'s own first token: a
+        # nested while/until loop'"'"'s opener can appear immediately after a
+        # `do`/`then`/`else`/`elif` belonging to an ENCLOSING block that is
+        # not itself a while/until - a `for` or an `if`, neither of which
+        # sets loop_opener on its own. `for item in a b c; do until grep -q
+        # done x; do sleep 5; done; done` produces the segment [\'"'"'do\'"'"',
+        # \'"'"'until\'"'"', \'"'"'!\'"'"', \'"'"'grep\'"'"', ...] - checking only the raw
+        # \'"'"'do\'"'"' misses the nested until entirely, since no other segment in
+        # that command carries a while/until keyword at all. Checking
+        # body[0] in addition to seg[0] catches this with no new false
+        # positive: basename() is an exact-token match, and a segment whose
+        # stripped body genuinely starts with while/until is opening a loop
+        # by shell grammar however it got there.
+        body_head = basename(body[0]) if body else ""
+        opener_tok = body_head if body_head in LOOP_KEYWORDS else basename(seg[0])
+        if loop_opener is None and opener_tok in LOOP_KEYWORDS:
+            loop_opener = (opener_tok, " ".join(seg))
+
         if not body:
             continue
         resolved_b, _resolved_argv = resolve_command(body)
