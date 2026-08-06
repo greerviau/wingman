@@ -466,6 +466,10 @@ wm_tmux_ensure_session
 # -PF prints the new window's id (@N); recorded in the roster so stray-window
 # adoption can match this exact window, not just its name.
 WINDOW_ID="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "$WINDOW" "bash $(quote "$LAUNCH")")"
+_new_window_rc=$?
+if [ "$_new_window_rc" -ne 0 ] || [ -z "$WINDOW_ID" ]; then
+  wm_die "tmux new-window failed for '$ID' (window '$WINDOW', exit $_new_window_rc) - no window was created, nothing to record or attach to"
+fi
 
 # --- record in the roster ----------------------------------------------------
 # --parent stamps ownership from the spawning crew's id: empty for wingman (the
