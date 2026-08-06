@@ -867,7 +867,8 @@ def cmd_crew_set(args):
                 live.pop("blocker_composed", None)
         else:
             live.pop("blocker_note", None)
-            if live.pop("blocker_composed", None) and args.blocker is None:
+            live.pop("blocker_composed", None)
+            if args.blocker is None:
                 live["blocker"] = None
         # nudged_at (#155 fix 1) is stamped elsewhere (cmd_stall_check's --just-
         # nudged, riding the existing per-poll stall-check call bin/watch-fleet
