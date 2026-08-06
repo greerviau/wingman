@@ -281,6 +281,13 @@ EOF
   # -PF prints the replacement window's id (@N); re-registered in the roster so
   # stray-window adoption keeps an exact identity to match on.
   _window_id="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "$_window" "bash $(quote "$_launch")")"
+  _new_window_rc=$?
+  if [ "$_new_window_rc" -ne 0 ] || [ -z "$_window_id" ]; then
+    wm_warn "'$_rid': tmux new-window failed (exit $_new_window_rc) - no window was created; status left 'died'. Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
+    RESUME_RESULT="skip: resume failed"
+    release_claim
+    return
+  fi
   wm_state crew-set --id "$_rid" --window-id "$_window_id" --silent >/dev/null 2>&1 || true
   # --resume reopens the conversation but, in this unattended setup, does not
   # itself decide to keep working - it needs the same kind of opening nudge a
