@@ -468,6 +468,44 @@ else
   fi
 fi
 
+# --- Foreground-poll-loop guard (any session, any repo), user scope --------
+# hooks/no-foreground-poll-loop-guard.sh (PreToolUse) denies a Bash command
+# containing an unbounded while/until loop with a sleep invocation anywhere
+# in it, unless `run_in_background: true` (issue #268: two crew sessions
+# hand-rolled a shell polling loop to wait on a long-running command and
+# hard-deadlocked - one on a `pgrep -f` self-match, the other on a sentinel
+# file a different process never wrote - costing roughly four hours
+# combined, since neither could read incoming messages or self-diagnose
+# while blocked inside the foreground tool call). Like the foreground-
+# watcher guard just above, there is no session type for which a foreground
+# hand-rolled polling loop is ever legitimate, so this is registered
+# unconditionally, with no crew-type gating at all.
+FOREGROUND_POLL_LOOP_HOOK="$WM_REPO/hooks/no-foreground-poll-loop-guard.sh"
+if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
+    --settings "$GUARD_SETTINGS" --hook "$FOREGROUND_POLL_LOOP_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
+  wm_ok "foreground-poll-loop guard hook registered ($GUARD_SETTINGS)"
+else
+  wm_warn "foreground-poll-loop guard hook (issue #268) not registered in $GUARD_SETTINGS"
+  printf '    denies a foreground while/until+sleep polling loop from any session, machine-wide\n'
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/install-user-hook.py --settings $GUARD_SETTINGS --hook $FOREGROUND_POLL_LOOP_HOOK --matcher Bash"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" --settings "$GUARD_SETTINGS" --hook "$FOREGROUND_POLL_LOOP_HOOK" --event PreToolUse --matcher Bash; then
+      wm_ok "registered foreground-poll-loop guard hook"
+    else
+      wm_err "failed to register foreground-poll-loop guard hook"
+    fi
+  fi
+fi
+
 # --- Interactive-prompt guard (crew sessions, any repo), user scope ---------
 # hooks/no-interactive-prompt-guard.sh (PreToolUse) denies AskUserQuestion,
 # EnterPlanMode, and ExitPlanMode outright for every crew session (issue

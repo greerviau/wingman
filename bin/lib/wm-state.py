@@ -1814,11 +1814,12 @@ def _track_long_running(cid, pane_pid, root_grace):
 
 def _impose_stall(cid, status_file, live, source, reason, clear_blocker=False, extra=None):
     """The single write that imposes 'stalled' onto `live` (the current
-    on-disk dict for `cid`), shared by cmd_stall_check, cmd_wedge_check and
+    on-disk dict for `cid`), shared by cmd_stall_check, _wedge_check_common
+    (cmd_wedge_check and cmd_loop_wedge_check's shared body, issue #268) and
     cmd_forward_motion_check (issue #235). Caller holds with_locked(status_file)
     and has already re-checked the record (re-read fresh, status/updated still
     match this call's own snapshot) before calling this - it performs the
-    write itself, matching every one of the three call sites' own prior
+    write itself, matching every one of these call sites' own prior
     inline write_json(status_file, live).
 
     Records the provenance cmd_stall_recheck needs to re-run THIS detector's
@@ -2069,19 +2070,54 @@ def _wedge_descendant(pane_pid, proc_re, threshold):
     return best
 
 
-def cmd_wedge_check(args):
-    """Flag a WORKING or BLOCKED crew member 'stalled' iff it shows the
-    signature of a watch-fleet/pr-watch cycle blocking in the FOREGROUND of
-    its own session (issue #202): its pane has repainted continuously - never
-    idle at a prompt - for --threshold seconds of genuinely OBSERVED
-    continuity, its own record has gone unwritten for the same window, AND a
-    descendant matching --proc-re (default 'watch-fleet|pr-watch') has itself
-    been running >= --threshold seconds. All three must hold together -
-    pane continuity alone would flip any legitimately long foreground task,
-    and the descendant duration alone would flip a lead whose own
-    correctly-armed background watcher is simply blocking on a quiet crew
-    (see docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-plan.md,
-    section 2.6): only the combination is specific to a wedge.
+# Layer B (issue #268) default pattern for the loop-wedge detector, mirroring
+# cmd_wedge_check's own inlined "watch-fleet|pr-watch" default exactly, but
+# named (rather than inlined) since it is documented and referenced from the
+# CLI subparser below too. Searched via re.search against a descendant's own
+# full `args` text (matching _wedge_descendant's existing convention, not
+# re.match) - `[\s\S]*?` (not `.*?`) so the match spans a `ps`-rendered
+# command line that happens to include a literal newline. Overridable via
+# WM_LOOP_WEDGE_PROC_RE, mirroring WM_WEDGE_PROC_RE's own override mechanism.
+WM_LOOP_WEDGE_PROC_RE_DEFAULT = r"\b(while|until)\b[\s\S]*?\bsleep\b"
+
+
+def _wedge_pid_contradicted(stall, pane_pid):
+    """Shared evidence check for the 'wedge' and 'loop' _stall_contradicted
+    branches (issue #268): both detectors record the same `wedge_pid` field
+    (the descendant pid _wedge_descendant matched), and "has that pid
+    disappeared from the pane's process tree" is the identical fact to check
+    regardless of which pattern originally matched it. Contradicted iff
+    `_ps_tree(pane_pid)` is non-empty AND the recorded `wedge_pid` is absent
+    from it - the non-emptiness check is the fail-closed guard (an EMPTY
+    tree is what --pane-pid 0, an unreadable ps, or a momentarily
+    unresolvable pane all look like, and none of them may ever be read as
+    "the wedging process is gone"). A `stall` with no integer `wedge_pid` is
+    not contradicted at all - there is no recorded process to look for."""
+    wedge_pid = stall.get("wedge_pid")
+    if not isinstance(wedge_pid, int):
+        return False
+    tree = _ps_tree(pane_pid)
+    if not tree:
+        return False
+    return wedge_pid not in tree
+
+
+def _wedge_check_common(args, source, proc_re_env, proc_re_default, reason_fn):
+    """Shared body of cmd_wedge_check (issue #202) and cmd_loop_wedge_check
+    (issue #268): both flag a WORKING or BLOCKED crew member 'stalled' iff
+    its pane has repainted continuously - never idle at a prompt - for
+    --threshold seconds of genuinely OBSERVED continuity, its own record has
+    gone unwritten for the same window, AND a descendant matching
+    --proc-re (defaulting through `proc_re_env`/`proc_re_default` when
+    omitted) has itself been running >= --threshold seconds. All three must
+    hold together - pane continuity alone would flip any legitimately long
+    foreground task, and the descendant duration alone would flip a lead
+    whose own correctly-armed background watcher is simply blocking on a
+    quiet crew (see docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-
+    plan.md, section 2.6): only the combination is specific to a wedge.
+    `source` ("wedge" or "loop") is what the caller's own detector is named
+    in the record's provenance; `reason_fn(threshold, desc_args, desc_pid,
+    desc_elapsed, cid)` composes that detector's own reason text.
 
     Widened to 'blocked' (not just 'working', unlike cmd_stall_check) because
     the wedge this is named for happens exactly as easily while answering a
@@ -2092,7 +2128,7 @@ def cmd_wedge_check(args):
     Called per member per bin/watch-fleet poll (both statuses), unlike
     cmd_stall_check (working only, and only once the blocked skip has
     already excluded a blocked member for that poll) - see the call site
-    comment in bin/watch-fleet for why this one sits ABOVE that skip.
+    comment in bin/watch-fleet for why these sit ABOVE that skip.
 
     --root-grace is passed straight through to the relocated
     _track_long_running call (#155 fix 2, issue #202) - see its own
@@ -2101,14 +2137,16 @@ def cmd_wedge_check(args):
 
     Anchor store (wedge-anchor.json): {"<id>": {"since": <iso>,
     "last_seen": <iso>, "pid": <pane_pid>}}, read-modify-written under
-    with_locked, matching forward-motion.json. `since` is the moment
-    continuity was last (re-)established; `last_seen` is the moment
-    continuity was last CONFIRMED, and is what makes the anchor require
-    genuinely OBSERVED continuity rather than merely "no poll has yet
-    observed a quiet pane since `since`" - a watcher outage spanning two
-    live observations would otherwise read as continuous coverage across the
-    whole gap it never actually watched. Three resets, in order, before the
-    update:
+    with_locked, matching forward-motion.json, and SHARED between both
+    detectors (keyed by `cid` alone, unmodified by which pattern is being
+    tested for) - pane continuity is a property of the session's pane, not
+    of which pattern is being tested. `since` is the moment continuity was
+    last (re-)established; `last_seen` is the moment continuity was last
+    CONFIRMED, and is what makes the anchor require genuinely OBSERVED
+    continuity rather than merely "no poll has yet observed a quiet pane
+    since `since`" - a watcher outage spanning two live observations would
+    otherwise read as continuous coverage across the whole gap it never
+    actually watched. Three resets, in order, before the update:
       1. --pane-idle >= --pane-gap: the pane has fallen silent at its
          prompt (a correctly-armed background watcher, or simply idle).
          Drop the entry and return - nothing to anchor.
@@ -2189,7 +2227,7 @@ def cmd_wedge_check(args):
     if updated_dt is None or (stamp_dt - updated_dt).total_seconds() < args.threshold:
         return
 
-    proc_re = getattr(args, "proc_re", None) or os.environ.get("WM_WEDGE_PROC_RE") or "watch-fleet|pr-watch"
+    proc_re = getattr(args, "proc_re", None) or os.environ.get(proc_re_env) or proc_re_default
     found = _wedge_descendant(args.pane_pid, proc_re, args.threshold)
     if found is None:
         return
@@ -2202,19 +2240,7 @@ def cmd_wedge_check(args):
             return
         live = current
 
-        reason = (
-            "wedged mid-turn for over %s: its pane has repainted "
-            "continuously the whole time (never idle at a prompt) while its "
-            "own record has not been written, and `%s` (pid %d) has been "
-            "running as a descendant of its pane for %s. That is the "
-            "signature of a blocking watcher started in the FOREGROUND of "
-            "its own session (issue #202) - a correctly backgrounded one "
-            "leaves the session idle at its prompt. It will not resume on "
-            "its own: inspect with `bin/crew-takeover %s`, or stand it down "
-            "with `bin/crew-standdown %s`."
-            % (_human_duration(args.threshold), desc_args, desc_pid,
-               _human_duration(desc_elapsed), cid, cid)
-        )
+        reason = reason_fn(args.threshold, desc_args, desc_pid, desc_elapsed, cid)
         blocker = live.get("blocker")
         if blocker:
             reason += " (unanswered question was: %s)" % blocker
@@ -2230,7 +2256,7 @@ def cmd_wedge_check(args):
         # would also make cmd_needs_attention's `blocker or delivery or
         # artifact_url or artifact or summary` note surface the stale
         # question instead of this stall reason.
-        _impose_stall(cid, status_file, live, "wedge", reason,
+        _impose_stall(cid, status_file, live, source, reason,
                        clear_blocker=True, extra={"wedge_pid": desc_pid})
 
     with with_locked(crew_json_path()):
@@ -2242,6 +2268,76 @@ def cmd_wedge_check(args):
         write_json(crew_json_path(), roster)
     render_board()
     print("stalled %s" % cid)
+
+
+def _wedge_reason(threshold, desc_args, desc_pid, desc_elapsed, cid):
+    """cmd_wedge_check's own reason text (issue #202), unchanged from before
+    the _wedge_check_common extraction."""
+    return (
+        "wedged mid-turn for over %s: its pane has repainted "
+        "continuously the whole time (never idle at a prompt) while its "
+        "own record has not been written, and `%s` (pid %d) has been "
+        "running as a descendant of its pane for %s. That is the "
+        "signature of a blocking watcher started in the FOREGROUND of "
+        "its own session (issue #202) - a correctly backgrounded one "
+        "leaves the session idle at its prompt. It will not resume on "
+        "its own: inspect with `bin/crew-takeover %s`, or stand it down "
+        "with `bin/crew-standdown %s`."
+        % (_human_duration(threshold), desc_args, desc_pid,
+           _human_duration(desc_elapsed), cid, cid)
+    )
+
+
+def cmd_wedge_check(args):
+    """Flag a WORKING or BLOCKED crew member 'stalled' iff it shows the
+    signature of a watch-fleet/pr-watch cycle blocking in the FOREGROUND of
+    its own session (issue #202) - see _wedge_check_common's own docstring
+    for the full shared design this delegates to. --proc-re defaults through
+    WM_WEDGE_PROC_RE / "watch-fleet|pr-watch" when omitted."""
+    _wedge_check_common(args, "wedge", "WM_WEDGE_PROC_RE", "watch-fleet|pr-watch", _wedge_reason)
+
+
+def _loop_wedge_reason(threshold, desc_args, desc_pid, desc_elapsed, cid):
+    """cmd_loop_wedge_check's own reason text (issue #268) - composed fresh
+    rather than reusing _wedge_reason's watcher-specific wording, which would
+    be actively misleading if the matched descendant is a hand-rolled loop
+    instead of a foregrounded watch-fleet/pr-watch cycle."""
+    return (
+        "wedged mid-turn for over %s: its pane has repainted "
+        "continuously the whole time (never idle at a prompt) while its "
+        "own record has not been written, and `%s` (pid %d) has been "
+        "running as a descendant of its pane for %s. That is the "
+        "signature of a hand-rolled foreground polling loop (a "
+        "while/until construct with a sleep in its body) with no "
+        "independent timeout (issue #268) - its exit condition never "
+        "became true, and it cannot be woken by anything except an "
+        "external kill. It will not resume on its own: inspect with "
+        "`bin/crew-takeover %s`, or stand it down with "
+        "`bin/crew-standdown %s`."
+        % (_human_duration(threshold), desc_args, desc_pid,
+           _human_duration(desc_elapsed), cid, cid)
+    )
+
+
+def cmd_loop_wedge_check(args):
+    """Flag a WORKING or BLOCKED crew member 'stalled' iff it shows the
+    signature of a hand-rolled foreground while/until+sleep polling loop
+    (issue #268, layer B - the detection backstop for whatever layer A,
+    hooks/no-foreground-poll-loop-guard.sh, misses: the hook not yet
+    registered for a given machine/session, a shape it cannot parse, or a
+    wedge already in flight before that hook shipped) - see
+    _wedge_check_common's own docstring for the full shared design this
+    delegates to.
+
+    A hand-rolled polling loop is not idle - it spins every `sleep N`
+    seconds, forking short-lived sleep/pgrep children the whole time it is
+    wedged - which is exactly what the generic stall/liveness probe treats
+    as positive evidence of life, so detection needs this same combined
+    (pane continuity + stale record + matching descendant) signature
+    _wedge_check_common already uses for the watch-fleet/pr-watch case,
+    generalized to a second --proc-re pattern (--proc-re defaults through
+    WM_LOOP_WEDGE_PROC_RE / WM_LOOP_WEDGE_PROC_RE_DEFAULT when omitted)."""
+    _wedge_check_common(args, "loop", "WM_LOOP_WEDGE_PROC_RE", WM_LOOP_WEDGE_PROC_RE_DEFAULT, _loop_wedge_reason)
 
 
 def _attention_suppressed(rid, upd, suppress_on, only_acked, acked, handled):
@@ -3226,7 +3322,7 @@ def cmd_forward_motion_check(args):
 def _valid_stall(stall):
     """Whole-object validation gating cmd_stall_recheck (issue #235) - guard
     #1 of the governing fail-closed invariant. True iff `stall` is a dict,
-    its `source` is one of the three known detectors, `since` parses, and
+    its `source` is one of the known detectors, `since` parses, and
     `prev_status` is a status a revert could legally restore. Anything else
     (absent, malformed, or a legacy 'stalled' record flipped before this
     feature shipped, so with no `stall` object at all) makes the record
@@ -3237,7 +3333,7 @@ def _valid_stall(stall):
     streak started, no write made."""
     return (
         isinstance(stall, dict)
-        and stall.get("source") in ("liveness", "wedge", "forward-motion")
+        and stall.get("source") in ("liveness", "wedge", "forward-motion", "loop")
         and _parse_updated(stall.get("since")) is not None
         and stall.get("prev_status") in ("working", "blocked")
     )
@@ -3268,9 +3364,13 @@ def _stall_contradicted(stall, pane_changed, pane_pid, root_grace, cid):
     None on its own (already 'not contradicted'), never something that reads
     as 'dead'.
 
-    source == 'wedge': contradicted iff `_ps_tree(pane_pid)` is non-empty AND
-    the recorded `wedge_pid` is absent from it. The non-emptiness check is
-    the fail-closed guard and is load-bearing: an EMPTY tree is what
+    source == 'wedge' or source == 'loop': contradicted iff
+    `_ps_tree(pane_pid)` is non-empty AND the recorded `wedge_pid` is absent
+    from it (_wedge_pid_contradicted, shared by both - the underlying fact
+    being checked, has the specific pid this member was found wedged on
+    disappeared from its pane's process tree, is identical regardless of
+    which pattern originally matched it). The non-emptiness check is the
+    fail-closed guard and is load-bearing: an EMPTY tree is what
     `--pane-pid 0`, an unreadable `ps`, or a momentarily unresolvable pane
     all look like, and none of them may ever be read as 'the wedging process
     is gone' - _ps_tree returns {} for all three, indistinguishable from a
@@ -3299,14 +3399,8 @@ def _stall_contradicted(stall, pane_changed, pane_pid, root_grace, cid):
             return True
         return _longest_running_descendant(pane_pid, root_grace) is not None
 
-    if source == "wedge":
-        wedge_pid = stall.get("wedge_pid")
-        if not isinstance(wedge_pid, int):
-            return False
-        tree = _ps_tree(pane_pid)
-        if not tree:
-            return False
-        return wedge_pid not in tree
+    if source in ("wedge", "loop"):
+        return _wedge_pid_contradicted(stall, pane_pid)
 
     if source == "forward-motion":
         children_sig = stall.get("children_sig")
@@ -3335,13 +3429,17 @@ _STALL_CLEAR_EVIDENCE = {
 
 def _stall_clear_evidence(stall):
     """The per-source evidence phrase for cmd_stall_recheck's clear reason
-    text (see "The revert" in the plan for the exact three wordings). wedge
-    is composed here (it needs the recorded pid), the other two are a plain
+    text (see "The revert" in the plan for the exact three wordings, plus
+    issue #268's "loop" addition). wedge/loop are composed here (each needs
+    the recorded pid, with its own phrasing), the other two are a plain
     lookup."""
     source = stall.get("source")
     if source == "wedge":
         return ("the foreground process (pid %s) that wedged it is gone from "
                 "its pane's process tree" % stall.get("wedge_pid"))
+    if source == "loop":
+        return ("the foreground polling loop (pid %s) that wedged it is gone "
+                "from its pane's process tree" % stall.get("wedge_pid"))
     return _STALL_CLEAR_EVIDENCE.get(source, "")
 
 
@@ -4399,6 +4497,27 @@ def build_parser():
     # change - see the plan's "Residual gap" risk.
     a.add_argument("--proc-re", default=None, dest="proc_re")
     a.set_defaults(fn=cmd_wedge_check)
+
+    # Foreground-poll-loop wedge detection (issue #268, layer B): the
+    # identical detector shape as wedge-check just above, generalized to a
+    # second --proc-re pattern (default WM_LOOP_WEDGE_PROC_RE_DEFAULT: a
+    # while/until keyword followed by a sleep invocation in a descendant's
+    # own `ps` args) - the backstop for whatever hooks/no-foreground-poll-
+    # loop-guard.sh (layer A) misses. Called per member per bin/watch-fleet
+    # poll, alongside the existing wedge-check call - see cmd_loop_wedge_
+    # check's own docstring for the full design.
+    a = sub.add_parser("loop-wedge-check")
+    a.add_argument("--id", required=True)
+    a.add_argument("--pane-idle", type=int, required=True, dest="pane_idle")
+    a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
+    a.add_argument("--root-grace", type=int, required=True, dest="root_grace")
+    a.add_argument("--threshold", type=int, required=True)
+    a.add_argument("--pane-gap", type=int, required=True, dest="pane_gap")
+    # Overridable via WM_LOOP_WEDGE_PROC_RE (read directly by
+    # cmd_loop_wedge_check when this is omitted), mirroring --proc-re's own
+    # override mechanism on wedge-check above.
+    a.add_argument("--proc-re", default=None, dest="proc_re")
+    a.set_defaults(fn=cmd_loop_wedge_check)
 
     a = sub.add_parser("needs-attention")
     # Emit only this owner's direct reports ("" = top level). Omit for every layer.
