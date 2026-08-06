@@ -43,9 +43,9 @@
 # bin/watch-fleet's own per-owner block, re-derived independently there - see
 # the plan's "known, accepted duplication" note) reference: pidfile, beatfile,
 # exitfile, runfile, stopfile, claimlock, wakefile, inflightfile,
-# suppressedfile, claimfailfile, ownerlock, ownercheckfile. Owner "" (wingman's
-# own top-level scope) keeps the legacy unscoped names, matching
-# bin/watch-fleet exactly.
+# suppressedfile, claimfailfile, killstampfile, ownerlock, ownercheckfile.
+# Owner "" (wingman's own top-level scope) keeps the legacy unscoped names,
+# matching bin/watch-fleet exactly.
 wm_owner_paths() {
   _wop_owner="$1"; _wop_home="$2"
   if [ -n "$_wop_owner" ]; then
@@ -75,6 +75,7 @@ wm_owner_paths() {
   claimlock="$pidfile.lock"
   inflightfile="$_wop_home/stop-continuity${_okey:+-$_okey}.pid"
   claimfailfile="$_wop_home/stop-continuity${_okey:+-$_okey}.claimfail"
+  killstampfile="$_wop_home/stop-continuity${_okey:+-$_okey}.killstamp"
   ownerlock="$pidfile.owner"
 }
 

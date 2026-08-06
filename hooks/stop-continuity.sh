@@ -19,10 +19,21 @@
 # #231, see continuity_registered_timeout below) - but that is the on-disk
 # value, not necessarily what THIS session's own harness is actually bound
 # to (Claude Code binds hooks at session start, and the on-disk value moves
-# the instant a new registration is deployed). RESTARTING every session that
-# was already running when a `timeout` change lands is required, not merely
-# advisable - the clamp only covers the narrower case where the on-disk
-# value itself is still stale (unreadable, or a scope not yet reconciled).
+# the instant a new registration is deployed). The harness's own timeout
+# kill is a trappable SIGTERM, not SIGKILL (confirmed empirically - issue
+# #248): this hook's own TERM/INT trap below measures the elapsed lifetime
+# and stamps it to a run-scoped record ($killstampfile) BEFORE forwarding
+# the kill to its own child, so the first invocation killed under a stale
+# binding witnesses its own real timeout directly and pins it for the rest
+# of the run - every later invocation clamps to that measurement instead of
+# the stale on-disk value, durably, not merely until the next clean exit. A
+# dead pid found in the in-flight marker (step 5 below) is a narrower
+# fallback for the one case a trap cannot help with - an untrappable
+# SIGKILL (OOM, a hard crash, a manual `kill -9`) - and informs only the
+# invocation that discovers it, without pinning a record for later ones.
+# RESTARTING every session that was already running when a `timeout` change
+# lands is still required, not optional: this narrows the exposure to at
+# most one silently-discarded kill per session, it does not eliminate it.
 # See the clamp's own comment below and docs/guards.md for the honest scope
 # of what this actually protects.
 #
@@ -179,27 +190,77 @@ fi
 window="${WM_STOP_CONTINUITY_WINDOW:-480}"
 lifetime="${WM_STOP_CONTINUITY_LIFETIME:-$WM_CONTINUITY_LIFETIME_DEFAULT}"
 
+# 5. Self-owned, time-bounded in-flight marker. Not "pid alive" alone - "pid
+# alive AND recorded within $window plus a margin" - since this hook's own
+# total runtime is bounded by its own referee at $window, so anything older
+# than that plus a small margin (60s) cannot possibly be a live instance of
+# this hook, regardless of what the pid says.
+inflight_pid="$(cat "$inflightfile" 2>/dev/null)"
+inflight_age=999999
+if [ -f "$inflightfile" ]; then
+  inflight_age=$(( $(date +%s) - $($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$inflightfile" 2>/dev/null || echo 0) ))
+fi
+if [ -n "$inflight_pid" ] && kill -0 "$inflight_pid" 2>/dev/null && [ "$inflight_age" -lt $(( window + 60 )) ]; then
+  exit 0   # a genuinely concurrent instance is already managing continuity for this owner
+fi
+printf '%s\n' "$$" > "$inflightfile"
+# Cleared unconditionally on every clean exit (issue #248) - the
+# harness-timeout scenario is now witnessed directly by the TERM/INT trap
+# below, which stamps $killstampfile BEFORE this process ever reaches its
+# own exit, so $inflightfile no longer needs to survive a TERM-forwarded
+# exit to preserve evidence the way it once did. The pid guard (only remove
+# a marker still naming THIS invocation's own pid) is defense in depth
+# against a marker a LATER invocation has already reclaimed by the time this
+# one's own EXIT trap runs; it works unmodified inside a subshell too ($$ is
+# always the parent shell's pid, never the subshell's), though the referee
+# below never actually runs this trap regardless - bash does not inherit an
+# EXIT trap into a `( ... )` subshell in the first place.
+trap '[ "$(cat "$inflightfile" 2>/dev/null)" = "$$" ] && rm -f "$inflightfile"' EXIT
+
 # Self-clamp the lifetime budget against this hook's own registered
-# `timeout` (issue #231). Finding 1 of the companion analysis is that a hook
-# killed AT its own `timeout` has its exit code silently discarded, so
-# trusting the configured lifetime blindly would go dark on exactly the
-# session this exists to protect.
+# `timeout` (issue #231) OR, when available, a directly measured prior kill
+# (issue #248 - see the TERM/INT trap installed further below, and this
+# file's own header comment for the full design). Evidence sources are tried
+# in order and the first one that yields a value wins outright - never
+# blended with a `min` against a later source, which would let a stale
+# on-disk value back in behind a genuine measurement:
 #
-# What this clamp does NOT cover, honestly: Claude Code binds hooks at
-# session start, but the value read here is the CURRENT on-disk
-# registration, which moves the instant a new `timeout` is deployed - the
-# same commit that ships this script. A session already running when that
-# happens keeps executing the new script off disk while its own harness
-# binding still kills it at the OLD timeout, and by the time its next Stop
-# event runs this clamp, the on-disk value already reads the NEW (larger)
-# timeout - so the clamp computes a lifetime that fits the NEW binding, not
-# the OLD one it is actually still killed at, and provides no protection at
-# all for that session. RESTARTING every such session is required, not
-# optional; this clamp is not a substitute for it. What it DOES cover: the
-# narrower window where the on-disk value itself is genuinely still stale -
-# unreadable/missing, or one scope (typically crew-scope, reconciled only at
-# the next spawn/resume) not yet caught up with the other.
-#
+#   1. $killstampfile, honored only for the CURRENT $WINGMAN_RUN_ID - a
+#      directly measured elapsed lifetime, stamped by a PRIOR invocation's
+#      own TERM/INT trap the instant the harness killed it. This is ground
+#      truth about the session's real harness binding, not an inference, and
+#      it persists across a clean exit deliberately: the fact it records
+#      (this session's registered timeout) cannot change again short of an
+#      actual restart, which mints a fresh run id and makes this file stop
+#      being honored on its own.
+#   2. A dead pid found in $inflightfile above (SIGKILL-only fallback): no
+#      trap ran, so nothing measured anything, but a prior invocation is
+#      definitively gone with no trace of a clean exit. Pinned to the
+#      historical 600 for THIS invocation's own clamp only - deliberately
+#      NOT written back to $killstampfile the way source 1 is: unlike a real
+#      measurement, "some invocation died with no evidence" says nothing
+#      about what this session's actual timeout IS, and self-pinning it
+#      would tighten every later invocation's clamp for the rest of the run
+#      on one ambiguous data point - including the ordinary, unrelated
+#      process churn an already-running production session can carry in
+#      $inflightfile from before this mechanism ever shipped.
+#   3. The on-disk registration (both project- and user-scope settings
+#      files, minimum of whatever is found), falling back to the historical
+#      600 if neither yields a value - unchanged from issue #231, and the
+#      one path that does NOT protect a session already running when a
+#      `timeout` change lands (see this file's own header comment).
+_registered_timeout=""
+if wm_run_scoped_marker_active "$killstampfile"; then
+  _registered_timeout="$(tail -n +2 "$killstampfile" 2>/dev/null | head -n 1)"
+  case "$_registered_timeout" in ''|*[!0-9]*) _registered_timeout="" ;; esac
+fi
+_prior_kill_evidence=0
+if [ -n "$inflight_pid" ] && ! kill -0 "$inflight_pid" 2>/dev/null; then
+  _prior_kill_evidence=1
+fi
+if [ -z "$_registered_timeout" ] && [ "$_prior_kill_evidence" -eq 1 ]; then
+  _registered_timeout=600
+fi
 # Read BOTH candidate settings files rather than choosing one by
 # WINGMAN_CREW_ID: a crew session whose project root IS this repo loads both
 # the project registration (stop-continuity.sh, in .claude/settings.json)
@@ -214,33 +275,18 @@ lifetime="${WM_STOP_CONTINUITY_LIFETIME:-$WM_CONTINUITY_LIFETIME_DEFAULT}"
 # does nothing" is a far better failure than "continuity silently dies".
 _continuity_project_settings="${WM_PROJECT_SETTINGS:-$REPO/.claude/settings.json}"
 _continuity_user_settings="${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"
-_registered_timeout=""
-for _t in \
-  "$(continuity_registered_timeout "$_continuity_project_settings" "stop-continuity.sh")" \
-  "$(continuity_registered_timeout "$_continuity_user_settings" "stop-continuity-crew.sh")"; do
-  [ -n "$_t" ] || continue
-  if [ -z "$_registered_timeout" ] || [ "$_t" -lt "$_registered_timeout" ]; then
-    _registered_timeout="$_t"
-  fi
-done
+if [ -z "$_registered_timeout" ]; then
+  for _t in \
+    "$(continuity_registered_timeout "$_continuity_project_settings" "stop-continuity.sh")" \
+    "$(continuity_registered_timeout "$_continuity_user_settings" "stop-continuity-crew.sh")"; do
+    [ -n "$_t" ] || continue
+    if [ -z "$_registered_timeout" ] || [ "$_t" -lt "$_registered_timeout" ]; then
+      _registered_timeout="$_t"
+    fi
+  done
+fi
 _lifetime_cap=$(( ${_registered_timeout:-600} - WM_CONTINUITY_TIMEOUT_MARGIN ))
 [ "$lifetime" -gt "$_lifetime_cap" ] && lifetime="$_lifetime_cap"
-
-# 5. Self-owned, time-bounded in-flight marker. Not "pid alive" alone - "pid
-# alive AND recorded within $window plus a margin" - since this hook's own
-# total runtime is bounded by its own referee at $window, so anything older
-# than that plus a small margin (60s) cannot possibly be a live instance of
-# this hook, regardless of what the pid says. Not actively cleaned up on exit
-# (no rm in any trap) - the freshness bound makes that unnecessary.
-inflight_pid="$(cat "$inflightfile" 2>/dev/null)"
-inflight_age=999999
-if [ -f "$inflightfile" ]; then
-  inflight_age=$(( $(date +%s) - $($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$inflightfile" 2>/dev/null || echo 0) ))
-fi
-if [ -n "$inflight_pid" ] && kill -0 "$inflight_pid" 2>/dev/null && [ "$inflight_age" -lt $(( window + 60 )) ]; then
-  exit 0   # a genuinely concurrent instance is already managing continuity for this owner
-fi
-printf '%s\n' "$$" > "$inflightfile"
 
 # 6. Persistent stop-sanction gate. Silently, every time, no rewake - the
 # sanction was already reported once, synchronously, when `bin/watch-fleet
@@ -339,7 +385,26 @@ armlog="$WM_HOME/stop-autoarm${_okey:+-$_okey}.log"
 # body (unlike the claim itself) so an iteration boundary, where both are
 # momentarily "", expands to no argument rather than an empty-string one.
 child=""; referee=""; term_forwarded=0
-trap 'term_forwarded=1; kill -TERM $child $referee 2>/dev/null' TERM INT
+# Measures and stamps BEFORE forwarding the kill (issue #248) - in case the
+# harness ever escalates to an unconditional SIGKILL after some grace period
+# following the initial SIGTERM, front-loading the write minimizes the
+# window in which that escalation could cut this trap off before it records
+# anything (and if it does, the dead-pid fallback above still covers it).
+# Gated on having already run for at least one full $window: a TERM/INT
+# arriving earlier than that cannot be the genuine harness-timeout kill this
+# exists to measure (the registered timeout this hook clamps against is
+# always well above one window - see bin/doctor's own minimum), so trusting
+# an early signal as evidence would instead pin whatever small, arbitrary
+# elapsed time a stray signal happened to arrive at (a test's own teardown
+# kill, an operator's kill -TERM against a wedged hook, a pilot's Ctrl-C)
+# for the rest of the run - clamping every later invocation far tighter than
+# this session's real binding actually requires.
+trap 'term_forwarded=1
+  _elapsed=$(( $(date +%s) - hook_start ))
+  if [ "$_elapsed" -ge "$window" ]; then
+    printf "%s\n%s\n" "${WINGMAN_RUN_ID:-}" "$_elapsed" > "$killstampfile"
+  fi
+  kill -TERM $child $referee 2>/dev/null' TERM INT
 
 while :; do
   # Refresh the in-flight marker every iteration, not just at entry: the
