@@ -232,7 +232,14 @@ trap '[ "$(cat "$inflightfile" 2>/dev/null)" = "$$" ] && rm -f "$inflightfile"' 
 #      it persists across a clean exit deliberately: the fact it records
 #      (this session's registered timeout) cannot change again short of an
 #      actual restart, which mints a fresh run id and makes this file stop
-#      being honored on its own.
+#      being honored on its own - true unconditionally for wingman's own
+#      top-level session (a fresh $WINGMAN_RUN_ID every `bin/wingman` launch),
+#      but NOT for a resumed crew session: `bin/crew-resume` propagates the
+#      current wingman sit-down's own run id rather than minting a new one,
+#      so a killstamp recorded before that member's own restart stays
+#      honored afterward too. Safe in the same direction as every other
+#      guess in this file (can only tighten the resulting clamp, never
+#      loosen it), so left as-is rather than special-cased.
 #   2. A dead pid found in $inflightfile above (SIGKILL-only fallback): no
 #      trap ran, so nothing measured anything, but a prior invocation is
 #      definitively gone with no trace of a clean exit. Pinned to the

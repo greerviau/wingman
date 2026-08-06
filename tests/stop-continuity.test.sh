@@ -182,6 +182,13 @@ assert_true "the manual re-arm claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 assert_true "the manual claim cleared the stop sanction marker" "wait_for_file_gone '$WINGMAN_HOME/watch.stopped'"
 kill -TERM "$d3b" 2>/dev/null
 assert_true "the SIGTERM'd cycle actually dies" "wait_for_gone $d3b"
+# A dead process and a cleared pidfile are two different facts - the SIGTERM'd
+# cycle exiting doesn't itself prove watch.pid is gone yet, and without this
+# barrier the very next wait_for_file below can match that STALE pidfile
+# (still naming $d3b's own now-dead pid) instead of the fresh claim that
+# follows, latching a dead pid into $_after_pid and burning wait_for_pid_alive's
+# full patience on it while the real claim races in moments later underneath.
+wait_for_file_gone "$WINGMAN_HOME/watch.pid" 100
 export WM_STOP_CONTINUITY_WINDOW=60
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook4c.out" 2>&1 &
 h4c=$!; wm_track "$h4c"
