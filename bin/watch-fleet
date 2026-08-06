@@ -1807,6 +1807,20 @@ for r in data:
         --pane-idle "$_idle" --pane-pid "$_pid" --root-grace "$STALL_ROOT_GRACE" \
         --threshold "$WM_WEDGE_SECS" --pane-gap "$WM_WEDGE_PANE_GAP" >/dev/null 2>&1
 
+      # wm-state loop-wedge-check (issue #268, layer B): the identical
+      # detector shape as wedge-check just above, generalized to a second
+      # --proc-re pattern (a while/until keyword followed by a sleep
+      # invocation in a descendant's own `ps` args) - the backstop for a
+      # hand-rolled foreground polling loop that layer A (hooks/no-
+      # foreground-poll-loop-guard.sh) misses. Sits at the same place in the
+      # loop for the identical reason: a member wedged on a hand-rolled loop
+      # right after answering its own blocker is exactly as wedged as one
+      # that hit it mid-task. Reuses WM_WEDGE_SECS/WM_WEDGE_PANE_GAP - see
+      # wm-state's own WM_LOOP_WEDGE_PROC_RE_DEFAULT for the pattern.
+      [ -n "$_pid" ] && wm_state loop-wedge-check --id "$_id" \
+        --pane-idle "$_idle" --pane-pid "$_pid" --root-grace "$STALL_ROOT_GRACE" \
+        --threshold "$WM_WEDGE_SECS" --pane-gap "$WM_WEDGE_PANE_GAP" >/dev/null 2>&1
+
       # An already-blocked member with no dialog freeze detected needs no further
       # diagnosis here: its existing blocker reason is left untouched, and the
       # stall/api-error checks below only make sense for a member that claims to
