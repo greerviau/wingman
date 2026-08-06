@@ -85,6 +85,21 @@ wait_for_file_gone() {
   [ ! -f "$1" ]
 }
 
+wait_for_pidfile_not() {
+  # wait_for_pidfile_not <path> <pid> [tries (x0.2s)] - waits for $PIDFILE to name
+  # someone OTHER than <pid>. NOT wait_for_file_gone: bin/watch-fleet installs its
+  # own $PIDFILE-removing INT/TERM trap (:1073) only well after it writes $PIDFILE
+  # (:972), so a SIGTERM landing inside that window kills the cycle under the
+  # default disposition with the pidfile left behind and nothing alive to remove
+  # it. Waiting for it to vanish hangs out the full patience and then latches the
+  # dead pid anyway; waiting for it to be REPLACED is what actually holds.
+  _wpn_tries="${3:-100}"; _wpn_n=0
+  while { [ ! -s "$1" ] || [ "$(cat "$1" 2>/dev/null)" = "$2" ]; } && [ "$_wpn_n" -lt "$_wpn_tries" ]; do
+    sleep 0.2; _wpn_n=$((_wpn_n+1))
+  done
+  [ -s "$1" ] && [ "$(cat "$1" 2>/dev/null)" != "$2" ]
+}
+
 # A fresh isolated home, PLUS a real tmux session for it - bin/watch-fleet's
 # own reconcile step flips any LIVE_STATES crew member with no matching live
 # tmux window to 'died' the moment it completes even one poll iteration
@@ -182,17 +197,19 @@ assert_true "the manual re-arm claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 assert_true "the manual claim cleared the stop sanction marker" "wait_for_file_gone '$WINGMAN_HOME/watch.stopped'"
 kill -TERM "$d3b" 2>/dev/null
 assert_true "the SIGTERM'd cycle actually dies" "wait_for_gone $d3b"
-# A dead process and a cleared pidfile are two different facts - the SIGTERM'd
-# cycle exiting doesn't itself prove watch.pid is gone yet, and without this
-# barrier the very next wait_for_file below can match that STALE pidfile
-# (still naming $d3b's own now-dead pid) instead of the fresh claim that
-# follows, latching a dead pid into $_after_pid and burning wait_for_pid_alive's
-# full patience on it while the real claim races in moments later underneath.
-wait_for_file_gone "$WINGMAN_HOME/watch.pid" 100
 export WM_STOP_CONTINUITY_WINDOW=60
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook4c.out" 2>&1 &
 h4c=$!; wm_track "$h4c"
-assert_true "the SIGTERM'd cycle is classified and a fresh cycle is armed, with no model turn" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+# A dead process and a cleared pidfile are two different facts - $d3b dying
+# doesn't itself prove watch.pid is gone: bin/watch-fleet writes $PIDFILE well
+# before it installs the INT/TERM trap that removes it, so a SIGTERM landing
+# in that window (exactly where kill -TERM "$d3b" above aims) kills the cycle
+# under the default disposition, leaving the stale pidfile behind with nothing
+# alive to ever remove it. Waiting for the file to vanish would hang out the
+# full patience in that case and then latch the dead pid anyway - waiting for
+# it to be REPLACED holds regardless of which branch the kill landed in, since
+# the only other writer is the fresh claim below.
+assert_true "the SIGTERM'd cycle is classified and a fresh cycle is armed, with no model turn" "wait_for_pidfile_not '$WINGMAN_HOME/watch.pid' $d3b"
 _after_pid="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
 assert_true "the fresh cycle is a real, distinct live process" "[ -n '$_after_pid' ] && wait_for_pid_alive $_after_pid"
 kill -TERM "$h4c" 2>/dev/null
