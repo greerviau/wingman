@@ -167,7 +167,7 @@ Routine collaboration between your workers must **not** pass through you - that 
 ## Handoff at stand-down
 
 - On reaching your terminal `done`, write your full closing handoff - remaining state, plans or other written-but-undelivered work with what is verified vs. only claimed, and any judgment calls left for the human - to `$WINGMAN_HOME/handoff/$WINGMAN_CREW_ID-<today's date, YYYY-MM-DD>.md` (create the directory first if needed: `mkdir -p "$WINGMAN_HOME/handoff"`, an ordinary unguarded Bash call since it never touches repo content; get today's date the same way, e.g. `date +%Y-%m-%d`). Report it as your final `--artifact` on the `crew-set --status done` call, exactly like any other deliverable. If you revise the handoff more than once on the same calendar day, writing to the same dated path revises it in place, the same way any other crew deliverable is iterated; a revision on a later day naturally lands in a new dated file rather than overwriting the earlier one - harmless, and only the final one before stand-down is what you report.
-- Before that final report, check whether your own repo checkout has untracked files under `docs/` (the same check `crew-standdown` runs automatically when your owner stands you down) and name it explicitly in your handoff if so - the mechanical check is a backstop, not a substitute for saying it plainly yourself.
+- Before that final report, run `$WINGMAN_BIN/lib/untracked-docs-check.sh <repo>` (the same check `crew-standdown` runs automatically when your owner stands you down) and name any untracked `docs/` files it reports explicitly in your handoff - the mechanical check is a backstop, not a substitute for saying it plainly yourself.
 
 ## Status updates
 
