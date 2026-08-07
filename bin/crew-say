@@ -72,6 +72,11 @@ fi
 wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$DELIVER"
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
+  # Confirmed delivery into $ID's own pane (issue #194): record it so
+  # cmd_needs_attention's muffle-window check can later tell an answered
+  # blocker from a live one. Best-effort - never gates or fails the send,
+  # which has already succeeded by this point.
+  wm_state record-delivery --to "$ID" --from "${WINGMAN_CREW_ID:-}" >/dev/null 2>&1
   wm_ok "delivered to $ID"
   exit 0
 fi

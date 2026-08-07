@@ -226,4 +226,29 @@ out_wrap2="$(printf '{"stop_hook_active": true}' | bash "$CREW_HOOK")"
 assert_eq "the wrapper's own pass-2, run after the real script's, finds nothing left and is silent" "$out_wrap2" ""
 unset WINGMAN_CREW_ID
 
+# =====================================================================
+# issue #194: an answered blocker's bounded muffle window, end to end through
+# the real hook. blocked (hook blocks, as today) -> record-delivery with no
+# self-report yet (hook still blocks - a delivered message alone proves
+# nothing about whether the delegate acted on it) -> a self-report while
+# still blocked (hook stops blocking on this member, within the grace window).
+# Every check here stays on pass 1 (stop_hook_active false): the muffle
+# window's own `continue` in cmd_needs_attention happens before the ack/
+# handled dedup even runs, so it is provable without ever exercising pass 2.
+test_new_home
+wm_state crew-add --id h9 --type developer --objective x --repo /tmp --window wm-h9 --session-id s9 >/dev/null
+wm_state crew-set --id h9 --status blocked --blocker "need a call on the retry policy" >/dev/null
+
+outh9a="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "an unanswered blocker blocks the stop" "$outh9a" '"decision": "block"'
+assert_contains "the block names the member" "$outh9a" "h9"
+
+wm_state record-delivery --to h9 --from "" >/dev/null
+outh9b="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_contains "a delivery with no self-report since still blocks" "$outh9b" '"decision": "block"'
+
+wm_state crew-set --id h9 --status blocked --summary "acted on the answer" >/dev/null
+outh9c="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
+assert_eq "a self-report after the reply muffles the row: the stop is not blocked" "$outh9c" ""
+
 test_summary

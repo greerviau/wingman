@@ -120,6 +120,11 @@ the second is `blocked`. The first is **parked**.
   `crew-set --id "$WINGMAN_CREW_ID" --unpark "<ref>"`. If that was your last parked item and
   you had escalated to `blocked` purely to deliver the batch, return to `working` in the
   same call.
+- **Return to `working` the instant you act on a direct blocker's answer.** If you escalated
+  with a plain `--blocker` (not a parked-item batch), the moment `crew-say` delivers the
+  answer and you act on it, `crew-set --id "$WINGMAN_CREW_ID" --status working` in that same
+  call - the status change alone clears `blocker`. Do not keep reporting `blocked` "just in
+  case"; it re-surfaces to your owner as an unresolved question.
 - **Default-and-proceed for reversible calls.** Not every open question belongs to the
   requester at all. For a decision you could undo or redo later at low cost, pick the
   sensible default yourself, record the default and your reasoning in your `artifact`/PR
