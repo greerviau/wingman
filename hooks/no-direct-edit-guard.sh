@@ -68,7 +68,7 @@ fi
 printf '%s' "$INPUT" | PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
 import json, os, re, subprocess, sys
 
-from cmd_match import command_segments, resolve_command
+from cmd_match import command_segments, redirect_write_targets, resolve_command
 
 try:
     data = json.load(sys.stdin)
@@ -180,6 +180,167 @@ if tool == "Bash":
             "a developer crew member via bin/spawn-crew instead of invoking the "
             "test runner yourself. See issue #17."
         )
+
+    # Bash file-writing commands (issue #171): sed -i, output redirection
+    # (>, >>, &>, tee), and cp/mv all write to a path given as an ordinary
+    # positional/flag argument or shell operator, bypassing the Edit/Write
+    # check above entirely even though the identical bytes to the identical
+    # path would be denied there. Redirection is a shell operator (applies to
+    # ANY command'"'"'s output), recognized via cmd_match.redirect_write_targets()
+    # on the sentinel tokens command_segments() already emits; sed/tee/cp/mv
+    # are command-specific argument shapes, recognized locally here.
+    FILE_WRITE_DENY = (
+        "This Bash command writes directly to %s inside a git repo (%s) - not "
+        "yours to do here as an orchestrator, for the same reason a direct "
+        "Edit/Write call is denied (issue #17). This mechanically extends that "
+        "same guard to shell-level writes (issue #171): sed -i, output "
+        "redirection (>, >>, &>, tee), and cp/mv are just as much \"heavy "
+        "work\" as an Edit/Write call, and are now recognized the same way, "
+        "no size exception. Spawn a developer crew member to make this change "
+        "instead: bin/spawn-crew --type developer --repo <name> --objective "
+        "\"<the change>\" (or --input <plan-path> if an analyst already "
+        "produced a plan)."
+    )
+
+    def check_write_targets(targets, mechanism):
+        for t in targets:
+            if t and is_inside_git_repo(t):
+                deny(FILE_WRITE_DENY % (t, mechanism))
+
+    redirect_targets = []
+    for seg in segments:
+        redirect_targets.extend(redirect_write_targets(seg))
+    check_write_targets(redirect_targets, "output redirection")
+
+    _SED_BOOL_SHORT = set("nrEsuz")     # no-argument short flags
+    _SED_SCRIPT_SHORT = set("ef")       # short flags supplying the script (glued or separate)
+    _SED_OTHER_VALUE_SHORT = set("l")   # other value-taking short flags (line-wrap length)
+
+    def _consume_short_cluster(tok):
+        # Character-level parse of one '"'"'-xyz'"'"' short-option cluster token.
+        # Returns (has_inplace, explicit_script, consumed_next) for THIS
+        # token - consumed_next is True iff a value-taking flag (e/f/l) was
+        # the cluster'"'"'s last character with no glued value, so its value is
+        # the NEXT argv token, not a positional argument.
+        has_inplace = False
+        explicit_script = False
+        consumed_next = False
+        k, n = 1, len(tok)
+        while k < n:
+            ch = tok[k]
+            if ch == "i":
+                has_inplace = True
+                k = n  # everything after '"'"'i'"'"' in this token is its backup suffix
+                break
+            if ch in _SED_SCRIPT_SHORT or ch in _SED_OTHER_VALUE_SHORT:
+                if ch in _SED_SCRIPT_SHORT:
+                    explicit_script = True
+                if k + 1 >= n:
+                    consumed_next = True  # no glued value - next token is the value
+                k = n
+                break
+            k += 1  # an ordinary boolean flag char - keep scanning this cluster
+        return has_inplace, explicit_script, consumed_next
+
+    def sed_inplace_targets(argv):
+        has_inplace = False
+        explicit_script = False
+        positional = []
+        i, n = 1, len(argv)
+        while i < n:
+            tok = argv[i]
+            if tok == "--":
+                positional.extend(argv[i + 1:])
+                break
+            if tok.startswith("--in-place"):
+                has_inplace = True
+                i += 1
+                continue
+            if tok in ("--expression", "--file"):
+                explicit_script = True
+                i += 2  # long form always takes a separate-token value
+                continue
+            if tok == "--line-length":
+                i += 2
+                continue
+            if tok.startswith("--expression=") or tok.startswith("--file="):
+                explicit_script = True
+                i += 1
+                continue
+            if tok.startswith("--line-length="):
+                i += 1
+                continue
+            if tok.startswith("--"):
+                # Any other GNU sed long flag (--posix, --debug, --sandbox,
+                # --unbuffered, --separate, --quiet, --silent,
+                # --regexp-extended, --null-data, ...) is boolean - skipped
+                # as a flag, never left to fall through to positional. A
+                # naive fallthrough here wrongly treated an unrecognized long
+                # flag as sed'"'"'s own script/file positional argument,
+                # corrupting target detection the same way an unhandled
+                # short flag did before the character-level cluster parse
+                # below (review round 2).
+                i += 1
+                continue
+            if tok.startswith("-") and tok != "-" and not tok.startswith("--"):
+                cl_inplace, cl_script, consumed_next = _consume_short_cluster(tok)
+                has_inplace = has_inplace or cl_inplace
+                explicit_script = explicit_script or cl_script
+                i += 2 if consumed_next else 1
+                continue
+            positional.append(tok)
+            i += 1
+        if not has_inplace:
+            return []
+        # With no -e/-f, sed'"'"'s own first positional argument is the SCRIPT, not a
+        # file - strip it. With -e/-f already supplying the script, every
+        # remaining positional is a file (sed -i can edit several at once).
+        if not explicit_script and positional:
+            positional = positional[1:]
+        return positional
+
+    def cp_mv_targets(argv):
+        positional = []
+        target_dir = None
+        i = 1
+        n = len(argv)
+        while i < n:
+            tok = argv[i]
+            if tok in ("-t", "--target-directory"):
+                if i + 1 < n:
+                    target_dir = argv[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--target-directory="):
+                target_dir = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--":
+                positional.extend(argv[i + 1:])
+                break
+            if tok.startswith("-") and tok != "-":
+                i += 1
+                continue
+            positional.append(tok)
+            i += 1
+        if target_dir is not None:
+            return [target_dir]
+        if len(positional) >= 2:
+            return [positional[-1]]
+        return []
+
+    for seg in segments:
+        b, argv = resolve_command(seg)
+        if not argv:
+            continue
+        if b == "tee":
+            check_write_targets(
+                [t for t in argv[1:] if not t.startswith("-")], "tee"
+            )
+        elif b == "sed":
+            check_write_targets(sed_inplace_targets(argv), "sed -i")
+        elif b in ("cp", "mv"):
+            check_write_targets(cp_mv_targets(argv), "%s" % b)
 
 sys.exit(0)
 ' 2>/dev/null
