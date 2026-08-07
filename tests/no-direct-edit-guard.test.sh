@@ -236,6 +236,14 @@ assert_contains "top-level: sed --posix -i denial names the real file, not the s
 assert_not_contains "top-level: sed --posix -i denial does not name the sed script as a target" \
   "$out" "to s/a/b/"
 
+# The same shape outside any git repo must stay allowed - before the fix, the
+# sed script text got wrongly stripped in as if it were "the target," which
+# would have made a legitimate outside-repo write resolve as if it were
+# inside one whenever the (nonexistent) script-shaped path happened to land
+# under the hook's own cwd.
+out="$(run_hook Bash "sed --posix -i s/a/b/ $OUTSIDE_DIR/x")"
+assert_eq "top-level: sed --posix -i outside any git repo is allowed (no output)" "$out" ""
+
 out="$(run_hook Bash "echo x > $TEST_REPO/bin/watch-fleet")"
 assert_contains "top-level: echo > (output redirect) is denied" "$out" '"permissionDecision": "deny"'
 assert_contains "top-level: echo > denial cites the issue" "$out" "issue #171"
