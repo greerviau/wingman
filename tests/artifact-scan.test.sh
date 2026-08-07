@@ -114,6 +114,29 @@ if wm_have gitleaks; then
   assert_eq "the verdict is a bare pass, not soft" "$out" "pass"
 fi
 
+# --- issue #205: a lead's own handoff destination is a distinct allowed
+# location, anchored on $WINGMAN_HOME rather than folded into ALLOWLIST_RE ----
+HANDOFF_HOME="$FIXDIR/wm-home"
+mkdir -p "$HANDOFF_HOME/handoff"
+HANDOFF_CLEAN="$HANDOFF_HOME/handoff/x.md"
+printf '# Handoff\nJust prose, no secrets, no internal hosts.\n' > "$HANDOFF_CLEAN"
+if wm_have gitleaks; then
+  out="$(WINGMAN_HOME="$HANDOFF_HOME" "$SCRIPT" "$HANDOFF_CLEAN")"; rc=$?
+  assert_eq "a clean file under \$WINGMAN_HOME/handoff/ passes the location gate" "$rc" "0"
+  assert_eq "the verdict is a bare pass" "$out" "pass"
+fi
+
+# MF1 regression: a directory literally named "handoff" that is NOT under
+# $WINGMAN_HOME must still be rejected - proves the fix is an anchored prefix
+# test against the resolved $WINGMAN_HOME, not an unanchored /handoff/ regex
+# alternative that would whitelist the word "handoff" anywhere on disk.
+FAKE_REPO_HANDOFF="$FIXDIR/some-other-repo/handoff/x.md"
+mkdir -p "$(dirname "$FAKE_REPO_HANDOFF")"
+printf 'clean content\n' > "$FAKE_REPO_HANDOFF"
+out="$(WINGMAN_HOME="$HANDOFF_HOME" "$SCRIPT" "$FAKE_REPO_HANDOFF")"; rc=$?
+assert_eq "a handoff/ dir outside \$WINGMAN_HOME is still rejected (MF1 regression)" "$rc" "1"
+assert_contains "the reason still names the location" "$out" "fail:not under a crew-deliverable directory"
+
 # --- usage errors ---------------------------------------------------------------
 out="$("$SCRIPT" 2>&1)"; rc=$?
 assert_eq "no argument is a usage error" "$rc" "1"
