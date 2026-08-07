@@ -55,7 +55,7 @@ for cid in $AFFECTED; do
   # One roster read per id, extended (issue #96) to also pull the Remote
   # Control fields alongside the existing worktree/repo read for the fallback
   # below - no separate lookup for either purpose.
-  { read -r WT; read -r RP; read -r RC; read -r RCC; } <<EOF
+  { read -r WT; read -r RP; read -r RC; read -r RCC; read -r TY; } <<EOF
 $(wm_state crew-get --id "$cid" 2>/dev/null | wm_py -c '
 import sys, json
 try:
@@ -65,8 +65,19 @@ except Exception:
 print(d.get("worktree") or "")
 print(d.get("repo") or "")
 print("true" if d.get("remote_control", True) else "false")
-print("true" if d.get("remote_control_connected", True) else "false")')
+print("true" if d.get("remote_control_connected", True) else "false")
+print(d.get("type") or "")')
 EOF
+
+  # A lead working directly in a shared repo checkout (no worktree of its own -
+  # only developer.md's own "Isolate" step ever creates one) leaves behind
+  # whatever it wrote to docs/ with nothing ever having authorized committing
+  # it outside the PR workflow (issue #205). Surface that exposure to the
+  # human at the moment it becomes unattended - warning-only, never gating
+  # this standdown on what it finds.
+  if [ "$TY" = lead ] && [ -n "$RP" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+    "$(dirname "$0")/lib/untracked-docs-check.sh" "$RP" || true
+  fi
 
   if wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
     _target="$(wm_tmux_win_target "$WINDOW")"
