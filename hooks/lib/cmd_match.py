@@ -707,9 +707,11 @@ def wrapper_payloads(tokens):
         saw_c = False
         while i < n:
             tok = tokens[i]
-            if tok == "--":
+            if tok == "--" or tok == "-":
                 # End of options; the next token (if any) is the operand,
-                # regardless of what it looks like.
+                # regardless of what it looks like. A bare "-" ends option
+                # processing exactly like "--" does (bash's own
+                # parse_shell_options() treats them identically).
                 i += 1
                 break
             if len(tok) > 1 and tok[0] in "-+":
@@ -723,9 +725,12 @@ def wrapper_payloads(tokens):
                 letters = tok[1:]
                 if "c" in letters:
                     saw_c = True
-                # -o/-O (or +o/+O) take a value; the following token is
-                # consumed too, regardless of whether `c` shares the cluster.
-                i += 2 if ("o" in letters or "O" in letters) else 1
+                # -o/-O (or +o/+O) each take their OWN value; a cluster
+                # carrying two of them (-coO, -cOo, -coo) consumes two value
+                # tokens, not one - bash's parse_shell_options() processes
+                # each letter in the cluster in turn, and -o/-O both take an
+                # argument every time they appear, not just once per cluster.
+                i += 1 + letters.count("o") + letters.count("O")
                 continue
             # The first non-option token ends option scanning.
             break

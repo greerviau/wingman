@@ -338,6 +338,31 @@ check("bash --rcfile FILE -c lifts the payload (a value-taking long option "
       [["bash", "--rcfile", "/dev/null", "-c", "gh pr merge 5"],
        ["gh", "pr", "merge", "5"]])
 
+# --- issue #183: a bare "-" and stacked o/O in a -c cluster (found in a
+# second review pass, same bug class as the shapes above) ------------------
+
+check("bash -c - lifts the payload (a bare - ends option scanning exactly like --)",
+      'bash -c - "gh pr merge 46"',
+      [["bash", "-c", "-", "gh pr merge 46"], ["gh", "pr", "merge", "46"]])
+
+check("bash -coO pipefail extglob lifts the payload (two value-taking o/O in one "
+      "cluster each consume their own value token)",
+      'bash -coO pipefail extglob "gh pr merge 46"',
+      [["bash", "-coO", "pipefail", "extglob", "gh pr merge 46"],
+       ["gh", "pr", "merge", "46"]])
+
+check("bash -cOo extglob pipefail lifts the payload (order of the stacked o/O within "
+      "the cluster does not matter)",
+      'bash -cOo extglob pipefail "gh pr merge 46"',
+      [["bash", "-cOo", "extglob", "pipefail", "gh pr merge 46"],
+       ["gh", "pr", "merge", "46"]])
+
+check("bash -coo pipefail posix lifts the payload (two lowercase o's in one cluster "
+      "each consume their own value token)",
+      'bash -coo pipefail posix "gh pr merge 46"',
+      [["bash", "-coo", "pipefail", "posix", "gh pr merge 46"],
+       ["gh", "pr", "merge", "46"]])
+
 check("positional parameters after the payload are not lifted",
       'bash -c "echo hi" arg0 arg1',
       [["bash", "-c", "echo hi", "arg0", "arg1"], ["echo", "hi"]])
