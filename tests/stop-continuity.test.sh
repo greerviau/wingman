@@ -807,6 +807,76 @@ assert_contains "the single-window break reports a clean rollover" "$out7f2" "wi
 unset WM_PROJECT_SETTINGS WM_CLAUDE_USER_SETTINGS WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN
 export WM_STOP_CONTINUITY_LIFETIME=1
 
+# --- (7f3) Fault path, corrupt settings file (issue #280) --------------------
+# A settings file that EXISTS and is NOT valid JSON must NOT be folded into
+# the same historical-600 fallback a MISSING file (d7f2 above) legitimately
+# gets - that fold is exactly the bug: it would infer 600 on a genuine fault,
+# clamp to 600-margin, and silently collapse to a fraction of the configured
+# lifetime. WM_CONTINUITY_TIMEOUT_MARGIN=597 makes the (wrong) 600-derived
+# cap a tiny 3s - small enough that a wrongly-clamped invocation cannot
+# complete more than a single window before its budget check fires, while
+# the correctly-unclamped invocation (lifetime stays at the configured 10s)
+# comfortably completes several. This is a fault-vs-absence proof, not an
+# exact-iteration-count proof - "-ge 2" leaves headroom against per-iteration
+# `uv` subprocess overhead varying under load, while a genuinely wrongly
+# clamped run can never exceed 1 by construction of the 3s cap.
+new_home
+add_crew_window d7f3
+wm_state crew-set --id d7f3 --status working --summary busy >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=10
+export WM_CONTINUITY_TIMEOUT_MARGIN=597
+BAD_SETTINGS_7f3="$WINGMAN_HOME/corrupt-settings-7f3.json"
+printf 'not valid json{' > "$BAD_SETTINGS_7f3"
+export WM_PROJECT_SETTINGS="$BAD_SETTINGS_7f3"
+export WM_CLAUDE_USER_SETTINGS="$WINGMAN_HOME/does-not-exist-7f3-user.json"
+out7f3="$(printf '{}' | wm_timeout 30 bash "$HOOK" 2>&1)"; rc7f3=$?
+armed7f3="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_true "a corrupt (not missing) settings file does NOT clamp to a single window" "[ '${armed7f3:-0}' -ge 2 ]"
+assert_eq "the hook exits 2 (a genuine budget-exhaustion rewake)" "$rc7f3" "2"
+assert_contains "the lookup fault is reported on stderr, naming the corrupt file" "$out7f3" "registered-timeout lookup faulted"
+assert_contains "the skipped-clamp consequence is also reported" "$out7f3" "skipping the registered-timeout clamp"
+unset WM_PROJECT_SETTINGS WM_CLAUDE_USER_SETTINGS WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN
+export WM_STOP_CONTINUITY_LIFETIME=1
+
+# --- (7f4) Fault path, $WM_UV subprocess failure (issue #280) ----------------
+# Proves the fault path is also reached via a shell-level $WM_UV failure
+# (uv itself exits nonzero before Python ever runs), not only the Python
+# exception route 7f3 exercises - a genuinely distinct trigger the issue
+# explicitly calls out. The settings file here is valid JSON, isolating this
+# as a non-JSON fault. The stub only intercepts calls naming this test's own
+# marker file, matching the STUB_A/STUB_B idiom in tests/watch-fleet.test.sh
+# and the RUNNER wrapper in tests/pilot-preferences-guard.test.sh - falling
+# through to the real `uv run --no-project --quiet "$@"` for every other
+# $WM_UV invocation the hook makes, so it never breaks the hook at an
+# earlier, unrelated call.
+new_home
+add_crew_window d7f4
+wm_state crew-set --id d7f4 --status working --summary busy >/dev/null
+STUB_7f4="$(wm_mktemp_file)"
+REAL_SETTINGS_7f4="$WINGMAN_HOME/settings-7f4-marker.json"
+printf '{"hooks": {"Stop": []}}\n' > "$REAL_SETTINGS_7f4"
+cat > "$STUB_7f4" <<STUBEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *settings-7f4-marker*) exit 17 ;;
+esac
+exec uv run --no-project --quiet "\$@"
+STUBEOF
+chmod +x "$STUB_7f4"
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=10
+export WM_CONTINUITY_TIMEOUT_MARGIN=597
+export WM_PROJECT_SETTINGS="$REAL_SETTINGS_7f4"
+export WM_CLAUDE_USER_SETTINGS="$WINGMAN_HOME/does-not-exist-7f4-user.json"
+out7f4="$(printf '{}' | WM_UV="$STUB_7f4" wm_timeout 30 bash "$HOOK" 2>&1)"; rc7f4=$?
+armed7f4="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_true "a dead \$WM_UV subprocess (not a JSON error) also skips the clamp, not just corrupt JSON" "[ '${armed7f4:-0}' -ge 2 ]"
+assert_eq "the hook exits 2" "$rc7f4" "2"
+assert_contains "the lookup fault is reported on stderr" "$out7f4" "registered-timeout lookup faulted"
+unset WM_PROJECT_SETTINGS WM_CLAUDE_USER_SETTINGS WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN
+export WM_STOP_CONTINUITY_LIFETIME=1
+
 # --- (8) A deterministically failing fleet: backoff + standdown markers ------
 new_home
 add_crew_window d8
