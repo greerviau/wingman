@@ -36,7 +36,13 @@
 #                                 for a repo known to have CI, an empty rollup
 #                                 on an already-confirmed head means checks
 #                                 exist but are degraded/not reporting, not
-#                                 resolved.
+#                                 resolved. Independent of that local heuristic,
+#                                 when the forge confirms a NON-zero checkSuite
+#                                 count for the exact head commit, an empty
+#                                 rollup is never settled either, even without
+#                                 --has-ci-config - checks are registered for
+#                                 this commit but have not reported yet
+#                                 (issue #259).
 #   checks-passed: <pr>           the same settle, but WITHOUT allow_merge -> crew
 #                                 moves to review instead
 #
@@ -122,6 +128,16 @@ if [ -n "$_wf_dir" ] && [ -d "$_wf_dir" ] \
   HAS_CI=1
 fi
 
+# Once-per-arm latch (issue #259) for the checkSuite forge-signal warning
+# below - a marker FILE, not a shell variable: poll_once() is invoked via
+# command substitution (`if reason="$(poll_once)"`), which runs the whole
+# function body in a subshell, so a plain variable assignment made inside it
+# is discarded the instant that subshell exits. A file write is real
+# filesystem state and survives the subshell exiting exactly the way
+# $_pr_file/$_cs_file already do.
+CS_WARNFILE="$CURDIR/$WINGMAN_CREW_ID.cs-warned"
+rm -f "$CS_WARNFILE"
+
 # One poll: fetch PR state + inline review comments, ask pr-eval for an event.
 # Prints the reason line (and returns 0) iff there is a fresh actionable event.
 poll_once() {
@@ -135,7 +151,14 @@ poll_once() {
   # failure here degrades gracefully to issue-comments + reviews only.
   _rc_file=""
   _nwo="$($GH repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
-  _num="$(printf '%s' "$_pr_json" | wm_py -c 'import sys,json; print(json.load(sys.stdin).get("number") or "")' 2>/dev/null)"
+  _meta="$(printf '%s' "$_pr_json" | wm_py -c '
+import sys, json
+d = json.load(sys.stdin)
+print(d.get("number") or "")
+print("1" if not (d.get("statusCheckRollup") or []) else "")
+' 2>/dev/null)"
+  _num="$(printf '%s\n' "$_meta" | sed -n 1p)"
+  _empty_rollup="$(printf '%s\n' "$_meta" | sed -n 2p)"
   if [ -n "$_nwo" ] && [ -n "$_num" ]; then
     _rc="$($GH api "repos/$_nwo/pulls/$_num/comments" --paginate 2>/dev/null || true)"
     if [ -n "$_rc" ]; then
@@ -164,9 +187,48 @@ poll_once() {
   _has_ci_flag=""
   [ "$HAS_CI" = 1 ] && _has_ci_flag="--has-ci-config"
 
+  # checkSuite forge signal (issue #259): only fetch when the rollup is
+  # empty - the only case where it can change the outcome. gh pr view --json
+  # has no checkSuites field, so this needs its own GraphQL call; the raw
+  # response is handed to pr-eval.py unparsed (same shape as
+  # --review-comments/--crew-record) so the oid cross-check against this
+  # poll's own headRefOid lives in one place, in Python, next to the rest of
+  # the settle-gate logic. A failed/empty/skipped call just omits the flag -
+  # pr-eval.py already treats a missing --check-suites-json as "forge signal
+  # unavailable" and falls back to --has-ci-config (issue #274), the safe
+  # pre-#259 default. A durably-failing call is warned about once per arm
+  # cycle (not every poll) so it is never a silent, permanent no-op - see
+  # $CS_WARNFILE above, a marker FILE (not a shell variable - poll_once()
+  # is invoked via command substitution, `if reason="$(poll_once)"`, which
+  # runs the whole function body in a subshell; any plain variable
+  # assignment made inside it is discarded the instant that subshell exits,
+  # so a would-be `_cs_warned=1` set here would never be visible on the next
+  # poll and this would warn every 30s for the watcher's whole life instead
+  # of once. A file write is real filesystem state and survives the
+  # subshell exiting exactly the way $_pr_file/$_cs_file already do below).
+  _cs_file=""
+  if [ -n "$_empty_rollup" ] && [ -n "$_nwo" ] && [ -n "$_num" ]; then
+    _cs_json="$($GH api graphql -f query='
+      query($owner:String!,$repo:String!,$number:Int!){
+        repository(owner:$owner,name:$repo){
+          pullRequest(number:$number){
+            commits(last:1){nodes{commit{oid checkSuites(first:1){totalCount}}}}
+          }
+        }
+      }' -f owner="${_nwo%%/*}" -f repo="${_nwo#*/}" -F number="$_num" 2>/dev/null || true)"
+    if [ -n "$_cs_json" ]; then
+      _cs_file="$CURDIR/$WINGMAN_CREW_ID.checksuites.json"
+      printf '%s' "$_cs_json" > "$_cs_file"
+    elif [ ! -f "$CS_WARNFILE" ]; then
+      wm_warn "pr-watch: checkSuite forge signal unavailable (gh api graphql failed or returned nothing this poll) - falling back to --has-ci-config; will keep retrying silently on later polls (this warning fires once per arm cycle)"
+      : > "$CS_WARNFILE"
+    fi
+  fi
+
   _reason="$(wm_py "$PR_EVAL" --pr-json "$_pr_file" \
     ${_rc_file:+--review-comments "$_rc_file"} \
     ${_crew_file:+--crew-record "$_crew_file"} \
+    ${_cs_file:+--check-suites-json "$_cs_file"} \
     --cursor "$CURSOR" --me "$ME" --my-crew-id "$WINGMAN_CREW_ID" $_has_ci_flag 2>/dev/null)"
   [ -n "$_reason" ] || return 1
   printf '%s\n' "$_reason"
