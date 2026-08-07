@@ -64,6 +64,15 @@ assert_contains "the short say reports delivered" "$out" "delivered"
 pane="$(wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-ml1)")"
 assert_contains "the short message was typed raw" "$pane" "SUBMITTED:short direct message"
 
+# --- a confirmed immediate send records last_delivered (issue #194) -----------
+# The short direct send just above ran with WINGMAN_CREW_ID unset, so it
+# attributes to the unattributable/wingman sender key "".
+last_delivered="$(wm_state crew-get --id ml1 | uv run --no-project --quiet python3 -c "
+import json, sys
+print(json.dumps(json.load(sys.stdin).get('last_delivered') or {}))
+")"
+assert_contains "a confirmed immediate crew-say send records last_delivered" "$last_delivered" '""'
+
 # --- the watcher redelivers a queued outbox message ---------------------------
 # Queue a message by hand (the shape crew-say leaves on an unconfirmed
 # delivery), then arm one watch-fleet cycle: its per-member pane pass must
@@ -104,6 +113,33 @@ assert_contains "the redelivery pointed at the sent- path, not the raw payload" 
   "$pane" "sent-2-multi.msg"
 assert_not_contains "the raw multi-line payload was never typed by the watcher" \
   "$pane" "second line payload"
+
+# --- a sidecar-attributed queued redelivery records the ORIGINAL sender -------
+# (round-2 review, N3): the hand-queued case above (1-queued.msg) has no
+# matching outbox-meta sidecar, so it only exercises the unattributed ("")
+# fallback path, not sender attribution. This case writes the sidecar bin/
+# crew-say itself would have written, so it actually proves
+# wm_outbox_try_redeliver's sender lookup attributes to the original queuing
+# sender rather than always falling through to wingman.
+mkdir -p "$WINGMAN_HOME/outbox-meta/ml1"
+printf '%s\n' "sender-lead-7" > "$WINGMAN_HOME/outbox-meta/ml1/3-attributed.msg"
+printf 'queued answer from sender-lead-7\n' > "$WINGMAN_HOME/outbox/ml1/3-attributed.msg"
+WM_WATCH_INTERVAL=1 "$WATCH" --owner "" >/dev/null 2>&1 &
+wm_track $!
+_i=0
+while [ "$_i" -lt 60 ]; do
+  [ -f "$WINGMAN_HOME/outbox/ml1/sent-3-attributed.msg" ] && break
+  sleep 0.5; _i=$((_i+1))
+done
+"$WATCH" --stop >/dev/null 2>&1
+assert_true "the sidecar-attributed queued file moved to sent-" \
+  "[ -f '$WINGMAN_HOME/outbox/ml1/sent-3-attributed.msg' ]"
+last_delivered2="$(wm_state crew-get --id ml1 | uv run --no-project --quiet python3 -c "
+import json, sys
+print(json.dumps(json.load(sys.stdin).get('last_delivered') or {}))
+")"
+assert_contains "the redelivery attributes to the ORIGINAL queuing sender, not wingman" \
+  "$last_delivered2" '"sender-lead-7"'
 
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 test_summary

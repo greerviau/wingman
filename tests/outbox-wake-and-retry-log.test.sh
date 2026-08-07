@@ -138,9 +138,12 @@ wm_track $!
 # pointer names the file's final path), so polling on the file's existence
 # alone races the actual pane confirm - wait for the pointer to actually
 # land in the pane instead (mirrors tests/outbox-redelivery.test.sh's own
-# identical multi-line case).
+# identical multi-line case). 40 iterations (~20s), not 20 (~10s): issue #194
+# added one confirmed-delivery record-delivery subprocess call to this exact
+# path, and a busy full-suite run needs the extra headroom (tests/outbox-
+# redelivery.test.sh's analogous poll was widened the same way).
 _i=0
-while [ "$_i" -lt 20 ]; do
+while [ "$_i" -lt 40 ]; do
   wm_tmux capture-pane -pJ -t "$(wm_tmux_win_target wm-long1)" 2>/dev/null \
     | grep -q "sent-1.msg" && break
   sleep 0.5; _i=$((_i+1))
