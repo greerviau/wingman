@@ -126,6 +126,18 @@ if wm_have gitleaks; then
   assert_eq "the verdict is a bare pass" "$out" "pass"
 fi
 
+# The location-gate acceptance above is gated on gitleaks being installed, so
+# it never runs in an environment without it (this repo's own CI job marks
+# gitleaks optional). Assert the location gate itself unconditionally, using
+# the no-gitleaks stub PATH built above: a file under $WINGMAN_HOME/handoff/
+# must clear the location gate and fail closed at the *missing-gitleaks*
+# check specifically, not at the location gate - distinguishable from a
+# rejected path, which fails closed at the location gate instead (asserted
+# right below, in the MF1 regression case).
+out="$(env PATH="$NOGL_BIN" WINGMAN_HOME="$HANDOFF_HOME" "$SCRIPT" "$HANDOFF_CLEAN")"; rc=$?
+assert_eq "a file under \$WINGMAN_HOME/handoff/ clears the location gate even without gitleaks" "$rc" "1"
+assert_contains "it fails closed on the missing dependency, not the location gate" "$out" "fail:gitleaks not installed"
+
 # MF1 regression: a directory literally named "handoff" that is NOT under
 # $WINGMAN_HOME must still be rejected - proves the fix is an anchored prefix
 # test against the resolved $WINGMAN_HOME, not an unanchored /handoff/ regex
