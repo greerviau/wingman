@@ -64,6 +64,20 @@ canned JSON. It reads:
                             rollup settle shortcut - see the outage-gate
                             paragraph below. Omitting it is byte-identical to
                             pre-#274 behavior.
+  --check-suites-json <path> OPTIONAL: raw `gh api graphql` response naming the
+                            checkSuites totalCount for the PR's current head
+                            commit (issue #259), shaped like
+                            commits(last:1){nodes{commit{oid
+                            checkSuites(first:1){totalCount}}}}. A NON-zero
+                            count for the exact head commit withholds
+                            checks-passed/merge-ready unconditionally, even
+                            without --has-ci-config - see the checkSuite-gate
+                            paragraph below. A zero or unavailable count (a
+                            missing flag, an oid mismatch, or a
+                            malformed/error response) carries no information
+                            and falls straight through to --has-ci-config
+                            unchanged. Omitting it is byte-identical to
+                            pre-#259 behavior.
 
 It prints ONE reason line and advances the cursor for exactly that dimension, or
 prints nothing when there is no new event. Priority (highest first):
@@ -111,6 +125,18 @@ head confirmed as healthy BEFORE an outage begins already satisfies that gate
 on the very first outage-degraded poll. A rollup entry that is present but
 malformed or carries an unrecognized/garbled state is separately never treated
 as resolved by `checks_pending` itself, independent of `--has-ci-config`.
+
+`checks-passed`/`merge-ready` are also gated on `--check-suites-json` (issue
+#259): when the forge reports a NON-zero checkSuite count for the exact head
+commit, an empty `statusCheckRollup` is never treated as resolved, regardless
+of `head_confirmed` or `--has-ci-config` - checks are registered for this
+commit but have not reported into the rollup yet. This is strictly
+conservative (a non-zero count can only withhold a result that would
+otherwise have fired, never produce one that wouldn't have), so it applies on
+the very first poll, with no settle window of its own. A zero or unavailable
+count is NOT trusted as "no CI" - it carries exactly as little information as
+`statusCheckRollup` itself being empty - and falls straight through to the
+`--has-ci-config` behavior above, unchanged.
 
 `merge-ready` occupies the exact same slot as `checks-passed` but fires instead
 of it when `--crew-record` reports `allow_merge: true`: the PR being green and
@@ -206,6 +232,29 @@ def checks_pending(pr):
     return False
 
 
+def check_suite_count_for_head(check_suites_json, head_oid):
+    """checkSuites totalCount for the exact head commit, from a `gh api graphql`
+    response shaped like bin/pr-watch's commits(last:1){nodes{commit{oid
+    checkSuites(first:1){totalCount}}}} query (issue #259) - or None if the
+    response is absent/malformed, OR the commit it describes does not match
+    head_oid (a push landed between the two `gh` calls that produced --pr-json
+    and --check-suites-json this same poll; the next poll's own consistent
+    snapshot settles it instead of miscounting across commits)."""
+    if not isinstance(check_suites_json, dict) or not head_oid:
+        return None
+    try:
+        nodes = check_suites_json["data"]["repository"]["pullRequest"]["commits"]["nodes"]
+        if not nodes:
+            return None
+        commit = nodes[0]["commit"]
+        oid = (commit.get("oid") or "").strip().lower()
+        if oid != head_oid:
+            return None
+        return int(commit["checkSuites"]["totalCount"])
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
 def _map_mergeability(mergeable, merge_state_status):
     """Collapse gh's mergeable/mergeStateStatus pair into MERGEABLE/CONFLICTING/
     UNKNOWN. Either field can lag (GitHub computes them asynchronously), so a
@@ -279,7 +328,8 @@ def conversation(pr, review_comments, me, my_crew_id):
     ]
 
 
-def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False, has_ci_config=False):
+def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False, has_ci_config=False,
+             check_suites_json=None):
     """Return (reason_or_None, new_cursor)."""
     cur = dict(cursor) if isinstance(cursor, dict) else {}
     cur.setdefault("ci", "")
@@ -380,10 +430,21 @@ def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False, has
     # the same head. A NON-empty rollup is unaffected either way: real
     # entries (green, pending, or malformed - see checks_pending above) are
     # evaluated exactly as before.
+    # Per-commit checkSuite forge signal (issue #259), strictly conservative:
+    # a NON-zero count means checks ARE registered for this exact commit but
+    # have not reported into the rollup yet - always withhold, regardless of
+    # head_confirmed or has_ci_config, and on the very first poll (no settle
+    # needed: this only ever *withholds*, so it can never itself produce a
+    # false checks-passed). A ZERO or unavailable count carries no
+    # information of its own - it is exactly as much "nothing observed" as
+    # statusCheckRollup itself being empty - so it is NOT trusted as "no CI"
+    # and falls straight through to the has_ci_config branch unchanged.
     empty_rollup = not (pr.get("statusCheckRollup") or [])
+    check_suite_count = check_suite_count_for_head(check_suites_json, head_oid)
+    empty_rollup_blocks = empty_rollup and ((check_suite_count or 0) > 0 or has_ci_config)
     ready = (not fail) and (not checks_pending(pr)) and mergeability == "MERGEABLE" \
         and (head_confirmed or not head_oid) \
-        and not (empty_rollup and has_ci_config)
+        and not empty_rollup_blocks
     merge_ready = ready and allow_merge
     if mergeability == "UNKNOWN":
         pass  # not yet resolved - leave both cursors exactly as they were
@@ -419,6 +480,7 @@ def main():
     ap.add_argument("--me", default="")
     ap.add_argument("--my-crew-id", required=True)
     ap.add_argument("--has-ci-config", action="store_true", default=False)
+    ap.add_argument("--check-suites-json", default="")
     args = ap.parse_args()
 
     pr = read_json(args.pr_json, None)
@@ -427,11 +489,12 @@ def main():
     review_comments = read_json(args.review_comments, []) if args.review_comments else []
     crew_record = read_json(args.crew_record, {}) if args.crew_record else {}
     allow_merge = bool(crew_record.get("allow_merge"))
+    check_suites_json = read_json(args.check_suites_json, {}) if args.check_suites_json else {}
 
     with with_locked(args.cursor):
         cursor = read_json(args.cursor, {})
         reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id, allow_merge,
-                                       args.has_ci_config)
+                                       args.has_ci_config, check_suites_json)
         write_json(args.cursor, new_cursor)
     if reason:
         print(reason)

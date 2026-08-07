@@ -365,4 +365,125 @@ rm -f "$CUR"
 echo '{"number":51,"state":"OPEN","statusCheckRollup":[{"weird":"shape"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
 case "$(ev)" in *ci-failed*) fail "a malformed rollup entry must never fire ci-failed" ;; *) ok "a malformed entry does not misreport as ci-failed" ;; esac
 
+# --- checkSuite forge signal (issue #259), strictly conservative: a non-zero
+# --- count withholds unconditionally; a zero/unavailable count changes
+# --- nothing and falls through to --has-ci-config exactly as before -------
+CSJ="$D/cs.json"
+ev_cs() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me --my-crew-id dev-1 --check-suites-json "$CSJ" 2>/dev/null; }
+
+# THE #259 BUG ITSELF: checkSuiteCount > 0 (checks ARE registered for this
+# exact commit) but the rollup stays empty for MULTIPLE polls beyond the #257
+# settle gate - must stay withheld the whole time, with NO --has-ci-config,
+# only firing once the rollup genuinely reports a real entry.
+rm -f "$CUR"
+echo '{"number":101,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-b"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-b","checkSuites":{"totalCount":1}}}]}}}}}' > "$CSJ"
+assert_eq "poll 1: head unconfirmed (the pre-existing #257 gate, unrelated to this fix)" "$(ev_cs)" ""
+assert_eq "poll 2: head confirmed, checkSuite registered, rollup still empty - withheld, NOT the #257 one-poll settle" "$(ev_cs)" ""
+assert_eq "poll 3: still slow to report - still withheld" "$(ev_cs)" ""
+assert_eq "poll 4: still slow - still withheld" "$(ev_cs)" ""
+echo '{"number":101,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-b"}' > "$PRJ"
+assert_contains "poll 5: CI finally reports - checks-passed fires on the real signal" "$(ev_cs)" "checks-passed: #101"
+
+# the real #274/PR#271 incident shape: an ALREADY-confirmed head (CI healthy
+# last poll) whose rollup empties out while checkSuiteCount stays >= 1 for
+# the SAME head - withheld immediately, no --has-ci-config needed at all.
+rm -f "$CUR"
+echo '{"number":271,"state":"OPEN","statusCheckRollup":[{"name":"test","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-existing"}' > "$PRJ"
+assert_eq "seed: CI genuinely running, nothing fires" "$(ev_cs)" ""
+echo '{"number":271,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-existing"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-existing","checkSuites":{"totalCount":1}}}]}}}}}' > "$CSJ"
+assert_eq "outage begins on the SAME already-confirmed head - checkSuite still registered - withheld with NO --has-ci-config" "$(ev_cs)" ""
+assert_eq "outage persists - still withheld" "$(ev_cs)" ""
+
+# checkSuiteCount == 0 is NOT trusted as "no CI" - falls straight through,
+# byte-identical to the signal being absent entirely.
+rm -f "$CUR"
+echo '{"number":100,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-a"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-a","checkSuites":{"totalCount":0}}}]}}}}}' > "$CSJ"
+assert_eq "poll 1" "$(ev_cs)" ""
+assert_contains "poll 2: count==0 settles via the plain #257 gate - identical timing to no forge signal at all" "$(ev_cs)" "checks-passed: #100"
+
+# checkSuiteCount == 0 does NOT override --has-ci-config=True - the #274 hang
+# is explicitly NOT resolved by this fix (out of scope - see Problem).
+# $CSJ MUST be rewritten here with an oid matching THIS block's own $PRJ
+# (sha-d): round-2 review caught that reusing the prior block's $CSJ
+# (oid sha-a, against this block's headRefOid sha-d) makes the assertions
+# below pass for the WRONG reason - an oid MISMATCH, which already returns
+# None via check_suite_count_for_head regardless of what the (unread)
+# totalCount says, so the test would pass identically under the rejected
+# "trust count==0" design too. Proven vacuous, then proven fixed: with the
+# mismatched fixture, both the strict formula and a reconstructed "trust
+# count==0" variant give the same (withheld) result; with the oid corrected
+# to sha-d below, the trusting variant fires checks-passed on poll 2 (fails
+# this assertion) while the strict formula still correctly withholds.
+ev_cs_ci() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me --my-crew-id dev-1 --has-ci-config --check-suites-json "$CSJ" 2>/dev/null; }
+rm -f "$CUR"
+echo '{"number":104,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-d"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-d","checkSuites":{"totalCount":0}}}]}}}}}' > "$CSJ"
+assert_eq "poll 1" "$(ev_cs_ci)" ""
+assert_eq "poll 2: count==0 (a REAL read, oid matches) does NOT override has-ci-config=True - still withheld (the #274 hang, unresolved by design)" "$(ev_cs_ci)" ""
+assert_eq "poll 3: still withheld" "$(ev_cs_ci)" ""
+
+# merge-ready inherits the same conservative gate.
+CRJ="$D/crj-cs.json"
+ev_cs_mr() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --crew-record "$CRJ" --me me --my-crew-id dev-1 --check-suites-json "$CSJ" 2>/dev/null; }
+rm -f "$CUR"
+echo '{"allow_merge":true}' > "$CRJ"
+echo '{"number":105,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-e"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-e","checkSuites":{"totalCount":2}}}]}}}}}' > "$CSJ"
+assert_eq "seed: allow_merge granted, checkSuites registered, rollup empty" "$(ev_cs_mr)" ""
+assert_eq "same head confirmed, still empty - merge-ready must NOT fire" "$(ev_cs_mr)" ""
+echo '{"number":105,"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-e"}' > "$PRJ"
+assert_contains "CI finally reports - merge-ready fires on the real signal" "$(ev_cs_mr)" "merge-ready: #105"
+
+# oid mismatch (a push landed between the --pr-json and --check-suites-json
+# calls) must never misattribute a stale count to the new commit - falls back
+# to --has-ci-config (unset here), settling via the plain #257 gate.
+rm -f "$CUR"
+echo '{"number":102,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new-push"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-stale","checkSuites":{"totalCount":5}}}]}}}}}' > "$CSJ"
+assert_eq "poll 1" "$(ev_cs)" ""
+assert_contains "poll 2: mismatched oid every time (count=5 for the WRONG commit) - falls back to the plain #257 gate, checks-passed fires" "$(ev_cs)" "checks-passed: #102"
+
+# malformed/error --check-suites-json degrades to the has_ci_config fallback,
+# never raises and never silently miscounts.
+rm -f "$CUR"
+echo '{"number":106,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-f"}' > "$PRJ"
+echo '{"errors":[{"message":"boom"}]}' > "$CSJ"
+assert_eq "poll 1" "$(ev_cs)" ""
+assert_contains "poll 2: malformed graphql response falls back to plain #257 settle" "$(ev_cs)" "checks-passed: #106"
+
+# N5 (round-1 review): --check-suites-json present while --pr-json carries no
+# headRefOid at all - check_suite_count_for_head's own "not head_oid" guard
+# returns None, and the separate "or not head_oid" clause in ready fires
+# immediately, exactly as if the flag had never been passed.
+rm -f "$CUR"
+echo '{"number":300,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-x","checkSuites":{"totalCount":5}}}]}}}}}' > "$CSJ"
+assert_contains "no headRefOid at all: fires on first poll exactly as pre-#257 behavior, forge signal ignored" "$(ev_cs)" "checks-passed: #300"
+
+# no --check-suites-json at all (the call failed/was skipped in bin/pr-watch)
+# is byte-identical to pre-#259 (--has-ci-config-only) behavior.
+rm -f "$CUR"
+echo '{"number":103,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-c"}' > "$PRJ"
+ev_ci_only() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me --my-crew-id dev-1 --has-ci-config 2>/dev/null; }
+assert_eq "poll 1" "$(ev_ci_only)" ""
+assert_eq "poll 2: no forge signal, has-ci-config withholds exactly as pre-#259" "$(ev_ci_only)" ""
+
+# round-1 review (N1): a `commit` field that is JSON null (a GraphQL field
+# error on that node - GitHub's real schema makes PullRequestCommit.commit
+# non-null, so this is a defensive/malformed-input case, not a shape the live
+# API produces) must degrade to None, not raise AttributeError out of
+# check_suite_count_for_head (commit.get("oid") on a None commit). An
+# uncaught exception here would exit before write_json, silently killing
+# checks-passed/merge-ready for this PR permanently while higher-priority
+# events keep working - never allowed to reach the caller, whatever the
+# fixture's shape.
+rm -f "$CUR"
+echo '{"number":107,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-g"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":null}]}}}}}' > "$CSJ"
+assert_eq "poll 1" "$(ev_cs)" ""
+assert_contains "poll 2: commit:null degrades to None, no crash - falls back to the plain #257 settle" "$(ev_cs)" "checks-passed: #107"
+
 test_summary
