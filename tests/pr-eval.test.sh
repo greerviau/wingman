@@ -277,4 +277,92 @@ assert_contains "head changes AND a fresh comment land on the same poll - commen
 echo '{"number":34,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[{"createdAt":"2026-07-10T12:00:00Z","author":{"login":"rev"}}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
 assert_contains "the SAME head, confirmed on the very next poll, fires checks-passed - only one poll after the comment, not one full interval after the head change" "$(ev)" "checks-passed: #34"
 
+# --- outage settle-gate: an existing, already-confirmed head going empty must
+# --- never be trusted as resolved when the caller knows this repo has CI
+# --- configured (issue #274) -------------------------------------------------
+ev_ci() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --me me --my-crew-id dev-1 --has-ci-config 2>/dev/null; }
+
+# an ALREADY-confirmed head (CI was healthy last poll) going empty must not
+# fire checks-passed even once - the #257 "same head twice" gate is already
+# satisfied from before the outage began, so this is NOT the same case #257
+# covers; it needs its own gate.
+rm -f "$CUR"
+echo '{"number":40,"state":"OPEN","statusCheckRollup":[{"name":"test","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-existing"}' > "$PRJ"
+assert_eq "seed: CI genuinely running, nothing fires" "$(ev_ci)" ""
+echo '{"number":40,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-existing"}' > "$PRJ"
+assert_eq "outage begins on the SAME already-confirmed head - rollup empties but must NOT fire checks-passed" "$(ev_ci)" ""
+assert_eq "outage persisting across several more polls still does not fire" "$(ev_ci)" ""
+assert_eq "and again" "$(ev_ci)" ""
+echo '{"number":40,"state":"OPEN","statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-existing"}' > "$PRJ"
+assert_contains "the outage clears and CI genuinely reports green - checks-passed fires on the real signal" "$(ev_ci)" "checks-passed: #40"
+
+# a fresh PR opened DURING an outage (repo has CI, head never confirmed, rollup
+# empty from the very start) - both gates (head-confirm and has-ci) must
+# independently withhold it; neither masks the other.
+rm -f "$CUR"
+echo '{"number":41,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-new"}' > "$PRJ"
+assert_eq "fresh cursor, has-ci-config, empty rollup, head unconfirmed - withheld" "$(ev_ci)" ""
+assert_eq "same head now confirmed, still empty, has-ci-config still withholds it" "$(ev_ci)" ""
+
+# without --has-ci-config (the caller couldn't determine it, or genuinely has
+# no CI), behavior is byte-identical to pre-#274 - the existing "a no-CI PR
+# fires checks-passed on first poll" case (line 25-27, unmodified) already
+# covers the no-headRefOid variant of this; this pins the headRefOid variant.
+rm -f "$CUR"
+echo '{"number":42,"state":"OPEN","statusCheckRollup":[{"name":"test","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-x"}' > "$PRJ"
+ev >/dev/null  # seed, no --has-ci-config
+echo '{"number":42,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-x"}' > "$PRJ"
+assert_contains "no --has-ci-config: an established head going empty still settles exactly as before #274" "$(ev)" "checks-passed: #42"
+
+# merge-ready inherits the same gate - the most safety-critical case, since
+# firing this on a lie would attempt a merge on unverified code.
+CRJ2="$D/crj2.json"
+ev_ci_mr() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --crew-record "$CRJ2" --me me --my-crew-id dev-1 --has-ci-config 2>/dev/null; }
+rm -f "$CUR"
+echo '{"allow_merge":true}' > "$CRJ2"
+echo '{"number":43,"state":"OPEN","statusCheckRollup":[{"name":"test","status":"IN_PROGRESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-m"}' > "$PRJ"
+assert_eq "seed: CI running, allow_merge granted" "$(ev_ci_mr)" ""
+echo '{"number":43,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-m"}' > "$PRJ"
+assert_eq "outage on an already-confirmed head with allow_merge granted - merge-ready must NOT fire" "$(ev_ci_mr)" ""
+assert_eq "outage persists - still withheld" "$(ev_ci_mr)" ""
+
+# --- malformed/incomplete rollup entries never parse as resolved (issue #274)
+# --- - independent of --has-ci-config, and independent of whether the array
+# --- is otherwise empty ------------------------------------------------------
+rm -f "$CUR"
+echo '{"number":50,"state":"OPEN","statusCheckRollup":[{"name":"test"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-b"}' > "$PRJ"
+assert_eq "fresh cursor, malformed entry (no conclusion/status/state at all), head unconfirmed" "$(ev)" ""
+assert_eq "same head confirmed, entry still malformed - still withheld (no --has-ci-config needed)" "$(ev)" ""
+echo '{"number":50,"state":"OPEN","statusCheckRollup":[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-b"}' > "$PRJ"
+assert_contains "the entry resolving to a real conclusion fires checks-passed normally" "$(ev)" "checks-passed: #50"
+
+# --- a StatusContext entry that DOES match the recognized shape, but with a
+# --- garbled or null "state" value, is just as reachable as the no-shape-at-
+# --- all case above and must be hardened the same direction (issue #274,
+# --- round-1 review finding) --------------------------------------------------
+rm -f "$CUR"
+echo '{"number":61,"state":"OPEN","statusCheckRollup":[{"context":"ci/legacy","state":null}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-d"}' > "$PRJ"
+assert_eq "fresh cursor, StatusContext with state:null, head unconfirmed" "$(ev)" ""
+assert_eq "same head confirmed, state still null - still withheld" "$(ev)" ""
+echo '{"number":61,"state":"OPEN","statusCheckRollup":[{"context":"ci/legacy","state":"UNKNOWN"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-d"}' > "$PRJ"
+assert_eq "same head, a garbled non-null state value ('UNKNOWN') is also withheld, not just null" "$(ev)" ""
+echo '{"number":61,"state":"OPEN","statusCheckRollup":[{"context":"ci/legacy","state":"SUCCESS"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-d"}' > "$PRJ"
+assert_contains "the state resolving to a real terminal value fires checks-passed normally" "$(ev)" "checks-passed: #61"
+
+# the same gap on the merge-ready path - the safety-critical case: a real
+# merge attempt must never be triggered on a garbled/null StatusContext state
+CRJ3="$D/crj3.json"
+ev_ci_mr2() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$CUR" --crew-record "$CRJ3" --me me --my-crew-id dev-1 2>/dev/null; }
+rm -f "$CUR"
+echo '{"allow_merge":true}' > "$CRJ3"
+echo '{"number":62,"state":"OPEN","statusCheckRollup":[{"context":"ci/legacy","state":null}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-e"}' > "$PRJ"
+assert_eq "fresh cursor, allow_merge granted, state:null, head unconfirmed" "$(ev_ci_mr2)" ""
+assert_eq "same head confirmed, state still null - merge-ready must NOT fire" "$(ev_ci_mr2)" ""
+
+# a malformed entry must not be misreported as ci-failed either - it should
+# simply withhold readiness, never misdirect a member to "fix CI".
+rm -f "$CUR"
+echo '{"number":51,"state":"OPEN","statusCheckRollup":[{"weird":"shape"}],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' > "$PRJ"
+case "$(ev)" in *ci-failed*) fail "a malformed rollup entry must never fire ci-failed" ;; *) ok "a malformed entry does not misreport as ci-failed" ;; esac
+
 test_summary

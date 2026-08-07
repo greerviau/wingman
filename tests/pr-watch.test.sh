@@ -35,6 +35,11 @@ D="$(wm_mktemp_dir)"
 GH="$D/gh"; make_fake_gh "$GH"
 export WM_GH="$GH"
 export FAKE_PR="$D/pr.json"
+# Pin has-ci detection to an empty fixture dir, not this repo's own real
+# .github/workflows/ - every existing fixture below represents a generic
+# repo with no CI signal established, and must keep doing so regardless of
+# which repo the test suite itself happens to run inside (issue #274).
+export WM_PR_WATCH_WORKFLOWS_DIR="$D/no-workflows"
 
 run() { "$PRWATCH" --pr 42 --once 2>/dev/null; }
 
@@ -200,6 +205,49 @@ assert_contains "not yet granted: settling fires ordinary checks-passed" "$(run)
 wm_state crew-set --id pw5 --allow-merge true >/dev/null
 assert_contains "granting allow_merge afterward fires merge-ready, no PR change needed" "$(run)" "merge-ready: #42"
 assert_eq "merge-ready does not re-fire while still settled" "$(run)" ""
+
+# --- has-ci-config detection end-to-end (issue #274): a fixture dir WITH a
+# --- workflow file makes pr-watch withhold checks-passed on an empty rollup
+# --- for an already-confirmed head; the file-wide no-workflows override
+# --- (this file's own setup, above) already covers the "no CI" path in
+# --- every case before this one, so this section only needs to add the
+# --- "has CI" path. ------------------------------------------------------
+# Fresh crew id + a fresh $WM_HOME (round-2 review finding): without this,
+# this section inherits WINGMAN_CREW_ID=pw5 and its never-revoked
+# allow_merge:true grant from the immediately-preceding merge-ready section
+# (:192-207) - the cursor and the crew record both carry over, so the last
+# assertion below fires "merge-ready: #42" instead of the expected
+# "checks-passed: #42". pw5b (not pw6 - already used by section 11 below).
+test_new_home
+export WINGMAN_CREW_ID=pw5b
+mkdir -p "$D/has-workflows"
+printf 'name: ci\non: [pull_request]\n' > "$D/has-workflows/ci.yml"
+run_with_ci() { WM_PR_WATCH_WORKFLOWS_DIR="$D/has-workflows" "$PRWATCH" --pr 42 --once 2>/dev/null; }
+
+# seed: CI healthy on the current head, using run_with_ci() from the start so
+# the cursor's recorded head_ref_oid comes from a poll that already had
+# --has-ci-config set - exactly the pre-outage condition the bug needs (the
+# head must already be confirmed BEFORE the rollup goes empty).
+echo '{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS"}],
+ "reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-live"}' > "$FAKE_PR"
+assert_eq "seed: CI healthy on current head (has-workflows dir)" "$(run_with_ci)" ""
+
+# outage begins: same head, rollup empties out. Must NOT fire checks-passed -
+# this is PR #271's own reported shape, driven through the real bin/pr-watch
+# script end-to-end, not just pr-eval.py in isolation.
+echo '{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-live"}' > "$FAKE_PR"
+assert_eq "repo has CI configured (fixture workflow file present): an outage-empty rollup on the same confirmed head does NOT fire checks-passed" "$(run_with_ci)" ""
+assert_eq "outage persisting across a further poll still does not fire" "$(run_with_ci)" ""
+
+# the outage clears and CI genuinely reports green - checks-passed fires on
+# the real signal, proving the gate withholds only the false reading, not
+# every reading.
+echo '{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
+ "reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-live"}' > "$FAKE_PR"
+assert_contains "outage clears, CI genuinely reports green - checks-passed fires" "$(run_with_ci)" "checks-passed: #42"
 
 # 11. the liveness beacon (issue #187): --once never touches it, but the real
 #     blocking loop does - the signal wm_state review-resurface-check (see
