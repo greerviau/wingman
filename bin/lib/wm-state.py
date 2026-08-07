@@ -1166,6 +1166,62 @@ def cmd_review_sign(args):
     print(preimage.hex())
 
 
+def cmd_crew_derive_id(args):
+    """Derive a unique crew id from --base, checked against BOTH the live
+    roster and the prune archive (issue #178) - the roster alone can't see a
+    pruned id, since cmd_prune removes the roster record before archiving
+    it. Holds the roster lock across the whole derivation, so two concurrent
+    derive-id calls for the same --base can never return the same id.
+
+    Residual gap (round-1 review N1, not closed here): this call and the
+    caller's later, separate `crew-add` are not one atomic transaction, and
+    cmd_crew_add silently replaces a same-id roster record with no archiving
+    on an exact id collision. Two concurrent *spawns* (not just derivations)
+    for the same objective+type therefore still both derive the same id
+    before either has added a record - the roster-side half of a
+    pre-existing race, not introduced by this change and not fixed by it.
+
+    WARNING for future archive-rotation work: crew-archive.jsonl is
+    currently the ONLY durable record that an id was ever retired. If
+    rotation ever removes an old archive entry before that id's sidecar
+    files are cleaned up (sidecar cleanup on standdown/prune is tracked
+    separately as the unbounded-state-growth issue), the id becomes
+    reusable again and issue #178 recurs silently - no test fails, no code
+    changes. Rotation must either delete that id's sidecars at the same time
+    it drops the archive entry, or wait until sidecar cleanup lands first."""
+    with with_locked(crew_json_path()):
+        used = set(r.get("id") for r in load_roster())
+        try:
+            with open(archive_path()) as fh:
+                for line in fh:
+                    line = line.strip()
+                    # Cheap prefilter before paying for json.loads: every id this
+                    # call could ever produce contains args.base as a substring
+                    # (base, base-2, base-3, ...), so a line that doesn't isn't a
+                    # candidate match and needs no parsing at all. (json.dumps'
+                    # default ensure_ascii=True means a non-ASCII or quote-
+                    # containing base would be escaped in the archived line and
+                    # missed here - unreachable for a slugified base, only
+                    # possible via an explicit --id, which is not slugified.)
+                    if not line or args.base not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    rid = rec.get("id")
+                    if rid:
+                        used.add(rid)
+        except FileNotFoundError:
+            pass
+        derived = args.base
+        n = 2
+        while derived in used:
+            derived = "%s-%d" % (args.base, n)
+            n += 1
+        print(derived)
+
+
 def cmd_crew_get(args):
     roster = load_roster()
     for r in roster:
@@ -1599,7 +1655,12 @@ def cmd_prune(args):
             print("0")
             return
 
-        # Archive first, so a crash mid-prune never loses a record.
+        # Archive first, so a crash mid-prune never loses a record. This archive
+        # is also the only durable record cmd_crew_derive_id has that an id was
+        # ever retired (issue #178) - any future rotation of this file must not
+        # drop an entry before that id's sidecar files are cleaned up, or the id
+        # becomes reusable again and the recycled-id bug recurs silently. See
+        # cmd_crew_derive_id's docstring.
         with open(archive_path(), "a") as fh:
             for m in remove:
                 fh.write(json.dumps(m, sort_keys=True) + "\n")
@@ -4438,6 +4499,14 @@ def build_parser():
     a = sub.add_parser("crew-get")
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_crew_get)
+
+    # crew-derive-id (issue #178): the sole way spawn-crew turns a candidate
+    # slug into a guaranteed-unused id - checks the roster AND the prune
+    # archive under one lock, so a pruned id can never be handed out again.
+    # See cmd_crew_derive_id's own docstring for the full rationale.
+    a = sub.add_parser("crew-derive-id")
+    a.add_argument("--base", required=True)
+    a.set_defaults(fn=cmd_crew_derive_id)
 
     # record-delivery (issue #194): bin/crew-say and wm_outbox_try_redeliver
     # call this on every CONFIRMED delivery into a crew member's own pane, so

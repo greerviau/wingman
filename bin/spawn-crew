@@ -299,11 +299,13 @@ if [ -z "$ID" ]; then
   # generated file/worktree path.
   ID="$(slugify "$OBJECTIVE")-$(slugify "$TYPE")"
 fi
-# Ensure uniqueness against the current roster.
-base="$ID"; n=2
-while wm_state crew-get --id "$ID" >/dev/null 2>&1; do
-  ID="$base-$n"; n=$((n+1))
-done
+# Ensure uniqueness against both the current roster and the prune archive
+# (issue #178) - a pruned id must never be handed out again, since its
+# per-id sidecar files (e.g. the stall check-in nudge marker) outlive the
+# prune and would otherwise be inherited by the new occupant.
+REQUESTED_ID="$ID"
+ID="$(wm_state crew-derive-id --base "$ID")" || wm_die "crew-derive-id failed for base '$REQUESTED_ID'"
+[ "$ID" != "$REQUESTED_ID" ] && wm_warn "'$REQUESTED_ID' is already used (roster or archive) - spawning as '$ID' instead"
 WINDOW="wm-$ID"
 
 # --- deterministic worktree path (repo scope, git only) ----------------------
