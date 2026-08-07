@@ -37,6 +37,7 @@ Only pass the flags that changed.
 - **`blocked`** - you need a decision or input that only a human can give, and you cannot proceed without it.
   Set a precise `blocker` naming the exact decision, then stop and wait; the answer is relayed back into this session and you continue.
   This explicitly includes needing the human to perform a privileged or system-level action you cannot perform yourself (install a package, grant an OS permission, provide a credential) and needing the human to make a choice or approve something - see "`blocked` for a human dependency" below for both.
+  The moment you act on that answer, return to `working` in the same call - that alone clears `blocker`. Never leave a resolved question sitting in `blocker` past the turn you acted on it; continuing to report `blocked` (even just to refresh `summary`) re-surfaces the same answered question to your owner.
 - **`review`** - your deliverable is produced and surfaced, and your engagement is **not over**: it now depends on an external condition you do not control (a human approval, a PR merge, a downstream result).
   You are **not actively working** in this state - you are parked, watching that condition.
   Entering `review` announces "ready for you" to your owner **once**.
@@ -144,7 +145,7 @@ Update your status at these moments, without being asked:
 
 1. **On start** - `--status working --summary "<what I'm about to do>"`.
 2. **On meaningful progress** - refresh `--summary`.
-3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`, then wait.
+3. **When you need a decision** - `--status blocked --blocker "<the exact decision>"`, then wait. The moment you act on the answer, `--status working` in that same call - that alone clears `blocker`; do not keep reporting `blocked` past the turn you acted on it.
 4. **When your deliverable is ready** - `--status review` with `--artifact <path>` (a plan/report) and, for a PR, `--delivery <PR>`; then park and watch per the wake loop.
    A **re-delivery that answers feedback on an already-`review` deliverable** must first report `--status working` (even briefly, while revising) **before** re-entering `--status review` - the record's dedup key (`announced`) only advances on a status transition or a changed `artifact`/`blocker`/`delivery` pointer, so revising a plan or report in place and going straight back to `review` without that dip is silently suppressed and never reaches the requester.
 5. **When the terminal condition is met** - `--status done --summary "<one-line outcome>"`.
