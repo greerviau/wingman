@@ -73,6 +73,10 @@ wm_owner_paths() {
     ownercheckfile="$_wop_home/watch.ownercheck"
   fi
   claimlock="$pidfile.lock"
+  # Run-id stamp on line 1 (empty for a run-id-less session), pid on line 2 -
+  # the same two-line shape $killstampfile/$stopfile already use, so its own
+  # kill-evidence read can be run-scoped and freshness-bound like theirs
+  # (issue #278; see hooks/stop-continuity.sh's own header comment).
   inflightfile="$_wop_home/stop-continuity${_okey:+-$_okey}.pid"
   claimfailfile="$_wop_home/stop-continuity${_okey:+-$_okey}.claimfail"
   killstampfile="$_wop_home/stop-continuity${_okey:+-$_okey}.killstamp"
@@ -99,6 +103,19 @@ wm_watcher_up() {
   fi
 }
 
+# wm_run_scoped_stamp_active <stamp>
+# The comparison half of wm_run_scoped_marker_active, split out for a caller
+# that must read a marker's stamp BEFORE the marker itself is overwritten
+# (hooks/stop-continuity.sh's own in-flight-marker kill-evidence read claims
+# the file for itself a few lines after capturing this value - see issue
+# #278). True (rc 0) iff <stamp> matches $WINGMAN_RUN_ID, or either side is
+# empty (cannot certify ownership either way, so any stamp is honored - the
+# existing $stopfile precedent).
+wm_run_scoped_stamp_active() {
+  _stamp="$1"
+  [ -z "${WINGMAN_RUN_ID:-}" ] || [ -z "$_stamp" ] || [ "$_stamp" = "${WINGMAN_RUN_ID:-}" ]
+}
+
 # wm_run_scoped_marker_active <file>
 # True (rc 0) iff <file> exists and is honored for the CURRENT run: its
 # first line matches $WINGMAN_RUN_ID, or is empty, or this session has no
@@ -106,12 +123,12 @@ wm_watcher_up() {
 # honored - the existing $stopfile precedent). False (rc 1) if absent, or
 # stamped by a different, presumably-ended run. Reads only the first line,
 # so this works unmodified for a marker that carries extra content after its
-# stamp (see $suppressedfile below).
+# stamp (see $suppressedfile below). stop-continuity.sh's own in-flight
+# marker read cannot use this directly - see wm_run_scoped_stamp_active above.
 wm_run_scoped_marker_active() {
   _f="$1"
   [ -f "$_f" ] || return 1
-  _stamp="$(head -n 1 "$_f" 2>/dev/null)"
-  [ -z "${WINGMAN_RUN_ID:-}" ] || [ -z "$_stamp" ] || [ "$_stamp" = "${WINGMAN_RUN_ID:-}" ]
+  wm_run_scoped_stamp_active "$(head -n 1 "$_f" 2>/dev/null)"
 }
 
 # wm_unwaited_reason <owner>
