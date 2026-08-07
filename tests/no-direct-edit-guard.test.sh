@@ -199,6 +199,111 @@ assert_eq "top-level: Edit outside any git repo is allowed (no output)" "$out" "
 out="$(run_hook Write "" "$OUTSIDE_DIR/note.md")"
 assert_eq "top-level: Write outside any git repo is allowed (no output)" "$out" ""
 
+# --- Bash file-writing commands bypass the delegation guard (issue #171) ---
+# sed -i, output redirection (>, >>, &>, tee), and cp/mv all write to a path
+# via a shell operator or an ordinary positional/flag argument - the same
+# bytes an Edit/Write call is denied for above, reaching an identical path
+# through a different tool.
+
+out="$(run_hook Bash "sed -i s/a/b/ $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: sed -i is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: sed -i denial cites the issue" "$out" "issue #171"
+assert_contains "top-level: sed -i denial names the mechanism" "$out" "sed -i"
+
+out="$(run_hook Bash "sed -i.bak s/a/b/ $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: sed -i.bak (glued backup suffix) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "sed --in-place s/a/b/ $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: sed --in-place (long flag) is denied" "$out" '"permissionDecision": "deny"'
+
+# Round-1 review's two reported false-negative shapes, as their own explicit
+# regression fixtures - both confirmed genuine in-place edits against real
+# GNU sed, and both previously silently allowed by a naive whole-token check.
+out="$(run_hook Bash "sed -ni '1,2p' $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: sed -ni (short-flag cluster, -i not leading) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "sed -es/a/X/ -i $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: sed -es/a/X/ -i (glued -e script) is denied" "$out" '"permissionDecision": "deny"'
+
+# Round-2 review's residual false-positive shape: an unrecognized sed long
+# flag (--posix, --debug, ...) ahead of -i must be skipped as a boolean
+# flag, never wrongly treated as sed's own script/file positional argument -
+# the denial must name the real file target, not the sed script text.
+out="$(run_hook Bash "sed --posix -i s/a/b/ $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: sed --posix -i is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: sed --posix -i denial names the real file, not the script" \
+  "$out" "$TEST_REPO/bin/watch-fleet"
+assert_not_contains "top-level: sed --posix -i denial does not name the sed script as a target" \
+  "$out" "to s/a/b/"
+
+out="$(run_hook Bash "echo x > $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: echo > (output redirect) is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: echo > denial cites the issue" "$out" "issue #171"
+
+out="$(run_hook Bash "echo x>$TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: echo x>file (glued, no space) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "echo x >> $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: echo >> (append) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "echo x>>$TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: echo x>>file (glued append) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "echo x &> $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: echo &> (combined stdout+stderr) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "echo x | tee $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: tee is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: tee denial names the mechanism" "$out" "(tee)"
+
+out="$(run_hook Bash "cp /tmp/x $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: cp is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: cp denial names the mechanism" "$out" "(cp)"
+
+out="$(run_hook Bash "mv /tmp/x $TEST_REPO/bin/watch-fleet")"
+assert_contains "top-level: mv is denied" "$out" '"permissionDecision": "deny"'
+assert_contains "top-level: mv denial names the mechanism" "$out" "(mv)"
+
+out="$(run_hook Bash "cp -t $TEST_REPO/bin/ /tmp/a /tmp/b")"
+assert_contains "top-level: cp -t DIR (target-directory form) is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook Bash "cp /tmp/a /tmp/b $TEST_REPO/bin/")"
+assert_contains "top-level: cp with a trailing directory (last positional) is denied" "$out" '"permissionDecision": "deny"'
+
+# A relative-path target must resolve against the hook process's own cwd, not
+# an assumed-absolute path - the first time this guard has ever had to
+# resolve a relative path (Edit/Write's file_path is always absolute).
+out="$(cd "$TEST_REPO" && run_hook Bash "sed -i s/a/b/ bin/watch-fleet")"
+assert_contains "top-level: a relative-path sed -i target (cwd=repo root) is denied" "$out" '"permissionDecision": "deny"'
+
+# --- Regression fences: the two false-positive traps found during design ---
+out="$(run_bash_command 'grep ">" file.txt')"
+assert_eq "top-level: grep \">\" (double-quoted literal) is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "grep '>' file.txt")"
+assert_eq "top-level: grep '>' (single-quoted literal) is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "cmd 2>&1")"
+assert_eq "top-level: cmd 2>&1 (fd-duplication) is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "echo err >&2")"
+assert_eq "top-level: echo err >&2 (fd-duplication) is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "sed s/a/b/ $TEST_REPO/bin/watch-fleet")"
+assert_eq "top-level: sed with no -i (stdout-only) is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "cp $OUTSIDE_DIR/a $OUTSIDE_DIR/b")"
+assert_eq "top-level: cp outside any git repo is allowed (no output)" "$out" ""
+
+out="$(run_hook Bash "sed -i s/a/b/ $OUTSIDE_DIR/x")"
+assert_eq "top-level: sed -i outside any git repo is allowed (no output)" "$out" ""
+
+out="$(run_bash_command "echo \"hello\" > $OUTSIDE_DIR/scratch.txt")"
+assert_eq "top-level: a legitimate scratch-file redirect outside any repo is allowed (no output)" "$out" ""
+
+out="$(run_bash_command "echo \"hi\" > $OUTSIDE_DIR/note")"
+assert_eq "top-level: another legitimate scratch-file redirect outside any repo is allowed (no output)" "$out" ""
+
 # --- cwd scoping: an unset WINGMAN_CREW_ID means "wingman's own top-level
 # session" only when this session's project root actually is this checkout.
 # Every unrelated Claude Code session elsewhere on the machine also has no
@@ -255,6 +360,18 @@ for wtype in developer architect reviewer software-analyst research; do
 
   out="$(run_hook Bash "pytest tests/")"
   assert_eq "$wtype: pytest is allowed (no output)" "$out" ""
+
+  out="$(run_hook Bash "sed -i s/a/b/ $TEST_REPO/bin/watch-fleet")"
+  assert_eq "$wtype: sed -i against a repo path is allowed (no output)" "$out" ""
+
+  out="$(run_hook Bash "echo x > $TEST_REPO/bin/watch-fleet")"
+  assert_eq "$wtype: output redirection against a repo path is allowed (no output)" "$out" ""
+
+  out="$(run_hook Bash "echo x | tee $TEST_REPO/bin/watch-fleet")"
+  assert_eq "$wtype: tee against a repo path is allowed (no output)" "$out" ""
+
+  out="$(run_hook Bash "cp /tmp/x $TEST_REPO/bin/watch-fleet")"
+  assert_eq "$wtype: cp against a repo path is allowed (no output)" "$out" ""
 done
 
 # A crew member with WINGMAN_CREW_ID set but no WINGMAN_CREW_TYPE at all (should
