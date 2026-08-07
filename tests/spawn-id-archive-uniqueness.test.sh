@@ -64,6 +64,18 @@ id5b="$(wm_state crew-derive-id --base nomatch-slug)"; rc5b=$?
 assert_eq "a malformed-only substring hit does not crash (exit 0)" "$rc5b" "0"
 assert_eq "a malformed-only substring hit is not treated as a collision" "$id5b" "nomatch-slug"
 
+# 5c: an undecodable byte (0xff) in the archive must not raise out of the
+# scan, alongside a real match elsewhere in the file (round-1 review N2/N3).
+uv run --no-project --quiet python -c '
+import sys
+with open(sys.argv[1], "wb") as fh:
+    fh.write(b"not json, has a bad byte: \xff mentions badbyte-slug raw\n")
+    fh.write(b"{\"id\": \"badbyte-slug\"}\n")
+' "$WINGMAN_HOME/crew-archive.jsonl"
+id5c="$(wm_state crew-derive-id --base badbyte-slug)"; rc5c=$?
+assert_eq "an undecodable byte in the archive does not crash (exit 0)" "$rc5c" "0"
+assert_eq "the real match survives an undecodable byte elsewhere in the file" "$id5c" "badbyte-slug-2"
+
 # --- 6: end to end through bin/spawn-crew itself -------------------------------
 # spawn -> stand down -> prune (archives it) -> spawn again with the identical
 # objective+type -> the new member must NOT reuse the pruned id.

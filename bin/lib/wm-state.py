@@ -1191,19 +1191,27 @@ def cmd_crew_derive_id(args):
     it drops the archive entry, or wait until sidecar cleanup lands first."""
     with with_locked(crew_json_path()):
         used = set(r.get("id") for r in load_roster())
+        # Cheap prefilter before paying for json.loads: every id this call
+        # could ever produce contains args.base as a substring (base, base-2,
+        # base-3, ...), so a line whose ENCODED form doesn't contain it isn't a
+        # candidate match and needs no parsing at all. Compared against
+        # json.dumps(args.base)[1:-1] (the quotes stripped), not the raw
+        # args.base, so this stays correct even when args.base itself needs
+        # JSON escaping (non-ASCII or quote-containing, reachable only via an
+        # explicit --id, which is not slugified) - a raw-string compare would
+        # silently miss an archived match in exactly that case, handing out an
+        # already-retired id (round-1 review N1).
+        needle = json.dumps(args.base)[1:-1]
         try:
-            with open(archive_path()) as fh:
+            # errors="replace": an undecodable byte in the archive must not
+            # raise out of this loop and abort the whole derivation (round-1
+            # review N2/N3) - spawn-crew treats a failed derivation as a
+            # fleet-wide spawn outage. A replaced byte can only ever cause an
+            # extra, harmless json.loads failure below, never a false match.
+            with open(archive_path(), errors="replace") as fh:
                 for line in fh:
                     line = line.strip()
-                    # Cheap prefilter before paying for json.loads: every id this
-                    # call could ever produce contains args.base as a substring
-                    # (base, base-2, base-3, ...), so a line that doesn't isn't a
-                    # candidate match and needs no parsing at all. (json.dumps'
-                    # default ensure_ascii=True means a non-ASCII or quote-
-                    # containing base would be escaped in the archived line and
-                    # missed here - unreachable for a slugified base, only
-                    # possible via an explicit --id, which is not slugified.)
-                    if not line or args.base not in line:
+                    if not line or needle not in line:
                         continue
                     try:
                         rec = json.loads(line)
