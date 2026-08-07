@@ -110,6 +110,12 @@ A repo-scoped crew session other than `developer` (which already isolates into a
 `bin/lib/git-freshness-check.sh` makes the fix to this - checking freshness before making such a claim - cheap and consistent instead of an ad hoc `git log`/`git status` improvisation: it fetches `origin` (read-only against the working tree, index, and `HEAD`) and reports whether the checkout as a whole is caught up with `origin/<default-branch>`, plus, given path arguments, whether each named file's content specifically differs between `HEAD` and `origin/<default-branch>`.
 `playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness" is the shared convention that tells every git-backed session to run it before asserting a file's current state, with targeted pointers at the three points in the software-development playbooks where this risk is most concentrated (`software-analyst.md`, `reviewer.md`, `architect.md`).
 
+## Untracked `docs/` content at stand-down (advisory, not a hook)
+
+A related exposure, also not interceptable by a `PreToolUse` hook: a `lead` works directly in the shared repo checkout rather than a worktree of its own (only `developer.md`'s "Isolate" step ever creates one), so a plan or review-findings file it writes to `docs/` can sit untracked in that checkout indefinitely - one `git clean -fd` from gone, with nothing surfacing the risk before this (issue #205).
+`bin/lib/untracked-docs-check.sh <repo>` reports untracked files under `<repo>/docs/`: exits 1 with a warning naming the count and paths on stderr when it finds any, exits 0 printing nothing when `docs/` is clean or `<repo>` is not a git repo at all (the two are deliberately indistinguishable - this is a best-effort backstop, not a repo-validity check).
+`bin/crew-standdown` calls it automatically for every stood-down `lead` that has no worktree of its own on record - warning-only, never gating the standdown - and `playbooks/common/lead.md`'s "Handoff at stand-down" section asks a lead to run the same check itself before its closing report, so the exposure is named in its own handoff rather than only surfacing after the fact.
+
 ## Autonomous mode and interactive gates
 
 Because no human sits at a crew member's terminal, `bin/spawn-crew` launches each member with `--permission-mode bypassPermissions` (`WM_PERMISSION_MODE`) so a gated tool call auto-approves instead of hanging on a prompt forever.

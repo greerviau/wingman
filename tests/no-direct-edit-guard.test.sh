@@ -353,6 +353,17 @@ assert_eq "lead: Edit outside any git repo is allowed (no output)" "$out" ""
 
 unset CLAUDE_PROJECT_DIR
 
+# --- issue #205: a lead's own handoff destination is already allowed, with no
+# code change - $WINGMAN_HOME sits outside any git repo, so the denylist's one
+# condition (is_inside_git_repo) never fires there. This pins that property so
+# a future tightening of the guard's repo-detection logic cannot silently
+# reintroduce the deadlock issue #205 was filed about. ------------------------
+test_new_home
+export WINGMAN_CREW_ID=lead2 WINGMAN_CREW_TYPE=lead
+out="$(run_hook Write "" "$WINGMAN_HOME/handoff/lead2-2026-08-07.md")"
+assert_eq "lead: Write to \$WINGMAN_HOME/handoff/<id>-<date>.md is allowed (no output)" "$out" ""
+unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
+
 # --- worker crew types are workers: the guard must stay fully inactive -------
 for wtype in developer architect reviewer software-analyst research; do
   export WINGMAN_CREW_ID=w1 WINGMAN_CREW_TYPE="$wtype"

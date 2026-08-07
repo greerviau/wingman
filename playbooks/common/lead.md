@@ -164,6 +164,11 @@ Routine collaboration between your workers must **not** pass through you - that 
 - **Sequence for cost.** Sequential by default; parallel only for genuinely independent tasks (e.g. per-repo developers).
 - **Reserve the `Workflow` power-tool** for fan-outs you were explicitly asked to run at scale.
 
+## Handoff at stand-down
+
+- On reaching your terminal `done`, write your full closing handoff - remaining state, plans or other written-but-undelivered work with what is verified vs. only claimed, and any judgment calls left for the human - to `$WINGMAN_HOME/handoff/$WINGMAN_CREW_ID-<today's date, YYYY-MM-DD>.md` (create the directory first if needed: `mkdir -p "$WINGMAN_HOME/handoff"`, an ordinary unguarded Bash call since it never touches repo content; get today's date the same way, e.g. `date +%Y-%m-%d`). Report it as your final `--artifact` on the `crew-set --status done` call, exactly like any other deliverable. If you revise the handoff more than once on the same calendar day, writing to the same dated path revises it in place, the same way any other crew deliverable is iterated; a revision on a later day naturally lands in a new dated file rather than overwriting the earlier one - harmless, and only the final one before stand-down is what you report.
+- Before that final report, run `$WINGMAN_BIN/lib/untracked-docs-check.sh <repo>` (the same check `crew-standdown` runs automatically when your owner stands you down) and name any untracked `docs/` files it reports explicitly in your handoff - the mechanical check is a backstop, not a substitute for saying it plainly yourself.
+
 ## Status updates
 
 Follow the status contract (appended). You are yourself a report of your owner's, so you keep your own status file honest: `working` while you are orchestrating, `blocked` only when nothing across your whole team is actionable (a single unit's pending decision is `--park`, not `blocked` - see "Escalation and parking" above), `review` when a worker's delivery is ready and, per the `allow_merge` discriminator above, structurally waiting on the human with neither of you able to land it - the one case where you keep orchestrating from this status rather than treating it as parked, `done` when the whole effort is delivered and dispositioned. Your `summary` is always the rollup - the one line relayed upward.

@@ -43,9 +43,23 @@ FILE="${1:-}"
 # --- 1. location allowlist (coarse, cheap, defense-in-depth only) ------------
 # Only a crew-deliverable directory is even a candidate, regardless of content -
 # a file the crew happened to read elsewhere is never auto-published.
+#
+# A lead's own handoff (issue #205) is a distinct case, tested as a literal
+# prefix against the resolved $WINGMAN_HOME rather than folded into
+# ALLOWLIST_RE below: an unanchored /handoff/ alternative in that regex would
+# whitelist any directory named "handoff" anywhere on the filesystem, for
+# every crew type, which is not what this allowlist is for.
 ALLOWLIST_RE="${WM_ARTIFACT_SCAN_ALLOWLIST_RE:-/docs/(plans|analysis|tickets)/}"
 _abs="$(cd "$(dirname "$FILE")" && pwd)/$(basename "$FILE")"
-printf '%s' "$_abs" | grep -qE "$ALLOWLIST_RE" || { echo "fail:not under a crew-deliverable directory (docs/plans, docs/analysis, docs/tickets)"; exit 1; }
+_wm_h="$(cd "${WINGMAN_HOME:-$HOME/.wingman}" 2>/dev/null && pwd || true)"
+case "$_abs" in
+  "${_wm_h:-/nonexistent}"/handoff/*)
+    : # a lead's own handoff destination (issue #205) - not repo content
+    ;;
+  *)
+    printf '%s' "$_abs" | grep -qE "$ALLOWLIST_RE" || { echo "fail:not under a crew-deliverable directory (docs/plans, docs/analysis, docs/tickets, or a lead's own \$WINGMAN_HOME/handoff)"; exit 1; }
+    ;;
+esac
 
 # --- 2a. secrets/credentials: gitleaks (maintained tool, not a regex list) ---
 if wm_have gitleaks; then
