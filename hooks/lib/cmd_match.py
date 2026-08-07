@@ -710,11 +710,17 @@ def wrapper_payloads(tokens):
             if tok == "--" or tok == "-":
                 # End of options; the next token (if any) is the operand,
                 # regardless of what it looks like. A bare "-" ends option
-                # processing exactly like "--" does (bash's own
-                # parse_shell_options() treats them identically).
+                # processing exactly like "--" does. A bare "+" does NOT -
+                # bash's own parse_shell_options() only special-cases a
+                # leading "-" character for this early-terminator check
+                # (confirmed: `bash + -ocO ...` still recognizes -ocO as a
+                # real option cluster, while `bash - -ocO ...` treats
+                # "-ocO" as a script-path operand and fails to open it);
+                # a bare "+" instead falls into the cluster branch below
+                # as a harmless no-op (empty letters).
                 i += 1
                 break
-            if len(tok) > 1 and tok[0] in "-+":
+            if tok[0] == "+" or (len(tok) > 1 and tok[0] == "-"):
                 if tok.startswith("--"):
                     # A long option: value-taking ones (--rcfile FILE,
                     # --init-file FILE) consume the following token too;

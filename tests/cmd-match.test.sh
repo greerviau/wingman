@@ -345,6 +345,25 @@ check("bash -c - lifts the payload (a bare - ends option scanning exactly like -
       'bash -c - "gh pr merge 46"',
       [["bash", "-c", "-", "gh pr merge 46"], ["gh", "pr", "merge", "46"]])
 
+check("bash -c + lifts the payload (a bare + is a harmless no-op cluster, NOT a "
+      "terminator like - and -- - found in this PR's own round-1 review, which "
+      "initially proposed the wrong fix; the checked-in oracle caught that too)",
+      'bash -c + "gh pr merge 46"',
+      [["bash", "-c", "+", "gh pr merge 46"], ["gh", "pr", "merge", "46"]])
+
+check("bash + -ocO noclobber nullglob lifts the payload (a bare + before a real "
+      "option cluster does not stop the cluster from being recognized, unlike a "
+      "bare - in the same position - the distinguishing case for the point above)",
+      'bash + -ocO noclobber nullglob "gh pr merge 46"',
+      [["bash", "+", "-ocO", "noclobber", "nullglob", "gh pr merge 46"],
+       ["gh", "pr", "merge", "46"]])
+
+check("bash - -ocO noclobber nullglob lifts nothing (a bare - really does end "
+      "option scanning, so -ocO becomes a script-path operand with no -c "
+      "payload - real bash fails to open it as a file and runs nothing)",
+      'bash - -ocO noclobber nullglob "gh pr merge 46"',
+      [["bash", "-", "-ocO", "noclobber", "nullglob", "gh pr merge 46"]])
+
 check("bash -coO pipefail extglob lifts the payload (two value-taking o/O in one "
       "cluster each consume their own value token)",
       'bash -coO pipefail extglob "gh pr merge 46"',
