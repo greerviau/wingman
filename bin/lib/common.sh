@@ -1495,6 +1495,14 @@ wm_outbox_try_redeliver() {
   [ -n "$_tr_obfile" ] || return 0
   _tr_obpath="$_tr_obdir/$_tr_obfile"
   _tr_obsent="$_tr_obdir/sent-$_tr_obfile"
+  # Sender lookup via the sidecar (issue #194), mirroring the pattern
+  # wm_outbox_sweep_abandoned already uses: $_tr_obfile still holds the
+  # un-prefixed name at this point (before the pointer-path mv to sent-*
+  # below), matching exactly what bin/crew-say writes. No sidecar, or an
+  # empty one, both mean "wingman/unattributable" and are recorded as "".
+  _tr_sidecar="$WM_HOME/outbox-meta/$_tr_id/$_tr_obfile"
+  _tr_sender=""
+  [ -f "$_tr_sidecar" ] && _tr_sender="$(cat "$_tr_sidecar" 2>/dev/null)"
   _tr_obmsg="$(cat "$_tr_obpath" 2>/dev/null)"
   if [ -z "$_tr_obmsg" ]; then
     printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" empty-file >> "$WM_HOME/outbox-retry.log"
@@ -1526,5 +1534,11 @@ wm_outbox_try_redeliver() {
     6) _tr_outcome=busy ;;
     *) _tr_outcome=unconfirmed ;;
   esac
+  if [ "$_tr_outcome" = sent ]; then
+    # Confirmed redelivery (issue #194) - same record-delivery call bin/crew-say
+    # makes on its own confirmed-immediate-send path. Best-effort, never gates
+    # the retry itself, which has already succeeded by this point.
+    wm_state record-delivery --to "$_tr_id" --from "$_tr_sender" >/dev/null 2>&1
+  fi
   printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" "$_tr_outcome" >> "$WM_HOME/outbox-retry.log"
 }

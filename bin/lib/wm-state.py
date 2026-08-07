@@ -131,7 +131,22 @@ STATUS_FIELDS = ("status", "summary", "blocker", "artifact", "artifact_url", "de
 # happens entirely inside cmd_stall_recheck's own direct read/write, not
 # through this overlay. cmd_crew_set pops it on the member's own next
 # self-report, exactly like nudged_at.
-DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked", "stall")
+# blocker_set_at/last_delivered (issue #194) are a SECOND exception to the "no
+# gating weight" framing above, and a more direct one than parked (which only
+# feeds a display string): cmd_needs_attention reads both directly to decide
+# whether a `blocked` row is emitted at all this poll (the bounded muffle-
+# window check). blocker_set_at is a timestamp stamped by cmd_crew_set
+# alongside blocker composition (see cmd_crew_set) - not itself a member-
+# settable STATUS_FIELD. last_delivered is a {sender_id: timestamp} map
+# written only by the separate cmd_record_delivery subcommand (never by a
+# member's own crew-set call) on every confirmed bin/crew-say or queued-
+# redelivery send. Both ride DISPLAY_ONLY_LIVE_FIELDS purely because that is
+# the only mechanism merged() has for carrying a live-status-file field onto
+# the roster's merged view for every reader (cmd_needs_attention included) -
+# so they also appear in crew-get/crew-list --json output as a side effect,
+# harmless but worth naming.
+DISPLAY_ONLY_LIVE_FIELDS = ("nudged_at", "long_shell_pid", "long_shell_elapsed", "parked", "stall",
+                             "blocker_set_at", "last_delivered")
 # Live = the member is still in flight and stays on the board's Active list.
 # `review` means "a deliverable is ready and in review" - it is announced to
 # wingman once (like `blocked`) but the member keeps running, shepherding that
@@ -870,6 +885,19 @@ def cmd_crew_set(args):
             live.pop("blocker_composed", None)
             if args.blocker is None:
                 live["blocker"] = None
+        # blocker_set_at (issue #194): stamped whenever the (possibly composed)
+        # blocker's text changes while blocked, so cmd_needs_attention's muffle-
+        # window check can tell a live blocker from one the owner has already
+        # answered. Cleared the moment the record leaves blocked. A routine
+        # blocked refresh call (status unchanged, blocker text unchanged - e.g. a
+        # summary-only re-report) leaves it untouched, so it never re-arms an
+        # already-muffled blocker. No blocker_composed branch: direct and
+        # composed blockers are stamped identically (see plan's "no longer a
+        # direct-vs-composed distinction").
+        if live.get("status") != "blocked":
+            live.pop("blocker_set_at", None)
+        elif live.get("blocker") and live.get("blocker") != prev_pointer[1]:
+            live["blocker_set_at"] = now()
         # nudged_at (#155 fix 1) is stamped elsewhere (cmd_stall_check's --just-
         # nudged, riding the existing per-poll stall-check call bin/watch-fleet
         # already makes for every candidate) - this function only ever CLEARS it,
@@ -1056,6 +1084,36 @@ def cmd_crew_set(args):
         write_json(crew_json_path(), roster)
     render_board()
     print(args.id)
+
+
+def cmd_record_delivery(args):
+    """Record a confirmed message delivery into args.to's own pane (issue #194):
+    bin/crew-say's immediate-send success path and wm_outbox_try_redeliver's
+    confirmed-redelivery path both call this so cmd_needs_attention's muffle-
+    window check can later tell "the owner already replied to this blocker"
+    from "nothing has happened since it was set." Writes only
+    last_delivered[args.sender] = now() onto args.to's own status file -
+    never touches updated/announced/status, so this alone never bumps or
+    suppresses anything the member itself hasn't also acted on.
+
+    No-ops if args.to has no existing status file (round-1 review, NH1):
+    cmd_prune only ever removes status files it can match to a live roster
+    id, so writing one for a typo'd or already-pruned --to would otherwise
+    leave a permanently unreaped orphan under crew_dir()."""
+    ensure_home()
+    status_file = status_path(args.to)
+    with with_locked(status_file):
+        if not os.path.exists(status_file):
+            return
+        live = read_json(status_file, None)
+        if live is None:
+            return
+        last_delivered = live.get("last_delivered")
+        if not isinstance(last_delivered, dict):
+            last_delivered = {}
+        last_delivered[args.sender or ""] = now()
+        live["last_delivered"] = last_delivered
+        write_json(status_file, live)
 
 
 def cmd_review_sign(args):
@@ -2418,6 +2476,34 @@ def cmd_needs_attention(args):
             upd = r.get("announced") or r.get("updated")
             if _attention_suppressed(rid, upd, suppress_on, only_acked, acked, handled):
                 continue
+            # Bounded muffle window for an answered blocker (issue #194): a
+            # `blocked` row is withheld while the owner has confirmably replied
+            # (last_delivered[owner] >= blocker_set_at) AND the record has since
+            # demonstrably run a turn on that reply (updated > last_delivered[owner]
+            # - a confirmed tmux submit only proves the message landed in the pane,
+            # not that the recipient's session acted on it) AND the elapsed time
+            # since that reply is still under WM_BLOCKER_ANSWER_GRACE. Past the
+            # window the row resurfaces with a STALE? prefix rather than staying
+            # silenced forever - a still-open decision is never muted for more
+            # than one window. See docs/architecture.md for the full writeup.
+            stale_prefix = None
+            if r.get("status") == "blocked":
+                bset = r.get("blocker_set_at")
+                if bset:
+                    last_delivered = r.get("last_delivered")
+                    answered_at = (last_delivered.get(parent_of(r))
+                                   if isinstance(last_delivered, dict) else None)
+                    if answered_at and answered_at >= bset and (r.get("updated") or "") > answered_at:
+                        try:
+                            grace = float(os.environ.get("WM_BLOCKER_ANSWER_GRACE", "900"))
+                        except ValueError:
+                            grace = 900.0
+                        answered_dt = _parse_updated(answered_at)
+                        if answered_dt is not None:
+                            elapsed = (datetime.datetime.now(datetime.timezone.utc) - answered_dt).total_seconds()
+                            if elapsed < grace:
+                                continue  # muffled - still inside the grace window
+                            stale_prefix = "STALE? (answered %s, still marked blocked): " % answered_at
             # The note is a short hint for wingman to relay; prefer the pointer the
             # pilot needs (the blocker to answer, the PR/branch delivered, the
             # hosted Artifact URL, or the local artifact path) over the free-text
@@ -2425,6 +2511,8 @@ def cmd_needs_attention(args):
             # than the local path when both are present.
             note = (r.get("blocker") or r.get("delivery")
                     or r.get("artifact_url") or r.get("artifact") or r.get("summary") or "")
+            if stale_prefix:
+                note = stale_prefix + note
             # Resumability (issue #251): a died member's session_id and transcript
             # survive independent of its worktree - lead with recovery rather than
             # letting a bare "died" read as a dead end (the exact misreading the
@@ -4350,6 +4438,15 @@ def build_parser():
     a = sub.add_parser("crew-get")
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_crew_get)
+
+    # record-delivery (issue #194): bin/crew-say and wm_outbox_try_redeliver
+    # call this on every CONFIRMED delivery into a crew member's own pane, so
+    # cmd_needs_attention's muffle-window check can later tell an answered
+    # blocker from a live one. Never called by a member on itself.
+    a = sub.add_parser("record-delivery")
+    a.add_argument("--to", required=True)
+    a.add_argument("--from", dest="sender", default="")
+    a.set_defaults(fn=cmd_record_delivery)
 
     # review-sign (issue #135): produces the preimage for a reviewer's own
     # review-token commitment, to embed in a comment-fallback PR verdict (see
