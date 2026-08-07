@@ -29,7 +29,14 @@
 #   merge-ready: <pr>             PR settled green and mergeable (or no CI) AND
 #                                 this session's own crew record carries
 #                                 allow_merge:true -> attempt the merge now (see
-#                                 playbooks/_delivery.md, "Merge authorization")
+#                                 playbooks/_delivery.md, "Merge authorization").
+#                                 An empty statusCheckRollup only counts as
+#                                 "settled" when this checkout has no
+#                                 .github/workflows/ file at all (issue #274) -
+#                                 for a repo known to have CI, an empty rollup
+#                                 on an already-confirmed head means checks
+#                                 exist but are degraded/not reporting, not
+#                                 resolved.
 #   checks-passed: <pr>           the same settle, but WITHOUT allow_merge -> crew
 #                                 moves to review instead
 #
@@ -96,6 +103,25 @@ PR_EVAL="$WM_LIB/pr-eval.py"
 # doc. Best effort: an empty login just means no self-filtering.
 ME="$($GH api user --jq .login 2>/dev/null || true)"
 
+# Repo-level static fact (issue #274): does this checkout have ANY GitHub
+# Actions workflow file at all? Computed once per arm (not per poll - a
+# structural fact, not something that changes on a 30s cadence; each
+# re-arm after handling an event re-reads it fresh, so a workflow file
+# added mid-effort is picked up on the very next arm, not never).
+# Overridable via WM_PR_WATCH_WORKFLOWS_DIR so a test harness can point
+# this at an isolated fixture directory instead of the ambient checkout's
+# own .github/workflows (see tests/pr-watch.test.sh).
+_wf_dir="${WM_PR_WATCH_WORKFLOWS_DIR:-}"
+if [ -z "$_wf_dir" ]; then
+  _toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$_toplevel" ] && _wf_dir="$_toplevel/.github/workflows"
+fi
+HAS_CI=0
+if [ -n "$_wf_dir" ] && [ -d "$_wf_dir" ] \
+    && find "$_wf_dir" -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) -print -quit 2>/dev/null | grep -q .; then
+  HAS_CI=1
+fi
+
 # One poll: fetch PR state + inline review comments, ask pr-eval for an event.
 # Prints the reason line (and returns 0) iff there is a fresh actionable event.
 poll_once() {
@@ -135,10 +161,13 @@ poll_once() {
     printf '%s' "$_crew_json" > "$_crew_file"
   fi
 
+  _has_ci_flag=""
+  [ "$HAS_CI" = 1 ] && _has_ci_flag="--has-ci-config"
+
   _reason="$(wm_py "$PR_EVAL" --pr-json "$_pr_file" \
     ${_rc_file:+--review-comments "$_rc_file"} \
     ${_crew_file:+--crew-record "$_crew_file"} \
-    --cursor "$CURSOR" --me "$ME" --my-crew-id "$WINGMAN_CREW_ID" 2>/dev/null)"
+    --cursor "$CURSOR" --me "$ME" --my-crew-id "$WINGMAN_CREW_ID" $_has_ci_flag 2>/dev/null)"
   [ -n "$_reason" ] || return 1
   printf '%s\n' "$_reason"
   return 0
