@@ -152,6 +152,31 @@ assert_eq "crew, no grant: bash -c \"git push origin feature/foo\" (non-default 
 out="$(run_hook 'bash -co pipefail "gh pr merge 46"')"
 assert_contains "crew, no grant: bash -co pipefail \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
 
+# Issue #183: a bare "-" must end option scanning exactly like "--" does, and
+# each o/O in a stacked flag cluster must consume its own value token - both
+# were wrong allows (the guard silently let a real merge through).
+out="$(run_hook 'bash -c - "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -c - \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
+# Round-1 review regression: a bare "+" hit the same one-char code path the
+# "-" fix above closed (it fell through to "first non-option token ends
+# scanning" with the index still on "+"), left open until this PR's own
+# review caught it. "+" is NOT a terminator like "-"/"--" though - it is a
+# harmless no-op cluster that still lets option scanning continue - so this
+# particular case denies for the same reason as the "-" case above (nothing
+# follows "+" but the payload itself), not because "+" ends scanning.
+out="$(run_hook 'bash -c + "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -c + \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'bash -coO pipefail extglob "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -coO pipefail extglob \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'bash -cOo extglob pipefail "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -cOo extglob pipefail \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
+out="$(run_hook 'bash -coo pipefail posix "gh pr merge 46"')"
+assert_contains "crew, no grant: bash -coo pipefail posix \"gh pr merge 46\" is denied" "$out" '"permissionDecision": "deny"'
+
 # A non-crew session (the pilot's own) with a wrapped merge is still allowed -
 # the guard's crew-scoping is untouched by the wrapper-lifting fix.
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
