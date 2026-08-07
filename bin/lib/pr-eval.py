@@ -57,6 +57,13 @@ canned JSON. It reads:
                             bin/pr-watch always passes its own $WINGMAN_CREW_ID
                             (guaranteed set at that point), so there is no
                             legitimate caller this would ever break.
+  --has-ci-config           OPTIONAL: this repo's checkout has at least one
+                            workflow file under .github/workflows/, computed
+                            by the caller (bin/pr-watch) from the local
+                            filesystem, once per arm cycle. Gates the empty-
+                            rollup settle shortcut - see the outage-gate
+                            paragraph below. Omitting it is byte-identical to
+                            pre-#274 behavior.
 
 It prints ONE reason line and advances the cursor for exactly that dimension, or
 prints nothing when there is no new event. Priority (highest first):
@@ -93,6 +100,18 @@ after-`gh pr create` case. A PR whose `--pr-json` carries no `headRefOid` at all
 (an older/degraded caller, or a test fixture omitting the field) never gates -
 this is byte-identical to pre-#257 behavior.
 
+`checks-passed`/`merge-ready` are further gated on `--has-ci-config` (issue #274):
+an EMPTY `statusCheckRollup` (zero entries) is trusted as "resolved, no CI" only
+when the caller has NOT established that this repo has CI configured. When
+`--has-ci-config` is passed, an empty rollup on an already-confirmed head means
+checks exist but are not currently reporting - e.g. a GitHub Actions outage -
+and is never read as resolved, no matter how many polls agree on the same head;
+this closes a gap the `headRefOid` settle-gate above does not cover, since a
+head confirmed as healthy BEFORE an outage begins already satisfies that gate
+on the very first outage-degraded poll. A rollup entry that is present but
+malformed or carries an unrecognized/garbled state is separately never treated
+as resolved by `checks_pending` itself, independent of `--has-ci-config`.
+
 `merge-ready` occupies the exact same slot as `checks-passed` but fires instead
 of it when `--crew-record` reports `allow_merge: true`: the PR being green and
 mergeable is no longer just a cue to park in `review`, it is a cue to attempt the
@@ -120,6 +139,12 @@ from wm_lock import with_locked
 FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 # StatusContext states that count as a failure.
 FAIL_STATES = {"ERROR", "FAILURE"}
+# StatusContext states that count as terminal/resolved (success or a
+# recognized failure). Anything else - PENDING, EXPECTED, null, empty, or a
+# garbled/unrecognized value a degraded API response could plausibly return -
+# is treated as still-pending, the same safe default the sibling CheckRun
+# branch already applies via its own "status != COMPLETED" check.
+RESOLVED_STATES = {"SUCCESS"} | FAIL_STATES
 
 
 def read_json(path, default):
@@ -161,14 +186,22 @@ def failing_checks(pr):
 def checks_pending(pr):
     """True if any check has not yet concluded (still queued/in-progress/expected).
     A CheckRun is pending until its status is COMPLETED; a StatusContext is pending
-    in PENDING/EXPECTED."""
+    unless its state is a recognized terminal value (RESOLVED_STATES); a dict
+    entry matching NEITHER recognized shape (a malformed/partial record -
+    issue #274) is also pending, never silently invisible."""
     for c in pr.get("statusCheckRollup") or []:
         if not isinstance(c, dict):
             continue
         if "conclusion" in c or "status" in c:  # CheckRun
             if str(c.get("status") or "").upper() != "COMPLETED":
                 return True
-        elif str(c.get("state") or "").upper() in ("PENDING", "EXPECTED"):  # StatusContext
+        elif "state" in c:  # StatusContext
+            if str(c.get("state") or "").upper() not in RESOLVED_STATES:
+                return True
+        else:
+            # Neither shape - a partial/malformed record. Never silently
+            # invisible: treat as still-unresolved so a degraded rollup can't
+            # be read as settled just because none of its entries parsed.
             return True
     return False
 
@@ -246,7 +279,7 @@ def conversation(pr, review_comments, me, my_crew_id):
     ]
 
 
-def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False):
+def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False, has_ci_config=False):
     """Return (reason_or_None, new_cursor)."""
     cur = dict(cursor) if isinstance(cursor, dict) else {}
     cur.setdefault("ci", "")
@@ -336,8 +369,21 @@ def evaluate(pr, review_comments, cursor, me, my_crew_id, allow_merge=False):
     # merge-ready still fires on the very next poll with no dependency on any
     # further PR-side event - closing the gap where a mid-flight allow_merge
     # grant lands on an already-settled PR.
+    # Outage settle-gate (issue #274): an EMPTY rollup ([] - zero entries,
+    # never populated at all) is trusted as "resolved, no CI" only when the
+    # caller has established, independent of the rollup itself, that this
+    # repo genuinely has no CI configured. When has_ci_config is True (the
+    # repo's .github/workflows/ has at least one workflow file), an empty
+    # rollup means checks exist but are not currently reporting - degraded
+    # Actions, or a run stuck queued with no runner ever assigned - and must
+    # never be read as a resolved result, no matter how many polls agree on
+    # the same head. A NON-empty rollup is unaffected either way: real
+    # entries (green, pending, or malformed - see checks_pending above) are
+    # evaluated exactly as before.
+    empty_rollup = not (pr.get("statusCheckRollup") or [])
     ready = (not fail) and (not checks_pending(pr)) and mergeability == "MERGEABLE" \
-        and (head_confirmed or not head_oid)
+        and (head_confirmed or not head_oid) \
+        and not (empty_rollup and has_ci_config)
     merge_ready = ready and allow_merge
     if mergeability == "UNKNOWN":
         pass  # not yet resolved - leave both cursors exactly as they were
@@ -372,6 +418,7 @@ def main():
     ap.add_argument("--crew-record", default="")
     ap.add_argument("--me", default="")
     ap.add_argument("--my-crew-id", required=True)
+    ap.add_argument("--has-ci-config", action="store_true", default=False)
     args = ap.parse_args()
 
     pr = read_json(args.pr_json, None)
@@ -383,7 +430,8 @@ def main():
 
     with with_locked(args.cursor):
         cursor = read_json(args.cursor, {})
-        reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id, allow_merge)
+        reason, new_cursor = evaluate(pr, review_comments, cursor, args.me, args.my_crew_id, allow_merge,
+                                       args.has_ci_config)
         write_json(args.cursor, new_cursor)
     if reason:
         print(reason)
