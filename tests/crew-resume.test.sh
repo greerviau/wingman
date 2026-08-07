@@ -393,4 +393,38 @@ assert_contains "the real cause is surfaced from the captured stderr, not just t
   "$out_se" "invalid session id xyz"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- #221 part 1: _worktree_fallback must not leak across an --all-died batch
+# resume_one() runs repeatedly in the same shell process for --all-died, so
+# without a per-member reset the first member's fallback would leave the flag
+# set for the rest of the batch, wrongly telling a healthy member with a live
+# worktree to abandon it. Both members use DIALOG_STUB so their nudges fail
+# delivery and get queued to the outbox (any nonzero delivery rc queues), so
+# the queued body can be inspected directly rather than relying on the
+# operator-console wording, which isn't gated on this flag at all. --all-died
+# processes crew-add's insertion order, so wt3 (missing worktree) is resumed
+# before wt4 (live worktree).
+REMOVED_WT2="$STUB_DIR/worktree-cleaned-up-batch"
+mkdir -p "$REMOVED_WT2"; rmdir "$REMOVED_WT2"
+LIVE_WT2="$STUB_DIR/worktree-still-here-batch"
+mkdir -p "$LIVE_WT2"
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id wt3 --type developer --objective x --repo /tmp \
+  --window wm-wt3 --session-id sess-wt3 --worktree "$REMOVED_WT2" >/dev/null
+wm_state crew-add --id wt4 --type developer --objective x --repo /tmp \
+  --window wm-wt4 --session-id sess-wt4 --worktree "$LIVE_WT2" >/dev/null
+wm_state crew-set --id wt3 --status died >/dev/null
+wm_state crew-set --id wt4 --status died >/dev/null
+out_batch="$(WM_AGENT="$DIALOG_STUB" "$CR" --all-died 2>&1)"
+assert_contains "both batch members resume despite each one's undeliverable nudge" "$out_batch" "2 resumed"
+q_wt3="$(ls "$WINGMAN_HOME/outbox/wt3" 2>/dev/null | grep -v '^sent-' | head -1)"
+q_wt4="$(ls "$WINGMAN_HOME/outbox/wt4" 2>/dev/null | grep -v '^sent-' | head -1)"
+assert_true "the fallback member's nudge is queued" "[ -n '$q_wt3' ]"
+assert_true "the healthy member's nudge is queued" "[ -n '$q_wt4' ]"
+assert_contains "the fallback member's queued nudge carries the re-isolate sentence" \
+  "$(cat "$WINGMAN_HOME/outbox/wt3/$q_wt3" 2>/dev/null)" "re-isolate into a fresh worktree"
+assert_not_contains "the flag does not leak: the healthy member's queued nudge carries no re-isolate wording" \
+  "$(cat "$WINGMAN_HOME/outbox/wt4/$q_wt4" 2>/dev/null)" "re-isolate into a fresh worktree"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary

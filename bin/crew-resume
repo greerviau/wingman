@@ -249,18 +249,21 @@ EOF
   # something readable behind after the window - and its pane's stderr -
   # is already gone. Every line is still forwarded to the pane's own stderr
   # unconditionally, so nothing currently visible via bin/crew-takeover is
-  # lost; the file is purely an additional copy. Bounded at 200 lines via
-  # awk (never tee, which would grow this file forever, since `exec claude
-  # ...` below inherits fd 2 for the entire life of a successfully resumed
-  # session, not just the few seconds this function watches) - and awk's
-  # reader never exits early the way `head` would, so the agent's later
-  # stderr writes never hit SIGPIPE/EPIPE against a reader that's gone.
+  # lost; the file is purely an additional copy. Bounded at 200 lines and
+  # 2000 bytes/line via awk (never tee, which would grow this file forever,
+  # since `exec claude ...` below inherits fd 2 for the entire life of a
+  # successfully resumed session, not just the few seconds this function
+  # watches) - the per-line cap keeps a single unterminated line (a
+  # \r-driven progress stream with no newline) from defeating the line
+  # count. awk's reader never exits early the way `head` would, so the
+  # agent's later stderr writes never hit SIGPIPE/EPIPE against a reader
+  # that's gone.
   _launch="$WM_HOME/crew/$_rid.resume.sh"
   _stderr_file="$WM_HOME/crew/$_rid.resume.stderr"
   : > "$_stderr_file" 2>/dev/null
   {
     echo '#!/usr/bin/env bash'
-    echo "exec 2> >(awk -v f=$(quote "$_stderr_file") 'NR<=200 { print >> f; fflush(f) } { print > \"/dev/stderr\" }')"
+    echo "exec 2> >(awk -v f=$(quote "$_stderr_file") 'NR<=200 { print substr(\$0,1,2000) >> f; fflush(f) } { print > \"/dev/stderr\" }')"
     echo "cd $(quote "$_cwd") || exit 1"
     echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
     # Defeat the CLI's own "resume from summary?" interactive prompt (issue
