@@ -471,4 +471,19 @@ ev_ci_only() { uv run --no-project --quiet "$EVAL" --pr-json "$PRJ" --cursor "$C
 assert_eq "poll 1" "$(ev_ci_only)" ""
 assert_eq "poll 2: no forge signal, has-ci-config withholds exactly as pre-#259" "$(ev_ci_only)" ""
 
+# round-1 review (N1): a `commit` field that is JSON null (a GraphQL field
+# error on that node - GitHub's real schema makes PullRequestCommit.commit
+# non-null, so this is a defensive/malformed-input case, not a shape the live
+# API produces) must degrade to None, not raise AttributeError out of
+# check_suite_count_for_head (commit.get("oid") on a None commit). An
+# uncaught exception here would exit before write_json, silently killing
+# checks-passed/merge-ready for this PR permanently while higher-priority
+# events keep working - never allowed to reach the caller, whatever the
+# fixture's shape.
+rm -f "$CUR"
+echo '{"number":107,"state":"OPEN","statusCheckRollup":[],"reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-g"}' > "$PRJ"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":null}]}}}}}' > "$CSJ"
+assert_eq "poll 1" "$(ev_cs)" ""
+assert_contains "poll 2: commit:null degrades to None, no crash - falls back to the plain #257 settle" "$(ev_cs)" "checks-passed: #107"
+
 test_summary

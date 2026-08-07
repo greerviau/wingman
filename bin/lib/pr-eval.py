@@ -251,7 +251,7 @@ def check_suite_count_for_head(check_suites_json, head_oid):
         if oid != head_oid:
             return None
         return int(commit["checkSuites"]["totalCount"])
-    except (KeyError, TypeError, ValueError, IndexError):
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError):
         return None
 
 

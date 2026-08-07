@@ -129,10 +129,12 @@ if [ -n "$_wf_dir" ] && [ -d "$_wf_dir" ] \
 fi
 
 # Once-per-arm latch (issue #259) for the checkSuite forge-signal warning
-# below - a marker FILE, not a shell variable: poll_once() is invoked via
-# command substitution (`if reason="$(poll_once)"`), which runs the whole
-# function body in a subshell, so a plain variable assignment made inside it
-# is discarded the instant that subshell exits. A file write is real
+# below - a marker FILE, not a shell variable, because poll_once() is invoked
+# via command substitution (`if reason="$(poll_once)"`), which runs the whole
+# function body in a subshell: a plain variable assignment made inside it is
+# discarded the instant that subshell exits, so a would-be `_cs_warned=1` set
+# in poll_once() would never be visible on the next poll and would warn every
+# 30s for the watcher's whole life instead of once. A file write is real
 # filesystem state and survives the subshell exiting exactly the way
 # $_pr_file/$_cs_file already do.
 CS_WARNFILE="$CURDIR/$WINGMAN_CREW_ID.cs-warned"
@@ -197,30 +199,35 @@ print("1" if not (d.get("statusCheckRollup") or []) else "")
   # pr-eval.py already treats a missing --check-suites-json as "forge signal
   # unavailable" and falls back to --has-ci-config (issue #274), the safe
   # pre-#259 default. A durably-failing call is warned about once per arm
-  # cycle (not every poll) so it is never a silent, permanent no-op - see
-  # $CS_WARNFILE above, a marker FILE (not a shell variable - poll_once()
-  # is invoked via command substitution, `if reason="$(poll_once)"`, which
-  # runs the whole function body in a subshell; any plain variable
-  # assignment made inside it is discarded the instant that subshell exits,
-  # so a would-be `_cs_warned=1` set here would never be visible on the next
-  # poll and this would warn every 30s for the watcher's whole life instead
-  # of once. A file write is real filesystem state and survives the
-  # subshell exiting exactly the way $_pr_file/$_cs_file already do below).
+  # cycle (not every poll), latched via $CS_WARNFILE above (see its own
+  # comment for why a file, not a variable) so it is never a silent,
+  # permanent no-op.
+  #
+  # Gated on the command's own exit status, not stdout emptiness (round-1
+  # review, M1): on a GraphQL/HTTP error, `gh api graphql` writes the ERROR
+  # BODY to stdout and exits non-zero - a bad field or a NOT_FOUND/permission
+  # error both come back as a non-empty `{"errors":[...]}` on stdout with
+  # exit 1, so branching on "stdout non-empty" alone (the first draft, with a
+  # trailing `|| true` swallowing the exit status entirely) took the SUCCESS
+  # branch on every one of these, silently handing pr-eval.py an error body
+  # it parses to None and diagnosing nothing - exactly the failures this
+  # warning exists for, including the rate-limit case that is this change's
+  # own main open cost (see the plan's Risks section). Requiring both a zero
+  # exit AND non-empty stdout catches all of them.
   _cs_file=""
   if [ -n "$_empty_rollup" ] && [ -n "$_nwo" ] && [ -n "$_num" ]; then
-    _cs_json="$($GH api graphql -f query='
+    if _cs_json="$($GH api graphql -f query='
       query($owner:String!,$repo:String!,$number:Int!){
         repository(owner:$owner,name:$repo){
           pullRequest(number:$number){
             commits(last:1){nodes{commit{oid checkSuites(first:1){totalCount}}}}
           }
         }
-      }' -f owner="${_nwo%%/*}" -f repo="${_nwo#*/}" -F number="$_num" 2>/dev/null || true)"
-    if [ -n "$_cs_json" ]; then
+      }' -f owner="${_nwo%%/*}" -f repo="${_nwo#*/}" -F number="$_num" 2>/dev/null)" && [ -n "$_cs_json" ]; then
       _cs_file="$CURDIR/$WINGMAN_CREW_ID.checksuites.json"
       printf '%s' "$_cs_json" > "$_cs_file"
     elif [ ! -f "$CS_WARNFILE" ]; then
-      wm_warn "pr-watch: checkSuite forge signal unavailable (gh api graphql failed or returned nothing this poll) - falling back to --has-ci-config; will keep retrying silently on later polls (this warning fires once per arm cycle)"
+      wm_warn "pr-watch: checkSuite forge signal unavailable (gh api graphql failed or returned an error this poll) - falling back to --has-ci-config; will keep retrying silently on later polls (this warning fires once per arm cycle)"
       : > "$CS_WARNFILE"
     fi
   fi
