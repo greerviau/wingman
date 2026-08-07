@@ -146,26 +146,34 @@ Fleet continuity is fully automatic for this session - do NOT run /watch and do 
 
 # continuity_registered_timeout <settings_file> <command_marker>
 # Prints the MINIMUM `timeout` across every Stop entry whose command contains
-# <command_marker>, as a single value - never one line per match - or
-# nothing if the file is missing/unparseable or carries no such entry; never
-# a hard failure, just an empty result the caller folds into its own
-# fallback. A single value matters: two Stop entries matching the same
-# marker (e.g. absolute paths from two different checkouts of this repo)
-# would otherwise hand the caller a multi-line capture, which is either a
-# silent `integer expected` on stderr (if the OTHER lookup already produced
-# a value) or a fatal, invocation-ending arithmetic error (if it did not) -
-# print(min(...)) removes both by construction. Used by the lifetime
-# self-clamp below to read this hook's own registration rather than trust
-# the registration surface (four separate declaration sites - see the plan)
-# to have moved in lockstep.
+# <command_marker>, as a single value - never one line per match - and
+# returns 0, with EMPTY stdout, only when the file is missing or carries no
+# matching entry - both legitimate, expected outcomes the caller folds into
+# its own fallback. An unparseable or unreadable file is now a DISTINCT
+# fault: this function returns 1 and never contributes to the caller's
+# empty-result fallback (issue #280 - see hooks/stop-continuity.sh's own
+# caller comment below for what that means for the 600 fallback). A single
+# value matters: two Stop entries matching the same marker (e.g. absolute
+# paths from two different checkouts of this repo) would otherwise hand the
+# caller a multi-line capture, which is either a silent `integer expected`
+# on stderr (if the OTHER lookup already produced a value) or a fatal,
+# invocation-ending arithmetic error (if it did not) - print(min(...))
+# removes both by construction. Used by the lifetime self-clamp below to
+# read this hook's own registration rather than trust the registration
+# surface (four separate declaration sites - see the plan) to have moved in
+# lockstep.
 continuity_registered_timeout() {
-  $WM_UV python -c '
+  _crt_errfile="$(mktemp "${TMPDIR:-/tmp}/wm-crt-err.XXXXXX" 2>/dev/null)"
+  _crt_out="$($WM_UV python -c '
 import json, sys
 path, marker = sys.argv[1], sys.argv[2]
 try:
     d = json.load(open(path))
-except Exception:
-    sys.exit(0)
+except FileNotFoundError:
+    sys.exit(0)   # no such file - legitimate: project and user settings need not both exist
+except Exception as e:
+    print("%s: %s" % (type(e).__name__, e), file=sys.stderr)
+    sys.exit(1)   # file exists but the lookup itself faulted - NOT the same as "no entry"
 found = []
 for entry in (d.get("hooks") or {}).get("Stop", []) or []:
     for h in entry.get("hooks") or []:
@@ -175,7 +183,23 @@ for entry in (d.get("hooks") or {}).get("Stop", []) or []:
             found.append(t)
 if found:
     print(min(found))
-' "$1" "$2" 2>/dev/null
+' "$1" "$2" 2>"${_crt_errfile:-/dev/null}")"
+  _crt_rc=$?
+  # Defense in depth (matches the killstamp path's own guard,
+  # hooks/stop-continuity.sh:271): the success path should only ever be a
+  # bare integer or empty by construction of the Python script above, but
+  # this makes that a guarantee of THIS function's own contract rather than
+  # an assumption its caller has to trust.
+  case "$_crt_out" in ''|*[!0-9]*) _crt_out="" ;; esac
+  if [ "$_crt_rc" -ne 0 ]; then
+    printf 'stop-continuity: registered-timeout lookup faulted for %s (marker %s): %s\n' \
+      "$1" "$2" "$(cat "$_crt_errfile" 2>/dev/null)" >&2
+    rm -f "$_crt_errfile"
+    return 1
+  fi
+  rm -f "$_crt_errfile"
+  printf '%s\n' "$_crt_out"
+  return 0
 }
 
 # 3+4. Fast path: no crew in flight, or a live cycle already exists. Also
@@ -287,24 +311,56 @@ fi
 # timeout found across whichever entries actually exist, so the result never
 # depends on which registration happened to invoke this process (unknowable
 # from inside the script - see hooks/stop-continuity-crew.sh's own header).
-# A file that yields nothing (missing, unparseable, no matching entry)
-# simply contributes nothing; if NEITHER yields a value at all, fall back to
-# the historical 600 rather than the configured default - "the fix silently
-# does nothing" is a far better failure than "continuity silently dies".
+# A file that's missing or has no matching entry still contributes nothing;
+# if NEITHER file yields a value at all AND neither lookup faulted, fall back
+# to the historical 600 rather than the configured default - "the fix
+# silently does nothing" is a far better failure than "continuity silently
+# dies". A file whose lookup FAULTS (issue #280 - corrupt/unreadable
+# settings, or the $WM_UV subprocess itself failing) is reported by
+# continuity_registered_timeout above and tracked via $_lookup_faulted below;
+# it is never silently absorbed into "contributes nothing" the way it used
+# to be, and short-circuits the 600 fallback below when it's the only reason
+# $_registered_timeout is still empty.
 _continuity_project_settings="${WM_PROJECT_SETTINGS:-$REPO/.claude/settings.json}"
 _continuity_user_settings="${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"
+_lookup_faulted=0
 if [ -z "$_registered_timeout" ]; then
-  for _t in \
-    "$(continuity_registered_timeout "$_continuity_project_settings" "stop-continuity.sh")" \
-    "$(continuity_registered_timeout "$_continuity_user_settings" "stop-continuity-crew.sh")"; do
-    [ -n "$_t" ] || continue
+  _t="$(continuity_registered_timeout "$_continuity_project_settings" "stop-continuity.sh")"; _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    _lookup_faulted=1
+  elif [ -n "$_t" ]; then
+    _registered_timeout="$_t"
+  fi
+  _t="$(continuity_registered_timeout "$_continuity_user_settings" "stop-continuity-crew.sh")"; _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    _lookup_faulted=1
+  elif [ -n "$_t" ]; then
     if [ -z "$_registered_timeout" ] || [ "$_t" -lt "$_registered_timeout" ]; then
       _registered_timeout="$_t"
     fi
-  done
+  fi
 fi
-_lifetime_cap=$(( ${_registered_timeout:-600} - WM_CONTINUITY_TIMEOUT_MARGIN ))
-[ "$lifetime" -gt "$_lifetime_cap" ] && lifetime="$_lifetime_cap"
+if [ -z "$_registered_timeout" ] && [ "$_lookup_faulted" -eq 1 ]; then
+  # At least one settings lookup genuinely faulted (corrupt/unreadable file,
+  # or the $WM_UV subprocess itself failing - issue #280) and neither lookup
+  # nor any earlier evidence source (killstamp, dead-pid) produced a real
+  # value. Do NOT infer the historical 600 here: bin/doctor enforces
+  # WM_CONTINUITY_TIMEOUT_MIN=3600 on every registration it writes, so 600
+  # is not a value any correctly-installed session's real registration can
+  # ever be - inferring it on a fault manufactures a number with no
+  # relationship to reality and reproduces the exact silent wake-storm this
+  # issue is about. Skip the registered-timeout clamp for this invocation
+  # only; `lifetime` stays at its already-configured default
+  # (WM_CONTINUITY_LIFETIME_DEFAULT, 3300s, well above one window) rather
+  # than being tightened on a guess. The fault itself was already reported
+  # to stderr by continuity_registered_timeout above; this line makes the
+  # consequence (no clamp applied) equally visible instead of silently
+  # falling through with no trace.
+  printf 'stop-continuity: skipping the registered-timeout clamp for this invocation (lookup fault, see above) - lifetime stays at %ss.\n' "$lifetime" >&2
+else
+  _lifetime_cap=$(( ${_registered_timeout:-600} - WM_CONTINUITY_TIMEOUT_MARGIN ))
+  [ "$lifetime" -gt "$_lifetime_cap" ] && lifetime="$_lifetime_cap"
+fi
 
 # Refuse to let ANY evidence source clamp the loop below one window (issue
 # #278) - the budget check below only ever evaluates AFTER an iteration
