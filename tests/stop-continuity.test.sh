@@ -100,6 +100,14 @@ wait_for_pidfile_not() {
   [ -s "$1" ] && [ "$(cat "$1" 2>/dev/null)" != "$2" ]
 }
 
+# seed_inflight_marker <pid> [run_id] - writes the run-scoped in-flight
+# marker the hook itself now expects (issue #278): run id on line 1 (empty
+# by default, matching test_new_home's own unset WINGMAN_RUN_ID), pid on
+# line 2 - the same shape $killstampfile/$stopfile already use.
+seed_inflight_marker() {
+  printf '%s\n%s\n' "${2:-}" "$1" > "$WINGMAN_HOME/stop-continuity.pid"
+}
+
 # A fresh isolated home, PLUS a real tmux session for it - bin/watch-fleet's
 # own reconcile step flips any LIVE_STATES crew member with no matching live
 # tmux window to 'died' the moment it completes even one poll iteration
@@ -258,7 +266,7 @@ new_home
 add_crew_window d6
 wm_state crew-set --id d6 --status working --summary busy >/dev/null
 sleep 300 & inpid=$!; wm_track "$inpid"
-echo "$inpid" > "$WINGMAN_HOME/stop-continuity.pid"
+seed_inflight_marker "$inpid"
 out8="$(run_hook)"; rc8=$?
 assert_eq "a live, fresh in-flight marker defers immediately: exit 0" "$rc8" "0"
 assert_eq "a live in-flight marker: silent" "$out8" ""
@@ -267,7 +275,7 @@ kill "$inpid" 2>/dev/null
 
 # Stale-pid companion: a guaranteed-dead pid in the marker is overwritten.
 ( : ) & deadpid=$!; wait "$deadpid" 2>/dev/null
-echo "$deadpid" > "$WINGMAN_HOME/stop-continuity.pid"
+seed_inflight_marker "$deadpid"
 export WM_STOP_CONTINUITY_WINDOW=60
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook9.out" 2>&1 &
 h9=$!; wm_track "$h9"
@@ -290,7 +298,7 @@ unset WM_STOP_CONTINUITY_WINDOW
 # even finishes claiming under load, which would make this flaky for a
 # reason unrelated to what it's actually testing.
 sleep 300 & livepid6=$!; wm_track "$livepid6"
-echo "$livepid6" > "$WINGMAN_HOME/stop-continuity.pid"
+seed_inflight_marker "$livepid6"
 export WM_STOP_CONTINUITY_WINDOW=10
 wm_age_path "$WINGMAN_HOME/stop-continuity.pid" 90
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook10.out" 2>&1 &
@@ -339,10 +347,10 @@ unset WM_STOP_CONTINUITY_WINDOW
 # marker completely untouched, since it exits before the EXIT trap is ever
 # installed.
 sleep 300 & livepid6a=$!; wm_track "$livepid6a"
-echo "$livepid6a" > "$WINGMAN_HOME/stop-continuity.pid"
+seed_inflight_marker "$livepid6a"
 out6a2="$(run_hook)"; rc6a2=$?
 assert_eq "a live, fresh in-flight marker defers immediately: exit 0" "$rc6a2" "0"
-assert_true "the concurrency-defer path leaves the OTHER instance's marker untouched" "[ -s '$WINGMAN_HOME/stop-continuity.pid' ] && [ \"\$(cat '$WINGMAN_HOME/stop-continuity.pid')\" = '$livepid6a' ]"
+assert_true "the concurrency-defer path leaves the OTHER instance's marker untouched" "[ -s '$WINGMAN_HOME/stop-continuity.pid' ] && [ \"\$(tail -n +2 '$WINGMAN_HOME/stop-continuity.pid' 2>/dev/null | head -n 1)\" = '$livepid6a' ]"
 kill "$livepid6a" 2>/dev/null
 
 # --- (6b) Kill-evidence clamp (issue #248): the TERM/INT trap measures its
@@ -430,38 +438,58 @@ wait "$h6c" 2>/dev/null
 assert_false "an early TERM (well under one window) does not stamp a killstamp" "[ -f '$WINGMAN_HOME/stop-continuity.killstamp' ]"
 unset WM_STOP_CONTINUITY_WINDOW
 
-# --- (6d) Kill-evidence clamp (issue #248, the direct M3 regression): a
-# dead pid found in the in-flight marker (the SIGKILL-only fallback, since
-# no TERM/INT trap ran to measure anything) clamps THIS invocation's own
-# budget as if the historical 600s were its registered timeout, but does NOT
-# pin that guess into $killstampfile for later invocations to inherit.
-# Unlike a real measurement, "some invocation died with no evidence" says
-# nothing about what this session's actual timeout IS - self-pinning it
-# would tighten every later invocation's clamp for the rest of the run on
-# one ambiguous data point, and since essentially every already-running
-# production session carries some pre-existing dead-pid residue in this
-# marker from before this mechanism ever shipped, self-pinning here would
-# have made a roughly 6x wake-rate regression guaranteed on deploy day, not
-# merely an edge case. Targeted at the tunable margin, not the fixture
-# timeout (round-1 review, M3 of round 2): the fallback's own clamp source
-# is the hardcoded 600, which is not fixture-tunable the way an on-disk
-# `timeout` is - the 7f2 pattern (margin overridden so 600-margin lands
-# exactly on the window) is reused here for the same reason. ---
+# --- (6d) Kill-evidence clamp (issue #278): a FRESH dead pid, stamped with
+# the CURRENT run (or no run id at all - the permissive convention
+# wm_run_scoped_stamp_active shares with $stopfile), is still genuine
+# SIGKILL evidence and still clamps THIS invocation's own budget - the
+# positive control this fix must not regress. Also the direct M3 regression
+# from issue #248: the dead-pid fallback clamps as if the historical 600s
+# were the registered timeout, but does NOT pin that guess into
+# $killstampfile for later invocations to inherit. Unlike a real
+# measurement, "some invocation died with no evidence" says nothing about
+# what this session's actual timeout IS - self-pinning it would tighten
+# every later invocation's clamp for the rest of the run on one ambiguous
+# data point, and since essentially every already-running production
+# session carries some pre-existing dead-pid residue in this marker from
+# before this mechanism ever shipped, self-pinning here would have made a
+# roughly 6x wake-rate regression guaranteed on deploy day, not merely an
+# edge case. Targeted at the tunable margin, not the fixture timeout
+# (round-1 review, M3 of round 2): the fallback's own clamp source is the
+# hardcoded 600, which is not fixture-tunable the way an on-disk `timeout`
+# is - the 7f2 pattern (margin overridden so 600-margin lands exactly on the
+# window) is reused here for the same reason. ---
 new_home
 add_crew_window d6d
 wm_state crew-set --id d6d --status working --summary busy >/dev/null
 ( : ) & deadpid6d=$!; wait "$deadpid6d" 2>/dev/null
-echo "$deadpid6d" > "$WINGMAN_HOME/stop-continuity.pid"
+seed_inflight_marker "$deadpid6d"   # no run id: the permissive-empty branch
 export WM_STOP_CONTINUITY_WINDOW=2
 export WM_STOP_CONTINUITY_LIFETIME=3300
 export WM_CONTINUITY_TIMEOUT_MARGIN=598
 out6d="$(run_hook 30)"; rc6d=$?
 armed6d="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
-assert_eq "the dead-pid fallback clamps this invocation to a single window" "$armed6d" "1"
+assert_eq "a fresh, run-id-less dead pid still clamps this invocation to a single window" "$armed6d" "1"
 assert_eq "the hook exits 2 (a genuine budget-exhaustion rewake)" "$rc6d" "2"
 assert_contains "the single-window break reports a clean rollover" "$out6d" "window rolled"
 assert_false "the fallback does NOT self-pin its guess into killstampfile" "[ -f '$WINGMAN_HOME/stop-continuity.killstamp' ]"
 unset WM_CONTINUITY_TIMEOUT_MARGIN
+
+# Same-run-id companion: an EXPLICIT stamp match (not just permissive
+# emptiness) also clamps - the branch (6d) above cannot exercise on its own.
+new_home
+add_crew_window d6d0
+wm_state crew-set --id d6d0 --status working --summary busy >/dev/null
+( : ) & deadpid6d0=$!; wait "$deadpid6d0" 2>/dev/null
+export WINGMAN_RUN_ID=run-6d0
+seed_inflight_marker "$deadpid6d0" "run-6d0"
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=3300
+export WM_CONTINUITY_TIMEOUT_MARGIN=598
+out6d0="$(run_hook 30)"; rc6d0=$?
+armed6d0="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_eq "a fresh, SAME-run-id dead pid clamps this invocation to a single window" "$armed6d0" "1"
+assert_eq "the hook exits 2" "$rc6d0" "2"
+unset WM_CONTINUITY_TIMEOUT_MARGIN WINGMAN_RUN_ID
 
 # A follow-up invocation, same $WINGMAN_HOME (no new_home, and no fresh dead
 # pid seeded - the prior invocation's own clean exit already cleared
@@ -481,6 +509,75 @@ assert_eq "the follow-up invocation clamps from its OWN fresh registration, not 
 assert_eq "the follow-up invocation exits 2" "$rc6d2" "2"
 unset WM_PROJECT_SETTINGS WM_STOP_CONTINUITY_WINDOW
 export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
+
+# --- (6d-stale) Kill-evidence clamp (issue #278, the direct regression): a
+# dead pid aged past window+60 cannot be evidence of a kill THIS invocation
+# needs to worry about, regardless of which run wrote it. Reuses (6d)'s own
+# WM_CONTINUITY_TIMEOUT_MARGIN=598 (NOT the default) so that IF the guard
+# were broken and wrongly accepted this marker, the resulting cap
+# (600-598=2) would visibly collapse this to armed=1 - with the guard
+# working, the marker is rejected and the on-disk fallback cap
+# (3600-598=3002) leaves the 40s budget untouched. Verified empirically
+# against unmodified main: armed=1 (this test fails pre-fix, as intended). ---
+new_home
+add_crew_window d6dstale
+wm_state crew-set --id d6dstale --status working --summary busy >/dev/null
+( : ) & deadpid6dstale=$!; wait "$deadpid6dstale" 2>/dev/null
+seed_inflight_marker "$deadpid6dstale"
+export WM_STOP_CONTINUITY_WINDOW=2
+wm_age_path "$WINGMAN_HOME/stop-continuity.pid" 90   # 90s > window(2)+60
+export WM_STOP_CONTINUITY_LIFETIME=40
+export WM_CONTINUITY_TIMEOUT_MARGIN=598
+out6dstale="$(run_hook 60)"; rc6dstale=$?
+armed6dstale="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_true "a stale dead pid does NOT clamp the budget - several windows run inside one invocation" "[ '$armed6dstale' -ge 3 ]"
+assert_eq "the hook eventually exits 2 on its own configured budget, not the stale marker's" "$rc6dstale" "2"
+assert_contains "the eventual break reports a clean rollover" "$out6dstale" "window rolled"
+unset WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN; export WM_STOP_CONTINUITY_LIFETIME=1
+
+# --- (6d-foreign) Kill-evidence clamp (issue #278): a FRESH dead pid stamped
+# with a DIFFERENT run id is equally not evidence for THIS run - proves the
+# scope guard, independent of the freshness guard (6d-stale) above proves.
+# Same WM_CONTINUITY_TIMEOUT_MARGIN=598 reasoning as (6d-stale). Verified
+# empirically against unmodified main: armed=1 (fails pre-fix, as intended). ---
+new_home
+add_crew_window d6dforeign
+wm_state crew-set --id d6dforeign --status working --summary busy >/dev/null
+( : ) & deadpid6dforeign=$!; wait "$deadpid6dforeign" 2>/dev/null
+seed_inflight_marker "$deadpid6dforeign" "run-some-other-session"
+export WINGMAN_RUN_ID=run-this-invocation
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=40
+export WM_CONTINUITY_TIMEOUT_MARGIN=598
+out6dforeign="$(run_hook 60)"; rc6dforeign=$?
+armed6dforeign="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_true "a foreign-run dead pid does NOT clamp the budget - several windows run inside one invocation" "[ '$armed6dforeign' -ge 3 ]"
+assert_eq "the hook eventually exits 2 on its own configured budget, not the foreign marker's" "$rc6dforeign" "2"
+unset WINGMAN_RUN_ID WM_STOP_CONTINUITY_WINDOW WM_CONTINUITY_TIMEOUT_MARGIN; export WM_STOP_CONTINUITY_LIFETIME=1
+
+# --- (6d-floor) issue #278 part 2: whatever the evidence source, the final
+# clamp never drops below one window. Reuses (6d)'s own fresh/same-run dead
+# pid (genuine evidence, margin overridden past the fallback 600) but pushes
+# the margin far enough that the UNFLOORED cap would be negative - proving
+# the floor, not the evidence path, is what keeps this sane. ---
+new_home
+add_crew_window d6dfloor
+wm_state crew-set --id d6dfloor --status working --summary busy >/dev/null
+( : ) & deadpid6dfloor=$!; wait "$deadpid6dfloor" 2>/dev/null
+seed_inflight_marker "$deadpid6dfloor"
+export WM_STOP_CONTINUITY_WINDOW=2
+export WM_STOP_CONTINUITY_LIFETIME=3300
+export WM_CONTINUITY_TIMEOUT_MARGIN=605   # 600 - 605 = -5: an unfloored cap would be negative
+printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook6dfloor.out" 2>&1 &
+h6dfloor=$!; wm_track "$h6dfloor"
+assert_true "the hook exits" "wait_for_gone $h6dfloor 60"
+wait "$h6dfloor" 2>/dev/null
+out6dfloor="$(cat "$WINGMAN_HOME/hook6dfloor.out" 2>/dev/null)"
+armed6dfloor="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_contains "the floor fires a one-time diagnostic naming the computed cap" "$out6dfloor" "is below one window"
+assert_eq "the floor still yields exactly one window (never fewer)" "$armed6dfloor" "1"
+assert_contains "the invocation still exits with a clean, well-formed rollover, not a crash" "$out6dfloor" "window rolled"
+unset WM_CONTINUITY_TIMEOUT_MARGIN WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
 
 # --- (7, rewritten for issue #231) The internal loop absorbs several windows
 # and rewakes exactly once, from a SINGLE invocation - the direct regression
@@ -803,6 +900,14 @@ new_home
 add_crew_window d8b
 wm_state crew-set --id d8b --status working --summary busy >/dev/null
 export WM_STOP_CONTINUITY_WINDOW=30
+# Matches the window (issue #278): the file-level WM_STOP_CONTINUITY_LIFETIME=1
+# default sits below any window override, which would otherwise trip the new
+# below-one-window floor (:296) on every invocation below and print its
+# diagnostic to stderr - polluting the byte-exact stderr/marker comparison
+# a few lines down ("one author, two consumers"). lifetime == window is still
+# a strict floor no-op (:296 only fires strictly below), so this changes
+# nothing about this section's own single-iteration-per-invocation behavior.
+export WM_STOP_CONTINUITY_LIFETIME=30
 _trip_out=""
 _trip_err=""
 _round=0
@@ -854,7 +959,7 @@ mc=$!; wm_track "$mc"
 assert_true "the manual arm claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 assert_true "the standdown marker is cleared shortly after the claim (a few lines after PIDFILE in bin/watch-fleet)" "wait_for_file_gone '$WINGMAN_HOME/watch.suppressed'"
 kill "$mc" 2>/dev/null
-unset WM_STOP_CONTINUITY_WINDOW
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
 
 # stop-guard.sh nags with the standdown's own composed text while it holds -
 # not the routine nudge - and treats a foreign-run stamp as inactive
