@@ -141,10 +141,23 @@ review of the first version of this rewrite:
   for substitutions or heredocs - so a stray apostrophe, `$(`, backtick, or
   `<<` in a trailing comment can never corrupt the scan into a false-deny.
 
+Output-redirect operators (`>`, `>>`, `&>`, `&>>`, `>|`) are recognized in
+_walk()'s own unquoted-only scanning branch and replaced with a padded,
+unique sentinel token before the per-line shlex pass runs, so a real operator
+is caught regardless of adjacent whitespace and a quoted literal `">"` is
+never confused with one (issue #171). `redirect_write_targets()` returns the
+token immediately following each such operator in a segment - the path that
+segment's shell will write to. `>&` (fd-duplication - `2>&1`, `>&2`) is
+deliberately excluded, re-emitted as untouched literal text so it falls
+through to the pre-existing `&`-as-punctuation segment split rather than
+being mistaken for a write to a file named the following digit; a bash
+`>&word` "ambiguous redirect" is consequently not recognized as a write
+either, a documented, deliberate false-negative-only gap. Input redirection
+(`<`, `<<`, `<<<`) is not a write and is not covered by this recognition.
+
 Residual gaps, deliberately out of scope (see docs/plans/2026-07-13-issue-56-
 cmd-match-fail-closed.md): arithmetic expansion (`$((...))`) is not extracted
-the way command/process substitution is; redirection (`> /path`) is not
-treated as a risk this module addresses; a substitution in COMMAND POSITION
+the way command/process substitution is; a substitution in COMMAND POSITION
 (`$(which gh) pr merge ...`) resolves to this module's inert placeholder
 rather than a real command name, so a guard matching on argv[0] does not catch
 it as that command - not a regression (the unfixed prior behavior already
@@ -160,6 +173,30 @@ _VAR_TOKEN_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 _PY_RE = re.compile(r"^python[0-9.]*$")
 _SHELL_WRAPPER_NAMES = ("bash", "sh", "zsh", "dash", "ksh")
 _INERT_PLACEHOLDERS = frozenset(("$(...)", "`...`", "<(...)", ">(...)"))
+
+_REDIR_TRUNC = "\x00WM_REDIR_GT\x00"
+_REDIR_APPEND = "\x00WM_REDIR_GTGT\x00"
+_REDIR_CLOBBER = "\x00WM_REDIR_GTBAR\x00"
+_REDIR_BOTH = "\x00WM_REDIR_AMPGT\x00"
+_REDIR_BOTH_APPEND = "\x00WM_REDIR_AMPGTGT\x00"
+_WRITE_REDIRECT_TOKENS = frozenset(
+    (_REDIR_TRUNC, _REDIR_APPEND, _REDIR_CLOBBER, _REDIR_BOTH, _REDIR_BOTH_APPEND)
+)
+
+
+def redirect_write_targets(tokens):
+    """Given one segment's tokens (as returned by command_segments()), return
+    the list of tokens immediately following an output-redirect operator (>,
+    >>, &>, &>>, >|) - paths this segment's shell will write to, regardless of
+    what command precedes the operator. Never includes an input redirect (<,
+    <<, <<<) or fd-duplication (2>&1, >&2), neither of which writes arbitrary
+    content to a path - see _walk()'s own handling of `>&` for why the latter
+    is excluded rather than merely unmatched."""
+    return [
+        tokens[i + 1]
+        for i, tok in enumerate(tokens)
+        if tok in _WRITE_REDIRECT_TOKENS and i + 1 < len(tokens)
+    ]
 
 
 def basename(tok):
@@ -401,6 +438,36 @@ def _walk(s, i, n, close):
             pending.append(("code", s[j + 2:end - 1]))
             out.append('">(...)"')
             j = end
+            continue
+
+        # Write-redirect operators (issue #171) - see module docstring for
+        # the two-part reasoning (whitespace-independence, quote-ambiguity).
+        if c == ">" and j + 1 < n and s[j + 1] == "&":
+            # fd-duplication (2>&1, >&2): re-emitted untouched so it falls
+            # through to the pre-existing &-as-punctuation segment split,
+            # never mistaken for a write to a file named the following digit.
+            out.append(">&")
+            j += 2
+            continue
+        if c == "&" and j + 2 < n and s[j + 1] == ">" and s[j + 2] == ">":
+            out.append(" " + _REDIR_BOTH_APPEND + " ")
+            j += 3
+            continue
+        if c == "&" and j + 1 < n and s[j + 1] == ">":
+            out.append(" " + _REDIR_BOTH + " ")
+            j += 2
+            continue
+        if c == ">" and j + 1 < n and s[j + 1] == ">":
+            out.append(" " + _REDIR_APPEND + " ")
+            j += 2
+            continue
+        if c == ">" and j + 1 < n and s[j + 1] == "|":
+            out.append(" " + _REDIR_CLOBBER + " ")
+            j += 2
+            continue
+        if c == ">":
+            out.append(" " + _REDIR_TRUNC + " ")
+            j += 1
             continue
 
         # A here-string (`<<<WORD`) is fundamentally different from a
