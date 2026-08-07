@@ -14,7 +14,8 @@ PRWATCH="$TEST_REPO/bin/pr-watch"
 
 # A fake `gh`: dispatches on args and serves canned JSON from files named by
 # environment. `gh api user` -> the crew's own login; `gh pr view` -> $FAKE_PR;
-# `gh repo view` -> a fixed owner/repo; `gh api .../comments` -> $FAKE_RC or [].
+# `gh repo view` -> a fixed owner/repo; `gh api .../comments` -> $FAKE_RC or [];
+# `gh api graphql` (the checkSuite forge signal, issue #259) -> $FAKE_CS or "".
 make_fake_gh() {
   cat > "$1" <<'SH'
 #!/usr/bin/env bash
@@ -23,6 +24,7 @@ case "$1 $2" in
   "pr view")    cat "$FAKE_PR" ;;
   "repo view")  echo "owner/repo" ;;
   "api repos/owner/repo/pulls/42/comments") [ -n "${FAKE_RC:-}" ] && cat "$FAKE_RC" || echo "[]" ;;
+  "api graphql") [ -n "${FAKE_CS:-}" ] && cat "$FAKE_CS" || echo "" ;;
   *)            echo "" ;;
 esac
 SH
@@ -248,6 +250,32 @@ echo '{"number":42,"state":"OPEN","mergedAt":null,
  "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
  "reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-live"}' > "$FAKE_PR"
 assert_contains "outage clears, CI genuinely reports green - checks-passed fires" "$(run_with_ci)" "checks-passed: #42"
+
+# --- checkSuite forge signal end-to-end (issue #259): a fixture where the
+# --- rollup stays empty across several polls while the fake graphql response
+# --- reports a registered checkSuite for the SAME head - must withhold
+# --- checks-passed the whole time, firing only once the rollup genuinely
+# --- resolves. -------------------------------------------------------------
+test_new_home
+export WINGMAN_CREW_ID=pw7
+export FAKE_CS="$D/cs.json"
+echo '{"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"oid":"sha-live2","checkSuites":{"totalCount":1}}}]}}}}}' > "$FAKE_CS"
+
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,"statusCheckRollup":[],"reviews":[],"comments":[],
+ "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-live2"}
+JSON
+assert_eq "poll 1: head unconfirmed (the pre-existing #257 gate)" "$(run)" ""
+assert_eq "poll 2: head confirmed, checkSuite registered per the forge, rollup still empty - withheld" "$(run)" ""
+assert_eq "poll 3: still withheld, not the plain #257 one-poll settle" "$(run)" ""
+
+cat > "$FAKE_PR" <<'JSON'
+{"number":42,"state":"OPEN","mergedAt":null,
+ "statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],
+ "reviews":[],"comments":[],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"sha-live2"}
+JSON
+assert_contains "poll 4: CI genuinely reports - checks-passed fires" "$(run)" "checks-passed: #42"
+unset FAKE_CS
 
 # 11. the liveness beacon (issue #187): --once never touches it, but the real
 #     blocking loop does - the signal wm_state review-resurface-check (see
