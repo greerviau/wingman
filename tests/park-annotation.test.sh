@@ -10,9 +10,12 @@
 # (cases 1-10); the auto-composed `blocker` text a --status blocked
 # transition derives from (lead-in, current parked list), and its
 # idempotency/self-clearing guarantees (cases 11-16, following plan review
-# findings B1/B4); and display/filtering across crew-list --parked,
-# render_roster_text/render_tree_text/render_board, and crew-get --json
-# (cases 17-20, including the stood-down exclusion from finding B3).
+# findings B1/B4); a plain, never-parked blocker clearing on every exit from
+# blocked with no fresh --blocker, and the needs-attention fallback that
+# depends on it (cases 16b-16e, issue #216); and display/filtering across
+# crew-list --parked, render_roster_text/render_tree_text/render_board, and
+# crew-get --json (cases 17-20, including the stood-down exclusion from
+# finding B3).
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -232,8 +235,37 @@ wm_state crew-set --id dev16b --summary "still waiting" >/dev/null
 assert_eq "case16b: an unrelated summary refresh leaves an explicit blocker untouched" \
   "$(raw_field_of dev16b blocker)" "need a decision"
 wm_state crew-set --id dev16b --status working --summary "unblocked, moving on" >/dev/null
-assert_eq "case16b: a record that never parks keeps its explicit blocker across the full blocked -> working cycle" \
-  "$(raw_field_of dev16b blocker)" "need a decision"
+assert_eq "case16b: a record that never parks clears its blocker once it leaves blocked with no fresh --blocker" \
+  "$(raw_field_of dev16b blocker)" ""
+
+# --- case 16c: blocked -> review with no fresh --blocker (issue #216's own
+# reported example) clears blocker, and needs-attention's note falls through
+# to delivery instead of relaying the resolved question --------------------
+wm_state crew-add --id dev16c --type developer --repo /tmp --window w16c --session-id s16c >/dev/null
+wm_state crew-set --id dev16c --status blocked --blocker "should I hold off standing down the other developer" >/dev/null
+wm_state crew-set --id dev16c --status review --summary "PR ready for review" \
+  --artifact /tmp/fake-plan.md --delivery "https://github.com/example/example/pull/223" >/dev/null
+assert_eq "case16c: blocked -> review with no fresh --blocker clears blocker" \
+  "$(raw_field_of dev16c blocker)" ""
+NOTE16C="$(wm_state needs-attention --owner "" | awk -F'\t' '$1=="dev16c"{print $4}')"
+assert_eq "case16c: needs-attention's note falls through to delivery instead of the stale blocker" \
+  "$NOTE16C" "https://github.com/example/example/pull/223"
+
+# --- case 16d: blocked -> done with no fresh --blocker clears blocker -----
+wm_state crew-add --id dev16d --type developer --repo /tmp --window w16d --session-id s16d >/dev/null
+wm_state crew-set --id dev16d --status blocked --blocker "need a decision" >/dev/null
+wm_state crew-set --id dev16d --status done --summary "done" >/dev/null
+assert_eq "case16d: blocked -> done with no fresh --blocker clears blocker" \
+  "$(raw_field_of dev16d blocker)" ""
+
+# --- case 16e: render_board's blocker cell is empty for a working/review
+# record whose blocker was set and then implicitly cleared (extends case
+# 17's render-board coverage) -----------------------------------------------
+board_16e="$(wm_state render-board)"
+assert_not_contains "case16e: render_board's blocker cell no longer shows a cleared blocker" \
+  "$board_16e" "need a decision"
+assert_not_contains "case16e: ...nor the review-transition case's resolved question" \
+  "$board_16e" "should I hold off standing down the other developer"
 
 # ============================================================================
 # 17-20: display and filtering.
