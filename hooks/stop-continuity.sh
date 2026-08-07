@@ -29,7 +29,10 @@
 # the stale on-disk value, durably, not merely until the next clean exit. A
 # dead pid found in the in-flight marker (step 5 below) is a narrower
 # fallback for the one case a trap cannot help with - an untrappable
-# SIGKILL (OOM, a hard crash, a manual `kill -9`) - and informs only the
+# SIGKILL (OOM, a hard crash, a manual `kill -9`) - scoped to the current run
+# and bounded to the same freshness window the concurrency-defer check uses
+# (issue #278: a stale or foreign-run marker is not evidence of anything this
+# invocation needs to worry about) - and informs only the
 # invocation that discovers it, without pinning a record for later ones.
 # RESTARTING every session that was already running when a `timeout` change
 # lands is still required, not optional: this narrows the exposure to at
@@ -195,7 +198,8 @@ lifetime="${WM_STOP_CONTINUITY_LIFETIME:-$WM_CONTINUITY_LIFETIME_DEFAULT}"
 # total runtime is bounded by its own referee at $window, so anything older
 # than that plus a small margin (60s) cannot possibly be a live instance of
 # this hook, regardless of what the pid says.
-inflight_pid="$(cat "$inflightfile" 2>/dev/null)"
+inflight_stamp="$(head -n 1 "$inflightfile" 2>/dev/null)"
+inflight_pid="$(tail -n +2 "$inflightfile" 2>/dev/null | head -n 1)"
 inflight_age=999999
 if [ -f "$inflightfile" ]; then
   inflight_age=$(( $(date +%s) - $($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$inflightfile" 2>/dev/null || echo 0) ))
@@ -203,7 +207,7 @@ fi
 if [ -n "$inflight_pid" ] && kill -0 "$inflight_pid" 2>/dev/null && [ "$inflight_age" -lt $(( window + 60 )) ]; then
   exit 0   # a genuinely concurrent instance is already managing continuity for this owner
 fi
-printf '%s\n' "$$" > "$inflightfile"
+printf '%s\n%s\n' "${WINGMAN_RUN_ID:-}" "$$" > "$inflightfile"
 # Cleared unconditionally on every clean exit (issue #248) - the
 # harness-timeout scenario is now witnessed directly by the TERM/INT trap
 # below, which stamps $killstampfile BEFORE this process ever reaches its
@@ -215,7 +219,7 @@ printf '%s\n' "$$" > "$inflightfile"
 # always the parent shell's pid, never the subshell's), though the referee
 # below never actually runs this trap regardless - bash does not inherit an
 # EXIT trap into a `( ... )` subshell in the first place.
-trap '[ "$(cat "$inflightfile" 2>/dev/null)" = "$$" ] && rm -f "$inflightfile"' EXIT
+trap '[ "$(tail -n +2 "$inflightfile" 2>/dev/null | head -n 1)" = "$$" ] && rm -f "$inflightfile"' EXIT
 
 # Self-clamp the lifetime budget against this hook's own registered
 # `timeout` (issue #231) OR, when available, a directly measured prior kill
@@ -240,8 +244,13 @@ trap '[ "$(cat "$inflightfile" 2>/dev/null)" = "$$" ] && rm -f "$inflightfile"' 
 #      honored afterward too. Safe in the same direction as every other
 #      guess in this file (can only tighten the resulting clamp, never
 #      loosen it), so left as-is rather than special-cased.
-#   2. A dead pid found in $inflightfile above (SIGKILL-only fallback): no
-#      trap ran, so nothing measured anything, but a prior invocation is
+#   2. A dead pid found in $inflightfile above (SIGKILL-only fallback), honored
+#      only when it is BOTH fresh (age < window+60, the same bound the
+#      concurrency-defer check above uses) AND stamped by the current run (or
+#      run-id-less, matching the existing $stopfile permissive convention) -
+#      a stale or foreign-run marker is not evidence of anything THIS
+#      invocation needs to worry about (issue #278). When both hold: no trap
+#      ran, so nothing measured anything, but a prior invocation is
 #      definitively gone with no trace of a clean exit. Pinned to the
 #      historical 600 for THIS invocation's own clamp only - deliberately
 #      NOT written back to $killstampfile the way source 1 is: unlike a real
@@ -262,7 +271,9 @@ if wm_run_scoped_marker_active "$killstampfile"; then
   case "$_registered_timeout" in ''|*[!0-9]*) _registered_timeout="" ;; esac
 fi
 _prior_kill_evidence=0
-if [ -n "$inflight_pid" ] && ! kill -0 "$inflight_pid" 2>/dev/null; then
+if [ -n "$inflight_pid" ] && ! kill -0 "$inflight_pid" 2>/dev/null \
+  && [ "$inflight_age" -lt $(( window + 60 )) ] \
+  && wm_run_scoped_stamp_active "$inflight_stamp"; then
   _prior_kill_evidence=1
 fi
 if [ -z "$_registered_timeout" ] && [ "$_prior_kill_evidence" -eq 1 ]; then
@@ -294,6 +305,21 @@ if [ -z "$_registered_timeout" ]; then
 fi
 _lifetime_cap=$(( ${_registered_timeout:-600} - WM_CONTINUITY_TIMEOUT_MARGIN ))
 [ "$lifetime" -gt "$_lifetime_cap" ] && lifetime="$_lifetime_cap"
+
+# Refuse to let ANY evidence source clamp the loop below one window (issue
+# #278) - the budget check below only ever evaluates AFTER an iteration
+# completes, so any lifetime under one window degenerates to the identical
+# single-iteration-then-rewake pattern regardless of how far under it is,
+# and bin/doctor's own WM_CONTINUITY_TIMEOUT_MIN keeps a genuinely correct
+# registration's own cap far above this floor in production - a cap this
+# tight is itself a signal something upstream is misconfigured or
+# mis-measuring. Surfaced on stderr (never stdout - that channel is
+# reserved for the hook's own JSON decision), not silently absorbed.
+if [ "$lifetime" -lt "$window" ]; then
+  printf 'stop-continuity: computed lifetime budget (%ss) is below one window (%ss) - flooring to %ss. Check this session'"'"'s registered Stop hook timeout (%s, %s).\n' \
+    "$lifetime" "$window" "$window" "$_continuity_project_settings" "$_continuity_user_settings" >&2
+  lifetime="$window"
+fi
 
 # 6. Persistent stop-sanction gate. Silently, every time, no rewake - the
 # sanction was already reported once, synchronously, when `bin/watch-fleet
@@ -419,7 +445,7 @@ while :; do
   # invocation can now live many multiples of $window - see "The concurrency
   # guard across a long lifetime" in the plan for why a stamp fixed at entry
   # would go stale mid-lifetime and let a concurrent instance in.
-  printf '%s\n' "$$" > "$inflightfile"
+  printf '%s\n%s\n' "${WINGMAN_RUN_ID:-}" "$$" > "$inflightfile"
   _body=""; _mode=""; _continue=0; _quiet=""
 
   # Re-claiming here is only safe because the PREVIOUS iteration's
