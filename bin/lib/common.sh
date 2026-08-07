@@ -605,7 +605,11 @@ prompt_shape_in() {
 # false "confirmed" (see wm_composer_is_empty's own design-property note
 # below), but real enough that "empty renders as the bare anchor" must not be
 # read as an unconditional claim about every idle composer, only the
-# post-submit one.
+# post-submit one. wm_composer_is_empty's trailing-whitespace strip is
+# deliberately restricted to the literal ASCII space byte rather than a
+# POSIX class, specifically so it never strips this anchor's own NBSP under
+# a locale that classifies U+00A0 as whitespace - see the comment on that
+# function for the mechanism (issue #279).
 WM_COMPOSER_RULE_MIN="${WM_COMPOSER_RULE_MIN:-20}"
 WM_COMPOSER_TAIL="${WM_COMPOSER_TAIL:-15}"
 WM_COMPOSER_RULE_CHAR="─"
@@ -652,12 +656,20 @@ wm_composer_text_in() {
 
 # True (rc 0) iff a wm_composer_text_in extraction is empty - reduces to the
 # anchor glyph + NBSP alone, no other text. False (rc 1, "pending") for
-# anything else. A misread here can only push a delivery toward "not yet
-# confirmed", never toward a false 0 - consistent with this whole detector's
-# design property (see _wm_tmux_send_message_locked below): every failure
-# mode degrades toward a false negative, never a false "confirmed".
+# anything else. Strips only the literal ASCII space byte (0x20), NEVER a
+# POSIX class like [[:space:]] - under a BSD libc UTF-8 locale, [[:space:]]
+# classifies the anchor's own NBSP (U+00A0, c2 a0) as whitespace and strips
+# it along with any trailing padding, which makes this equality permanently
+# fail (issue #279). tmux capture-pane never emits a tab or other whitespace
+# byte at a line's end, only literal spaces, so this is not a narrowing of
+# real input, and matching a literal byte (rather than a named class) has no
+# locale dependency to reintroduce. A misread here can only push a delivery
+# toward "not yet confirmed", never toward a false 0 - consistent with this
+# whole detector's design property (see _wm_tmux_send_message_locked below):
+# every failure mode degrades toward a false negative, never a false
+# "confirmed".
 wm_composer_is_empty() {
-  [ "$(printf '%s' "$1" | sed -e 's/[[:space:]]*$//')" = "$WM_COMPOSER_ANCHOR" ]
+  [ "$(printf '%s' "$1" | sed -e 's/ *$//')" = "$WM_COMPOSER_ANCHOR" ]
 }
 
 # Acquire / release the per-pane send lock that serializes every keystroke aimed
