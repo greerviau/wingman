@@ -649,6 +649,61 @@ JSON
 out="$(run_hook "gh pr merge 46")"
 assert_eq "review gate: a later approve from the same reviewer supersedes an earlier request-changes (no output)" "$out" ""
 
+# ============================================================================
+# issue #304: a later marker-anchored comment with NO parseable verdict must
+# not erase an earlier verdict recorded for the same id - it says nothing
+# about the verdict, so the previously-recorded one stays current. An
+# explicit LATER verdict must still override, even with a verdict-less
+# comment sitting between the two (replay protection, unchanged from #135).
+# ============================================================================
+
+# --- the exact PR #297 repro: request-changes, approve, then a verdict-less
+# follow-up confirming CI / attributing a red job to a known flake - the
+# approve must still count as evidence.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: request changes - fix X"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - fixed, lgtm now"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> Confirmed CI is green modulo the flaky integration job - unrelated to this change."}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "issue #304: a verdict-less follow-up after an approve does not withdraw it (no output)" "$out" ""
+
+# --- the reverse ordering: a verdict-less comment sitting between two
+# EXPLICIT verdicts must not prevent the later explicit verdict from
+# overriding the earlier one (replay protection preserved).
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> Still looking at the flaky test, will confirm shortly."},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: request changes - actually the flake masked a real failure"}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "issue #304: an explicit later verdict still overrides an earlier one, even across a verdict-less comment" \
+  "$out" '"permissionDecision": "deny"'
+
+# --- an id whose ONLY comment is verdict-less contributes no evidence at all
+# (unchanged from pre-#304 behavior - confirms the fix doesn't accidentally
+# start treating "no verdict ever" as an approve).
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> Just confirming this PR exists, no opinion yet."}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_contains "issue #304: an id with only a verdict-less comment (never an actual verdict) provides no evidence" \
+  "$out" '"permissionDecision": "deny"'
+
+# Leave the fixture in the same bare approve-only shape this section's own
+# earlier cases used, matching this file's existing convention (e.g. :591-597).
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev1 --> VERDICT: approve - lgtm"}
+]}
+JSON
+
 # --- a reviewer already stood down and pruned into crew-archive.jsonl is ----
 # still recognized (the roster cross-check falls back to the archive).
 wm_state crew-add --id rev-archived --type reviewer --repo "$TEST_REPO" \
@@ -1055,6 +1110,22 @@ JSON
 out="$(run_hook "gh pr merge 46")"
 assert_contains "issue #135: the exact PR #134 round-2 repro (forged marker-reuse approve) is now denied" \
   "$out" '"permissionDecision": "deny"'
+
+# --- issue #304 + #135 interaction: a tokened reviewer's genuine
+# approve+valid-proof followed by a verdict-less comment - carrying a garbage
+# proof marker of its own - must still be allowed. This is the wrong-marker
+# case, not just the absence case: it proves a mismatched proof marker on an
+# irrelevant later comment can never be checked in place of the real
+# approve's own genuine marker, because the follow-up (having no VERDICT:
+# line) never becomes the id's stored entry in the first place.
+cat > "$GH_REVIEWS_JSON" <<JSON
+{"number": 46, "url": "https://github.com/acme/widgets/pull/46", "reviews": [
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-tok1 -->\n<!-- wingman-review-proof:$PROOF_APPROVE1 -->\nVERDICT: approve - lgtm"},
+  {"state": "COMMENTED", "body": "<!-- wingman-crew:rev-tok1 -->\n<!-- wingman-review-proof:$GARBAGE_PROOF -->\nConfirmed CI is green, unrelated flake on the integration job."}
+]}
+JSON
+out="$(run_hook "gh pr merge 46")"
+assert_eq "issue #304 + #135: a verdict-less follow-up carrying a garbage proof marker of its own does not disturb the real approve's valid proof (no output)" "$out" ""
 
 # --- test 7: cross-PR replay via a live delivery change is denied (round 1) -
 REVIEW_TOKEN3="$(uv run --no-project --quiet python -c 'import secrets;print(secrets.token_hex(32))')"
