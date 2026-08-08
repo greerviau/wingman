@@ -8,9 +8,10 @@
 # loop always shows a live process tree. wm_state forward-motion-check closes
 # this: a WORKING candidate with at least one active report flips directly to
 # 'stalled' once its own roster-shape signature (its own summary/blocker/
-# artifact/delivery, plus every active report's own status/announced) has
-# shown no change for --window-secs - resetting the clock the instant
-# anything about that shape genuinely moves. Modeled directly on
+# artifact/delivery, plus every active report's own status/summary/blocker/
+# artifact/delivery/announced) has shown no change for --window-secs -
+# resetting the clock the instant anything about that shape genuinely
+# moves. Modeled directly on
 # tests/review-resurface.test.sh's structure and helpers. No real
 # tmux/claude/forge needed.
 set -u
@@ -188,7 +189,8 @@ wm_state crew-set --id lead7 --status working --summary "resumed" >/dev/null
 
 # Immediately re-check on the SAME cycle - the episode_announced anchor key
 # must prevent an instant re-flip, even though the roster shape (lead7's own
-# summary/blocker/artifact/delivery, dev7's status/announced) is otherwise
+# summary/blocker/artifact/delivery, dev7's status/summary/blocker/artifact/
+# delivery/announced) is otherwise
 # identical to what it was right before the flip.
 out7b="$(wm_state forward-motion-check --owner "" --window-secs 2)"
 assert_eq "an immediate re-check after resume does not re-flip" "$out7b" ""
@@ -422,5 +424,101 @@ assert_contains "no --pane-pids-stdin: no probing attempted, flips exactly as be
 
 kill "$dev14_pid" 2>/dev/null
 wait "$dev14_pid" 2>/dev/null
+
+# ============================================================================
+# issue #305: a delegate's own record CONTENT (summary/blocker/artifact/
+# delivery), not just its status or `announced` alone, counts as forward
+# motion for the owning lead - closing the false-positive stall flips issue
+# #305 reports (root cause shared with issue #264: a working child's
+# `announced` freezes on its first-ever crew-set call, so _child_tuples's
+# old `announced-or-updated` fallback never reached `updated` again for a
+# child that stays `working` the whole time). `announced` is kept ALONGSIDE
+# the content fields, not replaced by them - see case 18: a blocked/done
+# event always advances `announced` regardless of content (cmd_crew_set), so
+# a delegate that round-trips through an identical-looking re-block still
+# needs `announced` to register as motion.
+# ============================================================================
+
+# --- 15. a working child's genuinely new summary resets the anchor ----------
+# dev15 gets TWO working-status crew-set calls before the anchor is even
+# established, so its `announced` is already frozen (seeded on the first
+# call) well before forward-motion-check ever runs - the exact shape #264
+# describes, and the shape a real developer mid-implementation produces.
+test_new_home
+wm_state crew-add --id lead15 --type developer --objective x --repo /tmp --window wm-lead15 --session-id s15 >/dev/null
+wm_state crew-set --id lead15 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev15 --type developer --objective x --repo /tmp --window wm-dev15 --session-id s-dev15 --parent lead15 >/dev/null
+wm_state crew-set --id dev15 --status working --summary "coding v1" >/dev/null
+wm_state crew-set --id dev15 --status working --summary "coding v1, still working" >/dev/null
+
+wm_state forward-motion-check --owner "" --window-secs 5 >/dev/null
+sleep 3
+# Genuine new progress, still `working` the whole time.
+wm_state crew-set --id dev15 --status working --summary "coding v2 - implemented the parser" >/dev/null
+out15a="$(wm_state forward-motion-check --owner "" --window-secs 5)"
+assert_eq "a working child's genuinely new summary resets the anchor: no flip" "$out15a" ""
+sleep 2.5
+out15b="$(wm_state forward-motion-check --owner "" --window-secs 5)"
+assert_eq "still no flip shortly after (fresh window required from the reset point)" "$out15b" ""
+status15="$(wm_state crew-get --id lead15 | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])")"
+assert_eq "lead15 is still working" "$status15" "working"
+
+# --- 16. a genuinely wedged lead with idle delegates still flips (issue #305
+# regression guard: a delegate's repeated BYTE-IDENTICAL re-report - no real
+# content change, same summary text every time - must not be mistaken for
+# forward motion, preserving the original anti-spam intent). -----------------
+test_new_home
+wm_state crew-add --id lead16 --type developer --objective x --repo /tmp --window wm-lead16 --session-id s16 >/dev/null
+wm_state crew-set --id lead16 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev16 --type developer --objective x --repo /tmp --window wm-dev16 --session-id s-dev16 --parent lead16 >/dev/null
+wm_state crew-set --id dev16 --status working --summary "coding away" >/dev/null
+
+wm_state forward-motion-check --owner "" --window-secs 2 >/dev/null
+sleep 1
+# A no-op re-report: identical status AND identical summary text - not
+# genuine progress, must not reset the anchor.
+wm_state crew-set --id dev16 --status working --summary "coding away" >/dev/null
+sleep 1.5
+out16="$(wm_state forward-motion-check --owner "" --window-secs 2)"
+assert_contains "a byte-identical re-report is not forward motion: the lead still flips" "$out16" "stalled lead16"
+
+# --- 17. a working delegate that stops reporting entirely still flips the
+# lead. -----------------------------------------------------------------------
+test_new_home
+wm_state crew-add --id lead17 --type developer --objective x --repo /tmp --window wm-lead17 --session-id s17 >/dev/null
+wm_state crew-set --id lead17 --status working --summary "leading" >/dev/null
+wm_state crew-add --id dev17 --type developer --objective x --repo /tmp --window wm-dev17 --session-id s-dev17 --parent lead17 >/dev/null
+wm_state crew-set --id dev17 --status working --summary "coding away" >/dev/null
+
+wm_state forward-motion-check --owner "" --window-secs 2 >/dev/null
+# dev17 never calls crew-set again.
+sleep 2.5
+out17="$(wm_state forward-motion-check --owner "" --window-secs 2)"
+assert_contains "a delegate that stops reporting entirely still lets the lead flip" "$out17" "stalled lead17"
+
+# --- 18. a blocked delegate that round-trips through working and back to an
+# IDENTICAL-looking blocked state (same summary, same blocker - a dev blocked
+# twice on the same denial) still resets the anchor, because cmd_crew_set
+# always advances `announced` on a blocked/done call regardless of content.
+# (A content-only tuple with no `announced` false-flips here.) --------------
+test_new_home
+wm_state crew-add --id leadB --type developer --objective x --repo /tmp --window wm-leadB --session-id sB >/dev/null
+wm_state crew-set --id leadB --status working --summary "leading" >/dev/null
+wm_state crew-add --id devB --type developer --objective x --repo /tmp --window wm-devB --session-id s-devB --parent leadB >/dev/null
+wm_state crew-set --id devB --status blocked --summary "hit a permission wall" --blocker "need X approved" >/dev/null
+
+wm_state forward-motion-check --owner "" --window-secs 5 >/dev/null
+sleep 2
+# devB acts on the lead's crew-say answer, then hits the SAME wall again -
+# byte-identical summary AND blocker on the re-block.
+wm_state crew-set --id devB --status working --summary "retrying after the answer" >/dev/null
+wm_state crew-set --id devB --status blocked --summary "hit a permission wall" --blocker "need X approved" >/dev/null
+out18a="$(wm_state forward-motion-check --owner "" --window-secs 5)"
+assert_eq "an identical-looking re-block still resets the anchor: no flip" "$out18a" ""
+sleep 3.5
+out18b="$(wm_state forward-motion-check --owner "" --window-secs 5)"
+assert_eq "still no flip shortly after (fresh window required from the reset point)" "$out18b" ""
+statusB="$(wm_state crew-get --id leadB | uv run --no-project --quiet python -c "import json,sys; print(json.load(sys.stdin)['status'])")"
+assert_eq "leadB is still working" "$statusB" "working"
 
 test_summary
