@@ -544,6 +544,15 @@ def verify_reviewer_approval(pr_json):
     # (not just the parsed verdict), so the proof-marker check below (issue
     # #135) can be run against the LATEST comment for that id, not just its
     # verdict string.
+    #
+    # issue #304: a marked comment with NO parseable VERDICT: line (e.g.
+    # reviewer.md'"'"'s own later "confirm CI settled" follow-up) is skipped
+    # entirely rather than written as (None, body) - it says nothing about
+    # this id'"'"'s verdict, so it must not silently overwrite (and thereby
+    # erase) a real verdict recorded earlier in the scan. Only a comment that
+    # DOES carry an explicit verdict may advance this id'"'"'s entry; an
+    # explicit LATER verdict still overwrites exactly as before (the replay
+    # protection issue #135 documents), unaffected by this change.
     latest_by_id = {}
     for r in reviews:
         if str(r.get("state") or "").upper() != "COMMENTED":
@@ -553,7 +562,9 @@ def verify_reviewer_approval(pr_json):
         if not m:
             continue
         vm = VERDICT_RE.search(body)
-        latest_by_id[m.group(1)] = (vm.group(1).lower() if vm else None, body)
+        if vm is None:
+            continue
+        latest_by_id[m.group(1)] = (vm.group(1).lower(), body)
 
     for rid, (verdict, body) in latest_by_id.items():
         if verdict != "approve":
