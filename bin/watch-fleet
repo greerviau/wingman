@@ -499,6 +499,25 @@ beat_age() {
 # otherwise read as the true owner still alive. Stamping pid + process start
 # time and requiring both to match closes that without adding any time-since
 # term - a stalled-but-alive iteration is still, correctly, alive.
+#
+# The start-time comparison goes through wm_ps_lstart (bin/lib/common.sh),
+# which pins TZ=UTC LC_ALL=C: unpinned, `ps -o lstart=` renders in the
+# CALLING process's own local time, so a stamping cycle and a later checking
+# process under a different $TZ would render the same live process's start
+# time as two different strings and misread it as reused - the false-dead
+# defect issue #303 exists to fix (the mirror image of issue #298's send-lock
+# defect, MF1, which had the opposite polarity: false-alive).
+#
+# The stamp's third line (written at claim time below) is a marker,
+# "lstart-utc", confirming the second line was itself rendered by
+# wm_ps_lstart. A stamp with no third line (or an unrecognized one) is, by
+# construction, one this comparison cannot make sense of - either a pre-#303
+# stamp (its second line was rendered in whatever $TZ the writer had) or any
+# other unverifiable stamp - so it is never compared, and this function
+# degrades to trusting kill -0 alone: alive. That is the safe direction (a
+# stalled-but-alive cycle stays alive; a takeover is refused rather than
+# raced) and it self-heals the moment this owner's cycle is next armed, which
+# always writes the marker.
 owner_lock_alive() {
   [ -d "$OWNERLOCK" ] || return 1
   _ola_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
@@ -509,7 +528,9 @@ owner_lock_alive() {
   case "$_ola_pid" in ''|*[!0-9]*|0*) return 1 ;; esac
   kill -0 "$_ola_pid" 2>/dev/null || return 1
   _ola_stamped_start="$(sed -n '2p' "$OWNERLOCK/owner" 2>/dev/null)"
-  _ola_cur_start="$(ps -o lstart= -p "$_ola_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+  _ola_marker="$(sed -n '3p' "$OWNERLOCK/owner" 2>/dev/null)"
+  [ "$_ola_marker" = "lstart-utc" ] || return 0   # legacy/unverifiable stamp - degrade to kill -0 alone
+  _ola_cur_start="$(wm_ps_lstart "$_ola_pid")"
   [ -n "$_ola_stamped_start" ] && [ "$_ola_stamped_start" = "$_ola_cur_start" ]
 }
 
@@ -967,8 +988,11 @@ fi
 # that exact window as the one a SIGKILL landing inside it cannot recover
 # from cleanly (a dead-owner $CLAIMLOCK left behind that a re-arm must wait
 # out CLAIM_STALE_AGE for). Every subprocess fork this claim sequence can
-# avoid inside that window narrows it back down.
-_ol_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+# avoid inside that window narrows it back down. wm_ps_lstart pins
+# TZ=UTC LC_ALL=C so a later checker's own comparison (owner_lock_alive,
+# above, and hooks/no-watcher-kill-guard.sh's protected_pids()) agrees with
+# this rendering regardless of either process's own $TZ (issue #303).
+_ol_start="$(wm_ps_lstart "$$")"
 echo $$ > "$PIDFILE"
 # Stamp the arming session's run id (possibly empty) so a later arm from a
 # different run can recognize this cycle as foreign - see the singleton
@@ -1043,7 +1067,15 @@ code_fingerprint > "$CODEFILE"
 [ -e "$OWNERLOCK" ] && rm -rf "$OWNERLOCK" 2>/dev/null
 _ol_ok=0
 if mkdir "$OWNERLOCK" 2>/dev/null; then
-  { printf '%s\n' "$$"; printf '%s\n' "$_ol_start"; } > "$OWNERLOCK/owner" 2>/dev/null
+  # Third line "lstart-utc" marks the second line as rendered by wm_ps_lstart
+  # (issue #303): a reader (owner_lock_alive above, and
+  # hooks/no-watcher-kill-guard.sh's protected_pids()) trusts a pinned
+  # comparison against this stamp only when the marker is present, and
+  # degrades to kill -0 alone otherwise - closing the rollout-window hazard
+  # where a reader running the fixed code would otherwise compare its own
+  # pinned rendering against a stamp an old, not-yet-restarted cycle wrote in
+  # host-local time.
+  { printf '%s\n' "$$"; printf '%s\n' "$_ol_start"; printf '%s\n' "lstart-utc"; } > "$OWNERLOCK/owner" 2>/dev/null
   # issue #237 round-2 MF-B: verify the stamp WRITE itself, not just the
   # mkdir - a directory that exists but is not writable, or a disk that fills
   # up mid-write, can make mkdir succeed while the write above silently fails
@@ -1051,11 +1083,14 @@ if mkdir "$OWNERLOCK" 2>/dev/null; then
   # alone reported success. Read back what was actually written and compare
   # against what this process intended to write; anything else is treated
   # exactly like a failed mkdir - fatal, never a silently unprotected cycle.
-  # A single `read` pair off the file (a shell builtin) rather than two `sed`
-  # invocations - one less fork inside the same SIGKILL-sensitive window.
-  _ol_readback_pid=""; _ol_readback_start=""
-  { IFS= read -r _ol_readback_pid; IFS= read -r _ol_readback_start; } < "$OWNERLOCK/owner" 2>/dev/null
-  if [ "$_ol_readback_pid" = "$$" ] && [ "$_ol_readback_start" = "$_ol_start" ]; then
+  # A single `read` trio off the file (a shell builtin) rather than three
+  # `sed` invocations - fewer forks inside the same SIGKILL-sensitive window.
+  # Checking the marker here too (not just pid/start) means a write that
+  # truncates or corrupts just the third line is caught as a failed claim,
+  # never silently misread later as a legacy, pre-#303 stamp.
+  _ol_readback_pid=""; _ol_readback_start=""; _ol_readback_marker=""
+  { IFS= read -r _ol_readback_pid; IFS= read -r _ol_readback_start; IFS= read -r _ol_readback_marker; } < "$OWNERLOCK/owner" 2>/dev/null
+  if [ "$_ol_readback_pid" = "$$" ] && [ "$_ol_readback_start" = "$_ol_start" ] && [ "$_ol_readback_marker" = "lstart-utc" ]; then
     _ol_ok=1
   fi
 fi

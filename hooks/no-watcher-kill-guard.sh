@@ -284,6 +284,22 @@ def deny_dynamic(protected):
 # bin/watch-fleet'"'"'s own singleton guard is legitimately trying to reap it,
 # so this hook must not protect a pid that mechanism is entitled to kill.
 # Recomputed fresh every call, never cached.
+#
+# The start-time comparison is pinned to TZ=UTC LC_ALL=C, matching
+# bin/lib/common.sh'"'"'s wm_ps_lstart - the single source of this convention,
+# which bin/watch-fleet'"'"'s own stamp write goes through (issue #303). An
+# unpinned comparison here would inherit whichever $TZ this hook'"'"'s own
+# calling session happens to export, so a live cycle stamped under one $TZ
+# and checked under a different one would never match and this guard would
+# fail open on a genuinely live pid.
+#
+# The stamp'"'"'s third line, "lstart-utc", marks the second line as having been
+# rendered by the pinned wm_ps_lstart. A stamp with no third line (or an
+# unrecognized one) cannot be meaningfully compared against a pinned
+# rendering - either a pre-#303 stamp (rendered in whatever $TZ the writer
+# had) or otherwise unverifiable - so the comparison is skipped and the pid
+# degrades to protected on kill -0 alone: the safe direction during a
+# rollout window, never failing open against a still-live cycle.
 def protected_pids():
     pids = set()
     for ownerlock in glob.glob(os.path.join(home, "watch*.pid.owner")):
@@ -295,6 +311,7 @@ def protected_pids():
                 lines = fh.read().splitlines()
             pid = int(lines[0])
             stamped_start = lines[1] if len(lines) > 1 else ""
+            marker = lines[2] if len(lines) > 2 else ""
         except (OSError, ValueError, IndexError):
             continue
         if pid <= 0:
@@ -303,14 +320,20 @@ def protected_pids():
             os.kill(pid, 0)
         except OSError:
             continue
-        try:
-            cur_start = subprocess.check_output(
-                ["ps", "-o", "lstart=", "-p", str(pid)],
-                stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-        except Exception:
-            continue
-        if not stamped_start or stamped_start != cur_start:
-            continue
+        if marker == "lstart-utc":
+            try:
+                cur_start = subprocess.check_output(
+                    ["ps", "-o", "lstart=", "-p", str(pid)],
+                    stderr=subprocess.DEVNULL, timeout=5,
+                    env={**os.environ, "TZ": "UTC", "LC_ALL": "C"}).decode().strip()
+            except Exception:
+                continue
+            if not stamped_start or stamped_start != cur_start:
+                continue
+        # else: a marker-less (pre-#303, or otherwise unverifiable) stamp
+        # cannot be identity-verified against a pinned rendering - degrade to
+        # kill -0 alone (already verified above): protected, never failed
+        # open against a live pid during a rollout window.
         beatfile = ownerlock[: -len(".pid.owner")] + ".beat"
         try:
             mtime = os.path.getmtime(beatfile)
