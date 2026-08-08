@@ -123,6 +123,7 @@ Machine-local runtime state, created on first run, never committed:
 - `projects.json` - the discovered-projects cache.
 - `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
   Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.
+  It is also the only durable record that a crew id was ever retired (`wm_state crew-derive-id` reads it, issue #178) - any future rotation of this file must not outlive that id's sidecar files, or the id becomes reusable again with no test failing.
 - `orphan-candidates.json` - `{window_name: first_seen_iso_stamp}` for a live `wm-*` tmux window with no matching `crew.json` record, tracked by `wm_state reconcile`'s grace-period-gated orphan-window adoption (owner `""` only) - see [Survival & reconciliation](architecture.md#survival--reconciliation).
 
 All *user-editable* customization lives in the repo as gitignored `*.local.md` / `config.local.*` (see [the settings file](#the-settings-file---configlocaltoml)), not here.
