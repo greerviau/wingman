@@ -9,9 +9,9 @@
 # this: a WORKING candidate with at least one active report flips directly to
 # 'stalled' once its own roster-shape signature (its own summary/blocker/
 # artifact/delivery, plus every active report's own status/summary/blocker/
-# artifact/delivery/announced) has
-# shown no change for --window-secs - resetting the clock the instant
-# anything about that shape genuinely moves. Modeled directly on
+# artifact/delivery/announced) has shown no change for --window-secs -
+# resetting the clock the instant anything about that shape genuinely
+# moves. Modeled directly on
 # tests/review-resurface.test.sh's structure and helpers. No real
 # tmux/claude/forge needed.
 set -u

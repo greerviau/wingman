@@ -3262,9 +3262,9 @@ def cmd_forward_motion_check(args):
     summary/blocker/artifact/delivery - the staleness clock resets. This is
     deliberately more general than testing "a review worker with no reviewer
     sibling" specifically: it requires no new schema (there is no field
-    anywhere linking a developer's
-    record to a reviewer's), and uniformly covers every "any wait" shape the
-    issue names (a dropped usage-limit-reset fire, a reviewer verdict nobody
+    anywhere linking a developer's record to a reviewer's), and uniformly
+    covers every "any wait" shape the issue names (a dropped
+    usage-limit-reset fire, a reviewer verdict nobody
     ever requested, a CI run nobody is watching) rather than special-casing
     each one. Once a candidate's elapsed time reaches --window-secs, its
     `working` children (only) are probed via _probe_cpu_delta - deliberately
