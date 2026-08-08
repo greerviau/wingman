@@ -105,9 +105,19 @@ assert_eq "nothing was ever actually submitted" "$(grep -c SUBMITTED "$SN2_MARKE
 # exhausted; the stub clears its buffer on ANY Ctrl-C (even under
 # WM_TEST_SWALLOW=1), so an empty composer here proves the cleanup ran - NOT
 # that a real wedged pane's composer is reliably cleared (docs/runbooks/
-# incidents.md says as much to the operator).
-sn2_region="$(wm_composer_text_in "$(wm_tmux_pane_text "$WM_TMUX_SESSION:wm-sn2")")"
-sn2_empty=0; wm_composer_is_empty "$sn2_region" && sn2_empty=1
+# incidents.md says as much to the operator). The cleanup runs asynchronously
+# AFTER the marker's attempts field flips to the TRIES budget above (it still
+# has to acquire the send lock and send the keystroke), so poll for it rather
+# than sampling once - a single immediate sample can race the keystroke
+# actually landing.
+sn2_empty=0
+_sn2_wait=0
+while [ "$_sn2_wait" -lt 20 ]; do
+  sn2_region="$(wm_composer_text_in "$(wm_tmux_pane_text "$WM_TMUX_SESSION:wm-sn2")")"
+  if wm_composer_is_empty "$sn2_region"; then sn2_empty=1; break; fi
+  sleep 0.5
+  _sn2_wait=$((_sn2_wait+1))
+done
 assert_eq "the give-up cleanup fired (composer empty, proving the clear ran)" "$sn2_empty" "1"
 
 i=0; while kill -0 "$sn2pid" 2>/dev/null && [ "$i" -lt 45 ]; do sleep 1; i=$((i+1)); done
