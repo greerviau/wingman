@@ -3132,19 +3132,33 @@ def cmd_review_resurface_check(args):
 
 
 def _child_tuples(children):
-    """Sorted (child_id, child_status, child_announced) tuple for every one of
-    `children` (already filtered to LIVE_STATES by the caller). `announced`
-    (falling back to `updated` only when absent) is used for each child - not
-    `updated` - matching the exact idiom cmd_review_resurface_check/
-    cmd_needs_attention already use elsewhere in this file: `updated` bumps on
-    every routine same-status summary refresh, so keying on it would let an
-    actively-narrating-but-not-actually-progressing report reset the
-    staleness clock forever. Extracted out of _forward_motion_signature
-    (issue #235) so cmd_stall_recheck's forward-motion clearing predicate can
-    hash just the reports half on its own - see _children_signature - without
-    duplicating this construction."""
+    """Sorted (child_id, child_status, child_summary, child_blocker,
+    child_artifact, child_delivery, child_announced) tuple for every one of
+    `children` (already filtered to LIVE_STATES by the caller). The original
+    construction keyed the per-child freshness marker SOLELY on `announced`
+    (falling back to `updated` only when absent) - a working child's
+    `announced` freezes on its first-ever crew-set call (issue #264), making
+    a continuously-`working` delegate's genuine summary churn invisible
+    (issue #305). The fix adds the delegate's own CONTENT to the tuple
+    ALONGSIDE `announced`, rather than replacing it - see
+    docs/plans/2026-08-08-issue-305-forward-motion-false-stall-plan.md for
+    why dropping `announced` reintroduces a different false positive: a
+    non-silent `blocked`/`done` crew-set call always advances `announced`
+    unconditionally (see cmd_crew_set), so a delegate that round-trips
+    through an identical-looking re-block still needs `announced` to
+    register as motion, even though the content fields alone cannot see it.
+    Keeping `announced` alongside the content fields is purely additive: it
+    can only make the tuple change MORE often, never less, so the original
+    no-op-spam property (a byte-identical `working` re-report changes
+    nothing, since `working` is not an ATTENTION_STATE and `announced`
+    stays frozen) survives untouched. Extracted out of
+    _forward_motion_signature (issue #235) so cmd_stall_recheck's
+    forward-motion clearing predicate can hash just the reports half on its
+    own - see _children_signature - without duplicating this construction."""
     return sorted(
-        (c["id"], c.get("status"), c.get("announced") or c.get("updated"))
+        (c["id"], c.get("status"), c.get("summary"), c.get("blocker"),
+         c.get("artifact"), c.get("delivery"),
+         c.get("announced") or c.get("updated"))
         for c in children
     )
 
@@ -3164,14 +3178,13 @@ def _children_signature(children):
 
 def _forward_motion_signature(candidate, children):
     """Hash of the candidate's own (summary, blocker, artifact, delivery,
-    parked) plus _child_tuples(children) (see its own docstring for why
-    `announced`, not `updated`, is the per-child key). `parked` (#203) is
-    included so parking or unparking an item resets the staleness clock
-    directly - a lead now spends materially more time sitting in `working`
-    with active reports (it no longer flips to `blocked` for a single parked
-    item), which is exactly the shape this check polices. Output is
-    byte-identical to before _child_tuples was extracted out of this
-    function (issue #235) - the construction moved, not the shape."""
+    parked) plus _child_tuples(children) (see its own docstring for why the
+    per-child key is each report's own content ALONGSIDE `announced`, not
+    `announced` alone - issue #305). `parked` (#203) is included so parking
+    or unparking an item resets the staleness clock directly - a lead now
+    spends materially more time sitting in `working` with active reports
+    (it no longer flips to `blocked` for a single parked item), which is
+    exactly the shape this check polices."""
     own = (candidate.get("summary"), candidate.get("blocker"),
            candidate.get("artifact"), candidate.get("delivery"),
            tuple(sorted((p.get("ref"), p.get("note")) for p in candidate.get("parked") or [])))
@@ -3243,10 +3256,13 @@ def cmd_forward_motion_check(args):
 
     Signature: see _forward_motion_signature. If ANYTHING about it changes -
     a child's status flips, a new child appears (e.g. a reviewer finally
-    gets spawned), the candidate edits its own summary/blocker/artifact/
-    delivery - the staleness clock resets. This is deliberately more general
-    than testing "a review worker with no reviewer sibling" specifically: it
-    requires no new schema (there is no field anywhere linking a developer's
+    gets spawned), a child's own summary/blocker/artifact/delivery genuinely
+    changes (issue #305 - a delegate actively being supervised, spawned,
+    messaged, or reaped is exactly this), the candidate edits its own
+    summary/blocker/artifact/delivery - the staleness clock resets. This is
+    deliberately more general than testing "a review worker with no reviewer
+    sibling" specifically: it requires no new schema (there is no field
+    anywhere linking a developer's
     record to a reviewer's), and uniformly covers every "any wait" shape the
     issue names (a dropped usage-limit-reset fire, a reviewer verdict nobody
     ever requested, a CI run nobody is watching) rather than special-casing
@@ -3453,10 +3469,11 @@ def cmd_forward_motion_check(args):
             live = current
 
             reason = (
-                "no forward motion for over %s despite %d active report(s) - status, "
-                "summary, and every report's own status/announced have been unchanged "
-                "the whole time. Inspect with `bin/crew-takeover %s` or resume it with "
-                "`bin/crew-say %s <nudge>`."
+                "no forward motion for over %s despite %d active report(s) - this "
+                "member's own summary/blocker/artifact/delivery/parked, and every "
+                "report's own status/summary/blocker/artifact/delivery/announced, "
+                "have been unchanged the whole time. Inspect with `bin/crew-takeover "
+                "%s` or resume it with `bin/crew-say %s <nudge>`."
                 % (_human_duration(window_secs), n_reports, rid, rid)
             )
             prior = (prior_summary or "").split("\n")[0][:80]
