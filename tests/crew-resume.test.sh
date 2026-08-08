@@ -10,6 +10,16 @@ set -u
 
 CR="$TEST_REPO/bin/crew-resume"
 export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
+# WM_RESUME_VERIFY_WINDOW must stay an integer: the verify loop's guard is
+# test's `-lt`, which errors ("integer expected", rc 2) on a fractional
+# operand rather than raising - under set -u without set -e that doesn't
+# abort, it just silently skips the loop body, disabling the verify stage in
+# every test that doesn't override it. Since the deadline is measured from
+# window creation rather than added on top of the first check, most
+# ALIVE_STUB-based tests will already have exceeded this small window by the
+# time they reach the verify loop and pay no extra wait; this default exists
+# only to bound the rare case where the first check runs before 1s elapses.
+export WM_RESUME_VERIFY_WINDOW=1 WM_RESUME_VERIFY_POLL=0.2
 
 field_of() { wm_state crew-get --id "$1" | uv run --no-project --quiet python -c 'import sys,json
 print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$2"; }
@@ -35,6 +45,19 @@ printf '  2. No, exit\n'
 while IFS= read -r -n1 ch; do :; done
 DIALOGEOF
 chmod +x "$DIALOG_STUB"
+# #220: prints a banner immediately (clearing wm_tmux_pane_ready's quiet
+# floor), then crashes only after a delay - discriminating only if the delay
+# lands after the old single fixed-latency check would have already run and
+# before the new wall-clock deadline expires.
+DELAYED_CRASH_STUB="$STUB_DIR/delayed_crash.sh"
+printf '#!/usr/bin/env bash\necho "Claude Code - ready"\nsleep 4\nexit 1\n' > "$DELAYED_CRASH_STUB"
+chmod +x "$DELAYED_CRASH_STUB"
+# #221 part 2: crashes fast, writing a distinctive line to its own stderr, so
+# a test can prove that line is captured and surfaced instead of only the
+# generic "resume failed" message.
+STDERR_CRASH_STUB="$STUB_DIR/stderr_crash.sh"
+printf '#!/usr/bin/env bash\necho "fatal: invalid session id xyz" >&2\nexit 1\n' > "$STDERR_CRASH_STUB"
+chmod +x "$STDERR_CRASH_STUB"
 
 # --- a died member with a live session resumes --------------------------------
 test_new_home
@@ -174,10 +197,10 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id crx1 --type developer --objective x --repo /tmp --window wm-crx1 --session-id sess-crx1 >/dev/null
 wm_state crew-set --id crx1 --status died >/dev/null
-WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_TRIES=3 WM_RESUME_VERIFY_POLL=1 \
+WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_WINDOW=3 WM_RESUME_VERIFY_POLL=1 \
   "$CR" crx1 >"$WINGMAN_HOME/race-a.log" 2>&1 &
 race_a=$!
-WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_TRIES=3 WM_RESUME_VERIFY_POLL=1 \
+WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_WINDOW=3 WM_RESUME_VERIFY_POLL=1 \
   "$CR" crx1 >"$WINGMAN_HOME/race-b.log" 2>&1 &
 race_b=$!
 wait "$race_a" 2>/dev/null
@@ -238,7 +261,7 @@ test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r5 --type developer --objective x --repo /tmp --window wm-r5 --session-id sess-r5 >/dev/null
 wm_state crew-set --id r5 --status died >/dev/null
-out5="$(WM_AGENT="$DEAD_STUB" WM_RESUME_VERIFY_TRIES=5 WM_RESUME_VERIFY_POLL=1 "$CR" r5 2>&1)"
+out5="$(WM_AGENT="$DEAD_STUB" WM_RESUME_VERIFY_WINDOW=5 WM_RESUME_VERIFY_POLL=1 "$CR" r5 2>&1)"
 assert_contains "a failed resume reports the manual fallback" "$out5" "resume failed"
 assert_eq "status is left died after a failed resume" "$(field_of r5 status)" "died"
 assert_false "the vanished window is not left behind" \
@@ -297,6 +320,111 @@ wm_state crew-add --id o5 --type developer --objective x --repo /tmp --window wm
 wm_state crew-set --id o5 --status died >/dev/null
 out_o5="$(WM_AGENT="$ALIVE_STUB" "$CR" o5 2>&1)"
 assert_contains "no state file: resume proceeds without --force" "$out_o5" "1 resumed"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- #220: a delayed crash past the old fixed-latency check is now caught ----
+# Before this fix, only one check ran shortly after the nudge settled; a crash
+# landing after that check but before any human/watcher noticed was invisible
+# forever. WM_RESUME_VERIFY_WINDOW=6 sets a deadline comfortably past the
+# stub's 4s delayed crash, so the verify loop's polling must catch it.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id dc1 --type developer --objective x --repo /tmp --window wm-dc1 --session-id sess-dc1 >/dev/null
+wm_state crew-set --id dc1 --status died >/dev/null
+out_dc="$(WM_AGENT="$DELAYED_CRASH_STUB" WM_RESUME_VERIFY_WINDOW=6 WM_RESUME_VERIFY_POLL=0.3 "$CR" dc1 2>&1)"
+assert_contains "a delayed crash inside the verify window is caught, not reported as resumed" "$out_dc" "resume failed"
+assert_not_contains "a delayed crash never gets reported as resumed" "$out_dc" "1 resumed"
+assert_eq "status is left died for a delayed crash caught by the verify window" "$(field_of dc1 status)" "died"
+assert_false "the vanished window is not left behind after a delayed crash" \
+  "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-dc1"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- #221 part 1: a missing worktree falls back to the repo root, not a
+# failure -----------------------------------------------------------------
+REMOVED_WT="$STUB_DIR/worktree-cleaned-up-after-merge"
+mkdir -p "$REMOVED_WT"; rmdir "$REMOVED_WT"
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id wt1 --type developer --objective x --repo /tmp \
+  --window wm-wt1 --session-id sess-wt1 --worktree "$REMOVED_WT" >/dev/null
+wm_state crew-set --id wt1 --status died >/dev/null
+out_wt="$(WM_AGENT="$ALIVE_STUB" "$CR" wt1 2>&1)"
+assert_contains "a missing worktree falls back to the repo root instead of failing" "$out_wt" "1 resumed"
+assert_contains "the operator is told about the fallback" "$out_wt" "no longer exists"
+assert_eq "status flips to working despite the missing worktree" "$(field_of wt1 status)" "working"
+assert_eq "the roster's worktree field is cleared, not left stale" "$(field_of wt1 worktree)" ""
+launch_wt="$(cat "$WINGMAN_HOME/crew/wt1.resume.sh")"
+assert_contains "the launch script cd's into the repo root, not the missing worktree" "$launch_wt" "cd '/tmp'"
+assert_not_contains "the launch script must not reference the removed worktree path" "$launch_wt" "$REMOVED_WT"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- #221 part 1, positive case: an existing worktree still resumes into it,
+# and gets no fallback wording ----------------------------------------------
+# The needles use the literal single-quoted form (matching the test above's
+# own "cd '/tmp'"), not quote() - bin/lib/common.sh's quote() is never
+# sourced by this test file (tests/lib.sh has no ./source line for it), so
+# $(quote "$LIVE_WT") would silently expand to empty and collapse the first
+# needle to the bare, non-discriminating "cd " that every launch script this
+# suite generates contains regardless of correctness. LIVE_WT comes from
+# wm_mktemp_dir and contains no single quotes, so the literal form is exact.
+LIVE_WT="$STUB_DIR/worktree-still-here"
+mkdir -p "$LIVE_WT"
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id wt2 --type developer --objective x --repo /tmp \
+  --window wm-wt2 --session-id sess-wt2 --worktree "$LIVE_WT" >/dev/null
+wm_state crew-set --id wt2 --status died >/dev/null
+out_wt2="$(WM_AGENT="$ALIVE_STUB" "$CR" wt2 2>&1)"
+assert_contains "an existing worktree still resumes normally" "$out_wt2" "1 resumed"
+launch_wt2="$(cat "$WINGMAN_HOME/crew/wt2.resume.sh")"
+assert_contains "the launch script cd's into the worktree" "$launch_wt2" "cd '$LIVE_WT'"
+assert_contains "the launch script exports WINGMAN_WORKTREE" "$launch_wt2" "export WINGMAN_WORKTREE='$LIVE_WT'"
+assert_not_contains "a healthy worktree gets no fallback wording in the output" "$out_wt2" "no longer exists"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- #221 part 2: a fast-crashing resume surfaces its captured stderr --------
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id se1 --type developer --objective x --repo /tmp --window wm-se1 --session-id sess-se1 >/dev/null
+wm_state crew-set --id se1 --status died >/dev/null
+out_se="$(WM_AGENT="$STDERR_CRASH_STUB" "$CR" se1 2>&1)"
+assert_contains "a stderr-crashing resume still reports the manual fallback" "$out_se" "resume failed"
+assert_contains "the real cause is surfaced from the captured stderr, not just the generic message" \
+  "$out_se" "invalid session id xyz"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- #221 part 1: _worktree_fallback must not leak across an --all-died batch
+# resume_one() runs repeatedly in the same shell process for --all-died, so
+# without a per-member reset the first member's fallback would leave the flag
+# set for the rest of the batch, wrongly telling a healthy member with a live
+# worktree to abandon it. Both members use DIALOG_STUB so their nudges fail
+# delivery and get queued to the outbox (any nonzero delivery rc queues), so
+# the queued body can be inspected directly rather than relying on the
+# operator-console wording, which isn't gated on this flag at all. --all-died
+# processes crew-add's insertion order, so wt3 (missing worktree) is resumed
+# before wt4 (live worktree).
+REMOVED_WT2="$STUB_DIR/worktree-cleaned-up-batch"
+mkdir -p "$REMOVED_WT2"; rmdir "$REMOVED_WT2"
+LIVE_WT2="$STUB_DIR/worktree-still-here-batch"
+mkdir -p "$LIVE_WT2"
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id wt3 --type developer --objective x --repo /tmp \
+  --window wm-wt3 --session-id sess-wt3 --worktree "$REMOVED_WT2" >/dev/null
+wm_state crew-add --id wt4 --type developer --objective x --repo /tmp \
+  --window wm-wt4 --session-id sess-wt4 --worktree "$LIVE_WT2" >/dev/null
+wm_state crew-set --id wt3 --status died >/dev/null
+wm_state crew-set --id wt4 --status died >/dev/null
+out_batch="$(WM_AGENT="$DIALOG_STUB" "$CR" --all-died 2>&1)"
+assert_contains "both batch members resume despite each one's undeliverable nudge" "$out_batch" "2 resumed"
+q_wt3="$(ls "$WINGMAN_HOME/outbox/wt3" 2>/dev/null | grep -v '^sent-' | head -1)"
+q_wt4="$(ls "$WINGMAN_HOME/outbox/wt4" 2>/dev/null | grep -v '^sent-' | head -1)"
+assert_true "the fallback member's nudge is queued" "[ -n '$q_wt3' ]"
+assert_true "the healthy member's nudge is queued" "[ -n '$q_wt4' ]"
+assert_contains "the fallback member's queued nudge carries the re-isolate sentence" \
+  "$(cat "$WINGMAN_HOME/outbox/wt3/$q_wt3" 2>/dev/null)" "re-isolate into a fresh worktree"
+assert_not_contains "the flag does not leak: the healthy member's queued nudge carries no re-isolate wording" \
+  "$(cat "$WINGMAN_HOME/outbox/wt4/$q_wt4" 2>/dev/null)" "re-isolate into a fresh worktree"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 test_summary

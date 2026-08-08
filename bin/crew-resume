@@ -12,13 +12,17 @@
 # so a plain check-then-`new-window` would race) makes the loser skip instead.
 # Running `--all-died` twice is then naturally a no-op the second time.
 #
-# Verified, not optimistic: after relaunching, this waits briefly to confirm the
-# new window is still there. tmux destroys a window when its pane's process
-# exits (no remain-on-exit), so a `--resume` that fails fast (a stale/invalid
-# session id) manifests as the just-created window vanishing again - a real,
-# observable signal. On that path status is left `died` and nothing is
-# auto-retried; the existing manual path (bin/crew-takeover / bin/crew-standdown)
-# is printed instead.
+# Verified, not optimistic: after relaunching, this polls until a wall-clock
+# deadline measured from the moment the window was created
+# (WM_RESUME_VERIFY_WINDOW, default 20s - an integer) before committing status
+# to `working`, not a single fixed-latency sample. tmux destroys a window when
+# its pane's process exits (no remain-on-exit), so a `--resume` that fails -
+# whether fast (a stale/invalid session id) or only after a delay (a
+# slow-settling permission dialog, a delayed API round-trip, or host
+# contention from resuming several members at once) - manifests as the window
+# vanishing at any point before that deadline, a real, observable signal. On
+# that path status is left `died` and nothing is auto-retried; the existing
+# manual path (bin/crew-takeover / bin/crew-standdown) is printed instead.
 #
 # This is a tool wingman/a lead invokes deliberately, never something
 # bin/watch-fleet auto-fires: relaunching a session spends real compute (the
@@ -65,7 +69,7 @@ while [ $# -gt 0 ]; do
     --all-died) ALL_DIED=1; shift ;;
     --owner)    OWNER_ARG="$2"; shift 2 ;;
     --force)    FORCE=1; shift ;;
-    -h|--help)  sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,50p' "$0"; exit 0 ;;
     -*)         wm_die "unknown arg: $1" ;;
     *)          IDS="$IDS $1"; shift ;;
   esac
@@ -199,8 +203,27 @@ EOF
     return
   fi
 
+  # #221: a recorded worktree that's since been removed (this repo's own
+  # dev-workflow practice tears one down once its PR merges - routine, not
+  # exceptional) must not be an uninformative hard failure. Mirrors
+  # _anchor_died_worktree's own precedent for a missing worktree
+  # (bin/lib/wm-state.py: "if not worktree or not os.path.isdir(worktree):
+  # return None, None") by falling back to the repo root instead. Reset on
+  # every entry, not just $_cwd: resume_one() runs once per id in the same
+  # process for --all-died, so without this reset a fallback on one member
+  # would leave _worktree_fallback=1 for the rest of the batch, wrongly
+  # telling a healthy member with a live worktree to abandon it (see the
+  # nudge text below) - the same per-batch-reset discipline _review_token and
+  # release_claim's own comment already follow in this function.
   _cwd="$_repo"
-  [ -n "$_worktree" ] && _cwd="$_worktree"
+  _worktree_fallback=0
+  if [ -n "$_worktree" ] && [ -d "$_worktree" ]; then
+    _cwd="$_worktree"
+  elif [ -n "$_worktree" ]; then
+    wm_info "'$_rid': recorded worktree '$_worktree' no longer exists (likely cleaned up after its PR merged); resuming into the repo root '$_repo' instead"
+    wm_state crew-set --id "$_rid" --worktree "" >/dev/null
+    _worktree_fallback=1
+  fi
 
   # --- regenerate the review-signing token (reviewer type only, issue #135) --
   # WM_REVIEW_TOKEN is never persisted anywhere except the crashed process's
@@ -221,9 +244,41 @@ EOF
   fi
 
   # --- write the resume launch script (avoids all in-tmux quoting) -----------
+  # #221 part 2: capture the script's stderr to a durable per-member file,
+  # bounded, so a fast crash (a bad `cd`, an invalid session id) leaves
+  # something readable behind after the window - and its pane's stderr -
+  # is already gone. Every line is still forwarded to the pane's own stderr
+  # unconditionally, so nothing currently visible via bin/crew-takeover is
+  # lost; the file is purely an additional copy. Bounded at 200 lines and
+  # 2000 bytes/line via awk (never tee, which would grow this file forever,
+  # since `exec claude ...` below inherits fd 2 for the entire life of a
+  # successfully resumed session, not just the few seconds this function
+  # watches) - the per-line cap keeps a single unterminated line (a
+  # \r-driven progress stream with no newline) from defeating the line
+  # count. awk's reader never exits early the way `head` would, so the
+  # agent's later stderr writes never hit SIGPIPE/EPIPE against a reader
+  # that's gone.
   _launch="$WM_HOME/crew/$_rid.resume.sh"
+  _stderr_file="$WM_HOME/crew/$_rid.resume.stderr"
+  : > "$_stderr_file" 2>/dev/null
   {
     echo '#!/usr/bin/env bash'
+    # setsid: without it, awk is still a member of the pane's own process
+    # group, and tmux signals that whole group (SIGHUP) the instant the
+    # pane's foreground process (the resumed agent, or a fast-crashing stub)
+    # exits - killing awk before it gets scheduled to drain and flush
+    # whatever is still buffered in the pipe, discarding it outright. The
+    # same mechanism bin/wingman's own guardian launch already documents and
+    # works around for the tracked tmux server (cgroup isolation alone does
+    # nothing here - cgroups and terminal sessions are unrelated kernel
+    # concepts; only setsid detaches the latter). Reproduced directly: under
+    # even moderate host contention this loses the capture the large
+    # majority of the time, and no amount of extra waiting in the failure
+    # branch below helps, since awk is already dead by the time that wait
+    # begins - setsid detaches it into its own session so the pane's
+    # teardown signal never reaches it, and it exits only once it has
+    # genuinely finished (EOF on its own stdin).
+    echo "exec 2> >(setsid awk -v f=$(quote "$_stderr_file") 'NR<=200 { print substr(\$0,1,2000) >> f; fflush(f) } { print > \"/dev/stderr\" }')"
     echo "cd $(quote "$_cwd") || exit 1"
     echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
     # Defeat the CLI's own "resume from summary?" interactive prompt (issue
@@ -252,7 +307,10 @@ EOF
     echo "export WINGMAN_CREW_TYPE=$(quote "$_type")"
     echo "export WINGMAN_STATE=$(quote "$WM_UV $WM_STATE_PY")"
     echo "export WINGMAN_BIN=$(quote "$WM_BIN")"
-    [ -n "$_worktree" ] && echo "export WINGMAN_WORKTREE=$(quote "$_worktree")"
+    # Tracks the same fallback condition as $_cwd above, not the raw presence
+    # of $_worktree - otherwise a resumed session would be told (via this env
+    # var) that it's worktree-scoped while actually running from the repo root.
+    [ -n "$_worktree" ] && [ -d "$_worktree" ] && echo "export WINGMAN_WORKTREE=$(quote "$_worktree")"
     # Carry the original spawn's git-detection result forward rather than
     # discarding it: empty (the None/absent case - global scope, or a pre-change
     # record) means neither line is written, leaving the resumed session in the
@@ -288,6 +346,10 @@ EOF
     release_claim
     return
   fi
+  # Captured right after the window exists, well before the nudge is even
+  # sent, so the #220 verify deadline below measures from the window's true
+  # birth, not from whatever point this function happens to reach it.
+  _window_t0="$(date +%s)"
   wm_state crew-set --id "$_rid" --window-id "$_window_id" --silent >/dev/null 2>&1 || true
   # --resume reopens the conversation but, in this unattended setup, does not
   # itself decide to keep working - it needs the same kind of opening nudge a
@@ -301,6 +363,13 @@ EOF
   # issue #135: a resumed reviewer's review-signing token was just
   # regenerated above, invalidating any pre-crash comment-fallback proof.
   [ "${_type##*/}" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
+  # #221: tell the resumed session itself, not just the operator console
+  # (the wm_info line above only reaches whoever ran crew-resume). Left
+  # unannounced, a resumed developer either hits confusing failures on every
+  # remembered $WINGMAN_WORKTREE-prefixed path, or - worse - starts editing
+  # and committing in the shared repo root on whatever branch it's parked on,
+  # since no-direct-edit-guard.sh only gates a lead, not a developer.
+  [ "${_worktree_fallback:-0}" = 1 ] && _resume_nudge="$_resume_nudge Your recorded worktree no longer exists (likely cleaned up after its PR merged), so this session started in the shared repo root '$_repo' instead of an isolated worktree - re-isolate into a fresh worktree per your playbook's own step before touching any file."
   # WM_CLEAR_KEYS="" (issue #157): same reasoning as bin/spawn-crew's own opening
   # delivery - this window was just relaunched, so there is no pre-existing
   # composed text to clear, and it can still be mid-startup here even after
@@ -329,16 +398,42 @@ EOF
   fi
 
   # --- verify the resume actually took -----------------------------------------
-  # A single check: by the time we get here, the preceding wm_tmux_send_message
-  # call above has already spent WM_SUBMIT_DELAY plus (on failure to detect a
-  # change) up to WM_SUBMIT_TRIES x WM_SUBMIT_POLL - several seconds in the
-  # default production config - so a --resume that fails fast (a stale/invalid
-  # session id, see docs/plans/2026-07-11-watch-fleet-reliability-track-b-design.md)
-  # has already had that same window to manifest as the just-created window
-  # vanishing. Re-polling here on top of that answers a question this first
-  # check already settles, at a real ~10s tax on every successful resume for no
-  # further verification value.
+  # A wall-clock deadline, not a single fixed-latency sample (#220). The first
+  # check below is unchanged and costs nothing extra: by the time we get here,
+  # the preceding wm_tmux_send_message call has already spent WM_SUBMIT_DELAY
+  # plus (on failure to detect a change) up to WM_SUBMIT_TRIES x WM_SUBMIT_POLL,
+  # so a --resume that fails fast (a stale/invalid session id, see
+  # docs/plans/2026-07-11-watch-fleet-reliability-track-b-design.md) has
+  # already had that window to manifest as the just-created window vanishing.
+  # But a crash that lands after that single check - a slow-settling
+  # permission dialog, a delayed --resume API round-trip, or host contention
+  # from resuming several members at once (precisely what a mass-death
+  # recovery produces) - would otherwise go unnoticed forever, since nothing
+  # else ever re-checks a member once it's marked `working`. So when the
+  # single check finds the window still alive, keep polling until
+  # WM_RESUME_VERIFY_WINDOW seconds (default 20, must be an integer - the
+  # `-lt` comparison below errors, silently skipping the loop body, on a
+  # fractional value) have elapsed since $_window_t0. This makes the
+  # guarantee a single stated property - no resume is committed to `working`
+  # until at least WM_RESUME_VERIFY_WINDOW seconds after its window was
+  # created - independent of which nudge-delivery path was taken, rather than
+  # an unbounded "one more fixed batch of polls on top of an already-variable
+  # base." The cost is real: a genuinely healthy resume still waits out the
+  # full window rather than exiting early, since a session observed alive for
+  # a few polls is not evidence against a crash later in the window.
   if wm_tmux_windows | grep -qx "$_window"; then _alive=1; else _alive=0; fi
+
+  if [ "$_alive" = 1 ]; then
+    _rv_window="${WM_RESUME_VERIFY_WINDOW:-20}"
+    _rv_poll="${WM_RESUME_VERIFY_POLL:-1}"
+    while [ "$(( $(date +%s) - _window_t0 ))" -lt "$_rv_window" ]; do
+      sleep "$_rv_poll"
+      if ! wm_tmux_windows | grep -qx "$_window"; then
+        _alive=0
+        break
+      fi
+    done
+  fi
 
   if [ "$_alive" = 1 ]; then
     # --clear-wip-anchor (issue #251, review round 1, nice-to-have 3): the
@@ -351,7 +446,26 @@ EOF
     wm_ok "'$_rid': resumed in window '$_window'"
     RESUME_RESULT="resumed"
   else
-    wm_warn "'$_rid': --resume exited immediately (window vanished); status left 'died'. Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
+    # #221 part 2: fold the captured stderr's last line into the warning, so
+    # the real cause (a bad `cd`, an invalid session id) is surfaced instead
+    # of only this generic message. The awk capture process is independent of
+    # the pane's own lifecycle, so its final flush can trail the window's
+    # death by a beat - wait briefly (setsid above is what makes this wait
+    # actually sufficient: without it, awk is killed alongside the pane and
+    # no amount of waiting here would find anything; with it, awk reliably
+    # runs to completion, and this is only covering the ordinary scheduling
+    # delay until it does).
+    _stderr_tail=""
+    _st_i=0
+    while [ "$_st_i" -lt 20 ] && [ ! -s "$_stderr_file" ]; do
+      sleep 0.1
+      _st_i=$((_st_i+1))
+    done
+    if [ -s "$_stderr_file" ]; then
+      _stderr_line="$(tail -n1 "$_stderr_file" 2>/dev/null | tr -d '\000-\037' | cut -c1-200)"
+      [ -n "$_stderr_line" ] && _stderr_tail=" Last captured stderr line: $_stderr_line"
+    fi
+    wm_warn "'$_rid': --resume exited immediately (window vanished); status left 'died'.${_stderr_tail} Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
     RESUME_RESULT="skip: resume failed"
   fi
   release_claim
