@@ -211,6 +211,7 @@ mkdir -p "$_lock"
 out_bare="$(WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-bare" 2>&1)"
 bare_rc=$?
 assert_eq "a bare lock with no owner file still refuses with rc 4" "$bare_rc" "4"
+assert_contains "the refusal names the held-by-another-delivery reason" "$out_bare" "held by another delivery"
 pane_bare="$(wm_tmux capture-pane -p -t "$SESS:box")"
 assert_not_contains "nothing was typed against the unverifiable bare lock" "$pane_bare" "should-not-send-bare"
 
@@ -222,6 +223,7 @@ mkdir -p "$_lock"
 out_emptystart="$(WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-emptystart" 2>&1)"
 emptystart_rc=$?
 assert_eq "a live pid with an empty stamped start-time is not reclaimed" "$emptystart_rc" "4"
+assert_contains "the refusal names the held-by-another-delivery reason" "$out_emptystart" "held by another delivery"
 pane_emptystart="$(wm_tmux capture-pane -p -t "$SESS:box")"
 assert_not_contains "nothing was typed against the empty-start-time lock" "$pane_emptystart" "should-not-send-emptystart"
 
@@ -281,6 +283,32 @@ else
 fi
 kill "$_zombie_parent" 2>/dev/null
 wait "$_zombie_parent" 2>/dev/null
+
+# Verified NOT reused across differing $TZ at stamp-time vs check-time
+# (issue #298 round-1 MF1): `ps -o lstart=` renders an absolute instant into
+# the CALLING process's own local time, so an unpinned ps call would render
+# the exact same live process's start-time as two different strings
+# depending on which $TZ happened to be exported when each ps ran -
+# misreading a live holder as "pid reused" and stealing its lock. Acquire
+# the lock (stamping it) under one $TZ, then contend for the SAME
+# still-held lock under a different $TZ; since the fix pins TZ=UTC for
+# every ps call inside wm_tmux_send_lock regardless of the caller's own
+# environment, the two renderings must still agree and the lock must not be
+# reclaimed. A bogus-string stamp (the pid-reuse case above) cannot catch
+# this - it cannot tell "correctly detected reuse" from "compared two
+# differently-rendered strings of the same real instant".
+rm -rf "$_lock" 2>/dev/null
+tz_acquire_rc=0
+TZ=America/New_York wm_tmux_send_lock "$SESS:box" || tz_acquire_rc=$?
+assert_eq "the lock acquires normally under a non-default \$TZ" "$tz_acquire_rc" "0"
+out_tz="$(TZ=Asia/Tokyo WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-tz" 2>&1)"
+tz_rc=$?
+assert_eq "a live holder's stamp is recognized despite the contender's own \$TZ differing from the holder's" "$tz_rc" "4"
+pane_tz="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_not_contains "nothing was typed against the still-live TZ-mismatched holder" "$pane_tz" "should-not-send-tz"
+wm_tmux_send_unlock "$SESS:box"
+assert_true "the lock is released after the TZ test" "[ ! -d '$_lock' ]"
+
 tmux kill-session -t "$SESS" 2>/dev/null
 
 test_summary
