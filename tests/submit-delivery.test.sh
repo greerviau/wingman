@@ -173,4 +173,114 @@ assert_contains "the message submitted after the reclaim" "$pane_reclaim" "SUBMI
 assert_true "the lock is released after delivery" "[ ! -d '$_lock' ]"
 tmux kill-session -t "$SESS" 2>/dev/null
 
+# --- identity-verified reclaim: the three-outcome liveness predicate --------
+# (issue #298.) WM_SEND_LOCK_STALE=9999 throughout, so none of these cases
+# could pass by aging out - only the identity-verified reclaim path (or its
+# absence) decides the outcome.
+tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
+sleep 0.5
+WM_HOME="$WINGMAN_HOME"
+_lock="$WM_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').lock"
+
+# Verified dead (exited, reaped): a pid captured its own start-time stamp
+# while briefly alive, then was waited-on and reaped, so kill -0 fails
+# outright - genuinely gone, not a zombie. Reclaimed immediately: the fresh
+# mtime alone (with WM_SEND_LOCK_STALE=9999) proves the age-based fallback
+# could never have fired here.
+( sleep 0.3 ) &
+_dead_pid=$!
+_dead_start="$(ps -o lstart= -p "$_dead_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+wait "$_dead_pid" 2>/dev/null
+mkdir -p "$_lock"
+{ printf '%s\n' "$_dead_pid"; printf '%s\n' "$_dead_start"; } > "$_lock/owner"
+SECONDS=0
+WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=20 wm_tmux_send_message "$SESS:box" "after-dead-pid-reclaim"
+dead_rc=$?
+dead_elapsed=$SECONDS
+assert_eq "a lock stamped with an exited, reaped pid is reclaimed" "$dead_rc" "0"
+# Generous margin (well under half the wait budget) to absorb host scheduling
+# jitter while still clearly distinguishing "reclaimed on the first
+# contention check" from "reclaimed only after waiting out the budget".
+assert_true "the dead-pid reclaim happens immediately, not after the wait budget" "[ $dead_elapsed -lt 10 ]"
+pane_dead="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_contains "the message submitted after the dead-pid reclaim" "$pane_dead" "SUBMITTED:after-dead-pid-reclaim"
+
+# Cannot verify: a bare lock with no owner file at all still refuses with rc
+# 4 - unchanged - never mistaken for a reclaimable lock.
+mkdir -p "$_lock"
+out_bare="$(WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-bare" 2>&1)"
+bare_rc=$?
+assert_eq "a bare lock with no owner file still refuses with rc 4" "$bare_rc" "4"
+pane_bare="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_not_contains "nothing was typed against the unverifiable bare lock" "$pane_bare" "should-not-send-bare"
+
+# Cannot verify (empty start-time guard): a live pid (this test process's
+# own) paired with an empty start-time line must NOT be trusted as a bare
+# pid match - proves the guard, not the branch it guards.
+mkdir -p "$_lock"
+{ printf '%s\n' "$$"; printf '%s\n' ""; } > "$_lock/owner"
+out_emptystart="$(WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-emptystart" 2>&1)"
+emptystart_rc=$?
+assert_eq "a live pid with an empty stamped start-time is not reclaimed" "$emptystart_rc" "4"
+pane_emptystart="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_not_contains "nothing was typed against the empty-start-time lock" "$pane_emptystart" "should-not-send-emptystart"
+
+# Verified reused: a live pid (this test process's own) paired with a
+# start-time guaranteed not to match its real one - proves the pid-reuse
+# branch itself, not just the guard around it.
+mkdir -p "$_lock"
+{ printf '%s\n' "$$"; printf '%s\n' "bogus-start-time-that-will-never-match"; } > "$_lock/owner"
+WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=5 wm_tmux_send_message "$SESS:box" "after-pid-reuse-reclaim"
+reused_rc=$?
+assert_eq "a live pid with a mismatched start-time is reclaimed" "$reused_rc" "0"
+pane_reused="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_contains "the message submitted after the pid-reuse reclaim" "$pane_reused" "SUBMITTED:after-pid-reuse-reclaim"
+
+# Verified dead (zombie): an unreaped zombie keeps both its pid and its
+# lstart intact, so kill -0 alone would misread it as alive - proves the
+# zombie-state check itself. An observable zombie needs a grandchild whose
+# parent never reaps it: bash (not sh/dash, which reaps a background child
+# opportunistically on its very next command dispatch) runs a grandchild
+# that exits immediately, then sleeps without ever wait()ing on it.
+_zombie_dir="$(wm_mktemp_dir)"
+_zombie_pidfile="$_zombie_dir/pid"
+bash -c "sh -c 'exit 0' & echo \$! > '$_zombie_pidfile'; sleep 30" &
+_zombie_parent=$!
+wm_track "$_zombie_parent"
+_zombie_pid=""
+_zombie_tries=0
+while [ "$_zombie_tries" -lt 50 ]; do
+  [ -s "$_zombie_pidfile" ] && { _zombie_pid="$(cat "$_zombie_pidfile")"; break; }
+  sleep 0.1
+  _zombie_tries=$((_zombie_tries+1))
+done
+_zombie_state=""
+_zombie_tries=0
+if [ -n "$_zombie_pid" ]; then
+  while [ "$_zombie_tries" -lt 50 ]; do
+    _zombie_state="$(ps -o state= -p "$_zombie_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+    case "$_zombie_state" in Z*) break ;; esac
+    sleep 0.1
+    _zombie_tries=$((_zombie_tries+1))
+  done
+fi
+_zombie_start=""
+case "$_zombie_state" in
+  Z*) _zombie_start="$(ps -o lstart= -p "$_zombie_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')" ;;
+esac
+if [ -n "$_zombie_start" ]; then
+  mkdir -p "$_lock"
+  { printf '%s\n' "$_zombie_pid"; printf '%s\n' "$_zombie_start"; } > "$_lock/owner"
+  WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=5 wm_tmux_send_message "$SESS:box" "after-zombie-reclaim"
+  zombie_rc=$?
+  assert_eq "a lock stamped with an unreaped zombie pid is reclaimed" "$zombie_rc" "0"
+  pane_zombie="$(wm_tmux capture-pane -p -t "$SESS:box")"
+  assert_contains "the message submitted after the zombie reclaim" "$pane_zombie" "SUBMITTED:after-zombie-reclaim"
+else
+  echo "SKIP: could not construct an observable zombie process (with a readable lstart) on this host within budget - skipping the zombie-branch case" >&2
+fi
+kill "$_zombie_parent" 2>/dev/null
+wait "$_zombie_parent" 2>/dev/null
+tmux kill-session -t "$SESS" 2>/dev/null
+
 test_summary
