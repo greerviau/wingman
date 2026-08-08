@@ -686,23 +686,127 @@ wm_tmux_send_lock() {
   _sl_wait="${WM_SEND_LOCK_WAIT:-45}"
   _sl_stale="${WM_SEND_LOCK_STALE:-120}"
   _sl_t0="$(date +%s)"
-  while ! mkdir "$_sl_lock" 2>/dev/null; do
-    _sl_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_sl_lock" 2>/dev/null || date +%s) ))
-    if [ "$_sl_age" -ge "$_sl_stale" ]; then
-      rmdir "$_sl_lock" 2>/dev/null   # crashed holder; reclaim and retry
-      continue
-    fi
+  while :; do
+    # Evaluated first, unconditionally, on every iteration - including one
+    # reached via a `continue` below - so a reclaim whose removal cannot
+    # actually succeed (e.g. a permissions mismatch on $WM_HOME) can never
+    # spin at 100% CPU forever; it is bounded by WM_SEND_LOCK_WAIT exactly
+    # like ordinary contention (issue #298 round-1 MF2).
     if [ $(( $(date +%s) - _sl_t0 )) -ge "$_sl_wait" ]; then
       wm_err "send lock for pane '$1' held by another delivery for ${_sl_wait}s+ - nothing was sent; retry shortly"
       return 4
     fi
+    if mkdir "$_sl_lock" 2>/dev/null; then
+      # Acquired. Stamp pid + process start time atomically (owner.tmp then
+      # mv, so a reader never observes a live pid paired with a still-empty
+      # start-time line) so a future contender can verify death directly
+      # (issue #298) instead of only ever waiting out WM_SEND_LOCK_STALE. $$
+      # is only the true holder's pid when this function is called directly -
+      # never from inside a $( ) command substitution or an & subshell, where
+      # $$ names the parent instead (tests/lib.sh documents and relies on
+      # this bash behavior already). Every current call site is direct.
+      # TZ=UTC LC_ALL=C pins the rendering: `ps -o lstart=` renders an
+      # absolute instant into the CALLING process's own local time, so an
+      # unpinned holder and an unpinned contender running under different
+      # $TZ would render the very same live process's start time as two
+      # different strings and misread it as "pid reused" (issue #298
+      # round-1 MF1) - LC_ALL=C is the matching insurance against
+      # locale-dependent formatting on the state check below.
+      _sl_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+      if { printf '%s\n' "$$"; printf '%s\n' "$_sl_start"; } > "$_sl_lock/owner.tmp" 2>/dev/null \
+         && mv "$_sl_lock/owner.tmp" "$_sl_lock/owner" 2>/dev/null; then
+        # The write succeeded - verify it is still ours before trusting it,
+        # mirroring $CLAIMLOCK's own readback (bin/watch-fleet:791-795): a
+        # short, deliberate pause first, so this read is likely to observe a
+        # rival's later write rather than trivially re-observing our own.
+        sleep 0.1
+        _sl_readback_pid=""
+        IFS= read -r _sl_readback_pid < "$_sl_lock/owner" 2>/dev/null
+        if [ "$_sl_readback_pid" = "$$" ]; then
+          return 0
+        fi
+        # Lost the internal race (near-unreachable: only a rival that both
+        # reclaimed and re-acquired this exact directory inside our own
+        # 0.1s window could cause this). Fall through to the same
+        # contention handling below rather than a bespoke retry: if a rival
+        # genuinely holds it now, that code correctly waits on or reclaims
+        # against the rival's real stamp, and never mistakes our own
+        # just-created (and now foreign-owned) directory for something safe
+        # to remove.
+      else
+        # mkdir already succeeded, so this process already owns the lock
+        # directory regardless of whether the stamp landed - proceed with it
+        # held rather than retrying mkdir against our own lock (which can
+        # never succeed) or looping on a readback that was never attempted.
+        return 0
+      fi
+    fi
+    # Contention: either mkdir failed outright, or we lost the stamp-write
+    # race above. Liveness has three outcomes: cannot verify (falls through
+    # to the unchanged age-based check below), verified dead or reused
+    # (reclaim immediately), or verified alive (falls through exactly like
+    # cannot-verify).
+    _sl_stamped_pid="$(sed -n '1p' "$_sl_lock/owner" 2>/dev/null)"
+    _sl_stamped_start="$(sed -n '2p' "$_sl_lock/owner" 2>/dev/null)"
+    _sl_dead=0
+    _sl_reused=0
+    case "$_sl_stamped_pid" in
+      # Empty, non-numeric, or leading-zero: cannot verify. The leading-zero
+      # guard matters specifically because `kill -0 0` signals the caller's
+      # own process group and always reports success (same guard
+      # bin/watch-fleet:509's owner_lock_alive() already applies, reused
+      # verbatim here).
+      ''|*[!0-9]*|0*) ;;
+      *)
+        if [ -n "$_sl_stamped_start" ]; then
+          if ! kill -0 "$_sl_stamped_pid" 2>/dev/null; then
+            _sl_dead=1
+          else
+            # A SIGTERM'd holder whose parent has not yet wait()ed on it
+            # keeps both its pid and its lstart intact - kill -0 alone would
+            # misread it as a live holder and silently degrade to the
+            # 120-second wait this fix exists to avoid.
+            _sl_cur_state="$(TZ=UTC LC_ALL=C ps -o state= -p "$_sl_stamped_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+            case "$_sl_cur_state" in
+              Z*) _sl_dead=1 ;;
+              *)
+                _sl_cur_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$_sl_stamped_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+                if [ -n "$_sl_cur_start" ] && [ "$_sl_cur_start" != "$_sl_stamped_start" ]; then
+                  _sl_reused=1
+                fi
+                ;;
+            esac
+          fi
+        fi
+        ;;
+    esac
+    if [ "$_sl_dead" -eq 1 ] || [ "$_sl_reused" -eq 1 ]; then
+      # Re-verify immediately before removing: shrinks the check-then-act
+      # window from the whole liveness check above (multiple sed reads, a
+      # kill, up to two ps forks) down to one more pair of sed reads right
+      # next to the removal, so a lock that got reclaimed and re-acquired by
+      # a rival in between is never torn out from under it.
+      _sl_recheck_pid="$(sed -n '1p' "$_sl_lock/owner" 2>/dev/null)"
+      _sl_recheck_start="$(sed -n '2p' "$_sl_lock/owner" 2>/dev/null)"
+      if [ "$_sl_recheck_pid" = "$_sl_stamped_pid" ] && [ "$_sl_recheck_start" = "$_sl_stamped_start" ]; then
+        rm -f "$_sl_lock/owner" "$_sl_lock/owner.tmp" 2>/dev/null
+        rmdir "$_sl_lock" 2>/dev/null
+        continue
+      fi
+    fi
+    _sl_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_sl_lock" 2>/dev/null || date +%s) ))
+    if [ "$_sl_age" -ge "$_sl_stale" ]; then
+      rm -f "$_sl_lock/owner" "$_sl_lock/owner.tmp" 2>/dev/null
+      rmdir "$_sl_lock" 2>/dev/null   # crashed holder; reclaim and retry
+      continue
+    fi
     sleep 1
   done
-  return 0
 }
 
 wm_tmux_send_unlock() {
   _sl_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
+  rm -f "$_sl_lock/owner" "$_sl_lock/owner.tmp" 2>/dev/null
   rmdir "$_sl_lock" 2>/dev/null
   return 0
 }
@@ -899,9 +1003,16 @@ wm_tmux_pane_ready() {
 # retry - and unserialized send-keys bursts can interleave into one garbled
 # submission, or let one sender's pane-advanced confirm read another sender's
 # typing as its own success. The lock is held for the duration of one
-# delivery (seconds); a waiter polls up to WM_SEND_LOCK_WAIT seconds, then
-# reclaims a lock older than WM_SEND_LOCK_STALE (a crashed holder) or gives
-# up with a refusal-style message on stderr and rc 4 (nothing was typed).
+# delivery (seconds); a waiter polls up to WM_SEND_LOCK_WAIT seconds. The
+# primary reclaim path is identity-verified (issue #298): the lock is
+# stamped with its holder's pid + process start time, and a contender
+# reclaims it the moment it can positively verify that holder is dead or the
+# pid has been reused, rather than waiting out a fixed window. A lock whose
+# holder cannot be verified this way (no stamp, or a host where `ps` itself
+# is unavailable) falls back to the unchanged age-based check, reclaiming
+# once it is older than WM_SEND_LOCK_STALE. Either way, a contender that
+# still cannot acquire the lock gives up with a refusal-style message on
+# stderr and rc 4 (nothing was typed).
 wm_tmux_send_message() {
   wm_tmux_send_lock "$1" || return $?
   _wm_tmux_send_message_locked "$1" "$2"
