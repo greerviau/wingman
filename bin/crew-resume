@@ -263,7 +263,22 @@ EOF
   : > "$_stderr_file" 2>/dev/null
   {
     echo '#!/usr/bin/env bash'
-    echo "exec 2> >(awk -v f=$(quote "$_stderr_file") 'NR<=200 { print substr(\$0,1,2000) >> f; fflush(f) } { print > \"/dev/stderr\" }')"
+    # setsid: without it, awk is still a member of the pane's own process
+    # group, and tmux signals that whole group (SIGHUP) the instant the
+    # pane's foreground process (the resumed agent, or a fast-crashing stub)
+    # exits - killing awk before it gets scheduled to drain and flush
+    # whatever is still buffered in the pipe, discarding it outright. The
+    # same mechanism bin/wingman's own guardian launch already documents and
+    # works around for the tracked tmux server (cgroup isolation alone does
+    # nothing here - cgroups and terminal sessions are unrelated kernel
+    # concepts; only setsid detaches the latter). Reproduced directly: under
+    # even moderate host contention this loses the capture the large
+    # majority of the time, and no amount of extra waiting in the failure
+    # branch below helps, since awk is already dead by the time that wait
+    # begins - setsid detaches it into its own session so the pane's
+    # teardown signal never reaches it, and it exits only once it has
+    # genuinely finished (EOF on its own stdin).
+    echo "exec 2> >(setsid awk -v f=$(quote "$_stderr_file") 'NR<=200 { print substr(\$0,1,2000) >> f; fflush(f) } { print > \"/dev/stderr\" }')"
     echo "cd $(quote "$_cwd") || exit 1"
     echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
     # Defeat the CLI's own "resume from summary?" interactive prompt (issue
@@ -435,11 +450,14 @@ EOF
     # the real cause (a bad `cd`, an invalid session id) is surfaced instead
     # of only this generic message. The awk capture process is independent of
     # the pane's own lifecycle, so its final flush can trail the window's
-    # death by a beat - wait briefly (belt-and-braces; by now we're well past
-    # the verify window above, so in practice the file is already there).
+    # death by a beat - wait briefly (setsid above is what makes this wait
+    # actually sufficient: without it, awk is killed alongside the pane and
+    # no amount of waiting here would find anything; with it, awk reliably
+    # runs to completion, and this is only covering the ordinary scheduling
+    # delay until it does).
     _stderr_tail=""
     _st_i=0
-    while [ "$_st_i" -lt 5 ] && [ ! -s "$_stderr_file" ]; do
+    while [ "$_st_i" -lt 20 ] && [ ! -s "$_stderr_file" ]; do
       sleep 0.1
       _st_i=$((_st_i+1))
     done
