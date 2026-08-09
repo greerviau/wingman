@@ -82,8 +82,11 @@ if [ "$_rc" -eq 0 ]; then
 fi
 
 # Delivery did not confirm (2 = dialog-shaped refusal, 3 = typed but never
-# confirmed, 4 = another delivery held the pane's send lock too long). Queue
-# the message so it is not simply dropped: bin/watch-fleet retries the oldest
+# confirmed, 4 = another delivery held the pane's send lock too long, 5 =
+# typed but unconfirmed and the pane was busy, 6 = busy pane with a pending
+# composer, 7 = the send-lock helper itself failed - not contention, 8 = a
+# reentrant send-lock acquisition bug). Queue the message so it is not
+# simply dropped: bin/watch-fleet retries the oldest
 # queued message per member each poll once the pane looks deliverable again,
 # so a pilot answer relayed into a briefly-blocked pane arrives without anyone
 # having to remember to retry. The sidecar (sender id, empty for wingman) is
@@ -99,5 +102,7 @@ case "$_rc" in
   3) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered - treat it as NOT delivered. The message is QUEUED at $_qfile; $_retry_note" ;;
   5) wm_die "unconfirmed: the message was typed into '$ID's pane but the submit never visibly registered, and the pane was busy (still repainting on its own clock) - likely queued behind its current turn rather than lost outright. The message is QUEUED at $_qfile; $_retry_note" ;;
   6) wm_die "'$ID' is mid-turn with a message already composed in its input box, so nothing was typed. QUEUED at $_qfile; the watcher retries it once the pane clears." ;;
+  7) wm_die "not sent: the send-lock helper for '$ID's pane failed unexpectedly (a broken local 'uv'/python 'fcntl' toolchain, not contention) - nothing was typed. The message is QUEUED at $_qfile; $_retry_note (this is worth investigating directly - an ordinary contention refusal would clear on its own; a broken helper will not)." ;;
+  8) wm_die "not sent: an internal bug attempted a reentrant send-lock acquisition for '$ID's pane - nothing was typed. The message is QUEUED at $_qfile; $_retry_note (this indicates a programming error, not ordinary contention - please report it)." ;;
   *) wm_die "not sent: another delivery is holding '$ID's pane. The message is QUEUED at $_qfile; $_retry_note" ;;
 esac
