@@ -1412,16 +1412,36 @@ tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id nu1 --type developer --objective f --repo /tmp --window wm-nu1 --session-id snu1 >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-nu1 'trap "" INT; sleep 600'
 wm_age_status nu1
-# Pre-hold the per-pane send lock (bin/lib/common.sh's own mkdir-based
-# convention) so every attempted nudge this test drives refuses with rc 4
-# rather than ever actually typing. WM_SEND_LOCK_STALE is set far longer than
-# this test runs so the lock is never reclaimed out from under it.
+# Pre-hold the per-pane send lock so every attempted nudge this test drives
+# refuses with rc 4 rather than ever actually typing. The lock is a kernel
+# flock() (issue #302), not a bare mkdir'd directory - genuinely holding it
+# needs a real process calling wm_tmux_send_lock directly (the fd must live
+# in the process that opens it), not a filesystem artifact a test can
+# construct by hand.
 _nu1_target="$(printf '=%s:=%s' "$WM_TMUX_SESSION" "wm-nu1")"
-_nu1_lock="$WINGMAN_HOME/send-$(printf '%s' "$_nu1_target" | tr -c 'A-Za-z0-9._-' '_').lock"
-mkdir -p "$_nu1_lock"
+_nu1_holder="$(wm_mktemp_dir)/holder.sh"
+cat > "$_nu1_holder" <<HOLDEREOF
+#!/usr/bin/env bash
+set -u
+. "$TEST_REPO/bin/lib/common.sh"
+wm_tmux_send_lock "$_nu1_target" || exit 9
+echo "HOLDING \$\$"
+while :; do sleep 0.05; done
+HOLDEREOF
+chmod +x "$_nu1_holder"
+"$_nu1_holder" >"$WINGMAN_HOME/nu1-holder.out" 2>&1 &
+_nu1_holder_shell_pid=$!
+wm_track "$_nu1_holder_shell_pid"
+_nu1_hi=0
+while [ "$_nu1_hi" -lt 50 ]; do
+  grep -q "^HOLDING " "$WINGMAN_HOME/nu1-holder.out" 2>/dev/null && break
+  sleep 0.1; _nu1_hi=$((_nu1_hi+1))
+done
+assert_true "the pre-hold process genuinely acquired the send lock" \
+  "grep -q '^HOLDING ' '$WINGMAN_HOME/nu1-holder.out'"
 export WM_NUDGE_REFUSED_MAX=2
 WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=1 \
-  WM_SEND_LOCK_WAIT=1 WM_SEND_LOCK_STALE=9999 \
+  WM_SEND_LOCK_WAIT=1 \
   "$WF" >"$WINGMAN_HOME/nu1.log" 2>&1 &
 nupid=$!
 wm_track "$nupid"
@@ -1450,7 +1470,8 @@ assert_contains "cycle exits with the stalled reason" "$(cat "$WINGMAN_HOME/nu1.
 assert_contains "the reason names the undelivered nudge explicitly, not the generic template" \
   "$(cat "$WINGMAN_HOME/nu1.log")" "could not deliver a check-in nudge in 2 attempts"
 kill "$nupid" 2>/dev/null
-rmdir "$_nu1_lock" 2>/dev/null
+kill -KILL "$_nu1_holder_shell_pid" 2>/dev/null
+wait "$_nu1_holder_shell_pid" 2>/dev/null
 unset WM_NUDGE_REFUSED_MAX
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 

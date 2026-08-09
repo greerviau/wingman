@@ -142,173 +142,148 @@ assert_eq "an exhausted unconfirmed submit returns 3" "$unconfirmed_rc" "3"
 tmux kill-session -t "$SESS" 2>/dev/null
 
 # --- deliveries to one pane are serialized by a per-pane send lock ------------
-# (Robustness audit finding 4.) A held lock makes a second sender wait; one
-# held past WM_SEND_LOCK_WAIT makes it give up with rc 4 and send NOTHING; a
-# stale lock (older than WM_SEND_LOCK_STALE - a crashed holder) is reclaimed
-# and delivery proceeds.
+# (Robustness audit finding 4; redesigned around a kernel flock() - issue
+# #302, replacing the earlier mkdir+pid-stamp reclaim scheme of issue
+# #298/#301.) A held lock makes a second sender wait; one held past
+# WM_SEND_LOCK_WAIT makes it give up with rc 4 and send NOTHING. Release is
+# now kernel-guaranteed rather than inferred: the flock frees the instant
+# every fd on it closes, by ANY means, including an uncatchable kill -KILL -
+# so there is no separate age-based/identity-verified reclaim path left to
+# test; a genuinely held lock either releases (because its holder is
+# genuinely gone) or it does not (because its holder is genuinely still
+# running), with nothing in between for a predicate to get wrong.
 tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
 sleep 0.5
 # wm_tmux_send_message keys its lock off common.sh's $WM_HOME, which was
 # snapshotted from $WINGMAN_HOME when common.sh was sourced above - BEFORE
 # test_new_home re-pointed $WINGMAN_HOME at this test's isolated home. Realign
-# the in-shell variable so the lock we pre-create is the one the helper sees,
-# and so nothing here touches a real ~/.wingman.
+# the in-shell variable so the lock file path below matches what the helper
+# actually opens, and so nothing here touches a real ~/.wingman.
 WM_HOME="$WINGMAN_HOME"
-_lock="$WM_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').lock"
-mkdir -p "$_lock"   # a live holder's lock, fresh mtime
+_lockfile="$WM_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').flock"
+
+# A real holder process: a standalone script that sources common.sh and
+# calls wm_tmux_send_lock directly (so the fd is genuinely held in ITS OWN
+# process, not a subshell of this test - the same precondition every real
+# caller must meet). This is the only way to construct a genuinely held
+# flock for testing; the old mkdir-based "pre-hold a bare directory" trick
+# has no equivalent under this design; a bare `mkdir` no longer means
+# anything.
+_holder="$(wm_mktemp_dir)/holder.sh"
+cat > "$_holder" <<HOLDEREOF
+#!/usr/bin/env bash
+set -u
+. "$TEST_REPO/bin/lib/common.sh"
+wm_tmux_send_lock "$SESS:box" || exit 9
+echo "HOLDING \$\$"
+while :; do sleep 0.05; done
+HOLDEREOF
+chmod +x "$_holder"
+
+"$_holder" >"$WINGMAN_HOME/holder1.out" 2>&1 &
+_holder1_shell_pid=$!
+wm_track "$_holder1_shell_pid"
+_h1_i=0
+while [ "$_h1_i" -lt 50 ]; do
+  grep -q "^HOLDING " "$WINGMAN_HOME/holder1.out" 2>/dev/null && break
+  sleep 0.1; _h1_i=$((_h1_i+1))
+done
+_holder1_pid="$(awk '{print $2}' "$WINGMAN_HOME/holder1.out")"
+assert_true "the holder process genuinely acquired the lock" "[ -n '$_holder1_pid' ]"
+
 out_lock="$(WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send" 2>&1)"
 lock_rc=$?
 assert_eq "a contended send lock makes the sender give up with rc 4" "$lock_rc" "4"
+assert_contains "the refusal names the held-by-another-delivery reason" "$out_lock" "held by another delivery"
 pane_lock="$(wm_tmux capture-pane -p -t "$SESS:box")"
 assert_not_contains "nothing was typed while the lock was held" "$pane_lock" "should-not-send"
 
-# Stale-holder reclaim: age the same lock past WM_SEND_LOCK_STALE and the next
-# delivery reclaims it and goes through.
-wm_age_path "$_lock" 300
-WM_SEND_LOCK_STALE=120 wm_tmux_send_message "$SESS:box" "after-reclaim"
-reclaim_rc=$?
-assert_eq "a stale lock is reclaimed and delivery proceeds" "$reclaim_rc" "0"
-pane_reclaim="$(wm_tmux capture-pane -p -t "$SESS:box")"
-assert_contains "the message submitted after the reclaim" "$pane_reclaim" "SUBMITTED:after-reclaim"
-assert_true "the lock is released after delivery" "[ ! -d '$_lock' ]"
+# Release on a plain kill -KILL - uncatchable by any trap, so no cleanup
+# code in the holder ever runs. This is the one guarantee the mkdir+pid-stamp
+# scheme could never fully offer (a contender there still depended on
+# noticing death via its own polling and ps-based heuristics); the kernel
+# here releases the flock at the instant the holder's fd closes.
+kill -KILL "$_holder1_pid" 2>/dev/null
+SECONDS=0
+wm_tmux_send_message "$SESS:box" "after-sigkill-release"
+sigkill_rc=$?
+sigkill_elapsed=$SECONDS
+assert_eq "the lock releases after the holder is SIGKILLed" "$sigkill_rc" "0"
+assert_true "the SIGKILL release is prompt, not a many-second wait" "[ $sigkill_elapsed -lt 10 ]"
+pane_sigkill="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_contains "the message submitted after the SIGKILL release" "$pane_sigkill" "SUBMITTED:after-sigkill-release"
+assert_true "the lock FILE itself is never removed by unlock - only the fd closes" "[ -e '$_lockfile' ]"
+wait "$_holder1_shell_pid" 2>/dev/null
+
+# Release on a graceful exit (no trap - default SIGTERM handling): the same
+# guarantee via the ordinary path, checked from a second, independent
+# holder process and confirmed on a REAL send path (through
+# wm_tmux_send_message, not an isolated lock/unlock pair) - this is what
+# would catch an inherited-fd leak from a child spawned inside the locked
+# body, since a leaked fd would keep the flock held despite the holder
+# itself having exited.
+"$_holder" >"$WINGMAN_HOME/holder2.out" 2>&1 &
+_holder2_shell_pid=$!
+wm_track "$_holder2_shell_pid"
+_h2_i=0
+while [ "$_h2_i" -lt 50 ]; do
+  grep -q "^HOLDING " "$WINGMAN_HOME/holder2.out" 2>/dev/null && break
+  sleep 0.1; _h2_i=$((_h2_i+1))
+done
+_holder2_pid="$(awk '{print $2}' "$WINGMAN_HOME/holder2.out")"
+assert_true "the second holder process genuinely acquired the lock" "[ -n '$_holder2_pid' ]"
+kill -TERM "$_holder2_pid" 2>/dev/null
+SECONDS=0
+wm_tmux_send_message "$SESS:box" "after-graceful-release"
+graceful_rc=$?
+graceful_elapsed=$SECONDS
+assert_eq "the lock releases after the holder exits gracefully" "$graceful_rc" "0"
+assert_true "the graceful release is prompt" "[ $graceful_elapsed -lt 10 ]"
+pane_graceful="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_contains "the message submitted after the graceful release" "$pane_graceful" "SUBMITTED:after-graceful-release"
+wait "$_holder2_shell_pid" 2>/dev/null
+
 tmux kill-session -t "$SESS" 2>/dev/null
 
-# --- identity-verified reclaim: the three-outcome liveness predicate --------
-# (issue #298.) WM_SEND_LOCK_STALE=9999 throughout, so none of these cases
-# could pass by aging out - only the identity-verified reclaim path (or its
-# absence) decides the outcome.
+# --- the reentrant-acquisition guard (issue #302) ------------------------
+# No call site is meant to ever hold two targets' locks at once; a future
+# violation must be refused loudly (rc 8) rather than silently reassigning
+# the reserved fd out from under the first acquire. Called directly in this
+# shell (never a subshell) so the fd genuinely lands here.
 tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
 sleep 0.5
-WM_HOME="$WINGMAN_HOME"
-_lock="$WM_HOME/send-$(printf '%s' "$SESS:box" | tr -c 'A-Za-z0-9._-' '_').lock"
-
-# Verified dead (exited, reaped): a pid captured its own start-time stamp
-# while briefly alive, then was waited-on and reaped, so kill -0 fails
-# outright - genuinely gone, not a zombie. Reclaimed immediately: the fresh
-# mtime alone (with WM_SEND_LOCK_STALE=9999) proves the age-based fallback
-# could never have fired here.
-( sleep 0.3 ) &
-_dead_pid=$!
-_dead_start="$(ps -o lstart= -p "$_dead_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-wait "$_dead_pid" 2>/dev/null
-mkdir -p "$_lock"
-{ printf '%s\n' "$_dead_pid"; printf '%s\n' "$_dead_start"; } > "$_lock/owner"
-SECONDS=0
-WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=20 wm_tmux_send_message "$SESS:box" "after-dead-pid-reclaim"
-dead_rc=$?
-dead_elapsed=$SECONDS
-assert_eq "a lock stamped with an exited, reaped pid is reclaimed" "$dead_rc" "0"
-# Generous margin (well under half the wait budget) to absorb host scheduling
-# jitter while still clearly distinguishing "reclaimed on the first
-# contention check" from "reclaimed only after waiting out the budget".
-assert_true "the dead-pid reclaim happens immediately, not after the wait budget" "[ $dead_elapsed -lt 10 ]"
-pane_dead="$(wm_tmux capture-pane -p -t "$SESS:box")"
-assert_contains "the message submitted after the dead-pid reclaim" "$pane_dead" "SUBMITTED:after-dead-pid-reclaim"
-
-# Cannot verify: a bare lock with no owner file at all still refuses with rc
-# 4 - unchanged - never mistaken for a reclaimable lock.
-mkdir -p "$_lock"
-out_bare="$(WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-bare" 2>&1)"
-bare_rc=$?
-assert_eq "a bare lock with no owner file still refuses with rc 4" "$bare_rc" "4"
-assert_contains "the refusal names the held-by-another-delivery reason" "$out_bare" "held by another delivery"
-pane_bare="$(wm_tmux capture-pane -p -t "$SESS:box")"
-assert_not_contains "nothing was typed against the unverifiable bare lock" "$pane_bare" "should-not-send-bare"
-
-# Cannot verify (empty start-time guard): a live pid (this test process's
-# own) paired with an empty start-time line must NOT be trusted as a bare
-# pid match - proves the guard, not the branch it guards.
-mkdir -p "$_lock"
-{ printf '%s\n' "$$"; printf '%s\n' ""; } > "$_lock/owner"
-out_emptystart="$(WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-emptystart" 2>&1)"
-emptystart_rc=$?
-assert_eq "a live pid with an empty stamped start-time is not reclaimed" "$emptystart_rc" "4"
-assert_contains "the refusal names the held-by-another-delivery reason" "$out_emptystart" "held by another delivery"
-pane_emptystart="$(wm_tmux capture-pane -p -t "$SESS:box")"
-assert_not_contains "nothing was typed against the empty-start-time lock" "$pane_emptystart" "should-not-send-emptystart"
-
-# Verified reused: a live pid (this test process's own) paired with a
-# start-time guaranteed not to match its real one - proves the pid-reuse
-# branch itself, not just the guard around it.
-mkdir -p "$_lock"
-{ printf '%s\n' "$$"; printf '%s\n' "bogus-start-time-that-will-never-match"; } > "$_lock/owner"
-WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=5 wm_tmux_send_message "$SESS:box" "after-pid-reuse-reclaim"
-reused_rc=$?
-assert_eq "a live pid with a mismatched start-time is reclaimed" "$reused_rc" "0"
-pane_reused="$(wm_tmux capture-pane -p -t "$SESS:box")"
-assert_contains "the message submitted after the pid-reuse reclaim" "$pane_reused" "SUBMITTED:after-pid-reuse-reclaim"
-
-# Verified dead (zombie): an unreaped zombie keeps both its pid and its
-# lstart intact, so kill -0 alone would misread it as alive - proves the
-# zombie-state check itself. An observable zombie needs a grandchild whose
-# parent never reaps it: bash (not sh/dash, which reaps a background child
-# opportunistically on its very next command dispatch) runs a grandchild
-# that exits immediately, then sleeps without ever wait()ing on it.
-_zombie_dir="$(wm_mktemp_dir)"
-_zombie_pidfile="$_zombie_dir/pid"
-bash -c "sh -c 'exit 0' & echo \$! > '$_zombie_pidfile'; sleep 30" &
-_zombie_parent=$!
-wm_track "$_zombie_parent"
-_zombie_pid=""
-_zombie_tries=0
-while [ "$_zombie_tries" -lt 50 ]; do
-  [ -s "$_zombie_pidfile" ] && { _zombie_pid="$(cat "$_zombie_pidfile")"; break; }
-  sleep 0.1
-  _zombie_tries=$((_zombie_tries+1))
-done
-_zombie_state=""
-_zombie_tries=0
-if [ -n "$_zombie_pid" ]; then
-  while [ "$_zombie_tries" -lt 50 ]; do
-    _zombie_state="$(ps -o state= -p "$_zombie_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-    case "$_zombie_state" in Z*) break ;; esac
-    sleep 0.1
-    _zombie_tries=$((_zombie_tries+1))
-  done
-fi
-_zombie_start=""
-case "$_zombie_state" in
-  Z*) _zombie_start="$(ps -o lstart= -p "$_zombie_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')" ;;
-esac
-if [ -n "$_zombie_start" ]; then
-  mkdir -p "$_lock"
-  { printf '%s\n' "$_zombie_pid"; printf '%s\n' "$_zombie_start"; } > "$_lock/owner"
-  WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=5 wm_tmux_send_message "$SESS:box" "after-zombie-reclaim"
-  zombie_rc=$?
-  assert_eq "a lock stamped with an unreaped zombie pid is reclaimed" "$zombie_rc" "0"
-  pane_zombie="$(wm_tmux capture-pane -p -t "$SESS:box")"
-  assert_contains "the message submitted after the zombie reclaim" "$pane_zombie" "SUBMITTED:after-zombie-reclaim"
-else
-  echo "SKIP: could not construct an observable zombie process (with a readable lstart) on this host within budget - skipping the zombie-branch case" >&2
-fi
-kill "$_zombie_parent" 2>/dev/null
-wait "$_zombie_parent" 2>/dev/null
-
-# Verified NOT reused across differing $TZ at stamp-time vs check-time
-# (issue #298 round-1 MF1): `ps -o lstart=` renders an absolute instant into
-# the CALLING process's own local time, so an unpinned ps call would render
-# the exact same live process's start-time as two different strings
-# depending on which $TZ happened to be exported when each ps ran -
-# misreading a live holder as "pid reused" and stealing its lock. Acquire
-# the lock (stamping it) under one $TZ, then contend for the SAME
-# still-held lock under a different $TZ; since the fix pins TZ=UTC for
-# every ps call inside wm_tmux_send_lock regardless of the caller's own
-# environment, the two renderings must still agree and the lock must not be
-# reclaimed. A bogus-string stamp (the pid-reuse case above) cannot catch
-# this - it cannot tell "correctly detected reuse" from "compared two
-# differently-rendered strings of the same real instant".
-rm -rf "$_lock" 2>/dev/null
-tz_acquire_rc=0
-TZ=America/New_York wm_tmux_send_lock "$SESS:box" || tz_acquire_rc=$?
-assert_eq "the lock acquires normally under a non-default \$TZ" "$tz_acquire_rc" "0"
-out_tz="$(TZ=Asia/Tokyo WM_SEND_LOCK_STALE=9999 WM_SEND_LOCK_WAIT=2 wm_tmux_send_message "$SESS:box" "should-not-send-tz" 2>&1)"
-tz_rc=$?
-assert_eq "a live holder's stamp is recognized despite the contender's own \$TZ differing from the holder's" "$tz_rc" "4"
-pane_tz="$(wm_tmux capture-pane -p -t "$SESS:box")"
-assert_not_contains "nothing was typed against the still-live TZ-mismatched holder" "$pane_tz" "should-not-send-tz"
+first_acquire_rc=0
+wm_tmux_send_lock "$SESS:box" || first_acquire_rc=$?
+assert_eq "the first acquisition in this shell succeeds" "$first_acquire_rc" "0"
+second_acquire_rc=0
+wm_tmux_send_lock "$SESS:other-box" || second_acquire_rc=$?
+assert_eq "a reentrant acquisition while fd 200 is already held refuses with rc 8" "$second_acquire_rc" "8"
 wm_tmux_send_unlock "$SESS:box"
-assert_true "the lock is released after the TZ test" "[ ! -d '$_lock' ]"
+# A subsequent, non-reentrant acquisition succeeds normally once the first
+# is released, proving the guard is a targeted refusal, not a permanently
+# wedged fd.
+third_acquire_rc=0
+wm_tmux_send_lock "$SESS:other-box" || third_acquire_rc=$?
+assert_eq "acquisition succeeds again once the first lock is released" "$third_acquire_rc" "0"
+wm_tmux_send_unlock "$SESS:other-box"
+tmux kill-session -t "$SESS" 2>/dev/null
 
+# --- the flock helper's own hard-failure path (issue #302) ----------------
+# A distinct outcome from ordinary contention (rc 4): if the helper itself
+# cannot run (a broken 'uv'/python/fcntl toolchain), the caller must be told
+# that plainly (rc 7) rather than reading it as "someone else is holding the
+# pane, retry shortly" - the two warrant very different operator responses.
+# Simulated by pointing WM_UV at a command that always fails, standing in
+# for a genuinely broken toolchain without needing to actually break uv.
+tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
+sleep 0.5
+out_helper_fail="$(WM_UV=false wm_tmux_send_message "$SESS:box" "should-not-send-helper-fail" 2>&1)"
+helper_fail_rc=$?
+assert_eq "a broken lock helper returns rc 7, not rc 4" "$helper_fail_rc" "7"
+assert_contains "the refusal names it as a helper failure, not contention" "$out_helper_fail" "helper failed unexpectedly"
+assert_not_contains "the helper-failure refusal does NOT claim ordinary contention" "$out_helper_fail" "held by another delivery"
+pane_helper_fail="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_not_contains "nothing was typed when the helper itself failed" "$pane_helper_fail" "should-not-send-helper-fail"
 tmux kill-session -t "$SESS" 2>/dev/null
 
 test_summary
