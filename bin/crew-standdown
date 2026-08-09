@@ -92,15 +92,16 @@ EOF
     # the session is already disconnected (remote_control_connected is
     # explicitly false).
     if [ "$RC" = true ] && [ "$RCC" = true ]; then
-      # A dialog-shaped refusal (rc 2), a contended send lock (rc 4), or a
-      # busy pane with a pending composer (rc 6, issue #214) means nothing
-      # was typed - standing a member down must never hang or fail because
-      # Remote Control cleanup didn't go through, so kill-window below runs
-      # unconditionally regardless of this outcome (rc 6 gets one bounded
-      # retry first, since a busy member is the one case where "wait a
-      # moment" has a real chance of letting the disconnect through). Every
-      # other rc means the keystrokes landed, so settle on all of them the
-      # same way
+      # A dialog-shaped refusal (rc 2), a contended send lock (rc 4), a busy
+      # pane with a pending composer (rc 6, issue #214), a send-lock helper
+      # failure (rc 7), or a reentrant-acquisition bug (rc 8, issue #302)
+      # means nothing was typed - standing a member down must never hang or
+      # fail because Remote Control cleanup didn't go through, so
+      # kill-window below runs unconditionally regardless of this outcome
+      # (rc 6 gets one bounded retry first, since a busy member is the one
+      # case where "wait a moment" has a real chance of letting the
+      # disconnect through). Every other rc means the keystrokes landed, so
+      # settle on all of them the same way
       # (mirroring bin/watch-fleet's own two /remote-control call sites):
       # 0 confirmed, 3 unconfirmed-idle, and 5 unconfirmed-busy (issue #188) -
       # submitting /remote-control replaces the composer with a full-screen
@@ -118,7 +119,8 @@ EOF
         _rc_disc=$?
         [ "$_rc_disc" -eq 6 ] && wm_warn "'$cid's /remote-control disconnect could not be typed after one retry - the pane was still mid-turn with a pending composer. Its Remote Control registration may be left dangling after this standdown."
       fi
-      if [ "$_rc_disc" -ne 2 ] && [ "$_rc_disc" -ne 4 ] && [ "$_rc_disc" -ne 6 ]; then
+      if [ "$_rc_disc" -ne 2 ] && [ "$_rc_disc" -ne 4 ] && [ "$_rc_disc" -ne 6 ] \
+         && [ "$_rc_disc" -ne 7 ] && [ "$_rc_disc" -ne 8 ]; then
         # The send only confirms the keystroke registered, not that the CLI's
         # outbound disconnect call to Remote Control's relay has completed -
         # a short, bounded settle avoids killing the process the instant the

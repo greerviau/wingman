@@ -698,138 +698,162 @@ wm_ps_lstart() {
 # at one pane. Extracted verbatim from wm_tmux_send_message's own body (issue
 # #236) so a caller that sends keystrokes WITHOUT going through the full
 # type-and-submit path - today wm_tmux_clear_pending_composer below - takes the
-# identical lock instead of racing it. Acquire returns 0 with the lock held, or
-# 4 if it could not be acquired within WM_SEND_LOCK_WAIT (nothing was sent).
+# identical lock instead of racing it.
+#
+# Backed by a kernel flock() on a reserved file descriptor (issue #302),
+# replacing the earlier mkdir+pid-stamp reclaim scheme (issue #298/#301
+# round-trip). The lock is released by the KERNEL the instant every fd
+# referencing its open file description closes - including on an uncatchable
+# SIGKILL of the holder - with no reliance on a contender's own polling or
+# process-identity heuristics. That earlier scheme's whole liveness predicate
+# (pid+lstart stamping, zombie-state detection, TZ/LC_ALL pinning, a
+# pid-reuse comparison, a ps-availability fallback) is gone: there is no
+# identity left to infer, because the kernel is the single source of truth
+# for "is this still held."
+#
+# fd 200 is reserved for this lock alone across this entire codebase (grep
+# confirms no other `exec N<>`/`exec N>` use anywhere in bin/ or tests/) -
+# chosen for headroom under macOS's historical default soft RLIMIT_NOFILE of
+# 256, where a higher number would risk "Bad file descriptor" under any
+# tighter limit (a capped CI runner or container is not exotic even though it
+# wouldn't show up on a permissive host).
+#
+# MUST be called directly in the caller's own shell process, never from a
+# $( ) command substitution or an & subshell, in BOTH directions: the fd must
+# outlive this single function call and remain open until
+# wm_tmux_send_unlock runs, AND nothing spawned while the lock is held may
+# itself outlive wm_tmux_send_unlock - every child forked while fd 200 is
+# open inherits a reference to the same open file description (bash does not
+# mark user-opened fds close-on-exec by default), so a long-lived child would
+# keep the flock held with no reclaim path at all. The one concrete way this
+# could happen in this codebase - a tmux server autostarting while the lock
+# is held - was checked directly and is not reachable: only a
+# `new-session`-class tmux command triggers a fresh server fork (verified
+# against a scratch socket - `list-sessions` and `send-keys` both fail
+# outright with no server running, never starting one), and every tmux call
+# the locked bodies below actually make (`wm_tmux_pane_ready`, `send-keys`,
+# `capture-pane`) is in that never-autostarts category. The codebase's one
+# `new-session`-class call (wm_tmux_ensure_session, above) runs outside any
+# locked body; a future call site that needs one from inside a lock must
+# close fd 200 first (`200<&-`) - enforced by review, not a runtime guard.
+#
+# The lock file itself (send-<id>.flock) is created once and NEVER unlinked
+# by any code path here. flock is per-inode: removing the file while a
+# holder still has it open would let a contender that reopens the path
+# create a fresh inode and acquire it immediately - two processes then both
+# believe they hold the lock, and keystrokes from both interleave into one
+# pane. This is a stricter requirement than the mkdir directory it replaces,
+# which self-healed if deleted; a leftover .flock file is never safe to
+# remove while wingman is running. A leftover pre-upgrade send-*.lock
+# DIRECTORY, by contrast, is simply inert under this code (never opened,
+# never checked) and remains harmless to remove or leave.
+#
+# Return codes, the complete set spanning both this function and
+# wm_tmux_send_message (which propagates this function's rc verbatim
+# whenever the lock itself fails): 0 = acquired/confirmed delivery.
+# "Nothing was typed" family: 2 = dialog-shaped pane refusal, 4 = lock
+# contended past WM_SEND_LOCK_WAIT (ordinary contention - expected to clear
+# on its own), 6 = busy pane with pending composer, 7 = the flock helper
+# itself failed for a reason OTHER than ordinary contention (a broken
+# uv/python/fcntl in this environment, or the reserved fd could not even be
+# opened - NOT expected to clear on its own; distinct from 4 on purpose so a
+# caller never conflates a transient refusal with a broken toolchain),
+# 8 = reentrant acquisition refused (this process already holds fd 200 for a
+# different target - a programming error, since no call site is meant to
+# ever nest two targets' locks). "Typed but submit unconfirmed" family
+# (wm_tmux_send_message only, unaffected by this change): 3, 5.
 wm_tmux_send_lock() {
-  # The lock's parent must exist or every mkdir below fails and reads as
-  # permanent contention; callers can legitimately run before wm_state init.
+  # Reentrant-acquisition guard, checked first: refuse immediately if fd 200
+  # is already open in this process (a second target's lock, or a bug
+  # re-entering this function) rather than silently reassigning fd 200 out
+  # from under whatever the first acquire is still doing. No call site is
+  # meant to ever do this, so a runtime refusal surfaces the bug loudly the
+  # instant it happens instead of corrupting an unrelated lock silently.
+  if { true >&200; } 2>/dev/null; then
+    wm_err "send lock: fd 200 is already held in this process (attempted reentrant acquisition for pane '$1') - this is a bug, not contention; nothing was sent"
+    return 8
+  fi
+  # The lock's parent must exist or opening the lockfile below fails and
+  # reads as a helper failure; callers can legitimately run before wm_state
+  # init.
   mkdir -p "$WM_HOME" 2>/dev/null
-  _sl_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
+  _sl_lockfile="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').flock"
   _sl_wait="${WM_SEND_LOCK_WAIT:-45}"
-  _sl_stale="${WM_SEND_LOCK_STALE:-120}"
-  _sl_t0="$(date +%s)"
-  while :; do
-    # Evaluated first, unconditionally, on every iteration - including one
-    # reached via a `continue` below - so a reclaim whose removal cannot
-    # actually succeed (e.g. a permissions mismatch on $WM_HOME) can never
-    # spin at 100% CPU forever; it is bounded by WM_SEND_LOCK_WAIT exactly
-    # like ordinary contention (issue #298 round-1 MF2).
-    if [ $(( $(date +%s) - _sl_t0 )) -ge "$_sl_wait" ]; then
+  # A budget of 0 (or less) must never reach signal.alarm(): alarm(0) CANCELS
+  # any pending alarm rather than firing immediately, so an unclamped 0 would
+  # leave the blocking flock() call with no timeout at all - an unbounded
+  # hang on the central send path, in place of the old code's immediate
+  # rc-4 refusal at a 0 budget. No caller sets 0 today, but 0 is the natural
+  # thing to write meaning "don't wait", so it is guarded here rather than
+  # left as a latent hang.
+  [ "$_sl_wait" -lt 1 ] 2>/dev/null && _sl_wait=1
+  if ! exec 200<>"$_sl_lockfile"; then
+    wm_err "send lock for pane '$1': could not open $_sl_lockfile - nothing was sent; this is NOT ordinary contention"
+    return 7
+  fi
+  # A single blocking fcntl.flock() call under a SIGALRM-based timeout: no
+  # bash-side sleep/retry loop, no ps forks, no polling granularity - the
+  # kernel wakes this the instant the lock frees up, or the alarm cleanly
+  # raises at the budget. A bare signal.alarm() with no handler installed
+  # would NOT give a catchable timeout (the OS default action terminates the
+  # interpreter, and PEP 475 additionally retries an interrupted syscall
+  # unless the handler raises) - the explicit raising handler below is
+  # required, not decorative.
+  #
+  # The timeout outcome is signalled by a MARKER STRING printed to stdout,
+  # not by an exit code - deliberately, because $WM_UV is `uv run ...`, and
+  # `uv` itself exits 2 on its OWN failures (a bad --python spec, an
+  # unrecognized flag - verified directly), before python ever runs. An
+  # earlier version of this helper used exit code 2 for the timeout and
+  # anything-else for "the helper broke"; that made an uv-level failure
+  # indistinguishable from ordinary contention, misreporting a permanently
+  # broken toolchain as "retry shortly" - exactly the outcome rc 7 exists to
+  # prevent. No exit code below is load-bearing: the marker is checked
+  # first, unconditionally, and only its absence falls through to the
+  # exit-code check for the (already unambiguous) success/failure split.
+  _sl_helper_out="$(wm_py -c '
+import fcntl, signal, sys
+
+class _Timeout(Exception):
+    pass
+
+def _on_alarm(signum, frame):
+    raise _Timeout()
+
+try:
+    fd, budget = int(sys.argv[1]), int(sys.argv[2])
+    signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(budget)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    signal.alarm(0)
+    sys.exit(0)
+except _Timeout:
+    print("WM_SEND_LOCK_TIMEOUT")
+    sys.exit(2)
+except Exception as e:
+    print("wm_tmux_send_lock helper error: %s" % e, file=sys.stderr)
+    sys.exit(3)
+' 200 "$_sl_wait" 2>&1)"
+  _sl_hrc=$?
+  case "$_sl_helper_out" in
+    *WM_SEND_LOCK_TIMEOUT*)
+      exec 200<&-
       wm_err "send lock for pane '$1' held by another delivery for ${_sl_wait}s+ - nothing was sent; retry shortly"
       return 4
-    fi
-    if mkdir "$_sl_lock" 2>/dev/null; then
-      # Acquired. Stamp pid + process start time atomically (owner.tmp then
-      # mv, so a reader never observes a live pid paired with a still-empty
-      # start-time line) so a future contender can verify death directly
-      # (issue #298) instead of only ever waiting out WM_SEND_LOCK_STALE. $$
-      # is only the true holder's pid when this function is called directly -
-      # never from inside a $( ) command substitution or an & subshell, where
-      # $$ names the parent instead (tests/lib.sh documents and relies on
-      # this bash behavior already). Every current call site is direct.
-      # TZ=UTC LC_ALL=C pins the rendering: `ps -o lstart=` renders an
-      # absolute instant into the CALLING process's own local time, so an
-      # unpinned holder and an unpinned contender running under different
-      # $TZ would render the very same live process's start time as two
-      # different strings and misread it as "pid reused" (issue #298
-      # round-1 MF1) - LC_ALL=C is the matching insurance against
-      # locale-dependent formatting on the state check below.
-      _sl_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-      if { printf '%s\n' "$$"; printf '%s\n' "$_sl_start"; } > "$_sl_lock/owner.tmp" 2>/dev/null \
-         && mv "$_sl_lock/owner.tmp" "$_sl_lock/owner" 2>/dev/null; then
-        # The write succeeded - verify it is still ours before trusting it,
-        # mirroring $CLAIMLOCK's own readback (bin/watch-fleet:791-795): a
-        # short, deliberate pause first, so this read is likely to observe a
-        # rival's later write rather than trivially re-observing our own.
-        sleep 0.1
-        _sl_readback_pid=""
-        IFS= read -r _sl_readback_pid < "$_sl_lock/owner" 2>/dev/null
-        if [ "$_sl_readback_pid" = "$$" ]; then
-          return 0
-        fi
-        # Lost the internal race (near-unreachable: only a rival that both
-        # reclaimed and re-acquired this exact directory inside our own
-        # 0.1s window could cause this). Fall through to the same
-        # contention handling below rather than a bespoke retry: if a rival
-        # genuinely holds it now, that code correctly waits on or reclaims
-        # against the rival's real stamp, and never mistakes our own
-        # just-created (and now foreign-owned) directory for something safe
-        # to remove.
-      else
-        # mkdir already succeeded, so this process already owns the lock
-        # directory regardless of whether the stamp landed - proceed with it
-        # held rather than retrying mkdir against our own lock (which can
-        # never succeed) or looping on a readback that was never attempted.
+      ;;
+    *)
+      if [ "$_sl_hrc" -eq 0 ]; then
         return 0
       fi
-    fi
-    # Contention: either mkdir failed outright, or we lost the stamp-write
-    # race above. Liveness has three outcomes: cannot verify (falls through
-    # to the unchanged age-based check below), verified dead or reused
-    # (reclaim immediately), or verified alive (falls through exactly like
-    # cannot-verify).
-    _sl_stamped_pid="$(sed -n '1p' "$_sl_lock/owner" 2>/dev/null)"
-    _sl_stamped_start="$(sed -n '2p' "$_sl_lock/owner" 2>/dev/null)"
-    _sl_dead=0
-    _sl_reused=0
-    case "$_sl_stamped_pid" in
-      # Empty, non-numeric, or leading-zero: cannot verify. The leading-zero
-      # guard matters specifically because `kill -0 0` signals the caller's
-      # own process group and always reports success (same guard
-      # bin/watch-fleet:509's owner_lock_alive() already applies, reused
-      # verbatim here).
-      ''|*[!0-9]*|0*) ;;
-      *)
-        if [ -n "$_sl_stamped_start" ]; then
-          if ! kill -0 "$_sl_stamped_pid" 2>/dev/null; then
-            _sl_dead=1
-          else
-            # A SIGTERM'd holder whose parent has not yet wait()ed on it
-            # keeps both its pid and its lstart intact - kill -0 alone would
-            # misread it as a live holder and silently degrade to the
-            # 120-second wait this fix exists to avoid.
-            _sl_cur_state="$(TZ=UTC LC_ALL=C ps -o state= -p "$_sl_stamped_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-            case "$_sl_cur_state" in
-              Z*) _sl_dead=1 ;;
-              *)
-                _sl_cur_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$_sl_stamped_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-                if [ -n "$_sl_cur_start" ] && [ "$_sl_cur_start" != "$_sl_stamped_start" ]; then
-                  _sl_reused=1
-                fi
-                ;;
-            esac
-          fi
-        fi
-        ;;
-    esac
-    if [ "$_sl_dead" -eq 1 ] || [ "$_sl_reused" -eq 1 ]; then
-      # Re-verify immediately before removing: shrinks the check-then-act
-      # window from the whole liveness check above (multiple sed reads, a
-      # kill, up to two ps forks) down to one more pair of sed reads right
-      # next to the removal, so a lock that got reclaimed and re-acquired by
-      # a rival in between is never torn out from under it.
-      _sl_recheck_pid="$(sed -n '1p' "$_sl_lock/owner" 2>/dev/null)"
-      _sl_recheck_start="$(sed -n '2p' "$_sl_lock/owner" 2>/dev/null)"
-      if [ "$_sl_recheck_pid" = "$_sl_stamped_pid" ] && [ "$_sl_recheck_start" = "$_sl_stamped_start" ]; then
-        rm -f "$_sl_lock/owner" "$_sl_lock/owner.tmp" 2>/dev/null
-        rmdir "$_sl_lock" 2>/dev/null
-        continue
-      fi
-    fi
-    _sl_age=$(( $(date +%s) - $(wm_py -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_sl_lock" 2>/dev/null || date +%s) ))
-    if [ "$_sl_age" -ge "$_sl_stale" ]; then
-      rm -f "$_sl_lock/owner" "$_sl_lock/owner.tmp" 2>/dev/null
-      rmdir "$_sl_lock" 2>/dev/null   # crashed holder; reclaim and retry
-      continue
-    fi
-    sleep 1
-  done
+      exec 200<&-
+      wm_err "send lock for pane '$1': the lock helper failed unexpectedly ($_sl_helper_out) - nothing was sent; this is NOT ordinary contention - check that 'uv' and python's fcntl module work in this environment"
+      return 7
+      ;;
+  esac
 }
 
 wm_tmux_send_unlock() {
-  _sl_lock="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
-  rm -f "$_sl_lock/owner" "$_sl_lock/owner.tmp" 2>/dev/null
-  rmdir "$_sl_lock" 2>/dev/null
+  exec 200<&-
   return 0
 }
 
@@ -846,8 +870,13 @@ wm_tmux_send_unlock() {
 # first. BEST-EFFORT, and named so deliberately: the clear is sent but never
 # verified to have landed, so no caller may report the composer as clean.
 # rc 0 if there was nothing to do or the clear was sent, 1 if the composer was
-# not recognized, 2 if refused as dialog-shaped, 4 if the send lock was
-# contended (nothing sent - the next poll can try again).
+# not recognized, 2 if refused as dialog-shaped, 4 if the send lock could not
+# be acquired (nothing sent - the next poll can try again). This collapses
+# wm_tmux_send_lock's own 4/7/8 into a single 4 deliberately: this is a
+# best-effort background cleanup, not a human-facing delivery, so which of
+# "contended", "helper broke", or "reentrancy bug" occurred is not
+# actionable for this caller - any of them means "couldn't get the lock this
+# poll, try again next time" the same way.
 wm_tmux_clear_pending_composer() {
   _cc_target="$1"
   wm_tmux_send_lock "$_cc_target" || return 4
@@ -1018,23 +1047,28 @@ wm_tmux_pane_ready() {
 # failure keep working; callers that care can tell an idle-genuine-swallow
 # (3) apart from a busy-likely-queued one (5).
 #
-# Concurrency: the whole type-and-submit sequence holds an mkdir-based
-# per-pane lock (send-<target>.lock under $WM_HOME). Multiple writers
-# genuinely target one pane at once - crew-say from wingman, a sibling's
-# crew-say, a crew-ask send, watch-fleet's stall nudge and /remote-control
-# retry - and unserialized send-keys bursts can interleave into one garbled
-# submission, or let one sender's pane-advanced confirm read another sender's
-# typing as its own success. The lock is held for the duration of one
-# delivery (seconds); a waiter polls up to WM_SEND_LOCK_WAIT seconds. The
-# primary reclaim path is identity-verified (issue #298): the lock is
-# stamped with its holder's pid + process start time, and a contender
-# reclaims it the moment it can positively verify that holder is dead or the
-# pid has been reused, rather than waiting out a fixed window. A lock whose
-# holder cannot be verified this way (no stamp, or a host where `ps` itself
-# is unavailable) falls back to the unchanged age-based check, reclaiming
-# once it is older than WM_SEND_LOCK_STALE. Either way, a contender that
-# still cannot acquire the lock gives up with a refusal-style message on
-# stderr and rc 4 (nothing was typed).
+# wm_tmux_send_message itself (the wrapper below, not the _locked body these
+# rcs describe) can also surface 4, 7, or 8 - wm_tmux_send_lock's own rcs,
+# propagated verbatim when the lock itself could not be acquired at all
+# (see that function's doc comment above for what each means). Every rc this
+# whole call chain can produce falls into exactly one of two families:
+# "nothing was typed" (2, 4, 6, 7, 8) or "typed but submit unconfirmed"
+# (3, 5) - never both.
+#
+# Concurrency: the whole type-and-submit sequence holds a kernel flock()
+# (issue #302) on a per-pane lock file (send-<target>.flock under
+# $WM_HOME, fd 200 - see wm_tmux_send_lock's own doc comment for the full
+# design). Multiple writers genuinely target one pane at once - crew-say
+# from wingman, a sibling's crew-say, a crew-ask send, watch-fleet's stall
+# nudge and /remote-control retry - and unserialized send-keys bursts can
+# interleave into one garbled submission, or let one sender's
+# pane-advanced confirm read another sender's typing as its own success.
+# The lock is held for the duration of one delivery (seconds); a waiter
+# blocks (no polling) for up to WM_SEND_LOCK_WAIT seconds before giving up
+# with rc 4. Release is kernel-guaranteed: the flock frees the instant
+# every fd on it closes, including on an uncatchable SIGKILL of the
+# holder - there is no separate reclaim path to describe, because there is
+# nothing left that can go stale.
 wm_tmux_send_message() {
   wm_tmux_send_lock "$1" || return $?
   _wm_tmux_send_message_locked "$1" "$2"
@@ -1167,9 +1201,20 @@ _wm_tmux_send_message_locked() {
 # outlives a mortal caller cgroup (see wm_tmux_scoped). Verified after the
 # create: crew must land in a session wingman genuinely owns, or fail loudly -
 # never silently fall through to a prefix-matched neighbour.
+#
+# The trailing `200<&-` is defensive, not required by any call site today
+# (this function is never called from inside a wm_tmux_send_lock-held
+# region): `new-session` is the one tmux command class that autostarts a
+# fresh server, and a server autostarted while fd 200 happened to be open
+# would inherit it, pinning the send lock's flock open for that server's
+# entire lifetime with no reclaim path at all (see wm_tmux_send_lock's own
+# doc comment). Closing fd 200 for just this one command is a no-op when it
+# is not open (verified), so it costs nothing today and removes the
+# possibility entirely if this function is ever called from a locked body
+# in the future.
 wm_tmux_ensure_session() {
   wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null && return 0
-  wm_tmux_scoped new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+  wm_tmux_scoped new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle 200<&-
   wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null \
     || wm_die "failed to create tmux session '$WM_TMUX_SESSION'"
 }
@@ -1665,6 +1710,8 @@ wm_outbox_try_redeliver() {
     3|5) _tr_outcome=unconfirmed ;;
     4) _tr_outcome=lock-contended ;;
     6) _tr_outcome=busy ;;
+    7) _tr_outcome=lock-helper-failed ;;
+    8) _tr_outcome=lock-reentrant-bug ;;
     *) _tr_outcome=unconfirmed ;;
   esac
   if [ "$_tr_outcome" = sent ]; then

@@ -2068,16 +2068,17 @@ for r in data:
                 fi
                 rm -f "$_refusedfile" 2>/dev/null
                 _refused_count=0
-              elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ]; then
+              elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ] || [ "$_nudge_rc" -eq 7 ] || [ "$_nudge_rc" -eq 8 ]; then
                 _refused_count=$(( _refused_count + 1 ))
                 printf '%d %d\n' "$_refused_count" "$_refused_clock" > "$_refusedfile"
               fi
-              # rc 2/4/6 above burns no #236 retry budget (nothing was typed,
-              # so .nudged is left untouched and retried next qualifying
-              # poll) but DOES feed the #214 escape hatch above, so a
-              # composer-leaving retry that keeps landing on a busy/dialog/
-              # locked pane still eventually escalates instead of holding the
-              # flip gate closed forever.
+              # rc 2/4/6/7/8 above burns no #236 retry budget (nothing was
+              # typed, so .nudged is left untouched and retried next
+              # qualifying poll) but DOES feed the #214 escape hatch above,
+              # so a composer-leaving retry that keeps landing on a
+              # busy/dialog/locked/broken-helper/reentrancy-bug pane still
+              # eventually escalates instead of holding the flip gate closed
+              # forever.
             fi
             ;;
           *)
@@ -2098,7 +2099,7 @@ for r in data:
               fi
               rm -f "$_refusedfile" 2>/dev/null
               _refused_count=0
-            elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ]; then
+            elif [ "$_nudge_rc" -eq 2 ] || [ "$_nudge_rc" -eq 4 ] || [ "$_nudge_rc" -eq 6 ] || [ "$_nudge_rc" -eq 7 ] || [ "$_nudge_rc" -eq 8 ]; then
               _refused_count=$(( _refused_count + 1 ))
               printf '%d %d\n' "$_refused_count" "$_refused_clock" > "$_refusedfile"
             fi
