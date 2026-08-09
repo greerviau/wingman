@@ -535,6 +535,21 @@ beat_age() {
 # running as anything else does not - it falls through to a normal claim,
 # nothing killed. Self-heals the moment this owner's cycle is next armed,
 # which always writes the marker and never touches this path again.
+#
+# kill -0 alone also misreads an unreaped zombie as alive (issue #312): the
+# kernel keeps a zombie's process-table entry, and thus its pid, until the
+# parent wait()s it, and a zombie's ps -o lstart= still reports its true
+# original start time - so the marked path's comparison below would see a
+# perfect match. The marker-less path is not incidentally safe either: a
+# zombie's ps -o args= renders as "[<comm>] <defunct>" (its real argv is
+# gone, but ps falls back to the executable's own basename), and a genuine
+# watch-fleet cycle's comm is "watch-fleet" - so that path's *watch-fleet*
+# match above still fires too. Checked once here, before either path
+# branches, since neither one needs its own copy. Same predicate
+# bin/lib/common.sh's wm_tmux_send_lock used for its own, structurally
+# identical pid+lstart identity check (issue #298), pulled from that
+# function's history since its own scheme was since replaced by a kernel
+# flock() with no identity heuristics left at all (issue #302/#311).
 owner_lock_alive() {
   [ -d "$OWNERLOCK" ] || return 1
   _ola_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
@@ -544,6 +559,18 @@ owner_lock_alive() {
   # owner-pid validation, reused verbatim.
   case "$_ola_pid" in ''|*[!0-9]*|0*) return 1 ;; esac
   kill -0 "$_ola_pid" 2>/dev/null || return 1
+  # A SIGTERM'd cycle whose parent has not yet wait()ed on it keeps its
+  # process-table entry (kill -0 alone misreads it as alive) AND its true
+  # ps -o lstart= (misreading it as alive on the marked path below) AND,
+  # since a zombie's ps -o args= renders as "[<comm>] <defunct>" using the
+  # executable's own basename, a real watch-fleet zombie's args still
+  # contains the literal substring "watch-fleet" (misreading it as alive on
+  # the marker-less path below too - confirmed empirically, not assumed;
+  # see the issue #312 plan). Checked once, here, before either path
+  # branches: neither one needs its own copy.
+  case "$(LC_ALL=C ps -o state= -p "$_ola_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')" in
+    Z*) return 1 ;;
+  esac
   _ola_stamped_start="$(sed -n '2p' "$OWNERLOCK/owner" 2>/dev/null)"
   _ola_marker="$(sed -n '3p' "$OWNERLOCK/owner" 2>/dev/null)"
   if [ "$_ola_marker" != "lstart-utc" ]; then

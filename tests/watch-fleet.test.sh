@@ -2058,6 +2058,144 @@ assert_contains "a fresh cycle claims normally instead of taking over" "$out_inn
 kill "$innocentpid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #312: owner_lock_alive() must not read an unreaped zombie as --
+# alive on the MARKED (lstart-comparison) path. kill -0 succeeds against a
+# zombie (its process-table entry persists until the parent wait()s it),
+# and ps -o lstart= for a zombie still reports its true, original start
+# time (verified empirically against this host's ps - see the issue #312
+# plan) - so the existing marked-path comparison sees a perfect pid+lstart
+# match and, pre-fix, reads it as genuinely alive. Left unfixed, the
+# singleton guard's wedged-takeover branch then calls takeover_kill()
+# against it: SIGTERM does nothing to a zombie, the 5s wait escalates to
+# SIGKILL, which also does nothing to a zombie, and the second 5s wait
+# ends in wm_die - the cycle wedges instead of being taken over cleanly
+# (the issue's own described impact, reproduced end to end here, not
+# inferred from kill -0 passing in isolation).
+#
+# An observable zombie needs a grandchild whose parent never reaps it:
+# bash (not sh/dash, which reaps a background child opportunistically on
+# its very next command dispatch) runs a grandchild that exits
+# immediately, then sleeps without ever wait()ing on it.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-zom1 'sleep 600'
+wm_state crew-add --id zom1 --type lead --objective x --repo /tmp --window wm-zom1 --session-id szom1 >/dev/null
+wm_state crew-set --id zom1 --status working --summary "in progress" >/dev/null
+_zo1_dir="$(wm_mktemp_dir)"
+_zo1_pidfile="$_zo1_dir/pid"
+bash -c "sh -c 'exit 0' & echo \$! > '$_zo1_pidfile'; sleep 30" &
+_zo1_parent=$!
+wm_track "$_zo1_parent"
+_zo1_pid=""; _zo1_tries=0
+while [ "$_zo1_tries" -lt 50 ]; do
+  [ -s "$_zo1_pidfile" ] && { _zo1_pid="$(cat "$_zo1_pidfile")"; break; }
+  sleep 0.1; _zo1_tries=$((_zo1_tries+1))
+done
+_zo1_state=""; _zo1_tries=0
+if [ -n "$_zo1_pid" ]; then
+  while [ "$_zo1_tries" -lt 50 ]; do
+    _zo1_state="$(ps -o state= -p "$_zo1_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+    case "$_zo1_state" in Z*) break ;; esac
+    sleep 0.1; _zo1_tries=$((_zo1_tries+1))
+  done
+fi
+_zo1_start=""
+case "$_zo1_state" in
+  Z*) _zo1_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$_zo1_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')" ;;
+esac
+if [ -n "$_zo1_start" ]; then
+  mkdir "$WINGMAN_HOME/watch-zom1.pid.owner"
+  printf '%s\n%s\n%s\n' "$_zo1_pid" "$_zo1_start" "lstart-utc" > "$WINGMAN_HOME/watch-zom1.pid.owner/owner"
+  out_zo1status="$("$WF" --owner zom1 --status 2>&1)"
+  assert_contains "a zombie-stamped marked lock reads as not-live" "$out_zo1status" "no live watch-fleet cycle"
+  assert_not_contains "never reported WEDGED (that would mean owner_lock_alive still misread it as alive)" "$out_zo1status" "WEDGED"
+  "$WF" --owner zom1 >"$WINGMAN_HOME/zom1-arm.log" 2>&1 &
+  _zo1_armpid=$!
+  wm_track "$_zo1_armpid"
+  _zo1a_i=0
+  while ! grep -qE "watcher: armed|SIGKILL|uninterruptible kernel wait" "$WINGMAN_HOME/zom1-arm.log" 2>/dev/null && [ "$_zo1a_i" -lt 150 ]; do
+    sleep 0.2; _zo1a_i=$((_zo1a_i + 1))
+  done
+  out_zo1arm="$(cat "$WINGMAN_HOME/zom1-arm.log")"
+  assert_contains "a fresh arm claims normally over a zombie-stamped marked lock" "$out_zo1arm" "watcher: armed"
+  assert_not_contains "no takeover is attempted against the zombie" "$out_zo1arm" "taking over"
+  assert_not_contains "the zombie never forces an escalation to SIGKILL" "$out_zo1arm" "SIGKILL"
+  kill "$_zo1_armpid" 2>/dev/null
+else
+  echo "SKIP: could not construct an observable zombie process (with a readable lstart) on this host within budget - skipping the issue #312 marked-path case" >&2
+fi
+kill "$_zo1_parent" 2>/dev/null
+wait "$_zo1_parent" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #312: owner_lock_alive() must not read an unreaped zombie as --
+# alive on the MARKER-LESS (argv-verification) path added by #303 either.
+# This path's own pre-fix check is `ps -o args=` for the substring
+# "watch-fleet" - a zombie's real argv is gone (its address space is
+# already freed), but ps falls back to "[<comm>] <defunct>" using the
+# executable's own basename, and a genuine watch-fleet cycle's comm IS
+# "watch-fleet" - so pre-fix, a real watch-fleet zombie's args renders as
+# "[watch-fleet] <defunct>", which STILL matches *watch-fleet* and reads
+# as alive. A generic (e.g. sh) zombie would not exercise this - its
+# bracketed comm never matched the check regardless of this fix - so the
+# grandchild here is deliberately an executable literally named
+# "watch-fleet" (a throwaway two-line script, unrelated to the real
+# bin/watch-fleet binary), not the sh -c 'exit 0' used in case A above.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-zom2 'sleep 600'
+wm_state crew-add --id zom2 --type lead --objective x --repo /tmp --window wm-zom2 --session-id szom2 >/dev/null
+wm_state crew-set --id zom2 --status working --summary "in progress" >/dev/null
+_zo2_dir="$(wm_mktemp_dir)"
+printf '#!/bin/sh\nexit 0\n' > "$_zo2_dir/watch-fleet"
+chmod +x "$_zo2_dir/watch-fleet"
+_zo2_pidfile="$_zo2_dir/pid"
+bash -c "'$_zo2_dir/watch-fleet' & echo \$! > '$_zo2_pidfile'; sleep 30" &
+_zo2_parent=$!
+wm_track "$_zo2_parent"
+_zo2_pid=""; _zo2_tries=0
+while [ "$_zo2_tries" -lt 50 ]; do
+  [ -s "$_zo2_pidfile" ] && { _zo2_pid="$(cat "$_zo2_pidfile")"; break; }
+  sleep 0.1; _zo2_tries=$((_zo2_tries+1))
+done
+_zo2_state=""; _zo2_tries=0
+if [ -n "$_zo2_pid" ]; then
+  while [ "$_zo2_tries" -lt 50 ]; do
+    _zo2_state="$(ps -o state= -p "$_zo2_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+    case "$_zo2_state" in Z*) break ;; esac
+    sleep 0.1; _zo2_tries=$((_zo2_tries+1))
+  done
+fi
+case "$_zo2_state" in
+  Z*)
+    mkdir "$WINGMAN_HOME/watch-zom2.pid.owner"
+    # Marker-less (two-line) stamp: no third "lstart-utc" line, so
+    # owner_lock_alive() degrades to the argv-verification path.
+    printf '%s\n%s\n' "$_zo2_pid" "irrelevant-on-this-path" > "$WINGMAN_HOME/watch-zom2.pid.owner/owner"
+    out_zo2status="$("$WF" --owner zom2 --status 2>&1)"
+    assert_contains "a zombie-stamped marker-less lock reads as not-live" "$out_zo2status" "no live watch-fleet cycle"
+    assert_not_contains "never reported WEDGED (that would mean owner_lock_alive still misread it as alive)" "$out_zo2status" "WEDGED"
+    "$WF" --owner zom2 >"$WINGMAN_HOME/zom2-arm.log" 2>&1 &
+    _zo2_armpid=$!
+    wm_track "$_zo2_armpid"
+    _zo2a_i=0
+    while ! grep -qE "watcher: armed|SIGKILL|uninterruptible kernel wait" "$WINGMAN_HOME/zom2-arm.log" 2>/dev/null && [ "$_zo2a_i" -lt 150 ]; do
+      sleep 0.2; _zo2a_i=$((_zo2a_i + 1))
+    done
+    out_zo2arm="$(cat "$WINGMAN_HOME/zom2-arm.log")"
+    assert_contains "a fresh arm claims normally over a zombie-stamped marker-less lock" "$out_zo2arm" "watcher: armed"
+    assert_not_contains "no takeover is attempted against the zombie" "$out_zo2arm" "taking over"
+    assert_not_contains "the zombie never forces an escalation to SIGKILL" "$out_zo2arm" "SIGKILL"
+    kill "$_zo2_armpid" 2>/dev/null
+    ;;
+  *)
+    echo "SKIP: could not construct an observable zombie process on this host within budget - skipping the issue #312 marker-less-path case" >&2
+    ;;
+esac
+kill "$_zo2_parent" 2>/dev/null
+wait "$_zo2_parent" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation - the mkdir itself fails -
 # and is fatal on failure - never a silently-unprotected cycle. The
 # obstruction is chmod 500 on the pre-created $OWNERLOCK directory itself
