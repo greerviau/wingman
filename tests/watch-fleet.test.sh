@@ -2011,6 +2011,32 @@ else
   tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 fi
 
+# --- issue #303 PR review round 1: a marker-less stamp must not trust kill -0
+# alone - it must verify the pid is actually a watch-fleet cycle (its own
+# argv), or a pid the stamp's own pid has been RECYCLED to (e.g. after a host
+# reboot, the exact scenario the identity stamp exists for) gets treated as
+# the live owner. With no beacon file at all (a marker-less stamp never
+# written by this codebase's own claim step has none either), that reads as
+# wedged past WM_WATCH_HARD_GRACE, and the singleton guard's existing
+# takeover machinery SIGTERMs/SIGKILLs it - the exact harm the identity stamp
+# was added to prevent, reintroduced by the "cannot verify" branch itself. ---
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+sleep 600 &
+innocentpid=$!
+wm_track "$innocentpid"
+mkdir "$WINGMAN_HOME/watch.pid.owner"
+_innocent_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$innocentpid" | sed -e 's/^ *//' -e 's/ *$//')"
+printf '%s\n%s\n' "$innocentpid" "$_innocent_start" > "$WINGMAN_HOME/watch.pid.owner/owner"
+echo "$innocentpid" > "$WINGMAN_HOME/watch.pid"
+# Deliberately no watch.beat - the recycled-pid scenario this stands in for
+# (a reboot, nothing clears $WM_HOME) never had one from this codebase either.
+out_innocent="$(wm_timeout 15 "$WF" >"$WINGMAN_HOME/innocent.log" 2>&1; cat "$WINGMAN_HOME/innocent.log")"
+assert_true "the innocent pid behind a marker-less stamp survives" "kill -0 $innocentpid"
+assert_contains "a fresh cycle claims normally instead of taking over" "$out_innocent" "watcher: armed"
+kill "$innocentpid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation - the mkdir itself fails -
 # and is fatal on failure - never a silently-unprotected cycle. The
 # obstruction is chmod 500 on the pre-created $OWNERLOCK directory itself

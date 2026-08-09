@@ -297,9 +297,17 @@ def deny_dynamic(protected):
 # rendered by the pinned wm_ps_lstart. A stamp with no third line (or an
 # unrecognized one) cannot be meaningfully compared against a pinned
 # rendering - either a pre-#303 stamp (rendered in whatever $TZ the writer
-# had) or otherwise unverifiable - so the comparison is skipped and the pid
-# degrades to protected on kill -0 alone: the safe direction during a
-# rollout window, never failing open against a still-live cycle.
+# had) or otherwise unverifiable.
+#
+# A marker-less stamp does NOT degrade to protecting on kill -0 alone (same
+# round-1 PR review finding on issue #303 as bin/watch-fleet'"'"'s own
+# owner_lock_alive() - see its doc comment for the full reasoning): kill -0
+# alone cannot distinguish a genuine legacy watch-fleet cycle from a pid the
+# stamped one has since been RECYCLED to, and protecting the latter is wrong
+# in the other direction - a legitimate kill against an unrelated live
+# process would be denied on the mistaken belief that it is the watcher.
+# Requires the same independent evidence owner_lock_alive() now does: the
+# pid'"'"'s own argv actually names watch-fleet.
 def protected_pids():
     pids = set()
     for ownerlock in glob.glob(os.path.join(home, "watch*.pid.owner")):
@@ -330,10 +338,19 @@ def protected_pids():
                 continue
             if not stamped_start or stamped_start != cur_start:
                 continue
-        # else: a marker-less (pre-#303, or otherwise unverifiable) stamp
-        # cannot be identity-verified against a pinned rendering - degrade to
-        # kill -0 alone (already verified above): protected, never failed
-        # open against a live pid during a rollout window.
+        else:
+            # marker-less (pre-#303, or otherwise unverifiable): require
+            # independent evidence this pid is actually a watch-fleet cycle,
+            # not just alive, before trusting the stamp at all.
+            try:
+                args = subprocess.check_output(
+                    ["ps", "-o", "args=", "-p", str(pid)],
+                    stderr=subprocess.DEVNULL, timeout=5,
+                    env={**os.environ, "LC_ALL": "C"}).decode()
+            except Exception:
+                continue
+            if "watch-fleet" not in args:
+                continue
         beatfile = ownerlock[: -len(".pid.owner")] + ".beat"
         try:
             mtime = os.path.getmtime(beatfile)

@@ -680,11 +680,16 @@ wm_composer_is_empty() {
 # comparing process running under different $TZ would render the very same
 # live process's start time as two different strings and misread a live
 # holder as dead/reused (issue #298 round-1 MF1, and the same defect
-# independently in bin/watch-fleet's owner_lock_alive() - issue #303). Every
-# pid+lstart identity comparison in this codebase goes through this one
-# helper so the pin can never be dropped piecemeal again. An empty result
-# means unknown (no such pid, or ps itself unavailable) - never treat it as
-# a match against anything, including another empty string.
+# independently in bin/watch-fleet's owner_lock_alive() - issue #303). Used
+# by owner_lock_alive() so a new pid+lstart identity comparison never has to
+# hand-copy the pin. wm_tmux_send_lock's own two call sites just below stay
+# on their existing inline (but equally correctly pinned) pipelines rather
+# than being routed through this helper too - issue #302 replaces that
+# function's entire pid/lstart/zombie predicate with an flock()-backed fd,
+# so consolidating it here now would only be rewritten again shortly after.
+# An empty result means unknown (no such pid, or ps itself unavailable) -
+# never treat it as a match against anything, including another empty
+# string.
 wm_ps_lstart() {
   TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//'
 }

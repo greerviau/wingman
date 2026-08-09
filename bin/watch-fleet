@@ -513,11 +513,28 @@ beat_age() {
 # wm_ps_lstart. A stamp with no third line (or an unrecognized one) is, by
 # construction, one this comparison cannot make sense of - either a pre-#303
 # stamp (its second line was rendered in whatever $TZ the writer had) or any
-# other unverifiable stamp - so it is never compared, and this function
-# degrades to trusting kill -0 alone: alive. That is the safe direction (a
-# stalled-but-alive cycle stays alive; a takeover is refused rather than
-# raced) and it self-heals the moment this owner's cycle is next armed, which
-# always writes the marker.
+# other unverifiable stamp - so it is never compared.
+#
+# A marker-less stamp does NOT degrade to trusting kill -0 alone (round-1 PR
+# review on issue #303 found this exact defect in an earlier draft): "alive"
+# is what ENTERS the singleton guard below, and both its takeover branches
+# then signal the stamped pid - the foreign-run branch on any $WINGMAN_RUN_ID
+# mismatch (no beacon check at all - the common case right after a reboot,
+# which is also when a marker-less stamp is likeliest to name a RECYCLED
+# pid), and the wedged branch once beat_age exceeds WM_WATCH_HARD_GRACE
+# (guaranteed for a legacy stamp with no beacon file at all). A bare kill -0
+# would treat any pid recycled since this stamp was written as the live
+# owner, and the very next arm would then SIGTERM/SIGKILL whatever unrelated
+# process now holds that pid - the exact harm the identity stamp exists to
+# prevent, reintroduced by the "cannot verify" branch itself.
+#
+# Closing that requires independent evidence the pid is actually a
+# watch-fleet cycle, not just alive: its own argv. A genuine legacy cycle
+# (mid-rollout, stamped before this marker existed, but still genuinely
+# running) matches - the false-dead defect stays fixed. A recycled pid
+# running as anything else does not - it falls through to a normal claim,
+# nothing killed. Self-heals the moment this owner's cycle is next armed,
+# which always writes the marker and never touches this path again.
 owner_lock_alive() {
   [ -d "$OWNERLOCK" ] || return 1
   _ola_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
@@ -529,7 +546,12 @@ owner_lock_alive() {
   kill -0 "$_ola_pid" 2>/dev/null || return 1
   _ola_stamped_start="$(sed -n '2p' "$OWNERLOCK/owner" 2>/dev/null)"
   _ola_marker="$(sed -n '3p' "$OWNERLOCK/owner" 2>/dev/null)"
-  [ "$_ola_marker" = "lstart-utc" ] || return 0   # legacy/unverifiable stamp - degrade to kill -0 alone
+  if [ "$_ola_marker" != "lstart-utc" ]; then
+    case "$(LC_ALL=C ps -o args= -p "$_ola_pid" 2>/dev/null)" in
+      *watch-fleet*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   _ola_cur_start="$(wm_ps_lstart "$_ola_pid")"
   [ -n "$_ola_stamped_start" ] && [ "$_ola_stamped_start" = "$_ola_cur_start" ]
 }

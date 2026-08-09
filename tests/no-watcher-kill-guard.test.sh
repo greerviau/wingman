@@ -178,6 +178,23 @@ assert_eq "a live-but-unrelated pid behind a mismatched identity stamp is allowe
 kill "$reused" 2>/dev/null
 
 # ============================================================================
+# scenario 12 (issue #303 PR review round 1): a marker-less stamp must not
+# protect on kill -0 alone - it must verify the pid's own argv actually names
+# watch-fleet, or a pid the stamp's pid has been recycled to (e.g. after a
+# host reboot) gets wrongly protected from a legitimate kill.
+# ============================================================================
+test_new_home
+sleep 60 &
+recycled=$!
+wm_track "$recycled"
+mkdir "$WINGMAN_HOME/watch.pid.owner"
+printf '%s\n%s\n' "$recycled" "some-bogus-start-time" > "$WINGMAN_HOME/watch.pid.owner/owner"
+: > "$WINGMAN_HOME/watch.beat"
+out="$(run_hook "kill $recycled")"
+assert_eq "a marker-less stamp for a pid that is not actually watch-fleet is not protected (no output)" "$out" ""
+kill "$recycled" 2>/dev/null
+
+# ============================================================================
 # scenario 11 (issue #303): protected_pids()'s own ps -o lstart= call must be
 # pinned exactly like owner_lock_alive()'s - a cycle armed under one $TZ must
 # still be recognized (and protected) when this hook runs under a different
