@@ -76,17 +76,56 @@ else
 fi
 
 # --- 2b. internal infra identifiers: RFC1918 + internal hostname suffixes ----
-# Built as a literal (single-quoted, not a ${VAR:-default} expansion): the
-# regex's own literal `}` quantifiers would otherwise terminate a bash
-# parameter-expansion default early (confirmed: `${FOO:-a{1,3}b}` evaluates to
-# `a{1,3b}`, silently truncating at the first unescaped `}`).
 if [ -n "${WM_ARTIFACT_SCAN_INFRA_RE:-}" ]; then
-  INFRA_RE="$WM_ARTIFACT_SCAN_INFRA_RE"
+  # A caller override replaces the whole check verbatim via a single grep -E
+  # pass - this escape hatch predates the filename-vs-hostname refinement
+  # below and keeps its original simple semantics; the caller owns precision.
+  if grep -qE "$WM_ARTIFACT_SCAN_INFRA_RE" "$FILE"; then
+    echo "fail:matches an internal IP/hostname pattern (RFC1918 address or .internal/.corp/.local hostname)"; exit 1
+  fi
 else
-  INFRA_RE='\b10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b|\b172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}\b|\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b|[A-Za-z0-9.-]+\.(internal|corp|local)\b'
-fi
-if grep -qE "$INFRA_RE" "$FILE"; then
-  echo "fail:matches an internal IP/hostname pattern (RFC1918 address or .internal/.corp/.local hostname)"; exit 1
+  # Built as a literal (single-quoted, not a ${VAR:-default} expansion): the
+  # regex's own literal `}` quantifiers would otherwise terminate a bash
+  # parameter-expansion default early (confirmed: `${FOO:-a{1,3}b}`
+  # evaluates to `a{1,3b}`, silently truncating at the first unescaped `}`).
+  IP_RE='\b10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b|\b172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}\b|\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b'
+  if grep -qE "$IP_RE" "$FILE"; then
+    echo "fail:matches an internal IP/hostname pattern (RFC1918 address or .internal/.corp/.local hostname)"; exit 1
+  fi
+  # .internal/.corp/.local hostname suffix, excluding a filename-extension
+  # shape (config.local.toml, settings.local.json, developer.local.md): a
+  # dotted token where the suffix is followed by exactly one more segment
+  # that ends the token reads as <name>.<suffix>.<ext>, not a hostname. grep
+  # -E (POSIX ERE) has no lookahead to express "not followed by a lone
+  # extension" in one pattern, so this walks each dotted token and counts
+  # segments after the suffix instead: 0 trailing segments (nas.local) or 2+
+  # (db1.corp.example.com) still fails; exactly 1 (the extension case) does
+  # not. The sub() strips a sentence-final period/hyphen BEFORE splitting -
+  # without it, "config.local.toml." (a filename ending a sentence) splits
+  # into an extra empty trailing segment and is wrongly flagged, while
+  # "nas.local." (a real hostname ending a sentence) splits into exactly one
+  # trailing segment and is wrongly passed - a stray sentence-final period
+  # must never suppress a true positive.
+  _infra_host_hit="$(awk '
+    {
+      line = $0
+      while (match(line, /[A-Za-z0-9.-]+/)) {
+        tok = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        sub(/[.-]+$/, "", tok)
+        n = split(tok, seg, ".")
+        for (i = 2; i <= n; i++) {
+          if (seg[i] == "internal" || seg[i] == "corp" || seg[i] == "local") {
+            if (i == 2 && seg[1] == "") continue
+            if (n - i != 1) { print "MATCH"; exit }
+          }
+        }
+      }
+    }
+  ' "$FILE")"
+  if [ -n "$_infra_host_hit" ]; then
+    echo "fail:matches an internal IP/hostname pattern (RFC1918 address or .internal/.corp/.local hostname)"; exit 1
+  fi
 fi
 
 # --- 2c. proprietary-code-dump heuristic: soft, not a hard block -------------
