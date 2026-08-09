@@ -13,6 +13,16 @@
 # anchor, no vertical border glyphs), with an independent busy/repaint clock
 # and an optional Enter-swallow, so both the detector and the confirm loop's
 # sticky-busy behavior get exercised against the real detector, not a proxy.
+#
+# issue #281: a case's final rc alone is not proof it exercised composer
+# mode - cases 1, 2, 4, and 5 assert an rc that the pre-#188
+# whole-pane-checksum fallback can also produce, so a regression that
+# silently stopped composer mode from engaging in the stub would not fail
+# any of those cases on rc alone. Cases 1-5 each also assert
+# wm_composer_text_in recognized the final capture (case 3's rc 5 already
+# implies this; asserted anyway for explicit, mechanically-checked
+# symmetry), closing that gap directly rather than only inferring it from a
+# byte comparison done once, by hand.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 . "$TEST_REPO/bin/lib/common.sh"
@@ -92,6 +102,13 @@ wm_tmux_send_message "$SESS1:box" "hello-idle-confirmed"
 rc1=$?
 assert_eq "idle confirmed delivery returns rc 0" "$rc1" "0"
 assert_eq "exactly one submit registered" "$(grep -c SUBMITTED "$MARKER")" "1"
+_c1_pane="$(wm_tmux_pane_text "$SESS1:box")"
+wm_composer_text_in "$_c1_pane" >/dev/null; _c1_rc=$?
+assert_eq "idle confirmed delivery recognized composer mode, not a coincidental fallback rc (issue #281)" \
+  "$_c1_rc" "0"
+_c1_region="$(wm_composer_text_in "$_c1_pane")"
+assert_true "idle confirmed delivery's composer reads empty post-submit" \
+  "wm_composer_is_empty \"$_c1_region\""
 tmux kill-session -t "$SESS1" 2>/dev/null
 
 # --- case 2: busy pane, Enter registered (BUSY=1 SWALLOW=0) -------------------
@@ -106,6 +123,13 @@ rc2=$?
 assert_eq "busy pane with a registered Enter returns rc 0" "$rc2" "0"
 assert_eq "resolved on the poll the composer cleared, not the full try budget (Enter sent once)" \
   "$(grep -c ENTER "$MARKER")" "1"
+_c2_pane="$(wm_tmux_pane_text "$SESS2:box")"
+wm_composer_text_in "$_c2_pane" >/dev/null; _c2_rc=$?
+assert_eq "busy registered delivery recognized composer mode, not a coincidental fallback rc (issue #281)" \
+  "$_c2_rc" "0"
+_c2_region="$(wm_composer_text_in "$_c2_pane")"
+assert_true "busy registered delivery's composer reads empty post-submit" \
+  "wm_composer_is_empty \"$_c2_region\""
 tmux kill-session -t "$SESS2" 2>/dev/null
 
 # --- case 3: busy pane, Enter swallowed/queued (BUSY=1 SWALLOW=1) -------------
@@ -126,6 +150,13 @@ assert_eq "busy pane with a queued/unregistered Enter returns rc 5" "$rc3" "5"
 assert_eq "Enter is sent at most once (sticky-busy survives an aliased poll)" \
   "$(grep -c ENTER "$MARKER")" "1"
 assert_eq "nothing was ever actually submitted" "$(grep -c SUBMITTED "$MARKER")" "0"
+_c3_pane="$(wm_tmux_pane_text "$SESS3:box")"
+wm_composer_text_in "$_c3_pane" >/dev/null; _c3_rc=$?
+assert_eq "busy swallowed delivery recognized composer mode, not a coincidental fallback rc (issue #281)" \
+  "$_c3_rc" "0"
+_c3_region="$(wm_composer_text_in "$_c3_pane")"
+assert_false "busy swallowed delivery's composer still holds the unsubmitted text" \
+  "wm_composer_is_empty \"$_c3_region\""
 tmux kill-session -t "$SESS3" 2>/dev/null
 
 # --- case 4: idle pane, genuine swallow (BUSY=0 SWALLOW=1) --------------------
@@ -141,6 +172,13 @@ rc4=$?
 assert_eq "idle genuine swallow returns rc 3" "$rc4" "3"
 assert_eq "Enter retried up to the full try budget (1 initial + WM_SUBMIT_TRIES retries)" \
   "$(grep -c ENTER "$MARKER")" "9"
+_c4_pane="$(wm_tmux_pane_text "$SESS4:box")"
+wm_composer_text_in "$_c4_pane" >/dev/null; _c4_rc=$?
+assert_eq "idle genuine swallow recognized composer mode, not a coincidental fallback rc (issue #281)" \
+  "$_c4_rc" "0"
+_c4_region="$(wm_composer_text_in "$_c4_pane")"
+assert_false "idle genuine swallow's composer still holds the unsubmitted text" \
+  "wm_composer_is_empty \"$_c4_region\""
 tmux kill-session -t "$SESS4" 2>/dev/null
 
 # --- case 5: a wrapping message still confirms --------------------------------
@@ -156,6 +194,13 @@ WRAP_MSG="Message from wingman: read $WINGMAN_HOME/say/some-id-1234567890-99999.
 wm_tmux_send_message "$SESS5:box" "$WRAP_MSG"
 rc5=$?
 assert_eq "a ~150-char message that wraps across composer rows still confirms (rc 0)" "$rc5" "0"
+_c5_pane="$(wm_tmux_pane_text "$SESS5:box")"
+wm_composer_text_in "$_c5_pane" >/dev/null; _c5_rc=$?
+assert_eq "wrapping message recognized composer mode, not a coincidental fallback rc (issue #281)" \
+  "$_c5_rc" "0"
+_c5_region="$(wm_composer_text_in "$_c5_pane")"
+assert_true "wrapping message's composer reads empty post-submit" \
+  "wm_composer_is_empty \"$_c5_region\""
 tmux kill-session -t "$SESS5" 2>/dev/null
 
 # --- case 6: unrecognized composer routes to the pre-#188 fallback ------------
