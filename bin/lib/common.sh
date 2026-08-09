@@ -757,6 +757,14 @@ wm_tmux_send_lock() {
   mkdir -p "$WM_HOME" 2>/dev/null
   _sl_lockfile="$WM_HOME/send-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').flock"
   _sl_wait="${WM_SEND_LOCK_WAIT:-45}"
+  # A budget of 0 (or less) must never reach signal.alarm(): alarm(0) CANCELS
+  # any pending alarm rather than firing immediately, so an unclamped 0 would
+  # leave the blocking flock() call with no timeout at all - an unbounded
+  # hang on the central send path, in place of the old code's immediate
+  # rc-4 refusal at a 0 budget. No caller sets 0 today, but 0 is the natural
+  # thing to write meaning "don't wait", so it is guarded here rather than
+  # left as a latent hang.
+  [ "$_sl_wait" -lt 1 ] 2>/dev/null && _sl_wait=1
   if ! exec 200<>"$_sl_lockfile"; then
     wm_err "send lock for pane '$1': could not open $_sl_lockfile - nothing was sent; this is NOT ordinary contention"
     return 7
@@ -768,12 +776,20 @@ wm_tmux_send_lock() {
   # would NOT give a catchable timeout (the OS default action terminates the
   # interpreter, and PEP 475 additionally retries an interrupted syscall
   # unless the handler raises) - the explicit raising handler below is
-  # required, not decorative. The timeout path exits 2, deliberately not 1:
-  # Python's own default exit code for an uncaught exception is 1, so exit 2
-  # is what lets the bash wrapper below tell "ordinary contention" (exit 2)
-  # apart from "the helper itself broke" (exit 3, or anything else) - see
-  # the return-code contract in this function's own doc comment above.
-  _sl_helper_err="$(wm_py -c '
+  # required, not decorative.
+  #
+  # The timeout outcome is signalled by a MARKER STRING printed to stdout,
+  # not by an exit code - deliberately, because $WM_UV is `uv run ...`, and
+  # `uv` itself exits 2 on its OWN failures (a bad --python spec, an
+  # unrecognized flag - verified directly), before python ever runs. An
+  # earlier version of this helper used exit code 2 for the timeout and
+  # anything-else for "the helper broke"; that made an uv-level failure
+  # indistinguishable from ordinary contention, misreporting a permanently
+  # broken toolchain as "retry shortly" - exactly the outcome rc 7 exists to
+  # prevent. No exit code below is load-bearing: the marker is checked
+  # first, unconditionally, and only its absence falls through to the
+  # exit-code check for the (already unambiguous) success/failure split.
+  _sl_helper_out="$(wm_py -c '
 import fcntl, signal, sys
 
 class _Timeout(Exception):
@@ -782,32 +798,33 @@ class _Timeout(Exception):
 def _on_alarm(signum, frame):
     raise _Timeout()
 
-fd, budget = int(sys.argv[1]), int(sys.argv[2])
-signal.signal(signal.SIGALRM, _on_alarm)
-signal.alarm(budget)
 try:
+    fd, budget = int(sys.argv[1]), int(sys.argv[2])
+    signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(budget)
     fcntl.flock(fd, fcntl.LOCK_EX)
     signal.alarm(0)
     sys.exit(0)
 except _Timeout:
+    print("WM_SEND_LOCK_TIMEOUT")
     sys.exit(2)
 except Exception as e:
     print("wm_tmux_send_lock helper error: %s" % e, file=sys.stderr)
     sys.exit(3)
 ' 200 "$_sl_wait" 2>&1)"
   _sl_hrc=$?
-  case "$_sl_hrc" in
-    0)
-      return 0
-      ;;
-    2)
+  case "$_sl_helper_out" in
+    *WM_SEND_LOCK_TIMEOUT*)
       exec 200<&-
       wm_err "send lock for pane '$1' held by another delivery for ${_sl_wait}s+ - nothing was sent; retry shortly"
       return 4
       ;;
     *)
+      if [ "$_sl_hrc" -eq 0 ]; then
+        return 0
+      fi
       exec 200<&-
-      wm_err "send lock for pane '$1': the lock helper failed unexpectedly ($_sl_helper_err) - nothing was sent; this is NOT ordinary contention - check that 'uv' and python's fcntl module work in this environment"
+      wm_err "send lock for pane '$1': the lock helper failed unexpectedly ($_sl_helper_out) - nothing was sent; this is NOT ordinary contention - check that 'uv' and python's fcntl module work in this environment"
       return 7
       ;;
   esac
@@ -831,8 +848,13 @@ wm_tmux_send_unlock() {
 # first. BEST-EFFORT, and named so deliberately: the clear is sent but never
 # verified to have landed, so no caller may report the composer as clean.
 # rc 0 if there was nothing to do or the clear was sent, 1 if the composer was
-# not recognized, 2 if refused as dialog-shaped, 4 if the send lock was
-# contended (nothing sent - the next poll can try again).
+# not recognized, 2 if refused as dialog-shaped, 4 if the send lock could not
+# be acquired (nothing sent - the next poll can try again). This collapses
+# wm_tmux_send_lock's own 4/7/8 into a single 4 deliberately: this is a
+# best-effort background cleanup, not a human-facing delivery, so which of
+# "contended", "helper broke", or "reentrancy bug" occurred is not
+# actionable for this caller - any of them means "couldn't get the lock this
+# poll, try again next time" the same way.
 wm_tmux_clear_pending_composer() {
   _cc_target="$1"
   wm_tmux_send_lock "$_cc_target" || return 4
@@ -1157,9 +1179,20 @@ _wm_tmux_send_message_locked() {
 # outlives a mortal caller cgroup (see wm_tmux_scoped). Verified after the
 # create: crew must land in a session wingman genuinely owns, or fail loudly -
 # never silently fall through to a prefix-matched neighbour.
+#
+# The trailing `200<&-` is defensive, not required by any call site today
+# (this function is never called from inside a wm_tmux_send_lock-held
+# region): `new-session` is the one tmux command class that autostarts a
+# fresh server, and a server autostarted while fd 200 happened to be open
+# would inherit it, pinning the send lock's flock open for that server's
+# entire lifetime with no reclaim path at all (see wm_tmux_send_lock's own
+# doc comment). Closing fd 200 for just this one command is a no-op when it
+# is not open (verified), so it costs nothing today and removes the
+# possibility entirely if this function is ever called from a locked body
+# in the future.
 wm_tmux_ensure_session() {
   wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null && return 0
-  wm_tmux_scoped new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+  wm_tmux_scoped new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle 200<&-
   wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null \
     || wm_die "failed to create tmux session '$WM_TMUX_SESSION'"
 }
@@ -1655,6 +1688,8 @@ wm_outbox_try_redeliver() {
     3|5) _tr_outcome=unconfirmed ;;
     4) _tr_outcome=lock-contended ;;
     6) _tr_outcome=busy ;;
+    7) _tr_outcome=lock-helper-failed ;;
+    8) _tr_outcome=lock-reentrant-bug ;;
     *) _tr_outcome=unconfirmed ;;
   esac
   if [ "$_tr_outcome" = sent ]; then

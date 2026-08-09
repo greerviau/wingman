@@ -535,8 +535,10 @@ _opening_rc=$?
 # prompt; wm_tmux_send_message refuses rather than risk the objective's Enter being
 # consumed as an answer to that dialog. This is the same known startup-gate freeze
 # the watcher already flags as blocked - non-fatal here, but the objective was NOT
-# confirmed delivered (rc 2 = dialog refusal, 3 = unconfirmed submit, 4 = send
-# lock contention), so queue it: bin/watch-fleet retries the member's outbox
+# confirmed delivered (any nonzero rc - dialog refusal, unconfirmed submit,
+# send lock contention/failure, a busy pane, or an internal lock bug all
+# mean the same thing here: not confirmed), so queue it: bin/watch-fleet
+# retries the member's outbox
 # each poll once the pane is deliverable, with a manual crew-say as the
 # fallback remedy.
 if [ "$_opening_rc" -ne 0 ]; then

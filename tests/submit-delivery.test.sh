@@ -286,4 +286,31 @@ pane_helper_fail="$(wm_tmux capture-pane -p -t "$SESS:box")"
 assert_not_contains "nothing was typed when the helper itself failed" "$pane_helper_fail" "should-not-send-helper-fail"
 tmux kill-session -t "$SESS" 2>/dev/null
 
+# --- a WM_UV stand-in that exits 2 (uv's own real failure code) must NOT ---
+# --- be misread as the timeout marker's exit code -------------------------
+# `uv` itself exits 2 on its own failures (a bad --python spec, an
+# unrecognized flag - verified directly against the real binary), before
+# python ever runs - the exact exit code an earlier version of the helper
+# used to signal "timed out, ordinary contention". A stand-in that mimics
+# only the exit code (never printing the WM_SEND_LOCK_TIMEOUT marker, since
+# a real uv-level failure never reaches the python script at all) must still
+# be read as a hard failure (rc 7), not contention (rc 4) - proving the
+# dispatch is keyed on the marker, not on exit code 2.
+_uv_exit2_stub="$(wm_mktemp_dir)/uv-exit2.sh"
+cat > "$_uv_exit2_stub" <<'STUBEOF'
+#!/usr/bin/env bash
+echo "error: No interpreter found for Python 3.99" >&2
+exit 2
+STUBEOF
+chmod +x "$_uv_exit2_stub"
+tmux new-session -d -s "$SESS" -n box "WM_TEST_SWALLOW=0 bash '$STUB'"
+sleep 0.5
+out_uv_exit2="$(WM_UV="$_uv_exit2_stub" wm_tmux_send_message "$SESS:box" "should-not-send-uv-exit2" 2>&1)"
+uv_exit2_rc=$?
+assert_eq "a WM_UV stand-in exiting 2 (uv's own failure code) returns rc 7, not rc 4" "$uv_exit2_rc" "7"
+assert_not_contains "an uv-level exit-2 failure is never misread as ordinary contention" "$out_uv_exit2" "held by another delivery"
+pane_uv_exit2="$(wm_tmux capture-pane -p -t "$SESS:box")"
+assert_not_contains "nothing was typed when uv itself failed with exit 2" "$pane_uv_exit2" "should-not-send-uv-exit2"
+tmux kill-session -t "$SESS" 2>/dev/null
+
 test_summary
