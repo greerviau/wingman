@@ -284,6 +284,30 @@ def deny_dynamic(protected):
 # bin/watch-fleet'"'"'s own singleton guard is legitimately trying to reap it,
 # so this hook must not protect a pid that mechanism is entitled to kill.
 # Recomputed fresh every call, never cached.
+#
+# The start-time comparison is pinned to TZ=UTC LC_ALL=C, matching
+# bin/lib/common.sh'"'"'s wm_ps_lstart - the single source of this convention,
+# which bin/watch-fleet'"'"'s own stamp write goes through (issue #303). An
+# unpinned comparison here would inherit whichever $TZ this hook'"'"'s own
+# calling session happens to export, so a live cycle stamped under one $TZ
+# and checked under a different one would never match and this guard would
+# fail open on a genuinely live pid.
+#
+# The stamp'"'"'s third line, "lstart-utc", marks the second line as having been
+# rendered by the pinned wm_ps_lstart. A stamp with no third line (or an
+# unrecognized one) cannot be meaningfully compared against a pinned
+# rendering - either a pre-#303 stamp (rendered in whatever $TZ the writer
+# had) or otherwise unverifiable.
+#
+# A marker-less stamp does NOT degrade to protecting on kill -0 alone (same
+# round-1 PR review finding on issue #303 as bin/watch-fleet'"'"'s own
+# owner_lock_alive() - see its doc comment for the full reasoning): kill -0
+# alone cannot distinguish a genuine legacy watch-fleet cycle from a pid the
+# stamped one has since been RECYCLED to, and protecting the latter is wrong
+# in the other direction - a legitimate kill against an unrelated live
+# process would be denied on the mistaken belief that it is the watcher.
+# Requires the same independent evidence owner_lock_alive() now does: the
+# pid'"'"'s own argv actually names watch-fleet.
 def protected_pids():
     pids = set()
     for ownerlock in glob.glob(os.path.join(home, "watch*.pid.owner")):
@@ -295,6 +319,7 @@ def protected_pids():
                 lines = fh.read().splitlines()
             pid = int(lines[0])
             stamped_start = lines[1] if len(lines) > 1 else ""
+            marker = lines[2] if len(lines) > 2 else ""
         except (OSError, ValueError, IndexError):
             continue
         if pid <= 0:
@@ -303,14 +328,29 @@ def protected_pids():
             os.kill(pid, 0)
         except OSError:
             continue
-        try:
-            cur_start = subprocess.check_output(
-                ["ps", "-o", "lstart=", "-p", str(pid)],
-                stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-        except Exception:
-            continue
-        if not stamped_start or stamped_start != cur_start:
-            continue
+        if marker == "lstart-utc":
+            try:
+                cur_start = subprocess.check_output(
+                    ["ps", "-o", "lstart=", "-p", str(pid)],
+                    stderr=subprocess.DEVNULL, timeout=5,
+                    env={**os.environ, "TZ": "UTC", "LC_ALL": "C"}).decode().strip()
+            except Exception:
+                continue
+            if not stamped_start or stamped_start != cur_start:
+                continue
+        else:
+            # marker-less (pre-#303, or otherwise unverifiable): require
+            # independent evidence this pid is actually a watch-fleet cycle,
+            # not just alive, before trusting the stamp at all.
+            try:
+                args = subprocess.check_output(
+                    ["ps", "-o", "args=", "-p", str(pid)],
+                    stderr=subprocess.DEVNULL, timeout=5,
+                    env={**os.environ, "LC_ALL": "C"}).decode()
+            except Exception:
+                continue
+            if "watch-fleet" not in args:
+                continue
         beatfile = ownerlock[: -len(".pid.owner")] + ".beat"
         try:
             mtime = os.path.getmtime(beatfile)

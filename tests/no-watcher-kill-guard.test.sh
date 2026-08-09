@@ -167,11 +167,62 @@ sleep 60 &
 reused=$!
 wm_track "$reused"
 mkdir "$WINGMAN_HOME/watch.pid.owner"
-printf '%s\n%s\n' "$reused" "not-a-real-start-time" > "$WINGMAN_HOME/watch.pid.owner/owner"
+# The third line ("lstart-utc") marks this as a stamp whose start time was
+# rendered by the pinned wm_ps_lstart (issue #303) - load-bearing here: a
+# marker-less stamp instead reads as identity-unverifiable and degrades to
+# protected (kill -0 alone), which would invert this assertion.
+printf '%s\n%s\n%s\n' "$reused" "not-a-real-start-time" "lstart-utc" > "$WINGMAN_HOME/watch.pid.owner/owner"
 : > "$WINGMAN_HOME/watch.beat"
 out="$(run_hook "kill $reused")"
 assert_eq "a live-but-unrelated pid behind a mismatched identity stamp is allowed (no output)" "$out" ""
 kill "$reused" 2>/dev/null
+
+# ============================================================================
+# scenario 12 (issue #303 PR review round 1): a marker-less stamp must not
+# protect on kill -0 alone - it must verify the pid's own argv actually names
+# watch-fleet, or a pid the stamp's pid has been recycled to (e.g. after a
+# host reboot) gets wrongly protected from a legitimate kill.
+# ============================================================================
+test_new_home
+sleep 60 &
+recycled=$!
+wm_track "$recycled"
+mkdir "$WINGMAN_HOME/watch.pid.owner"
+printf '%s\n%s\n' "$recycled" "some-bogus-start-time" > "$WINGMAN_HOME/watch.pid.owner/owner"
+: > "$WINGMAN_HOME/watch.beat"
+out="$(run_hook "kill $recycled")"
+assert_eq "a marker-less stamp for a pid that is not actually watch-fleet is not protected (no output)" "$out" ""
+kill "$recycled" 2>/dev/null
+
+# ============================================================================
+# scenario 11 (issue #303): protected_pids()'s own ps -o lstart= call must be
+# pinned exactly like owner_lock_alive()'s - a cycle armed under one $TZ must
+# still be recognized (and protected) when this hook runs under a different
+# $TZ, never falling open on a live cycle mid-rollout or on any host whose
+# local $TZ is not UTC
+# ============================================================================
+_kg303_probe="$(TZ=America/New_York ps -o lstart= -p $$ | sed -e 's/^ *//' -e 's/ *$//')"
+_kg303_probe2="$(TZ=Asia/Tokyo ps -o lstart= -p $$ | sed -e 's/^ *//' -e 's/ *$//')"
+if [ "$_kg303_probe" = "$_kg303_probe2" ]; then
+  echo "SKIP: this host's zoneinfo does not distinguish America/New_York from Asia/Tokyo (missing tzdata?) - skipping the issue #303 TZ-mismatch case" >&2
+else
+  test_new_home
+  tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+  tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-tzguard 'sleep 600'
+  wm_state crew-add --id a11 --type analyst --objective x --repo /tmp --window wm-tzguard --session-id s11 >/dev/null
+  wm_state crew-set --id a11 --status working --summary "in progress" >/dev/null
+  TZ=America/New_York "$WF" >"$WINGMAN_HOME/out11.log" 2>&1 &
+  wpid11=$!
+  wm_track "$wpid11"
+  _wp11_i=0
+  while ! grep -q "watcher: armed" "$WINGMAN_HOME/out11.log" 2>/dev/null && [ "$_wp11_i" -lt 100 ]; do
+    sleep 0.2; _wp11_i=$((_wp11_i + 1))
+  done
+  out11="$(TZ=Asia/Tokyo run_hook "kill $wpid11")"
+  assert_contains "kill <pid> is still denied when the hook runs under a different \$TZ than the arming cycle" "$out11" '"permissionDecision": "deny"'
+  kill "$wpid11" 2>/dev/null
+  tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+fi
 
 # ============================================================================
 # scenario 6: tmux kill-window / tmux kill-session

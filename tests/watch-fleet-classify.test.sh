@@ -9,6 +9,14 @@
 # wingman-skills-for-robust-operation.md for the full design this proves.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+# wm_ps_lstart (for stamp_ownerlock below) lives in common.sh, not lib.sh.
+# Sourced immediately after lib.sh and before this file's first
+# test_new_home call, matching tests/submit-delivery.test.sh:20-26: the only
+# function both files define is wm_state, which resolves identically from
+# $TEST_REPO either way, so the override is inert, and nothing between here
+# and the first test_new_home reads $WM_TMUX_SESSION/$WINGMAN_HOME (only
+# function bodies are defined, not called, before then).
+. "$TEST_REPO/bin/lib/common.sh"
 
 WF="$TEST_REPO/bin/watch-fleet"
 export WM_WATCH_INTERVAL=1
@@ -25,17 +33,20 @@ dead_pid() {
 
 # stamp_ownerlock <pid> [owner-suffix] - fabricate a genuine $OWNERLOCK for a
 # real backgrounded pid, matching exactly what a real arm's own claim step
-# writes (pid + process start time). Needed wherever a test fabricates
-# $WINGMAN_HOME/watch[-<key>].pid directly rather than going through a real
-# bin/watch-fleet arm: owner_lock_alive() (issue #237) now requires this
-# identity stamp, not just the bare pidfile, to treat a pid as the genuine
-# owner.
+# writes (pid + process start time + the "lstart-utc" marker - issue #303).
+# Needed wherever a test fabricates $WINGMAN_HOME/watch[-<key>].pid directly
+# rather than going through a real bin/watch-fleet arm: owner_lock_alive()
+# (issue #237) now requires this identity stamp, not just the bare pidfile,
+# to treat a pid as the genuine owner. Goes through wm_ps_lstart, and writes
+# the marker, so this stays provably identical to the product code's own
+# write rather than exercising owner_lock_alive()'s marker-less degrade path
+# (kill -0 alone) instead of the verified-identity path it is meant to test.
 stamp_ownerlock() {
   _so_pid="$1"
   _so_suffix="${2:-}"
-  _so_start="$(ps -o lstart= -p "$_so_pid" | sed -e 's/^ *//' -e 's/ *$//')"
+  _so_start="$(wm_ps_lstart "$_so_pid")"
   mkdir -p "$WINGMAN_HOME/watch${_so_suffix}.pid.owner"
-  printf '%s\n%s\n' "$_so_pid" "$_so_start" > "$WINGMAN_HOME/watch${_so_suffix}.pid.owner/owner"
+  printf '%s\n%s\n%s\n' "$_so_pid" "$_so_start" "lstart-utc" > "$WINGMAN_HOME/watch${_so_suffix}.pid.owner/owner"
 }
 
 # --- argument-parser acceptance: --classify never hits "unknown arg" ---------

@@ -672,6 +672,28 @@ wm_composer_is_empty() {
   [ "$(printf '%s' "$1" | sed -e 's/ *$//')" = "$WM_COMPOSER_ANCHOR" ]
 }
 
+# wm_ps_lstart <pid>
+# Prints <pid>'s process start time via `ps -o lstart=`, trimmed of the
+# leading/trailing whitespace ps pads the field with. Pinned to
+# TZ=UTC LC_ALL=C: unpinned, `ps -o lstart=` renders an absolute instant into
+# the CALLING process's own local time, so a stamping process and a later
+# comparing process running under different $TZ would render the very same
+# live process's start time as two different strings and misread a live
+# holder as dead/reused (issue #298 round-1 MF1, and the same defect
+# independently in bin/watch-fleet's owner_lock_alive() - issue #303). Used
+# by owner_lock_alive() so a new pid+lstart identity comparison never has to
+# hand-copy the pin. wm_tmux_send_lock's own two call sites just below stay
+# on their existing inline (but equally correctly pinned) pipelines rather
+# than being routed through this helper too - issue #302 replaces that
+# function's entire pid/lstart/zombie predicate with an flock()-backed fd,
+# so consolidating it here now would only be rewritten again shortly after.
+# An empty result means unknown (no such pid, or ps itself unavailable) -
+# never treat it as a match against anything, including another empty
+# string.
+wm_ps_lstart() {
+  TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//'
+}
+
 # Acquire / release the per-pane send lock that serializes every keystroke aimed
 # at one pane. Extracted verbatim from wm_tmux_send_message's own body (issue
 # #236) so a caller that sends keystrokes WITHOUT going through the full

@@ -1913,7 +1913,12 @@ tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-ri1 'sleep 600'
 wm_state crew-add --id ri1 --type lead --objective x --repo /tmp --window wm-ri1 --session-id sri1 >/dev/null
 wm_state crew-set --id ri1 --status working --summary "in progress" >/dev/null
 mkdir "$WINGMAN_HOME/watch-ri1.pid.owner"
-printf '%s\n%s\n' "$$" "not-a-real-start-time" > "$WINGMAN_HOME/watch-ri1.pid.owner/owner"
+# The third line ("lstart-utc") marks this as a stamp whose start time was
+# rendered by the pinned wm_ps_lstart (issue #303) - load-bearing here: a
+# marker-less stamp instead degrades to identity-unverifiable (kill -0
+# alone), which would read $$ as the live owner and route this arm into the
+# wedged-takeover branch, killing the process running this test file.
+printf '%s\n%s\n%s\n' "$$" "not-a-real-start-time" "lstart-utc" > "$WINGMAN_HOME/watch-ri1.pid.owner/owner"
 "$WF" --owner ri1 >"$WINGMAN_HOME/ri1.log" 2>&1 &
 ri1pid=$!
 wm_track "$ri1pid"
@@ -1928,6 +1933,108 @@ assert_not_contains "no takeover is attempted against the harness's own process"
 assert_true "the test harness's own process ($$) is left untouched" "kill -0 $$"
 assert_true "the fresh claimant's pid is genuinely live" "kill -0 $ri1pid"
 kill "$ri1pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #303: owner_lock_alive()'s TZ-pinned identity comparison ---------
+# ps -o lstart= renders an absolute instant into the CALLING process's own
+# local time (unpinned), so a stamping cycle and a later checking process
+# under a different $TZ would render the very same live process's start time
+# as two different strings - misreading a live cycle as dead, the opposite
+# (and more dangerous) polarity from issue #298's send-lock defect. Guard the
+# precondition first: a minimal container with no tzdata renders every
+# unresolvable zone identically to UTC, which would make every case below
+# pass vacuously against unfixed code (mirrors the zoneinfo gap in PR #301's
+# own $TZ case, closed here for all three zones this file uses).
+_tz303_probe="$(TZ=America/New_York ps -o lstart= -p $$ | sed -e 's/^ *//' -e 's/ *$//')"
+_tz303_probe2="$(TZ=Asia/Tokyo ps -o lstart= -p $$ | sed -e 's/^ *//' -e 's/ *$//')"
+_tz303_probe3="$(TZ=Asia/Kathmandu ps -o lstart= -p $$ | sed -e 's/^ *//' -e 's/ *$//')"
+if [ "$_tz303_probe" = "$_tz303_probe2" ] || [ "$_tz303_probe" = "$_tz303_probe3" ] || [ "$_tz303_probe2" = "$_tz303_probe3" ]; then
+  echo "SKIP: this host's zoneinfo does not distinguish America/New_York, Asia/Tokyo, and Asia/Kathmandu (missing tzdata?) - skipping the issue #303 TZ-mismatch cases" >&2
+else
+  # Primary case: arm under one $TZ, confirm the cycle is read as LIVE (not
+  # dead) when checked under a different $TZ via --status, then prove the
+  # actual dual-watcher hazard directly: a second arm attempt under a THIRD,
+  # genuinely distinct offset (Asia/Kathmandu is +05:45 - not Asia/Pyongyang,
+  # which has been identical to Asia/Tokyo, UTC+9, since 2018) must recognize
+  # the existing cycle rather than claim a rival one.
+  test_new_home
+  tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+  tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-tz1 'sleep 600'
+  wm_state crew-add --id tz1 --type lead --objective x --repo /tmp --window wm-tz1 --session-id stz1 >/dev/null
+  wm_state crew-set --id tz1 --status working --summary "in progress" >/dev/null
+  TZ=America/New_York "$WF" --owner tz1 >"$WINGMAN_HOME/tz1.log" 2>&1 &
+  tz1pid=$!
+  wm_track "$tz1pid"
+  _tz1_i=0
+  while ! grep -q "watcher: armed" "$WINGMAN_HOME/tz1.log" 2>/dev/null && [ "$_tz1_i" -lt 100 ]; do
+    sleep 0.2; _tz1_i=$((_tz1_i + 1))
+  done
+  out_tz1status="$(TZ=Asia/Tokyo "$WF" --owner tz1 --status 2>&1)"
+  assert_contains "a cycle armed under one \$TZ reads live when checked under another" "$out_tz1status" "watch-fleet cycle live"
+  assert_not_contains "it is never misread as dead across a \$TZ mismatch" "$out_tz1status" "no live watch-fleet cycle"
+  # wm_timeout, not backgrounded: on the intended path this exits immediately
+  # ("already armed and healthy"); on a regression it re-enters the claim
+  # path and blocks forever (that is what an armed cycle does), which would
+  # hang this file - tests/lib.sh:172-181 documents wm_timeout for exactly
+  # this failure mode.
+  out_tz1arm2="$(TZ=Asia/Kathmandu wm_timeout 10 "$WF" --owner tz1 2>&1)"
+  assert_contains "a second arm under a third \$TZ recognizes the existing cycle" "$out_tz1arm2" "already armed and healthy"
+  assert_eq "the pidfile still names the first-armed pid, not a rival claimant" "$(cat "$WINGMAN_HOME/watch-tz1.pid" 2>/dev/null)" "$tz1pid"
+  assert_true "the first-armed pid is still alive" "kill -0 $tz1pid"
+  kill "$tz1pid" 2>/dev/null
+  tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+  # Legacy-stamp case: a marker-less two-line stamp (standing in for one a
+  # pre-#303 cycle would have left on disk mid-rollout) must degrade to
+  # trusting kill -0 alone - i.e. still the live owner, never misread as
+  # reused/dead and never claimed over.
+  test_new_home
+  tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+  tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-tz2 'sleep 600'
+  wm_state crew-add --id tz2 --type lead --objective x --repo /tmp --window wm-tz2 --session-id stz2 >/dev/null
+  wm_state crew-set --id tz2 --status working --summary "in progress" >/dev/null
+  "$WF" --owner tz2 >"$WINGMAN_HOME/tz2.log" 2>&1 &
+  tz2pid=$!
+  wm_track "$tz2pid"
+  _tz2_i=0
+  while ! grep -q "watcher: armed" "$WINGMAN_HOME/tz2.log" 2>/dev/null && [ "$_tz2_i" -lt 100 ]; do
+    sleep 0.2; _tz2_i=$((_tz2_i + 1))
+  done
+  _tz2_start="$(sed -n '2p' "$WINGMAN_HOME/watch-tz2.pid.owner/owner" 2>/dev/null)"
+  printf '%s\n%s\n' "$tz2pid" "$_tz2_start" > "$WINGMAN_HOME/watch-tz2.pid.owner/owner"
+  out_tz2status="$("$WF" --owner tz2 --status 2>&1)"
+  assert_contains "a marker-less (legacy) stamp for a genuinely live pid still reads live" "$out_tz2status" "watch-fleet cycle live"
+  out_tz2arm2="$(wm_timeout 10 "$WF" --owner tz2 2>&1)"
+  assert_contains "a second arm against a legacy stamp recognizes the existing cycle, not a takeover" "$out_tz2arm2" "already armed and healthy"
+  assert_eq "the pidfile still names the original pid" "$(cat "$WINGMAN_HOME/watch-tz2.pid" 2>/dev/null)" "$tz2pid"
+  kill "$tz2pid" 2>/dev/null
+  tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+fi
+
+# --- issue #303 PR review round 1: a marker-less stamp must not trust kill -0
+# alone - it must verify the pid is actually a watch-fleet cycle (its own
+# argv), or a pid the stamp's own pid has been RECYCLED to (e.g. after a host
+# reboot, the exact scenario the identity stamp exists for) gets treated as
+# the live owner. With no beacon file at all (a marker-less stamp never
+# written by this codebase's own claim step has none either), that reads as
+# wedged past WM_WATCH_HARD_GRACE, and the singleton guard's existing
+# takeover machinery SIGTERMs/SIGKILLs it - the exact harm the identity stamp
+# was added to prevent, reintroduced by the "cannot verify" branch itself. ---
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+sleep 600 &
+innocentpid=$!
+wm_track "$innocentpid"
+mkdir "$WINGMAN_HOME/watch.pid.owner"
+_innocent_start="$(TZ=UTC LC_ALL=C ps -o lstart= -p "$innocentpid" | sed -e 's/^ *//' -e 's/ *$//')"
+printf '%s\n%s\n' "$innocentpid" "$_innocent_start" > "$WINGMAN_HOME/watch.pid.owner/owner"
+echo "$innocentpid" > "$WINGMAN_HOME/watch.pid"
+# Deliberately no watch.beat - the recycled-pid scenario this stands in for
+# (a reboot, nothing clears $WM_HOME) never had one from this codebase either.
+out_innocent="$(wm_timeout 15 "$WF" >"$WINGMAN_HOME/innocent.log" 2>&1; cat "$WINGMAN_HOME/innocent.log")"
+assert_true "the innocent pid behind a marker-less stamp survives" "kill -0 $innocentpid"
+assert_contains "a fresh cycle claims normally instead of taking over" "$out_innocent" "watcher: armed"
+kill "$innocentpid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Fix 3 MF3 (round-2 MF-B): $OWNERLOCK creation - the mkdir itself fails -
