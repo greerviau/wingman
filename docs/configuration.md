@@ -78,7 +78,8 @@ Every crew member is an independent, interactive `claude` session in its own tmu
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   --objective "<one-line task>" [--input <plan-path>] \
-  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--allow-merge]
+  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--allow-merge] \
+  [--constraint "<text>" ...]
 ```
 
 The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
@@ -90,6 +91,16 @@ Use it for cross-repo work or when the repo is genuinely unclear.
 **Wingman's own root `CLAUDE.md` is mechanically excluded from every crew session's context.** The generated launch always carries `--settings` with a `claudeMdExcludes` entry naming wingman's own repo root (and its `<repo>-*` worktree-sibling glob), unconditionally, regardless of `--scope` or target - so the orchestrator persona never auto-loads for a crew member, even one working on wingman's own files. The same payload is re-emitted by `bin/crew-takeover`'s printed resume command and `bin/crew-resume`'s relaunch script, so it survives past a member's first process (see `docs/guards.md`).
 
 **Merge authorization.** `--allow-merge` is per-spawn and never a default: a crew member cannot merge its own PR unless the human explicitly granted it for that one effort (see [guards.md](guards.md)'s `hooks/no-merge-guard.sh`). It is visible in `bin/crew-list`/`board.md` as `allow_merge`. To grant it to a member that is already running, use `$WINGMAN_STATE crew-set --id <id> --allow-merge true` rather than respawning; it takes effect on the next merge attempt.
+
+**Pilot-stated constraints.** `--constraint "<text>"` is per-spawn and repeatable: a
+verbatim record of something the pilot said about *how* this effort must be carried out.
+It is visible in `bin/crew-list`/`board.md` as `constraints`, and `bin/crew-say` refuses a
+later follow-up to that member unless `--ack-constraints` is also passed (see
+[guards.md](guards.md)). To add one to a member that is already running, use
+`$WINGMAN_STATE crew-set --id <id> --add-constraint "<text>"`; to record that the pilot
+lifted one, `--clear-constraints --confirm-clear` (the confirmation is mandatory whenever
+the record is non-empty - a bare `--clear-constraints` is refused and reprints what it
+would erase, so the record this whole mechanism depends on can never be silently emptied).
 
 **Model and effort selection.** Most specific wins: an explicit `--model`/`--effort` on the spawn, then the settings file's `[models]`/`[effort]` entry for *that crew type*, then `$WM_MODEL`/`$WM_EFFORT` (where the file's own `default` lands), then the agent CLI's own default. See [the settings file](#the-settings-file---configlocaltoml) for the full chain. `--model`/`--effort` are per-spawn - they affect only that one session, never wingman's own model or any other member's.
 

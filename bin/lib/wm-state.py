@@ -662,6 +662,28 @@ def cmd_crew_add(args):
         # identical self-grant restriction allow_merge already carries - see
         # hooks/no-merge-guard.sh's check_review_gate_waiver_grant().
         "review_gate_waived": bool(getattr(args, "review_gate_waived", False)),
+        # Durable record of constraints the pilot has personally stated for this
+        # effort (issue #192) - captured once at spawn (bin/spawn-crew
+        # --constraint, repeatable) so they survive independently of whatever the
+        # spawning session's own --objective string says. A list of {"text":
+        # <verbatim>, "set_at": <timestamp>} entries, empty by default. Unlike
+        # allow_merge/review_gate_waived above, this grants a crew member nothing
+        # and carries no self-grant restriction - the record exists purely so a
+        # LATER crew-say to this member can resurface what the pilot already
+        # said before a new instruction is composed. See bin/crew-say's
+        # --ack-constraints gate and CLAUDE.md, "A pilot constraint is not
+        # yours to relax."
+        "constraints": [
+            {"text": t, "set_at": stamp}
+            for t in (getattr(args, "constraint", None) or [])
+        ],
+        # Bare trace of every constraint ever cleared from this record via
+        # crew-set --clear-constraints --confirm-clear (issue #192, review
+        # round 1) - {"text", "set_at", "cleared_at"} per entry. Always a list
+        # (never None), matching `constraints` itself; empty until a clear
+        # actually happens. Not a full who/why audit trail (see "Rejected
+        # alternatives") - only enough that a clear is never simply invisible.
+        "constraints_cleared": [],
         # Spawn-time per-verdict hash commitments (issue #135), reviewer type
         # only: sha256(sha256(token || id || verdict)) for each of "approve"
         # and "request changes", derived below via _apply_review_token and
@@ -1063,6 +1085,52 @@ def cmd_crew_set(args):
                 # hooks/no-merge-guard.sh reads.
                 if getattr(args, "review_gate_waived", None) is not None:
                     r["review_gate_waived"] = args.review_gate_waived == "true"
+                # constraints (issue #192): --clear-constraints runs FIRST so
+                # `--clear-constraints --add-constraint "new text"` in one call
+                # replaces the set atomically rather than clearing what was
+                # just added. Both roster-only, like allow_merge/
+                # review_gate_waived just above - an ordinary crew-set call
+                # that passes neither flag leaves constraints untouched.
+                #
+                # A non-empty clear REQUIRES --confirm-clear (review round 1
+                # fix): without it, this is a fail-loud refusal - via
+                # sys.exit, which with_locked's @contextmanager wrapping
+                # (bin/lib/wm_lock.py) still unwinds correctly through, same
+                # as every other exception - that reprints exactly what would
+                # be erased, so clearing a standing pilot constraint can never
+                # happen with the caller not having just seen it named. An
+                # already-empty `constraints` list needs no confirmation -
+                # there is nothing to hide a clear behind. A confirmed clear
+                # is appended (each entry plus a cleared_at stamp) to
+                # `constraints_cleared` rather than simply dropped, so the
+                # roster keeps a bare trace of what was cleared and when, even
+                # though who/why beyond that is left a follow-up (see the
+                # plan's "Rejected alternatives").
+                if getattr(args, "clear_constraints", False):
+                    _existing_constraints = r.get("constraints") or []
+                    if _existing_constraints and not getattr(args, "confirm_clear", False):
+                        _lines = "\n".join(
+                            "  - %s (recorded %s)" % (c.get("text", ""), c.get("set_at") or "unknown time")
+                            for c in _existing_constraints
+                        )
+                        sys.exit(
+                            "wm-state: --clear-constraints on '%s' would erase %d standing pilot "
+                            "constraint(s):\n%s\nThis must not happen without being seen - re-run "
+                            "with --confirm-clear to proceed. See CLAUDE.md, \"A pilot constraint is "
+                            "not yours to relax.\"" % (args.id, len(_existing_constraints), _lines)
+                        )
+                    if _existing_constraints:
+                        _cleared_stamp = now()
+                        r["constraints_cleared"] = list(r.get("constraints_cleared") or []) + [
+                            dict(c, cleared_at=_cleared_stamp) for c in _existing_constraints
+                        ]
+                    r["constraints"] = []
+                if getattr(args, "add_constraint", None):
+                    _existing_constraints = list(r.get("constraints") or [])
+                    _c_stamp = now()
+                    for _c_text in args.add_constraint:
+                        _existing_constraints.append({"text": _c_text, "set_at": _c_stamp})
+                    r["constraints"] = _existing_constraints
                 # remote_control_connected is likewise roster-only (issue #96):
                 # bin/watch-fleet's regular, stability-gated poll is the only
                 # writer, so bin/crew-standdown can read a previously-vetted
@@ -4303,6 +4371,10 @@ def render_roster_text(rows):
             lines.append("      merge: AUTHORIZED for this effort (issue #46)")
         if r.get("review_gate_waived"):
             lines.append("      review gate: WAIVED for this effort (issue #132)")
+        if r.get("constraints"):
+            lines.append("      constraints (from the pilot - do not relax without a fresh pilot instruction, issue #192):")
+            for c in r["constraints"]:
+                lines.append("        - %s" % c.get("text", ""))
     return "\n".join(lines)
 
 
@@ -4334,6 +4406,10 @@ def render_tree_text(rows):
             lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
         if r.get("review_gate_waived"):
             lines.append("%s    review gate: WAIVED for this effort (issue #132)" % indent)
+        if r.get("constraints"):
+            lines.append("%s    constraints (from the pilot - do not relax without a fresh pilot instruction, issue #192):" % indent)
+            for c in r["constraints"]:
+                lines.append("%s        - %s" % (indent, c.get("text", "")))
     return "\n".join(lines)
 
 
@@ -4351,7 +4427,7 @@ def render_board():
         # letting a human read the org rather than a flat list.
         for r, depth in order_tree(active):
             marker = ("&nbsp;&nbsp;" * depth) + ("↳ " if depth else "")
-            id_cell = r.get("id", "") + (" (merge-authorized)" if r.get("allow_merge") else "") + (" (review-waived)" if r.get("review_gate_waived") else "")
+            id_cell = r.get("id", "") + (" (merge-authorized)" if r.get("allow_merge") else "") + (" (review-waived)" if r.get("review_gate_waived") else "") + (" (constrained)" if r.get("constraints") else "")
             repo_cell = (
                 os.path.basename(r.get("repo", "") or "")
                 + (" (global)" if r.get("scope") == "global" else "")
@@ -4432,6 +4508,12 @@ def build_parser():
     # Mirrors --allow-merge's shape exactly - see hooks/no-merge-guard.sh for how
     # the two combine.
     a.add_argument("--waive-review-gate", action="store_true", dest="review_gate_waived")
+    # Durable pilot-constraint capture (issue #192): 0+ verbatim statements the
+    # pilot made about how this effort's work must be carried out (e.g. "go one
+    # at a time"), each stored with a set_at stamp. Repeatable; empty by
+    # default. Read back by bin/crew-say before it composes a follow-up to this
+    # member - see that script's --ack-constraints gate.
+    a.add_argument("--constraint", action="append", default=None, dest="constraint")
     # Remote-Control-visible at spawn (issue #96): mirrors bin/spawn-crew's own
     # --remote-control "wm-<id>" launch flag, gated on the same $REMOTE_CONTROL
     # variable. Drives both this record's own remote_control field and the
@@ -4482,6 +4564,30 @@ def build_parser():
     # by the member on its own --id; hooks/no-merge-guard.sh enforces that
     # boundary identically to --allow-merge.
     a.add_argument("--review-gate-waived", default=None, choices=("true", "false"), dest="review_gate_waived")
+    # Add one more durable constraint to this member's record (issue #192) -
+    # repeatable, mid-session equivalent of crew-add --constraint. Roster-only,
+    # like --allow-merge/--waive-review-gate above: never part of the member's
+    # own live-status report, never gated by a self-grant restriction (this
+    # grants no privilege - it only affects what bin/crew-say demands an
+    # acknowledgment of before messaging this member).
+    a.add_argument("--add-constraint", action="append", default=None, dest="add_constraint")
+    # Clear every recorded constraint (issue #192) - the explicit step for the
+    # one legitimate case a standing constraint goes away: the pilot's own
+    # later words relaxed or replaced it. Roster-only. Combine with
+    # --add-constraint in the same call to replace the set atomically (clear
+    # is applied before add - see cmd_crew_set). Refused unless --confirm-clear
+    # is also passed unless the record is already empty - see that flag.
+    a.add_argument("--clear-constraints", action="store_true", dest="clear_constraints")
+    # Required alongside --clear-constraints whenever the record is non-empty
+    # (issue #192, review round 1): without this, --clear-constraints is one
+    # ordinary command wingman's own session could run on itself with no
+    # identity restriction (unlike allow_merge/review_gate_waived, there is no
+    # self-grant boundary that would help here - see "Rejected alternatives" -
+    # since wingman is exactly the actor both real incidents implicate, not an
+    # untrusted third party). cmd_crew_set refuses a non-empty clear without
+    # this flag and reprints exactly what would be erased, mirroring
+    # bin/crew-say's own --ack-constraints reprint-and-require-a-flag shape.
+    a.add_argument("--confirm-clear", action="store_true", dest="confirm_clear")
     # Roster-only, single-field write (issue #96): bin/watch-fleet's own
     # regular, stability-gated poll is the only writer of this field - never a
     # crew member itself, and never bin/crew-standdown, which only reads it.

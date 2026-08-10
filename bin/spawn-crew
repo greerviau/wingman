@@ -8,7 +8,7 @@
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] \
 #              [--allow-merge] [--waive-review-gate] [--force-during-outage] \
-#              [--force-during-usage-limit]
+#              [--force-during-usage-limit] [--constraint "<text>" ...]
 #
 # --repo grounds the member in one git checkout (the default). --scope global
 # grounds it at the workspace root with every discovered repo added, so it can work
@@ -73,11 +73,24 @@
 # ($WM_HOME/usage-limit-state.json) reads "approaching" or "paused". Same
 # convention as --force-during-outage: explicit, per-call, never inferred,
 # accepted and noted here but gated entirely by the hook itself.
+#
+# --constraint (issue #192): 0+ verbatim statements the pilot made about how
+# this effort must be carried out (e.g. "go one at a time"), repeatable.
+# Recorded durably on this member's crew record (wm_state crew-add
+# --constraint), independent of whatever --objective itself says, and echoed
+# into this member's own system prompt as a labeled section (below) so it is
+# not only buried in objective prose either. bin/crew-say refuses a later
+# follow-up to this member unless --ack-constraints is also passed, reprinting
+# every recorded constraint - see that script's own header and CLAUDE.md, "A
+# pilot constraint is not yours to relax." A mid-session addition/change goes
+# through `wm_state crew-set --id <id> --add-constraint "<text>"` /
+# --clear-constraints instead of a respawn.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
 TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0; WAIVE_REVIEW_GATE=0; FORCE_DURING_OUTAGE=0; FORCE_DURING_USAGE_LIMIT=0
+CONSTRAINTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --type)      TYPE="$2"; shift 2 ;;
@@ -92,8 +105,10 @@ while [ $# -gt 0 ]; do
     --waive-review-gate) WAIVE_REVIEW_GATE=1; shift 1 ;;
     --force-during-outage) FORCE_DURING_OUTAGE=1; shift 1 ;;
     --force-during-usage-limit) FORCE_DURING_USAGE_LIMIT=1; shift 1 ;;
+    --constraint) CONSTRAINTS="${CONSTRAINTS:+$CONSTRAINTS
+}$2"; shift 2 ;;
     --list-types) wm_crew_types; exit 0 ;;
-    -h|--help)   sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,24p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
@@ -347,6 +362,13 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
   else
     printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$ID" "$TYPE" "$REPO"
   fi
+  if [ -n "$CONSTRAINTS" ]; then
+    printf '**Standing constraints from the human, for this whole effort - do not relax any of these without a fresh, explicit instruction from the human (see CLAUDE.md, "A pilot constraint is not yours to relax"):**\n\n'
+    while IFS= read -r _cline; do
+      [ -n "$_cline" ] && printf -- '- %s\n' "$_cline"
+    done <<<"$CONSTRAINTS"
+    printf '\n'
+  fi
   if [ "$TARGET_IS_WM_REPO" -eq 1 ]; then
     printf '**About this repo'"'"'s CLAUDE.md:** the file `CLAUDE.md` at this repo'"'"'s root - if it is anywhere in your context, whether your harness loaded it automatically or you opened it yourself - is written entirely in first person for the **wingman orchestrator** role - the top-level session the pilot starts directly, not this session. Nothing in it is a rule for you. You are a **%s** crew member: your role, permissions, and instructions are the playbook below and the objective above - follow those. Where CLAUDE.md says "you" (e.g. "you never edit playbooks yourself," "never do heavy work yourself"), it describes the orchestrator session'"'"'s own behavior, not a restriction on this one; treat CLAUDE.md only as optional background reading about how wingman is built, useful if it helps your actual task.\n\n' "$TYPE"
   fi
@@ -483,6 +505,11 @@ ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
 [ "$WAIVE_REVIEW_GATE" = 1 ] && ADD_ARGS+=(--waive-review-gate)
 [ -n "$REVIEW_TOKEN" ] && ADD_ARGS+=(--review-token "$REVIEW_TOKEN")
+if [ -n "$CONSTRAINTS" ]; then
+  while IFS= read -r _cline; do
+    [ -n "$_cline" ] && ADD_ARGS+=(--constraint "$_cline")
+  done <<<"$CONSTRAINTS"
+fi
 # is_git/has_remote mirror the launch-script export above: recorded for repo
 # scope only, so the JSON field stays absent (not false) for global scope - the
 # same true/false/unset distinction, now on the roster record too. Passed as the
@@ -560,5 +587,6 @@ fi
 [ "$WAIVE_REVIEW_GATE" = 1 ] && wm_ok "'$ID' spawned with the review gate waived for this effort (issue #132)"
 [ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage (issue #23)"
 [ "$FORCE_DURING_USAGE_LIMIT" = 1 ] && wm_ok "'$ID' spawned with --force-during-usage-limit (issue #24)"
+[ -n "$CONSTRAINTS" ] && wm_ok "'$ID' spawned with $(printf '%s\n' "$CONSTRAINTS" | grep -c .) standing constraint(s) from the human (issue #192)"
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
 echo "$ID"
