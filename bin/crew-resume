@@ -379,11 +379,21 @@ EOF
   # outright instead of clearing anything it hasn't composed yet.
   WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge"
   _resume_nudge_rc=$?
-  if [ "$_resume_nudge_rc" -eq 2 ]; then
-    wm_warn "'$_rid': resume nudge NOT delivered - its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $_rid)"
-  elif [ "$_resume_nudge_rc" -eq 6 ]; then
-    wm_warn "'$_rid': resume nudge NOT delivered - its pane is mid-turn with a composer already holding text, so nothing was typed."
-  fi
+  # Every documented wm_tmux_send_message rc gets matched wording (bin/lib/common.sh:1034-1056
+  # for the canonical list), mirroring bin/crew-say:100-107 - previously only rc 2 and rc 6
+  # were named here; 3/4/5/7/8 fell through silently to the generic "QUEUED" line below with
+  # no diagnosis of why (issue #173).
+  case "$_resume_nudge_rc" in
+    0) ;;
+    2) wm_warn "'$_rid': resume nudge NOT delivered - its pane looks like a permission/trust dialog, not the chat input (see: bin/crew-takeover $_rid)" ;;
+    3) wm_warn "'$_rid': resume nudge NOT delivered - it was typed into the pane but the submit never visibly registered; treat it as not delivered." ;;
+    4) wm_warn "'$_rid': resume nudge NOT delivered - another delivery is holding the pane's send lock." ;;
+    5) wm_warn "'$_rid': resume nudge NOT delivered - it was typed into the pane but the submit never visibly registered, and the pane was busy (still repainting on its own clock) - likely queued behind its current turn rather than lost outright." ;;
+    6) wm_warn "'$_rid': resume nudge NOT delivered - its pane is mid-turn with a composer already holding text, so nothing was typed." ;;
+    7) wm_warn "'$_rid': resume nudge NOT delivered - the send-lock helper for the pane failed unexpectedly (a broken local 'uv'/python 'fcntl' toolchain, not contention) - nothing was typed. Worth investigating directly: an ordinary contention refusal would clear on its own; a broken helper will not." ;;
+    8) wm_warn "'$_rid': resume nudge NOT delivered - an internal bug attempted a reentrant send-lock acquisition for the pane - nothing was typed. This indicates a programming error, not ordinary contention - please report it." ;;
+    *) wm_warn "'$_rid': resume nudge NOT delivered (unrecognized rc $_resume_nudge_rc from wm_tmux_send_message)." ;;
+  esac
   # Any nonzero rc means the nudge did not confirm delivered (issue #214): a
   # resumed session that misses this nudge otherwise silently gets nothing -
   # no re-arm reminder, no "you were resumed" context - since crew-resume

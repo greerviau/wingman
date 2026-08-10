@@ -145,6 +145,96 @@ assert_contains "the queued nudge carries the resumed-session context text" \
   "$(cat "$WINGMAN_HOME/outbox/rgate1/$q_gate" 2>/dev/null)" "Your previous window was interrupted"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #173: rc 3 (typed but unconfirmed) also warns with matched wording
+# and queues, not just rc 2/6 ------------------------------------------------
+# The relaunched window's pane genuinely accepts the nudge's keystrokes but
+# never confirms the submit (composer-stub with SWALLOW=1, BUSY=0 - the same
+# fixture tests/composer-confirm-delivery.test.sh proves returns rc 3): the
+# resume still succeeds (window/roster already in place), the nudge is
+# diagnosed with rc-3-specific wording (not the old silent fallback to the
+# generic QUEUED line), and it's queued for the watcher's retry same as rc 2.
+# WM_AGENT must be a real executable path - crew-resume writes it verbatim
+# into the generated launch script's `exec` line, and that script runs
+# inside a freshly spawned tmux window. tmux does not propagate the invoking
+# shell's env vars into a window it creates (confirmed empirically; every
+# other file driving this fixture bakes its WM_TEST_* vars directly into the
+# command string handed to tmux new-session/new-window instead of exporting
+# them beforehand), so the composer stub's knobs are baked into a thin
+# wrapper script rather than set as plain env vars on the crew-resume call.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rswallow1 --type developer --objective x --repo /tmp --window wm-rswallow1 --session-id sess-rswallow1 >/dev/null
+wm_state crew-set --id rswallow1 --status died >/dev/null
+SWALLOW_MARKER="$(wm_mktemp_file)"
+SWALLOW_STUB="$(wm_mktemp_dir)/swallow-wrap.sh"
+cat > "$SWALLOW_STUB" <<SWALLOWEOF
+#!/usr/bin/env bash
+export WM_TEST_BUSY=0 WM_TEST_SWALLOW=1 WM_TEST_MARKER='$SWALLOW_MARKER'
+exec "$TEST_REPO/tests/fixtures/composer-stub.sh"
+SWALLOWEOF
+chmod +x "$SWALLOW_STUB"
+out_swallow="$(WM_AGENT="$SWALLOW_STUB" \
+  WM_SUBMIT_DELAY=0.3 WM_READY_POLL=0.3 WM_SUBMIT_POLL=0.4 WM_READY_TRIES=20 WM_SUBMIT_TRIES=8 \
+  "$CR" rswallow1 2>&1)"
+assert_contains "the resume itself still succeeds despite the unconfirmed nudge" "$out_swallow" "1 resumed"
+assert_eq "status flips to working" "$(field_of rswallow1 status)" "working"
+assert_contains "crew-resume warns the nudge was not delivered (rc 3 wording)" \
+  "$out_swallow" "resume nudge NOT delivered"
+assert_contains "the warning names the unconfirmed-submit shape, not the rc-2/6 wording" \
+  "$out_swallow" "submit never visibly registered"
+assert_contains "crew-resume still reports the nudge as queued" "$out_swallow" "resume nudge is QUEUED"
+q_swallow="$(ls "$WINGMAN_HOME/outbox/rswallow1" 2>/dev/null | grep -v '^sent-' | head -1)"
+assert_true "the resume nudge landed in the outbox" "[ -n \"$q_swallow\" ]"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #173: rc 4 (send-lock contended) also warns with matched wording
+# and queues -------------------------------------------------------------------
+# A separate process holds crew-resume's own target's per-pane send lock
+# before the resume even starts, forcing wm_tmux_send_message to give up with
+# rc 4 (contention, not a dialog/composer refusal) once WM_SEND_LOCK_WAIT
+# elapses - proving the lock-contended path is now diagnosed and queued too,
+# not silently swallowed into the old generic "QUEUED" line.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rlock1 --type developer --objective x --repo /tmp --window wm-rlock1 --session-id sess-rlock1 >/dev/null
+wm_state crew-set --id rlock1 --status died >/dev/null
+
+LOCK_HOLDER="$(wm_mktemp_dir)/holder.sh"
+cat > "$LOCK_HOLDER" <<HOLDEREOF
+#!/usr/bin/env bash
+set -u
+. "$TEST_REPO/bin/lib/common.sh"
+wm_tmux_send_lock "=$WM_TMUX_SESSION:=wm-rlock1" || exit 9
+echo "HOLDING \$\$"
+while :; do sleep 0.05; done
+HOLDEREOF
+chmod +x "$LOCK_HOLDER"
+"$LOCK_HOLDER" >"$WINGMAN_HOME/lock-holder.out" 2>&1 &
+_lock_holder_shell_pid=$!
+wm_track "$_lock_holder_shell_pid"
+_lh_i=0
+while [ "$_lh_i" -lt 50 ]; do
+  grep -q "^HOLDING " "$WINGMAN_HOME/lock-holder.out" 2>/dev/null && break
+  sleep 0.1; _lh_i=$((_lh_i+1))
+done
+_lock_holder_pid="$(awk '{print $2}' "$WINGMAN_HOME/lock-holder.out")"
+assert_true "the holder process genuinely acquired the send lock" "[ -n \"$_lock_holder_pid\" ]"
+
+out_lock="$(WM_AGENT="$ALIVE_STUB" WM_SEND_LOCK_WAIT=1 "$CR" rlock1 2>&1)"
+assert_contains "the resume itself still succeeds despite the contended nudge" "$out_lock" "1 resumed"
+assert_eq "status flips to working" "$(field_of rlock1 status)" "working"
+assert_contains "crew-resume warns the nudge was not delivered (rc 4 wording)" \
+  "$out_lock" "resume nudge NOT delivered"
+assert_contains "the warning names lock contention, not a dialog/composer refusal" \
+  "$out_lock" "holding the pane's send lock"
+assert_contains "crew-resume still reports the nudge as queued" "$out_lock" "resume nudge is QUEUED"
+q_lock="$(ls "$WINGMAN_HOME/outbox/rlock1" 2>/dev/null | grep -v '^sent-' | head -1)"
+assert_true "the resume nudge landed in the outbox" "[ -n \"$q_lock\" ]"
+
+kill -KILL "$_lock_holder_pid" 2>/dev/null
+wait "$_lock_holder_shell_pid" 2>/dev/null
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- a resume outside any wingman run exports an empty run id ------------------
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
