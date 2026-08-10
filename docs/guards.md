@@ -22,6 +22,24 @@ The rules stated in prose across these docs and `CLAUDE.md` are also enforced me
 
 Not a hook, but the same "mechanical, not prose" discipline: `bin/spawn-crew`, `bin/crew-takeover`, and `bin/crew-resume` all bake a `claudeMdExcludes` entry (via the shared `wm_claude_md_excludes()` helper) into every crew launch, unconditionally, so wingman's own root `CLAUDE.md` - the orchestrator's own first-person persona - never auto-loads into a crew session's context. This is the mechanical counterpart to the `TARGET_IS_WM_REPO`-gated prose disclaimer (issue #69) `bin/spawn-crew` also injects into a crew member's system prompt: the disclaimer tells a member to disregard the file if it sees it, while this exclusion stops it from being loaded at all (issue #213).
 
+Also not a hook, and deliberately not one: `bin/crew-say`'s `--ack-constraints` gate
+(issue #192) refuses a message to a crew member carrying one or more recorded
+`constraints` unless that flag is also passed, reprinting every constraint on refusal. It
+lives inline in the script itself rather than as a registered `PreToolUse` hook because
+`crew-say` is already the sole sanctioned path for injecting a follow-up message into a
+crew member's session (mirroring where the team guardrail itself is implemented, `:35-50`
+in that same file) - there is no second, unguarded route into a live session's pane this
+gate would need to also catch. It deliberately does not attempt to judge whether a given
+message actually relaxes a given constraint (that would require judging arbitrary
+natural-language content, the one class of check this project consistently keeps out of
+its guards - see the catalog above); it only guarantees the constraint text cannot be
+absent from the sending session's own context when the call is made. The identical
+reprint-and-require-a-flag shape gates the record's own clear path too:
+`wm_state crew-set --clear-constraints` on a non-empty record refuses without
+`--confirm-clear`, so the record this whole mechanism depends on can never be silently
+emptied by the same session that would otherwise want to relax it. See `CLAUDE.md`, "A
+pilot constraint is not yours to relax."
+
 Each of these exists because relying on the equivalent prose instruction alone had already failed at least once in this project's history; the hook is a backstop, not a replacement for the playbook text.
 
 Every Bash-inspecting guard above matches the *resolved* command of each `;`/`&&`/`||`/pipe segment via the shared recognizer in `hooks/lib/cmd_match.py`, which sees through `env`/`sudo`/`uv run`/wrapper-shell `-c`/`eval` wrappers before matching - so `bash -c "gh pr merge 5"` and `eval "gh pr merge 5"` are caught the same as the unwrapped form (issue #168).

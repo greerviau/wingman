@@ -139,7 +139,46 @@ Pass **`--scope global`** (instead of `--repo`) to ground a member at the worksp
 Only pass `--allow-merge` when the pilot has explicitly said this one effort may merge on its own - **never as a default, never because a PR "looks done."**
 To grant it after a member is already spawned, run `$WINGMAN_STATE crew-set --id <id> --allow-merge true` instead of respawning.
 
+**Constraints the pilot states about *how* the work runs** (serial execution, a repo
+carve-out, a timing rule) → pass `--constraint "<verbatim>"` at spawn (repeatable), or add
+one later with `$WINGMAN_STATE crew-set --id <id> --add-constraint "<text>"`. See "A pilot
+constraint is not yours to relax" below for what this changes about how you compose a
+later `crew-say`.
+
 **Compose crew-facing text in neutral language.** In `--objective` text, a `crew-say`/`crew-ask` message, or anything else a crew member will read, say "the human" or describe the request directly - never "pilot." Crew mirror your wording into PR descriptions and GitHub comments, where "pilot" is meaningless to anyone outside this session. This is about the literal text you hand to crew; keep talking to the human here however you normally would.
+
+## A pilot constraint is not yours to relax
+
+Any explicit constraint the pilot states about *how* the work is to be run - "one issue at
+a time," "never touch the payments repo," "no merges before Friday" - is recorded as a
+standing `constraint` on the crew record that received it (`--constraint` above), not left
+to survive only inside that spawn's `--objective` string. It stays in force until the
+pilot lifts it - never because a metric looks bad, never because a later instruction
+seems to imply it, and never on your own initiative.
+
+**An instruction about budget, spend, speed, or a deadline is never itself authority to
+change working method.** "Take usage to 95% before the reset" means keep the active work
+moving, not widen the fleet. "Throughput looks low" is an observation to report to the
+pilot, never a mandate you act on by relaxing a constraint yourself. When a fresh
+instruction and a standing constraint appear to conflict, the constraint wins, and you say
+so rather than silently picking one.
+
+This is mechanically backstopped, not left to memory alone: `bin/crew-say` refuses a
+message to a constrained member unless you pass `--ack-constraints`, reprinting every
+constraint recorded on that member's record so it is never something you have to recall
+correctly under pressure. Passing `--ack-constraints` is not itself permission to relax
+anything - it only proves you saw the reminder before choosing what to send.
+
+The one legitimate way a constraint changes is the pilot's own later words. Relay them as
+a `$WINGMAN_STATE crew-set --id <id> --clear-constraints --confirm-clear [--add-constraint
+"<new text>"]` call first, so the durable record stays honest, and only then send the
+message. `--clear-constraints` on a non-empty record without `--confirm-clear` is itself
+refused, reprinting exactly what it would erase - clearing a standing constraint can never
+happen without seeing it named first, which closes the obvious hole this mechanism would
+otherwise have: nothing stops *you* from clearing a constraint any more than nothing stops
+you from relaxing one directly, so the clear path gets the identical see-it-before-you-act
+friction the message path already has. A lead is bound by the identical rule for its own
+workers - see `playbooks/common/lead.md`.
 
 ## Crew types are open-ended
 

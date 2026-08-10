@@ -20,17 +20,36 @@
 # crew-ask so both honour one policy. Pass --force (or set WM_TEAM_FORCE=1, or the
 # legacy WM_CREW_SAY_FORCE=1) to override, e.g. for a human operator.
 #
-# Usage: crew-say [--force] <id> "<message>"
+# Pilot-constraint acknowledgment (issue #192): if the target's crew record
+# carries one or more entries in `constraints` (wm_state crew-add
+# --constraint, or a later crew-set --add-constraint), this call is refused
+# unless --ack-constraints is also passed - the refusal reprints every
+# recorded constraint. This does not try to judge whether THIS message
+# actually relaxes a constraint (that would require judging arbitrary
+# natural language); it gates messaging a constrained target at all, so the
+# constraint text is unavoidably back in view before the message is sent, on
+# every single call, not just remembered from whenever it was first given.
+# Unlike --force, there is no env-var bypass - see CLAUDE.md, "A pilot
+# constraint is not yours to relax."
+#
+# Usage: crew-say [--force] [--ack-constraints] <id> "<message>"
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
 
 FORCE=0
-if [ "${1:-}" = "--force" ]; then FORCE=1; shift; fi
+ACK_CONSTRAINTS=0
+while [ "${1:-}" = "--force" ] || [ "${1:-}" = "--ack-constraints" ]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    --ack-constraints) ACK_CONSTRAINTS=1 ;;
+  esac
+  shift
+done
 
 ID="${1:-}"; MSG="${2:-}"
-[ -n "$ID" ] || wm_die "usage: crew-say [--force] <id> \"<message>\""
-[ -n "$MSG" ] || wm_die "usage: crew-say [--force] <id> \"<message>\""
+[ -n "$ID" ] || wm_die "usage: crew-say [--force] [--ack-constraints] <id> \"<message>\""
+[ -n "$MSG" ] || wm_die "usage: crew-say [--force] [--ack-constraints] <id> \"<message>\""
 
 # --- team guardrail ---------------------------------------------------------
 if [ "$FORCE" != 1 ] && [ -z "${WM_TEAM_FORCE:-}" ] && [ -z "${WM_CREW_SAY_FORCE:-}" ]; then
@@ -47,6 +66,26 @@ if [ "$FORCE" != 1 ] && [ -z "${WM_TEAM_FORCE:-}" ] && [ -z "${WM_CREW_SAY_FORCE
       # the guardrail; a human can still override with --force.
       wm_die "team guardrail could not run: the roster is unreadable (state engine or crew.json broken), so '$who' -> '$ID' cannot be checked. Fix the state engine (try: \$WINGMAN_STATE crew-list), or pass --force to override as a human." ;;
   esac
+fi
+
+# --- pilot-constraint acknowledgment gate (issue #192) ----------------------
+if [ "$ACK_CONSTRAINTS" != 1 ]; then
+  CONSTRAINTS_TEXT="$(wm_state crew-get --id "$ID" 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for c in (r.get("constraints") or []):
+    t = c.get("text")
+    if t:
+        print("  - %s (recorded %s)" % (t, c.get("set_at") or "unknown time"))
+' 2>/dev/null)"
+  if [ -n "$CONSTRAINTS_TEXT" ]; then
+    wm_die "'$ID' has standing constraint(s) the human personally stated for this effort:
+$CONSTRAINTS_TEXT
+A follow-up message must not relax any of these - only the human can (CLAUDE.md, \"A pilot constraint is not yours to relax\"). An instruction about budget, spend, speed, or a deadline is never itself authority to change working method. If this message does not touch them, resend with --ack-constraints. If the human's own words changed the constraint, first run: \$WINGMAN_STATE crew-set --id $ID --clear-constraints --confirm-clear [--add-constraint \"<new text>\"] (clearing a non-empty record without --confirm-clear is itself refused, reprinting what would be erased) - then resend with --ack-constraints."
+  fi
 fi
 
 WINDOW="wm-$ID"

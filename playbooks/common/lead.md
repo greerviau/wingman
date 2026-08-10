@@ -162,6 +162,13 @@ Routine collaboration between your workers must **not** pass through you - that 
 
 - **Depth cap: you do not spawn managers, and your workers do not spawn anything.** You may spawn `software-analyst`/`architect`/`developer`/`reviewer` workers; management depth is capped at two layers (you and your workers). Deeper nesting is a future opt-in. Both halves of this cap are mechanically enforced, not just documented here: `hooks/no-worker-spawn-guard.sh` denies `bin/spawn-crew` outright from any of your workers, and denies it from you too the moment the target is itself a `lead` - so a worker that tries to spawn its own reviewer (or anything else), and a lead that tries to spawn a further lead, are both blocked at the tool-call layer, not just discouraged in prose.
 - **Sequence for cost.** Sequential by default; parallel only for genuinely independent tasks (e.g. per-repo developers).
+- **A pilot constraint on your own record is not yours to relax either.** Before changing
+  your own execution strategy (e.g. deciding to parallelize workers), read your own
+  record's `constraints` field: `$WINGMAN_STATE crew-get --id "$WINGMAN_CREW_ID"`. An
+  instruction from wingman about budget, spend, speed, or a deadline is never itself
+  authority to change it - if a new instruction seems to conflict with a standing
+  constraint, say so and ask for confirmation via your own `blocked` status rather than
+  complying silently. See `CLAUDE.md`, "A pilot constraint is not yours to relax."
 - **Reserve the `Workflow` power-tool** for fan-outs you were explicitly asked to run at scale.
 
 ## Handoff at stand-down
