@@ -360,13 +360,47 @@ default = "shown-model-with-harness-agent-table"
 default = "claude"
 developer = "codex"
 EOF
-exports_with_table="$(unset WM_MODEL; wm_cfg env-exports)"
+exports_with_table="$(unset WM_MODEL WM_AGENT; wm_cfg env-exports)"
 assert_contains "[models].default still exports when [harness.agent] is a table alongside it" \
   "$exports_with_table" "WM_MODEL=shown-model-with-harness-agent-table"
-assert_not_contains "env-exports never tries (and fails) to export WM_AGENT from the per-type table shape" \
-  "$exports_with_table" "WM_AGENT="
+# issue #25 review round 2, finding NEW-1: [harness.agent]'s own `default` key
+# has to reach $WM_AGENT too, exactly like [models]/[effort]'s `default` reaches
+# $WM_MODEL/$WM_EFFORT - config.example.toml documents it as the fleet-wide
+# default twice, and for_type() deliberately never consults `default` itself
+# (see its own docstring), so env_exports carrying it into $WM_AGENT is the
+# ONLY place that key is ever read at all. A prior fix here (round 1) skipped
+# the whole per-type-table shape unconditionally, which fixed the poisoning
+# bug but silently dropped `default` along with it - the opposite failure
+# mode (too-loud became too-quiet), caught in review round 2 before merge.
+assert_contains "[harness.agent]'s own default key reaches \$WM_AGENT, exactly like [models]/[effort]'s default" \
+  "$exports_with_table" "WM_AGENT=claude"
 assert_true "sourcing common.sh with this file present does not declare it unusable" \
-  "! (unset WM_MODEL; . '$TEST_REPO/bin/lib/common.sh' 2>&1 | grep -q 'is unusable')"
+  "! (unset WM_MODEL WM_AGENT; . '$TEST_REPO/bin/lib/common.sh' 2>&1 | grep -q 'is unusable')"
+
+# The precedence chain stays intact once WM_AGENT carries the table's
+# `default`: an explicit per-type entry still wins over it (spawn-crew's own
+# resolution order, [harness.agent] per-type > $WM_AGENT > "claude").
+assert_eq "for-type harness.agent's per-type entry still resolves independently of default" \
+  "$(wm_cfg for-type --table harness.agent --type developer)" "codex"
+
+# resolved()/bin/config show must agree with what env-exports actually
+# applies - the bare "harness.agent" row has to show the table's `default`
+# value too, not report "default"/empty for a setting that is, in fact, in
+# force (the same symmetry fix, applied to the resolved-view renderer).
+table_default_shown="$(unset WM_MODEL WM_AGENT; WINGMAN_RUN_ID=$RUN "$CONFIG" 2>&1)"
+assert_contains "bin/config shows harness.agent's table-default value" "$table_default_shown" "harness.agent"
+assert_contains "...and attributes it to the file, not silently to 'default'" "$table_default_shown" "claude"
+
+# A table with per-type entries but NO default key at all has nothing to
+# export - there is no fleet-wide value to carry into $WM_AGENT, unlike the
+# case above.
+wm_write_config <<'EOF'
+[harness.agent]
+developer = "codex"
+EOF
+no_default_exports="$(unset WM_AGENT; wm_cfg env-exports)"
+assert_not_contains "a [harness.agent] table with no default key exports nothing for WM_AGENT" \
+  "$no_default_exports" "WM_AGENT="
 
 wm_write_config <<'EOF'
 [harness.agent]

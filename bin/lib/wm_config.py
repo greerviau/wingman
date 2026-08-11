@@ -326,22 +326,27 @@ def env_exports(data=None, environ=None):
         section = data.get(table)
         if not isinstance(section, dict) or key not in section:
             continue
-        # The DOTTED_PER_TYPE_TABLES exclusion (same as resolved()'s, and for
-        # the identical reason): `[harness.agent]` used as the new per-type
-        # table makes section["agent"] a dict, not the scalar this SCHEMA row
-        # expects - that shape has no single value to export as $WM_AGENT at
-        # all (there IS no fleet-wide default without an explicit `default`
-        # key, and even that has to be looked up via for_type, not exported
-        # unconditionally the way a true scalar is). Skipping it here is what
-        # keeps this shape from raising and poisoning every OTHER setting in
-        # the file - bin/lib/common.sh's caller treats any ConfigError from
-        # this function as "apply nothing," so a single unhandled shape here
-        # would silently drop [models]/[effort]/[projects]/the rest of
-        # [harness]/[env] too, not just this one setting.
-        if "%s.%s" % (table, key) in DOTTED_PER_TYPE_TABLES and isinstance(section[key], dict):
-            continue
+        raw = section[key]
+        # The DOTTED_PER_TYPE_TABLES handling (mirroring resolved()'s own
+        # exclusion, but not simply skipping the row the way that one does):
+        # `[harness.agent]` used as the new per-type table makes
+        # section["agent"] a dict, not the scalar this SCHEMA row expects.
+        # Its own `default` key is exactly [models]/[effort]'s `default`
+        # symmetry - PER_TYPE_TABLES carries `default` into $WM_MODEL/$WM_EFFORT
+        # from right here, and DOTTED_PER_TYPE_TABLES needs the identical
+        # treatment for $WM_AGENT, or `[harness.agent] default = "..."`
+        # becomes silently inert: for_type() never consults `default` itself
+        # (by design - see its own docstring), so if this export doesn't
+        # carry it into $WM_AGENT, no code path reads the key at all, despite
+        # config.example.toml documenting it as the fleet-wide default. Only
+        # a table with NO `default` key at all (per-type entries only) has
+        # nothing to export here - that's the one shape genuinely absent.
+        if "%s.%s" % (table, key) in DOTTED_PER_TYPE_TABLES and isinstance(raw, dict):
+            if "default" not in raw:
+                continue
+            raw = raw["default"]
         lines.append("export %s=%s" % (
-            var, shlex.quote(_env_value(table, key, kind, section[key]))))
+            var, shlex.quote(_env_value(table, key, kind, raw))))
         applied.append(var)
     for var, value in sorted(env_table(data).items()):
         if var in environ:
@@ -491,16 +496,22 @@ def resolved(data=None, environ=None):
             rows.append((name, _display(kind, environ[var]), "env"))
             continue
         section = data.get(table)
-        if isinstance(section, dict) and key in section \
-                and not (name in DOTTED_PER_TYPE_TABLES and isinstance(section[key], dict)):
-            # The DOTTED_PER_TYPE_TABLES exclusion: `[harness.agent]` used as
-            # the new per-type table (rather than harness.agent's own plain
-            # scalar shape) makes section["agent"] a dict, not a scalar - that
-            # is a valid, different shape for the identical dotted name, not
-            # an <invalid> scalar to report here; the per-type block below
-            # renders it instead (harness.agent.default, harness.agent.<type>, ...).
+        _raw = section.get(key) if isinstance(section, dict) else None
+        # The DOTTED_PER_TYPE_TABLES handling: `[harness.agent]` used as the
+        # new per-type table (rather than harness.agent's own plain scalar
+        # shape) makes section["agent"] a dict, not a scalar. Its `default`
+        # key IS this row's scalar value - the same symmetry env_exports()
+        # carries into $WM_AGENT, so this bare "harness.agent" row has to
+        # agree with what actually got exported, or `bin/config show` would
+        # report "default"/empty for a setting that is, in fact, in force.
+        # Only a table with no `default` key at all has nothing to show
+        # here; the per-type block below renders the rest either way
+        # (harness.agent.default, harness.agent.<type>, ...).
+        if name in DOTTED_PER_TYPE_TABLES and isinstance(_raw, dict):
+            _raw = _raw.get("default")
+        if isinstance(section, dict) and key in section and _raw is not None:
             try:
-                value = _env_value(table, key, kind, section[key])
+                value = _env_value(table, key, kind, _raw)
             except ConfigError as exc:
                 rows.append((name, "<invalid: %s>" % exc, "config.local.toml"))
             else:
