@@ -673,22 +673,41 @@ echo "  SKIP - case 219a quarantined pending issue #263 (mid-window re-claim del
 # issue #308: this case relies on the test's own `kill -9` landing well
 # before the referee subshell's `sleep "$window"` naturally fires (which
 # writes "rolled" to $exitfile and TERM-kills the child itself, on a clean
-# schedule this test must never race). WM_STOP_CONTINUITY_WINDOW=10 gave the
-# test's own kill only a ~10s margin to land - under real CI CPU-saturating
-# parallelism (multiple watch-fleet-daemon-heavy test files now co-scheduled
-# in the same wave, see #308's own comment thread), both "how long until the
-# test's shell actually dispatches kill -9" and "how long the referee's own
-# background subshell takes to be scheduled and write $exitfile" can stretch
-# under contention, closing that margin enough to flip which one wins the
-# race. Widened to 60s: the test's own success path does not get slower for
-# it (the hook's own budget check trips on window's magnitude regardless of
-# how large window is - see hooks/stop-continuity.sh's own accounting - so a
-# larger window only widens the safety margin against the race, it does not
-# make a passing run wait any longer for anything).
+# schedule this test must never race). A first fix here widened
+# WM_STOP_CONTINUITY_WINDOW from 10 to 60, reasoning that the hook's own
+# budget check trips on window's magnitude regardless of its size (see
+# hooks/stop-continuity.sh's own accounting), so a larger window only widens
+# the safety margin without slowing a passing run down - true, but that
+# widened margin STILL lost the race under real CI load (observed: "window
+# rolled" even at window=60). The reasoning missed where the referee's own
+# countdown actually starts: `sleep "$window"` is launched essentially
+# CONCURRENTLY with the child's own spawn (hooks/stop-continuity.sh's claim
+# loop starts both back to back), not after the child successfully claims -
+# so the time the child itself takes to spawn, initialize, and claim (write
+# $WINGMAN_HOME/watch.pid, several `uv run` subprocess startups deep) is
+# already eating into the SAME window budget before this test's own `wait_
+# for_file`/`kill -9` sequence even begins. Under real CI CPU-saturating
+# parallelism that claim time itself can balloon, so no window value bounded
+# by "a few tens of seconds" reliably survives it.
+#
+# Fixed at the actual root instead of guessing a bigger number: this case
+# does not need the referee's own natural timeout to ever be reachable at
+# all - the whole point is that the EXTERNAL kill preempts it, and every
+# other case in this file that genuinely exercises a natural window rollover
+# (e.g. case 2 above) already covers that behavior with its own window
+# value. Setting the window absurdly large (1 hour) makes the referee's own
+# natural firing structurally unreachable within any realistic test
+# duration, removing the race outright rather than continuing to widen a
+# margin that can always be closed again by enough contention. The test's
+# own wall-clock duration in the success path is still bounded by wait_
+# for_gone's own timeout below, not by window's magnitude, for the same
+# "budget check trips almost immediately" reasoning as before - only now
+# there is no finite window value left for real contention to ever close
+# the gap against.
 new_home
 add_crew_window d7cp
 wm_state crew-set --id d7cp --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=60
+export WM_STOP_CONTINUITY_WINDOW=3600
 export WM_STOP_CONTINUITY_LIFETIME=1
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7cp.out" 2>&1 &
 h7cp=$!; wm_track "$h7cp"
@@ -929,7 +948,18 @@ rm -f "$WINGMAN_HOME/stop-continuity.claimfail"
 new_home
 add_crew_window d8e
 wm_state crew-set --id d8e --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=30
+# issue #300: originally window=30 with a widened wait_for_gone budget - but
+# the SAME structural race case 7c' above turned out to have (the referee's
+# own `sleep "$window"` is launched essentially concurrently with the
+# child's own spawn, not after this test's later `wait_for_file`/kill -9
+# sequence even begins, so real CI contention inflating child-claim time
+# eats directly into whatever window budget is left for this test's own
+# kill to preempt it) applies here too - this block's own final assertion
+# (the spurious count) depends on --classify seeing "spurious", not "rolled"
+# for the exact same reason 7c's rewake body does. Fixed the same way: an
+# unreachably large window removes the race outright rather than leaving a
+# finite margin real contention can still close.
+export WM_STOP_CONTINUITY_WINDOW=3600
 assert_false "no spurious-count file exists yet" "[ -f '$WINGMAN_HOME/watch-spurious-count' ]"
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sre.out" 2>&1 &
 hpe=$!; wm_track "$hpe"
@@ -937,15 +967,13 @@ assert_true "the child claims and arms" "wait_for_file '$WINGMAN_HOME/watch.pid'
 assert_true "the child genuinely armed (not merely attempted)" "wait_for_content '$WINGMAN_HOME/stop-autoarm.log' 'armed pid='"
 cpide="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpide" 2>/dev/null
-# issue #300: the path from "child observed dead" to "hook process exits"
-# runs the accounting logic above (--classify, an active_crew re-check, the
-# budget check) - several `uv run --no-project` subprocess spawns, each with
-# real startup overhead that grows under CPU-saturating CI parallelism (the
-# same root mechanism #308 documents for the window/lifetime race just
-# above). The default 100-try (20s) wait_for_gone budget was measured
-# generous enough for a quiet local run but not always enough once several
-# concurrent watch-fleet-daemon-heavy test files are competing for CPU in
-# the same wave; widened for headroom, not because the real work changed.
+# The path from "child observed dead" to "hook process exits" runs the
+# accounting logic above (--classify, an active_crew re-check, the budget
+# check) - several `uv run --no-project` subprocess spawns, each with real
+# startup overhead that grows under the same CPU-saturating CI parallelism.
+# The default 100-try (20s) wait_for_gone budget was generous enough for a
+# quiet local run but not always enough under real contention; widened for
+# headroom, not because the real work changed.
 assert_true "the hook notices the death and exits" "wait_for_gone $hpe 300"
 wait "$hpe" 2>/dev/null
 out_sre="$(cat "$WINGMAN_HOME/sre.out" 2>/dev/null)"
