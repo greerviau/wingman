@@ -86,8 +86,22 @@
 # The agent-CLI-specific knobs. Change these to point the crew layer at a
 # different harness, or to loosen/tighten how crew sessions launch.
 [harness]
-# The agent CLI a crew session execs.
+# The agent CLI a crew session execs - claude (the default), or any other
+# name with a descriptor at bin/lib/agents/<name>.sh. `[harness.agent]` below
+# is the per-crew-type form of this SAME setting (its own `default` key
+# covers the plain fleet-wide case too) - set one shape or the other, never
+# both: TOML rejects a file that defines `harness.agent` as both a scalar
+# here and a table there.
 # agent = "claude"
+
+# Per-crew-type agent CLI, exactly like [models]/[effort] above: `default`
+# applies to every spawn, any other key names a crew type. An explicit
+# --agent on a spawn always wins over both this and the plain `agent` scalar
+# above.
+#[harness.agent]
+#default = "claude"
+#developer = "codex"
+#"software-development/reviewer" = "claude"
 
 # --permission-mode for a crew session. Crew run unattended, so the default
 # keeps a gated tool call from hanging forever on a prompt nobody will answer.
