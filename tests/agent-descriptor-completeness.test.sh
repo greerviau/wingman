@@ -41,6 +41,21 @@ done
 
 assert_true "at least one descriptor was found (claude.sh, at minimum)" "[ '$FOUND' -ge 1 ]"
 
+# The loop above's WM_AGENT_BIN assertion only proves non-empty, which the
+# suite's own ambient WM_AGENT_BIN_OVERRIDE (tests/lib.sh) satisfies
+# regardless of what the descriptor itself set - it can never actually catch
+# a broken WM_AGENT_BIN default. Check the descriptor's OWN value directly,
+# with the override out of the way (a subshell, so the ambient default is
+# restored for every other assertion in this file).
+real_bin="$(env -u WM_AGENT_BIN_OVERRIDE bash -c '
+  . "'"$TEST_REPO"'/bin/lib/common.sh"
+  . "'"$TEST_REPO"'/bin/lib/agent.sh"
+  wm_agent_resolve claude
+  printf %s "$WM_AGENT_BIN"
+')"
+assert_eq "claude's own descriptor resolves WM_AGENT_BIN to the real binary name, not the test override" \
+  "$real_bin" "claude"
+
 # wm_agent_list enumerates the identical set, sorted - the shared
 # enumeration point --list-agents (plan step 10) will build on later.
 listed="$(wm_agent_list)"

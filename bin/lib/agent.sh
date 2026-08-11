@@ -61,7 +61,11 @@ wm_agent_resolve() {
   _war_name="$1"
   [ -n "$_war_name" ] || wm_die "wm_agent_resolve: no agent name given"
   _war_file="$WM_LIB/agents/$_war_name.sh"
-  [ -f "$_war_file" ] || wm_die "unknown agent '$_war_name' - no descriptor at bin/lib/agents/$_war_name.sh (see: spawn-crew --list-agents)"
+  # Points at the descriptor directory itself, not `spawn-crew --list-agents`
+  # (plan step 10) - that flag does not exist yet at this stage of the port,
+  # and a message pointing at a flag that itself fails with "unknown arg"
+  # would be worse than no pointer at all.
+  [ -f "$_war_file" ] || wm_die "unknown agent '$_war_name' - no descriptor at bin/lib/agents/$_war_name.sh (see bin/lib/agents/ for the currently shipped adapters)"
 
   for _war_f in $WM_AGENT_FIELDS; do unset "$_war_f"; done
 
@@ -96,6 +100,20 @@ wm_agent_resolve() {
   [ -n "${WM_AGENT_BIN_OVERRIDE:-}" ] && WM_AGENT_BIN="$WM_AGENT_BIN_OVERRIDE"
 
   [ -n "$WM_AGENT_DISPLAY_NAME" ] || wm_die "agent descriptor '$_war_file' does not set WM_AGENT_DISPLAY_NAME (required)"
+
+  # WM_AGENT_PREFLIGHT names a function a caller invokes BY STRING later
+  # (bin/spawn-crew: `"$WM_AGENT_PREFLIGHT" ...`) - a typo'd or removed
+  # function name would otherwise fail silently: bash's own "command not
+  # found" for a name that resolves to nothing is just another nonzero exit
+  # status, indistinguishable at the call site from the preflight function
+  # itself legitimately returning failure, and neither this codebase nor the
+  # call site runs under `set -e` to turn that into a hard stop on its own.
+  # Verified here, once, at resolve time, so every gate a descriptor's
+  # preflight is supposed to run (workspace trust, Bypass-Permissions,
+  # guard-hook sync, for claude) cannot go silently missing behind a bad
+  # string.
+  [ -z "$WM_AGENT_PREFLIGHT" ] || command -v "$WM_AGENT_PREFLIGHT" >/dev/null 2>&1 \
+    || wm_die "agent descriptor '$_war_file' sets WM_AGENT_PREFLIGHT='$WM_AGENT_PREFLIGHT' but no such function is defined"
 
   unset _war_name _war_file _war_f
   return 0

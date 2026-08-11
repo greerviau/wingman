@@ -43,7 +43,7 @@ before_count="$(tmux list-windows -t "=$WM_TMUX_SESSION" 2>/dev/null | grep -c .
 if bad_out="$("$SPAWN" --type software-analyst --repo "$WS/repoA" --agent no-such-agent-xyz --objective "should refuse" 2>&1)"; then bad_rc=0; else bad_rc=$?; fi
 assert_true "an unknown --agent refuses the spawn" "[ $bad_rc -ne 0 ]"
 assert_contains "the refusal names the unknown agent" "$bad_out" "unknown agent 'no-such-agent-xyz'"
-assert_contains "the refusal points at --list-agents" "$bad_out" "--list-agents"
+assert_contains "the refusal points at the descriptor directory" "$bad_out" "bin/lib/agents/"
 after_count="$(tmux list-windows -t "=$WM_TMUX_SESSION" 2>/dev/null | grep -c .)"
 assert_eq "no tmux window was created for the refused spawn" "$after_count" "$before_count"
 

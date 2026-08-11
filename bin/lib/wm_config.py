@@ -326,6 +326,20 @@ def env_exports(data=None, environ=None):
         section = data.get(table)
         if not isinstance(section, dict) or key not in section:
             continue
+        # The DOTTED_PER_TYPE_TABLES exclusion (same as resolved()'s, and for
+        # the identical reason): `[harness.agent]` used as the new per-type
+        # table makes section["agent"] a dict, not the scalar this SCHEMA row
+        # expects - that shape has no single value to export as $WM_AGENT at
+        # all (there IS no fleet-wide default without an explicit `default`
+        # key, and even that has to be looked up via for_type, not exported
+        # unconditionally the way a true scalar is). Skipping it here is what
+        # keeps this shape from raising and poisoning every OTHER setting in
+        # the file - bin/lib/common.sh's caller treats any ConfigError from
+        # this function as "apply nothing," so a single unhandled shape here
+        # would silently drop [models]/[effort]/[projects]/the rest of
+        # [harness]/[env] too, not just this one setting.
+        if "%s.%s" % (table, key) in DOTTED_PER_TYPE_TABLES and isinstance(section[key], dict):
+            continue
         lines.append("export %s=%s" % (
             var, shlex.quote(_env_value(table, key, kind, section[key]))))
         applied.append(var)

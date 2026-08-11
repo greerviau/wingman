@@ -376,7 +376,7 @@ wm_guard_test_fixture_agent() {
     wm-test-*) wm_die "WM_TMUX_SESSION='$WM_TMUX_SESSION' looks like a test fixture and no stub is configured; refusing to launch a real '${1:-claude}'. Set WM_AGENT_BIN_OVERRIDE to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
   esac
   case "$WM_HOME" in
-    "${TMPDIR:-/tmp}"/wm-test.*/*|"${TMPDIR:-/tmp}"/wm-test.*) wm_die "WINGMAN_HOME='$WM_HOME' looks like a test fixture and WM_AGENT is unset; refusing to launch a real '${1:-claude}'. Set WM_AGENT to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
+    "${TMPDIR:-/tmp}"/wm-test.*/*|"${TMPDIR:-/tmp}"/wm-test.*) wm_die "WINGMAN_HOME='$WM_HOME' looks like a test fixture and no stub is configured; refusing to launch a real '${1:-claude}'. Set WM_AGENT_BIN_OVERRIDE to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
   esac
 }
 

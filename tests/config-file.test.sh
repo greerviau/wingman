@@ -341,6 +341,33 @@ assert_eq "for-type harness.agent resolves the per-type entry" \
 assert_eq "for-type harness.agent falls back to no per-type entry for an unlisted type" \
   "$(wm_cfg for-type --table harness.agent --type reviewer; echo $?)" "1"
 
+# --- issue #25 review round 1, finding 1: a [harness.agent] TABLE must not
+# poison env-exports for every OTHER setting in the file --------------------
+# The regression this guards: env_exports() iterates SCHEMA, and the
+# ("harness","agent",SCALAR,"WM_AGENT") row used to try to coerce
+# section["agent"] straight to a scalar with no shape check, unconditionally
+# raising ConfigError the instant [harness.agent] is used as a table -
+# bin/lib/common.sh's own sourcing block treats ANY ConfigError from this
+# function as "the whole file is unusable, apply nothing," so a single
+# per-type [harness.agent] table used to silently drop every other setting
+# in the file (models, effort, projects, the rest of [harness], all of
+# [env]) with only a warning, not a hard failure.
+wm_write_config <<'EOF'
+[models]
+default = "shown-model-with-harness-agent-table"
+
+[harness.agent]
+default = "claude"
+developer = "codex"
+EOF
+exports_with_table="$(unset WM_MODEL; wm_cfg env-exports)"
+assert_contains "[models].default still exports when [harness.agent] is a table alongside it" \
+  "$exports_with_table" "WM_MODEL=shown-model-with-harness-agent-table"
+assert_not_contains "env-exports never tries (and fails) to export WM_AGENT from the per-type table shape" \
+  "$exports_with_table" "WM_AGENT="
+assert_true "sourcing common.sh with this file present does not declare it unusable" \
+  "! (unset WM_MODEL; . '$TEST_REPO/bin/lib/common.sh' 2>&1 | grep -q 'is unusable')"
+
 wm_write_config <<'EOF'
 [harness.agent]
 develper = "codex"

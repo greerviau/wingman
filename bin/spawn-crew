@@ -281,7 +281,18 @@ PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
 # non-claude adapter today) simply has nothing to run here; per the plan,
 # claude's own preflights never apply to a non-claude agent regardless of this
 # field, they are not a fallback.
-[ -n "$WM_AGENT_PREFLIGHT" ] && "$WM_AGENT_PREFLIGHT" "$REPO" "$PERM_MODE" spawn
+#
+# The exit status is checked explicitly (never a bare `&&` chain, which
+# would let this whole statement's own nonzero status pass through unnoticed
+# under this script's `set -u`-but-not-`set -e` posture): wm_agent_resolve
+# already confirmed WM_AGENT_PREFLIGHT names a real function, so a nonzero
+# return here is the function's OWN deliberate failure signal, and must stop
+# the spawn exactly as hard as claude_preflight's own internal wm_die calls
+# already do (defense in depth for a future preflight function that returns
+# failure instead of calling wm_die directly).
+if [ -n "$WM_AGENT_PREFLIGHT" ]; then
+  "$WM_AGENT_PREFLIGHT" "$REPO" "$PERM_MODE" spawn || wm_die "agent preflight '$WM_AGENT_PREFLIGHT' failed"
+fi
 
 # Model and reasoning effort for the crew session, alongside the other
 # harness-specific knobs (the resolved AGENT, WM_PERMISSION_MODE). Most specific wins:

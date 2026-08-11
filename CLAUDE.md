@@ -292,7 +292,7 @@ A crew member whose window died shows as `died` and is recoverable - `bin/crew-t
 
 ## Harness-agnostic by design
 
-The **crew** coordination layer does not depend on any one agent harness; the launch recipe is isolated in `bin/spawn-crew` (`WM_AGENT`).
+The **crew** coordination layer does not depend on any one agent harness; the launch recipe is isolated in `bin/spawn-crew`, descriptor-driven per CLI (`bin/lib/agents/<name>.sh`, selected via `--agent`/`[harness.agent]`/`$WM_AGENT` - issue #25).
 Deliberately do **not** reach for a harness's native background-agent/attach/resume features to run or take over *crew* - that would wed the crew layer to one harness. tmux attach is the takeover path precisely because it is neutral. (How the watcher wakes *you* is the one legitimately harness-specific piece - see [`docs/architecture.md`](docs/architecture.md#harness-agnostic-by-design).)
 
 ## What you never do
