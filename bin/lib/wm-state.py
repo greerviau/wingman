@@ -5088,6 +5088,12 @@ _SUBCOMMAND_ARGS = {
     "ask-list": _args_ask_list,
     "ask-prune": _args_ask_prune,
 }
+# Registering a subcommand is now two separate edits (the _args_* function and
+# its _SUBCOMMAND_ARGS entry) where writing add_parser() used to be the whole
+# registration - so a forgotten dict entry would silently drop a subcommand
+# from the CLI with nothing else to catch it. This pins the two back together.
+assert {n for n in globals() if n.startswith("_args_")} == {fn.__name__ for fn in _SUBCOMMAND_ARGS.values()}, \
+    "a module-level _args_* function is missing from _SUBCOMMAND_ARGS (or vice versa)"
 
 
 def build_parser(only=None):
@@ -5099,10 +5105,18 @@ def build_parser(only=None):
     With `only` set to a known subcommand name, builds ONLY that one
     subcommand's parser - skipping both the add_parser() and add_argument()
     calls for the other 37, which are never needed to parse or dispatch a
-    single already-known subcommand (see issue #326)."""
+    single already-known subcommand (see issue #326). `sub.metavar` is
+    pinned to the full 38-name list explicitly in this branch: left alone,
+    argparse auto-derives the "cmd" positional's metavar from however many
+    choices are actually registered, so with only one subparser built it
+    would shrink to "{<only>}" - changing the usage: banner on any error the
+    TOP-level parser itself raises (e.g. an unrecognized trailing argument
+    after a valid subcommand), even though that error has nothing to do with
+    which subcommand was invoked."""
     p = argparse.ArgumentParser(prog="wm-state")
     sub = p.add_subparsers(dest="cmd", required=True)
     if only is not None:
+        sub.metavar = "{%s}" % ",".join(_SUBCOMMAND_ARGS)
         _SUBCOMMAND_ARGS[only](sub.add_parser(only))
         return p
     for name, add_args in _SUBCOMMAND_ARGS.items():
