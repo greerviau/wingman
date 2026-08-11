@@ -18,6 +18,11 @@ CR="$TEST_REPO/bin/crew-resume"
 export WM_SUBMIT_DELAY=0 WM_READY_POLL=0.2 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 
 test_new_home
+# crew-resume's own preflight now includes workspace-trust (issue #25's
+# claude_preflight, relocated) - trust /tmp here too, or every resume in
+# this file refuses before ever reaching the tmux new-window failure this
+# test is actually about.
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 
 wm_state crew-add --id r179 --type developer --objective x --repo /tmp --window wm-r179 --session-id sess-r179 >/dev/null
@@ -35,7 +40,7 @@ exec "$REAL_TMUX" "$@"
 EOF
 chmod +x "$SHIM_DIR/tmux"
 
-out="$(PATH="$SHIM_DIR:$PATH" WM_AGENT="$TEST_REPO/tests/fixtures/stub-agent.sh" "$CR" r179 2>&1)"
+out="$(PATH="$SHIM_DIR:$PATH" WM_AGENT_BIN_OVERRIDE="$TEST_REPO/tests/fixtures/stub-agent.sh" "$CR" r179 2>&1)"
 
 assert_contains "the failure message names tmux new-window as the cause, not a vanished window" \
   "$out" "tmux new-window failed"

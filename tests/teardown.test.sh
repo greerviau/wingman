@@ -169,6 +169,12 @@ assert_true "case4: the check passes once the session name is derived from \$WM_
 # cleared, or the suite's own default stub would silently satisfy the guard
 # and this case would stop testing what it claims to.
 test_new_home
+# Trust /tmp (issue #25): crew-resume's own preflight now includes
+# workspace-trust too, and this case is specifically about the test-fixture
+# safety net (wm_guard_test_fixture_agent), not trust - leaving /tmp
+# untrusted would make trust-status refuse first and mask the exact check
+# this case exists to verify.
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id g5 --type developer --objective x --repo /tmp --window wm-g5 --session-id sess-g5-teardown >/dev/null
 wm_state crew-set --id g5 --status died >/dev/null
