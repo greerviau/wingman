@@ -67,21 +67,30 @@ assert_contains "no-direct-edit-guard fails OPEN on an absent crew_type (opposit
 # =============================================================================
 # Part 2: decision equivalence - pre-extraction hooks vs the rewired ones
 # =============================================================================
-# The pre-extraction blobs live on the branch this stage stacks on (stage 2's
-# tip, before 12a touched any of the three hooks) - extracted into throwaway
-# files placed IN hooks/ itself (not a separate tmp dir) so their own
+# The pre-extraction blobs are static, checked-in fixtures (tests/fixtures/
+# guard-policy-pre-extraction/*.sh - byte-identical copies of the three hooks
+# as they stood immediately before 12a's extraction), NOT read live from a
+# git ref (PR #338 review round 1, must-fix): a branch name is neither
+# durable (it disappears the moment the stage-2 branch merges and gets
+# deleted, breaking this suite permanently the day the PR that requires it
+# lands) nor even reliably present in a fresh clone today (a shallow CI
+# checkout has no reason to fetch a sibling branch by name at all, so this
+# failed 22-run/10-failed in the reviewer's own fresh-clone repro despite
+# passing in this session's own worktree, which happened to have every
+# stacked branch created locally). Copied into throwaway files placed IN
+# hooks/ itself (not a separate tmp dir) so their own
 # `HERE="$(cd "$(dirname "$0")" && pwd -P)"` resolves to the real hooks/
 # directory and finds the real (unmodified by this stage) hooks/lib/
 # cmd_match.py - removed unconditionally before test_summary, matching this
 # suite's established throwaway-descriptor convention (this file cannot use
 # its own `trap ... EXIT`; lib.sh's shared trap is the only one allowed).
-BASE_REF="feat/issue-25-agent-adapter-stage2-crew-resume-takeover"
+FIXTURE_DIR="$TEST_REPO/tests/fixtures/guard-policy-pre-extraction"
 OLD_MERGE="$TEST_REPO/hooks/no-merge-guard.OLD.sh"
 OLD_EDIT="$TEST_REPO/hooks/no-direct-edit-guard.OLD.sh"
 OLD_SPAWN="$TEST_REPO/hooks/no-worker-spawn-guard.OLD.sh"
-git -C "$TEST_REPO" show "$BASE_REF:hooks/no-merge-guard.sh" > "$OLD_MERGE"
-git -C "$TEST_REPO" show "$BASE_REF:hooks/no-direct-edit-guard.sh" > "$OLD_EDIT"
-git -C "$TEST_REPO" show "$BASE_REF:hooks/no-worker-spawn-guard.sh" > "$OLD_SPAWN"
+cp "$FIXTURE_DIR/no-merge-guard.sh" "$OLD_MERGE"
+cp "$FIXTURE_DIR/no-direct-edit-guard.sh" "$OLD_EDIT"
+cp "$FIXTURE_DIR/no-worker-spawn-guard.sh" "$OLD_SPAWN"
 chmod +x "$OLD_MERGE" "$OLD_EDIT" "$OLD_SPAWN"
 
 NEW_MERGE="$TEST_REPO/hooks/no-merge-guard.sh"
@@ -184,6 +193,16 @@ equivalence_check "no-direct-edit: lead, a test-runner Bash call is denied" \
   "$OLD_EDIT" "$NEW_EDIT" "$(payload Bash "pytest")"
 equivalence_check "no-direct-edit: lead, an ordinary Bash call is allowed" \
   "$OLD_EDIT" "$NEW_EDIT" "$(payload Bash "git status")"
+
+# PR #338 review round 1, should-fix: the original bash pre-gate's own
+# WINGMAN_CREW_TYPE=lead check is an EXACT string comparison, unlike no-
+# worker-spawn-guard's base-role-name match - a category-qualified lead
+# (e.g. "common/lead") must stay INACTIVE here, matching the original
+# byte-for-byte, not silently gain activation via a base-role-name match
+# guard_policy.py's own core must never apply on its own initiative.
+export WINGMAN_CREW_TYPE=common/lead
+equivalence_check "no-direct-edit: a category-qualified lead type (common/lead) stays inactive (exact-match only)" \
+  "$OLD_EDIT" "$NEW_EDIT" "$(payload Edit "" "" "$EDIT_REPO/x.py")"
 
 export WINGMAN_CREW_TYPE=developer
 equivalence_check "no-direct-edit: a worker's own Edit inside a git repo is allowed (inactive)" \

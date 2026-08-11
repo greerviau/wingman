@@ -893,18 +893,31 @@ _SED_OTHER_VALUE_SHORT = set("l")   # other value-taking short flags (line-wrap 
 
 def no_direct_edit_guard_active(gi):
     """Whether no-direct-edit-guard applies to this session at all - active
-    when crew_type is "lead" (unconditionally), or crew_id is unset AND
-    project_dir resolves to this wingman checkout (wingman's own top-level
-    session; for Claude Code, project_dir is $CLAUDE_PROJECT_DIR). Exported
-    (not nested inside evaluate_no_direct_edit_guard) so it can be exercised
-    directly by tests/guard-policy.test.sh's fail-direction invariant check,
-    and so a future transport's own entry point can query it without
-    duplicating the comparison logic. no-direct-edit-guard.sh's own bash
-    pre-gate still performs this same check as a cheap, unchanged
+    when crew_type is EXACTLY "lead" (unconditionally), or crew_id is unset
+    AND project_dir resolves to this wingman checkout (wingman's own
+    top-level session; for Claude Code, project_dir is $CLAUDE_PROJECT_DIR).
+    Exported (not nested inside evaluate_no_direct_edit_guard) so it can be
+    exercised directly by tests/guard-policy.test.sh's fail-direction
+    invariant check, and so a future transport's own entry point can query
+    it without duplicating the comparison logic. no-direct-edit-guard.sh's
+    own bash pre-gate still performs this same check as a cheap, unchanged
     optimization (skip spinning up python at all for the common case of an
     ordinary worker session) - this function is the canonical decision the
-    core itself also enforces, not merely relied upon from the transport."""
-    if gi.crew_type.rsplit("/", 1)[-1] == "lead":
+    core itself also enforces, not merely relied upon from the transport.
+
+    The "lead" comparison here is deliberately EXACT (`==`), not the
+    base-role-name match (`crew_type.rsplit("/", 1)[-1] == "lead"`)
+    evaluate_no_worker_spawn_guard uses for its own caller-is-lead check
+    (PR #338 review round 1, should-fix: an earlier version of this
+    function used the base-role-name form here too, silently widening
+    activation to a category-qualified type like "common/lead" - a real
+    policy change, not a faithful port, since the original bash pre-gate
+    (`[ "${WINGMAN_CREW_TYPE:-}" = "lead" ]`) has never recognized anything
+    but the bare string. 12a's mandate is a byte-faithful extraction; a
+    category-qualified lead's own no-direct-edit-guard activation is a
+    genuine, separate policy question for whoever owns that decision, not
+    something this refactor gets to decide by accident)."""
+    if gi.crew_type == "lead":
         return True
     if not gi.crew_id and gi.project_dir:
         return os.path.realpath(gi.project_dir) == os.path.realpath(_REPO_ROOT)
