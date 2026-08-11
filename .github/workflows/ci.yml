@@ -3,8 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+  # No branches: filter here (issue #25) - a stacked PR (one feature's own
+  # multi-stage effort, each PR based on the previous stage's still-unmerged
+  # branch rather than main) would otherwise never get a CI run at all, since
+  # pull_request's own branches: filter matches the PR's BASE ref, not just
+  # the special case of main. Every PR gets a real run regardless of what
+  # it's opened against; push above stays scoped to main only, unchanged.
   pull_request:
-    branches: [main]
 
 # One in-flight run per ref; a new push supersedes the previous run.
 concurrency:
