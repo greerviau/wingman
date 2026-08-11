@@ -293,27 +293,46 @@ def crew_transcript_path(record):
 
 
 def is_resumable(record):
-    """True iff record's Claude Code session transcript still exists on disk -
-    the resumability signal for a `died` member (issue #251): crew.json
-    already stores session_id, and the transcript survives independent of
-    the worktree, so `claude --resume <session_id>` recovers it regardless of
-    whether the worktree is still around. Shared by crew-list/crew-tree
-    rendering, crew-get's JSON (consumed by bin/crew-takeover), and the
-    death-flip notification text.
+    """True/False iff record's Claude Code session transcript does/doesn't
+    exist on disk - the resumability signal for a `died` member (issue #251):
+    crew.json already stores session_id, and the transcript survives
+    independent of the worktree, so `claude --resume <session_id>` recovers
+    it regardless of whether the worktree is still around. None (issue #25)
+    when the record's own `agent` field names a resolved adapter other than
+    claude: this whole check reads Claude Code's OWN transcript directory
+    layout (claude_projects_dir/_claude_project_slug), which is meaningless
+    for any other CLI's session format - a non-claude record is never even
+    stat'd, let alone reported False, since False specifically means
+    "checked, and it is gone," which callers (bin/crew-takeover) already
+    treat differently from "not checkable at all" (see its own comment).
+    Absent/empty `agent` means claude (every record predating this field was
+    necessarily claude), so this only returns None for an explicit non-claude
+    value - never for a legacy record with no field at all.
 
-    Two checks, in order (review round 1, MF-3): the exact derived path
-    first (cheap, no directory scan), then - only on a miss, and only when a
-    session_id is present at all - a glob for `<projects>/*/<session_id>.jsonl`.
-    Session ids are UUIDs, so a match is unambiguous. The fallback exists
-    because the derivation above has known blind spots even after the
-    realpath/CLAUDE_CONFIG_DIR fixes above: the CLI's own 200-char slug
-    truncation+hash has no equivalent here, and any future change to the
-    CLI's own naming scheme would otherwise silently read as "not
-    resumable" - which, per this same review round, is exactly the failure
-    mode issue #251 itself was filed over. A `bin/crew-takeover` degraded
-    branch never trusts a bare `False` from this function alone to withhold
-    the resume command outright - see its own comment for why."""
+    Shared by crew-list/crew-tree rendering, crew-get's JSON (consumed by
+    bin/crew-takeover), and the death-flip notification text - every other
+    caller here treats a bare `if is_resumable(record):` check, where None
+    is simply falsy alongside a genuine False, which is the right
+    degradation for a brief inline annotation (crew-takeover is the one
+    caller that needs to tell the two apart, and does so via the JSON's own
+    null vs false).
+
+    Two checks, in order (review round 1, MF-3), when the record IS claude's:
+    the exact derived path first (cheap, no directory scan), then - only on a
+    miss, and only when a session_id is present at all - a glob for
+    `<projects>/*/<session_id>.jsonl`. Session ids are UUIDs, so a match is
+    unambiguous. The fallback exists because the derivation above has known
+    blind spots even after the realpath/CLAUDE_CONFIG_DIR fixes above: the
+    CLI's own 200-char slug truncation+hash has no equivalent here, and any
+    future change to the CLI's own naming scheme would otherwise silently
+    read as "not resumable" - which, per this same review round, is exactly
+    the failure mode issue #251 itself was filed over. A `bin/crew-takeover`
+    degraded branch never trusts a bare `False` from this function alone to
+    withhold the resume command outright - see its own comment for why."""
     import glob
+    agent = record.get("agent")
+    if agent and agent != "claude":
+        return None
     session_id = record.get("session_id")
     if not session_id:
         return False
@@ -645,6 +664,12 @@ def cmd_crew_add(args):
         "window": args.window,
         "window_id": getattr(args, "window_id", "") or "",
         "session_id": args.session_id,
+        # The resolved agent CLI descriptor this member launched with (issue
+        # #25) - see the --agent argument's own comment above for why this is
+        # captured once at spawn rather than read live, and why empty means
+        # "claude". crew-resume/crew-takeover/common.sh's freeze-and-composer
+        # lookups key off this, not off $WM_AGENT (gone by the time they run).
+        "agent": getattr(args, "agent", "") or "",
         "status": "working",
         "summary": "",
         "blocker": None,
@@ -4558,6 +4583,18 @@ def _args_crew_add(a):
     # commitment fields None, the backward-compatible "no token on file"
     # case hooks/no-merge-guard.sh's shape-2 check falls through on.
     a.add_argument("--review-token", default=None, dest="review_token")
+    # The resolved agent CLI this member was launched with (issue #25) - the
+    # descriptor name (bin/lib/agent.sh's wm_agent_resolve), e.g. "claude" or
+    # "codex", never a raw binary path. Captured once at spawn, not read live
+    # off $WM_AGENT: the spawning process's own environment is gone by the
+    # time crew-resume/crew-takeover/common.sh's freeze-and-composer lookups
+    # need to know which adapter a given member actually runs on, so this is
+    # the durable record of that fact - mirrors session_id's own
+    # captured-once-at-spawn rationale exactly. Empty/absent means "claude":
+    # every record predating this field was necessarily claude (no other
+    # adapter existed yet), the same absence-reads-as-the-only-prior-option
+    # convention remote_control_connected's own absence already uses above.
+    a.add_argument("--agent", default="", dest="agent")
     a.set_defaults(fn=cmd_crew_add)
 
 
