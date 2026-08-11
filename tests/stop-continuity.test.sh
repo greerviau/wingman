@@ -845,8 +845,9 @@ export WM_STOP_CONTINUITY_LIFETIME=1
 # exception route 7f3 exercises - a genuinely distinct trigger the issue
 # explicitly calls out. The settings file here is valid JSON, isolating this
 # as a non-JSON fault. The stub only intercepts calls naming this test's own
-# marker file, matching the STUB_A/STUB_B idiom in tests/watch-fleet.test.sh
-# and the RUNNER wrapper in tests/pilot-preferences-guard.test.sh - falling
+# marker file, matching the STUB_A/STUB_B idiom in
+# tests/watch-fleet-lifecycle.test.sh and the RUNNER wrapper in
+# tests/pilot-preferences-guard.test.sh - falling
 # through to the real `uv run --no-project --quiet "$@"` for every other
 # $WM_UV invocation the hook makes, so it never breaks the hook at an
 # earlier, unrelated call.

@@ -7,10 +7,10 @@
 # frames in the pane's history and make "byte-identical between polls"
 # never true even once nothing is actually changing).
 # Originally inline in tests/composer-confirm-delivery.test.sh (issue #188);
-# extracted to a fixture (issue #236) so tests/watch-fleet.test.sh and
-# tests/stall-nudge-confirmation.test.sh can drive the same real composer
-# shape instead of grepping tmux scrollback for text that may only have
-# been typed, never submitted.
+# extracted to a fixture (issue #236) so tests/watch-fleet.test.sh,
+# tests/watch-fleet-lifecycle.test.sh, and tests/stall-nudge-confirmation.test.sh
+# can drive the same real composer shape instead of grepping tmux scrollback
+# for text that may only have been typed, never submitted.
 #
 # WM_TEST_BUSY=0/1: whether an independent "working... tick=N" line (in the
 # transcript area ABOVE the composer's own top rule - never between the two
