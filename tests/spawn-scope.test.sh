@@ -6,9 +6,9 @@
 # an explicit path by directory-existence (not git-ness), detects IS_GIT/HAS_REMOTE
 # mechanically (with the subdirectory rule and physical-path/symlink handling),
 # and refuses a software-development spawn against a non-git target while
-# allowing every other crew type to spawn there. Uses a stub agent (WM_AGENT)
-# and an isolated tmux session so no real claude launches and the live fleet is
-# untouched.
+# allowing every other crew type to spawn there. Uses a stub agent
+# (WM_AGENT_BIN_OVERRIDE) and an isolated tmux session so no real claude
+# launches and the live fleet is untouched.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -74,7 +74,7 @@ SYMWS2="$(wm_mktemp_dir)/symws2-link"
 mkdir -p "$(dirname "$SYMWS2")"
 ln -s "$WS2" "$SYMWS2"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 WM_READY_POLL=0 \
+export WM_AGENT_BIN_OVERRIDE="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 WM_READY_POLL=0 \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 # [projects].roots points discovery at the workspace; [projects.pins] registers

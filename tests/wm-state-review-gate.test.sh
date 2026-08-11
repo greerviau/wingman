@@ -119,7 +119,7 @@ git -C "$WS" init -q
 printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$WS/../stub.sh"
 chmod +x "$WS/../stub.sh"
 
-export WM_AGENT="$WS/../stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 \
+export WM_AGENT_BIN_OVERRIDE="$WS/../stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 \
   WM_READY_TRIES=4 WM_READY_POLL=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 wm_trust_repo "$WS"
 

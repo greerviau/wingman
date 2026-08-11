@@ -19,8 +19,8 @@
 #     therefore bin/doctor) rejects a typo instead of ignoring it;
 #   - a malformed file is announced and applies nothing, rather than half-applying.
 #
-# Uses a stub agent (WM_AGENT) and an isolated tmux session, so no real claude
-# launches and the live fleet is untouched.
+# Uses a stub agent (WM_AGENT_BIN_OVERRIDE) and an isolated tmux session, so
+# no real claude launches and the live fleet is untouched.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -63,7 +63,7 @@ done
 cp "$TEST_REPO/tests/fixtures/stub-agent.sh" "$WS/stub.sh"
 chmod +x "$WS/stub.sh"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 \
+export WM_AGENT_BIN_OVERRIDE="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 \
   WM_READY_POLL=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home           # also points WM_CONFIG_TOML at this test's own file
 wm_trust_repo "$WS"
@@ -325,6 +325,49 @@ EOF
 assert_false "a wrong-typed setting fails --check" "'$CONFIG' --check"
 assert_contains "the type error is named" \
   "$("$CONFIG" --check 2>&1)" "projects.roots must be an array of strings"
+
+# --- [harness.agent]: the per-type table form of harness.agent (issue #25) --
+# Exactly like [models]/[effort]'s per-type tables above, but nested one level
+# under [harness] rather than living at the top level - see wm_config.py's
+# for_type() dotted-path support and problems()'s harness.agent special case.
+wm_write_config <<'EOF'
+[harness.agent]
+default = "claude"
+developer = "codex"
+EOF
+assert_true "a well-formed [harness.agent] per-type table passes --check" "'$CONFIG' --check"
+assert_eq "for-type harness.agent resolves the per-type entry" \
+  "$(wm_cfg for-type --table harness.agent --type developer)" "codex"
+assert_eq "for-type harness.agent falls back to no per-type entry for an unlisted type" \
+  "$(wm_cfg for-type --table harness.agent --type reviewer; echo $?)" "1"
+
+wm_write_config <<'EOF'
+[harness.agent]
+develper = "codex"
+EOF
+assert_false "a [harness.agent] key naming no crew type fails --check" "'$CONFIG' --check"
+assert_contains "the bad crew type is named" \
+  "$("$CONFIG" --check 2>&1)" "harness.agent.develper names no crew type"
+
+wm_write_config <<'EOF'
+[harness.agent]
+default = { nested = "table" }
+EOF
+assert_false "a non-scalar [harness.agent] value fails --check" "'$CONFIG' --check"
+assert_contains "the shape error is named" \
+  "$("$CONFIG" --check 2>&1)" "harness.agent.default must be a single value"
+
+# The plain scalar shape (harness.agent as harness's own flat `agent` key,
+# unchanged since before issue #25) still works exactly as before - the two
+# shapes are mutually exclusive per-file (TOML itself rejects redefining
+# harness.agent as both), not a regression in the older one.
+wm_write_config <<'EOF'
+[harness]
+agent = "claude"
+EOF
+assert_true "the plain harness.agent scalar still passes --check" "'$CONFIG' --check"
+scalar_shown="$(WINGMAN_RUN_ID=$RUN "$CONFIG" 2>&1)"
+assert_contains "bin/config still shows the plain scalar form" "$scalar_shown" "harness.agent"
 
 # --- [env]: the raw passthrough for the unmodeled knobs ----------------------
 # Wingman has ~100 WM_* variables with no typed home. Carrying them here is what

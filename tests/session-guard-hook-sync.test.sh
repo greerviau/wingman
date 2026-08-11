@@ -115,7 +115,7 @@ wm_trust_repo "$TARGET_REPO2"
 STUB2="$(wm_mktemp_dir)/stub.sh"
 printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$STUB2"; chmod +x "$STUB2"
 GID11B="wiring-spawn-ok"
-out11b="$(WM_AGENT="$STUB2" "$MIRROR_OK2/bin/spawn-crew" --type software-analyst --repo "$TARGET_REPO2" --id "$GID11B" --objective "wiring reconciles" 2>&1)"
+out11b="$(WM_AGENT_BIN_OVERRIDE="$STUB2" "$MIRROR_OK2/bin/spawn-crew" --type software-analyst --repo "$TARGET_REPO2" --id "$GID11B" --objective "wiring reconciles" 2>&1)"
 rc11b=$?
 assert_eq "bin/spawn-crew: a healthy repo exits 0" "$rc11b" "0"
 assert_true "bin/spawn-crew: the roster record was created" "wm_state crew-get --id '$GID11B' >/dev/null 2>&1"
@@ -168,7 +168,7 @@ mkdir -p "$TARGET_REPO3"
 git -C "$TARGET_REPO3" init -q
 wm_trust_repo "$TARGET_REPO3"
 GID12B="wiring-spawn-bad"
-out12b="$(WM_AGENT="$STUB2" "$MIRROR_BAD2/bin/spawn-crew" --type software-analyst --repo "$TARGET_REPO3" --id "$GID12B" --objective "wiring refuses" 2>&1)"
+out12b="$(WM_AGENT_BIN_OVERRIDE="$STUB2" "$MIRROR_BAD2/bin/spawn-crew" --type software-analyst --repo "$TARGET_REPO3" --id "$GID12B" --objective "wiring refuses" 2>&1)"
 rc12b=$?
 assert_true "bin/spawn-crew: a broken repo exits non-zero" "[ $rc12b -ne 0 ]"
 assert_false "bin/spawn-crew: no roster record was created" "wm_state crew-get --id '$GID12B' >/dev/null 2>&1"
