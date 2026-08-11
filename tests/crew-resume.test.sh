@@ -545,7 +545,7 @@ out_fb="$(env -u WM_AGENT WM_AGENT_BIN_OVERRIDE="$FALLBACK_STUB" "$CR" fb1 2>&1)
 assert_contains "with \$WM_AGENT unset, WM_AGENT_BIN_OVERRIDE alone still resumes" "$out_fb" "1 resumed"
 assert_true "the fallback stub was the one actually execed, not real claude" "[ -f '$FALLBACK_MARKER' ]"
 assert_contains "the launch script's exec line names the fallback stub" \
-  "$(grep '^exec ' "$WINGMAN_HOME/crew/fb1.launch.sh" 2>/dev/null)" "$FALLBACK_STUB"
+  "$(grep '^exec ' "$WINGMAN_HOME/crew/fb1.resume.sh" 2>/dev/null)" "$FALLBACK_STUB"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 test_summary
