@@ -7,7 +7,7 @@
 # listing the qualified forms, --list-types emits category-qualified names and
 # excludes _-prefixed partials, and the shared status contract is still
 # concatenated onto a spawned member's system prompt. Uses a stub agent
-# (WM_AGENT), an isolated tmux session, and an isolated WM_PLAYBOOKS fixture
+# (WM_AGENT_BIN_OVERRIDE), an isolated tmux session, and an isolated WM_PLAYBOOKS fixture
 # tree (WM_PLAYBOOKS is override-friendly, like WM_HOME) so this suite never
 # reads or writes the live repo's own playbooks/ directory - resolution
 # against the real tree is exercised implicitly by every other test that
@@ -33,7 +33,7 @@ printf '# Status contract (all roles)\n\nFixture status contract text.\n' > "$PB
 printf '# Playbook: `lead`\n\nFixture lead playbook.\n' > "$PB/common/lead.md"
 printf '# Playbook: `developer`\n\nFixture developer playbook.\n' > "$PB/software-development/developer.md"
 
-export WM_AGENT="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB" \
+export WM_AGENT_BIN_OVERRIDE="$STUB" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_PLAYBOOKS="$PB" \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 wm_trust_repo "$REPO_DIR"

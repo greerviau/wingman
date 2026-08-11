@@ -321,8 +321,19 @@ EOF
     # The freshly regenerated review-signing token (reviewer type only),
     # exactly like a fresh spawn - see the regeneration block above.
     [ -n "$_review_token" ] && echo "export WM_REVIEW_TOKEN=$(quote "$_review_token")"
-    wm_guard_test_fixture_agent "${WM_AGENT:-claude}"
-    printf 'exec %s' "${WM_AGENT:-claude}"
+    # $WM_AGENT still wins when set (issue #25) - crew-resume's own adapter
+    # port is a later stage (plan step 5), so this file still execs $WM_AGENT
+    # directly rather than resolving a descriptor, and every existing
+    # crew-resume test fixture sets a call-specific $WM_AGENT stub that must
+    # keep winning here. WM_AGENT_BIN_OVERRIDE is the FALLBACK, only when
+    # $WM_AGENT is unset: wm_guard_test_fixture_agent (bin/lib/common.sh) now
+    # checks WM_AGENT_BIN_OVERRIDE first, and the suite's ambient test stub
+    # (tests/lib.sh) is that variable, not $WM_AGENT - without this fallback,
+    # a fixture relying only on the ambient default would pass the guard but
+    # still land on `exec claude`, a real launch.
+    _resume_agent_bin="${WM_AGENT:-${WM_AGENT_BIN_OVERRIDE:-claude}}"
+    wm_guard_test_fixture_agent "$_resume_agent_bin"
+    printf 'exec %s' "$_resume_agent_bin"
     printf ' --resume %s' "$(quote "$_sid")"
     [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
     printf ' --add-dir %s' "$(quote "$WM_HOME")"

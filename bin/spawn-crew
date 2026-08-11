@@ -7,6 +7,7 @@
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] \
+#              [--agent <name>] \
 #              [--allow-merge] [--waive-review-gate] [--force-during-outage] \
 #              [--force-during-usage-limit] [--constraint "<text>" ...]
 #
@@ -20,6 +21,15 @@
 # always wins; then config.local.toml's [models]/[effort] entry for this crew
 # type; then $WM_MODEL/$WM_EFFORT (where that file's own `default` also lands);
 # with none of them, the agent CLI's own default stands.
+#
+# --agent (issue #25): which agent CLI to exec for this crew member -
+# claude (the default), or any other name with a descriptor at
+# bin/lib/agents/<name>.sh (see bin/lib/agent.sh). Same precedence shape as
+# --model/--effort: an explicit --agent always wins; then
+# config.local.toml's [harness.agent] entry for this crew type; then
+# $WM_AGENT; with none of them, "claude". The resolved adapter's own
+# descriptor drives every per-CLI launch/preflight/detection difference from
+# here on - see docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md.
 #
 # --allow-merge (issue #46): grants THIS member merge autonomy for its own effort
 # from the moment it spawns - hooks/no-merge-guard.sh otherwise denies `gh pr
@@ -88,8 +98,9 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
-TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; SCOPE="repo"; ALLOW_MERGE=0; WAIVE_REVIEW_GATE=0; FORCE_DURING_OUTAGE=0; FORCE_DURING_USAGE_LIMIT=0
+TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; AGENT=""; SCOPE="repo"; ALLOW_MERGE=0; WAIVE_REVIEW_GATE=0; FORCE_DURING_OUTAGE=0; FORCE_DURING_USAGE_LIMIT=0
 CONSTRAINTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -101,6 +112,7 @@ while [ $# -gt 0 ]; do
     --input)     INPUT="$2"; shift 2 ;;
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
+    --agent)     AGENT="$2"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift 1 ;;
     --waive-review-gate) WAIVE_REVIEW_GATE=1; shift 1 ;;
     --force-during-outage) FORCE_DURING_OUTAGE=1; shift 1 ;;
@@ -108,7 +120,7 @@ while [ $# -gt 0 ]; do
     --constraint) CONSTRAINTS="${CONSTRAINTS:+$CONSTRAINTS
 }$2"; shift 2 ;;
     --list-types) wm_crew_types; exit 0 ;;
-    -h|--help)   sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,33p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
@@ -235,60 +247,55 @@ case " developer ml-engineer data-engineer " in
   *" $ROLE_NAME "*) INCLUDE_PR_DELIVERY=1 ;;
 esac
 
-# --- preflight: workspace-trust gate (issue #16) -----------------------------
-# The one-time-per-directory workspace-trust dialog survives
-# --permission-mode bypassPermissions and would otherwise freeze the crew
-# window the instant it opens, only to be caught later by watch-fleet's
-# reactive stall detection. Detect it non-interactively before opening any
-# window at all: $REPO is now fully resolved and physically normalized for
-# both scopes (global scope's $REPO is the workspace root - exactly the
-# directory the launch script `cd`s into - so one check covers both). A git
-# worktree carved out of an already-trusted repo needs no separate check (see
-# the plan's z15 finding), and this check is mode-independent - the trust
-# dialog appears regardless of --permission-mode - so it runs unconditionally,
-# not gated on PERM_MODE below. Hard failure: no tmux window, no crew record,
-# no worktree path reservation - exactly like the software-development check
-# above.
-if ! uv run --no-project --quiet "$WM_LIB/claude-gate-check.py" trust-status \
-    --config "${WM_CLAUDE_USER_CONFIG:-$HOME/.claude.json}" --repo "$REPO"; then
-  wm_die "workspace trust for '$REPO' has not been accepted yet. Run 'claude' there once, interactively, and accept the trust dialog, then retry this spawn."
-fi
+# --- resolve the agent CLI adapter (issue #25) -------------------------------
+# Same precedence shape as MODEL/EFFORT just below: an explicit --agent wins;
+# then config.local.toml's [harness.agent] entry for THIS crew type; then
+# $WM_AGENT; with none of them, "claude" - wingman's unconditional built-in
+# default regardless of what crew's own default is configured to (mirrors
+# bin/wingman's own orchestrator-agent default, plan §10.2).
+[ -n "$AGENT" ] || AGENT="$(wm_config_for_type harness.agent "$QUALIFIED_TYPE")"
+[ -n "$AGENT" ] || AGENT="${WM_AGENT:-}"
+[ -n "$AGENT" ] || AGENT="claude"
+wm_agent_resolve "$AGENT"
 
 # Permission posture for the (unattended) crew session. Default bypassPermissions;
 # explicit empty (WM_PERMISSION_MODE=) disables it and falls back to prompting.
 # Follow-up (out of scope here): rather than blanket bypass, route each individual
 # permission decision up to the pilot as a real blocker via a permission-prompt
 # hook / MCP tool, so the pilot approves specific actions instead of all-or-nothing.
+# Meaningful for every adapter with a WM_AGENT_BYPASS_FLAG (whatever shape that
+# takes for the resolved CLI - see flag composition below), not claude-specific
+# despite the flag value itself being one of claude's own permission-mode
+# strings; an adapter with no bypass flag simply never consumes it.
 PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
 
-# --- preflight: Bypass-Permissions mode acceptance (issue #16) ---------------
-# A safety net for a spawn that happens to run before bin/doctor ever did:
-# doctor is meant to have already cleared this once, machine-wide (the
-# common case). Only fires when bypass mode is actually in effect - an
-# explicit WM_PERMISSION_MODE= (empty) disables --permission-mode
-# bypassPermissions entirely and falls back to interactive per-tool
-# prompting, in which case this dialog never appears and
-# skipDangerousModePermissionPrompt is irrelevant.
-if [ "$PERM_MODE" = bypassPermissions ] && \
-   ! uv run --no-project --quiet "$WM_LIB/claude-gate-check.py" bypass-status \
-     --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}"; then
-  wm_die "Bypass-Permissions mode has not been accepted yet. Run 'bin/doctor -y', or accept it manually (see bin/doctor's own message), then retry this spawn."
-fi
-
-# --- preflight: reconcile user-scope guard hooks (issue #241) ---------------
-# The crew session about to be spawned is the one that wedged in the incident
-# this fixes - see bin/wingman's identical block for the full rationale. Same
-# fail-closed posture, same no-override rule: no tmux window, no crew record,
-# no worktree path reservation on a sync failure.
-if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
-    --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
-  wm_launch_failure "guard-hook sync (spawn)" "$_sync_err"
-  wm_die "could not wire the user-level guard hooks this crew session needs: $_sync_err
-Fix the reported problem, or run 'bin/doctor -y', then retry this spawn."
+# --- preflight: the resolved adapter's own gates (issue #16, #241, #25) ------
+# claude's WM_AGENT_PREFLIGHT (claude_preflight, bin/lib/agents/claude.sh)
+# wraps exactly the three gates this block used to run inline: the one-time
+# workspace-trust dialog (mode-independent - it appears regardless of
+# --permission-mode, so it is not itself gated on PERM_MODE), the one-time
+# Bypass-Permissions acceptance dialog (gated on PERM_MODE inside the
+# function), and the user-scope guard-hook sync. Hard failure on any of them:
+# no tmux window, no crew record, no worktree path reservation - exactly as
+# before this relocation. An adapter with no WM_AGENT_PREFLIGHT (every
+# non-claude adapter today) simply has nothing to run here; per the plan,
+# claude's own preflights never apply to a non-claude agent regardless of this
+# field, they are not a fallback.
+#
+# The exit status is checked explicitly (never a bare `&&` chain, which
+# would let this whole statement's own nonzero status pass through unnoticed
+# under this script's `set -u`-but-not-`set -e` posture): wm_agent_resolve
+# already confirmed WM_AGENT_PREFLIGHT names a real function, so a nonzero
+# return here is the function's OWN deliberate failure signal, and must stop
+# the spawn exactly as hard as claude_preflight's own internal wm_die calls
+# already do (defense in depth for a future preflight function that returns
+# failure instead of calling wm_die directly).
+if [ -n "$WM_AGENT_PREFLIGHT" ]; then
+  "$WM_AGENT_PREFLIGHT" "$REPO" "$PERM_MODE" spawn || wm_die "agent preflight '$WM_AGENT_PREFLIGHT' failed"
 fi
 
 # Model and reasoning effort for the crew session, alongside the other
-# harness-specific knobs (WM_AGENT, WM_PERMISSION_MODE). Most specific wins:
+# harness-specific knobs (the resolved AGENT, WM_PERMISSION_MODE). Most specific wins:
 #   --model/--effort on this call
 #     > config.local.toml's [models]/[effort] entry for THIS crew type
 #     > $WM_MODEL/$WM_EFFORT (which is also where the file's own `default`
@@ -298,6 +305,19 @@ fi
 [ -n "$MODEL" ]  || MODEL="${WM_MODEL:-}"
 [ -n "$EFFORT" ] || EFFORT="$(wm_config_for_type effort "$QUALIFIED_TYPE")"
 [ -n "$EFFORT" ] || EFFORT="${WM_EFFORT:-}"
+
+# A resolved effort outside the adapter's own accepted-value domain (e.g.
+# "xhigh" against grok, which rejects it outright - plan §3) is omitted with a
+# warning rather than composed and left to fail the launch; an adapter with no
+# declared domain (WM_AGENT_EFFORT_VALUES empty - claude today) is
+# unconstrained, unchanged from today's pass-anything-through behavior.
+if [ -n "$EFFORT" ] && [ -n "$WM_AGENT_EFFORT_VALUES" ]; then
+  case " $WM_AGENT_EFFORT_VALUES " in
+    *" $EFFORT "*) ;;
+    *) wm_warn "effort '$EFFORT' is outside $WM_AGENT_DISPLAY_NAME's accepted domain ($WM_AGENT_EFFORT_VALUES) - omitting --effort, launching on its own default"
+       EFFORT="" ;;
+  esac
+fi
 
 # Remote Control visibility, on by default (empty to disable), mirroring
 # WM_PERMISSION_MODE's convention exactly so there is only one pattern to learn.
@@ -385,6 +405,12 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
   cat "$WM_PLAYBOOKS/_status-contract.md"
 } > "$SYSPROMPT"
 
+# Computed here (rather than just before delivery, as before this file's #25
+# rewrite) because a `positional`/`prompt-flag` WM_AGENT_SYSPROMPT_MODE folds
+# this straight into the launch line below - see wm_agent_emit_sysprompt.
+OPENING="$OBJECTIVE"
+[ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
+
 # --- write the launch script (avoids all in-tmux quoting) --------------------
 LAUNCH="$WM_HOME/crew/$ID.launch.sh"
 {
@@ -434,43 +460,77 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # own environment - not the roster, not any file, not a conversation
   # transcript.
   [ -n "$REVIEW_TOKEN" ] && echo "export WM_REVIEW_TOKEN=$(quote "$REVIEW_TOKEN")"
-  # WM_AGENT and WM_PERMISSION_MODE are the harness-specific lines (swap both for a
-  # different harness). WM_AGENT is the agent CLI (default: claude; tests also use
-  # it to substitute a stub).
-  wm_guard_test_fixture_agent "${WM_AGENT:-claude}"
-  printf 'exec %s' "${WM_AGENT:-claude}"
+  # The resolved agent CLI drives everything from here on (issue #25): the
+  # exec target, every flag template, and how the system prompt is delivered.
+  # WM_AGENT_ENV_UNSET/WM_AGENT_ENV_PREFIX run before exec (unset a
+  # self-identifying marker the orchestrator - always Claude Code - would
+  # otherwise pass down unconditionally; prefix env vars a non-flag-shaped
+  # bypass needs, e.g. opencode's permission override, §3); empty for claude,
+  # which needs neither.
+  wm_guard_test_fixture_agent "$WM_AGENT_BIN"
+  [ -n "$WM_AGENT_ENV_UNSET" ] && echo "unset $WM_AGENT_ENV_UNSET"
+  printf 'exec '
+  [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"
+  printf '%s' "$WM_AGENT_BIN"
   # Crew run unattended, disposably, and scoped to one repo, so the default
   # bypassPermissions keeps a gated tool call from hanging forever on a prompt no
   # human is there to answer. (It does NOT clear the one-time workspace-trust
   # dialog, which no flag bypasses; the watcher surfaces that instead.) Set
   # WM_PERMISSION_MODE= (empty) to disable and fall back to interactive prompting.
-  [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
-  printf ' --session-id %s' "$(quote "$SID")"
+  # An adapter with no WM_AGENT_BYPASS_FLAG (a CLI with no permission system at
+  # all, or one whose bypass is expressed via WM_AGENT_ENV_PREFIX instead)
+  # simply emits nothing here.
+  [ -n "$PERM_MODE" ] && wm_agent_emit_flag "$WM_AGENT_BYPASS_FLAG" "$PERM_MODE"
+  # Forced-session-id-at-creation: only claude has a confirmed flag for this
+  # (plan §3) - an adapter with none simply omits it; $SID is still generated
+  # and recorded on the roster either way as a wingman-side bookkeeping id
+  # (crew-resume's relaunch mode, plan §4.8, is what stands in for a true
+  # resume where this flag doesn't exist).
+  wm_agent_emit_flag "$WM_AGENT_SESSION_ID_FLAG" "$SID"
   # The crew's own human-readable slug as the session name, so it shows up
-  # legibly in the Claude Code session picker / terminal title instead of an
-  # auto-generated one.
-  printf ' --name %s' "$(quote "$ID")"
-  [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
-  [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
+  # legibly in the agent CLI's own session picker / terminal title instead of
+  # an auto-generated one, where the adapter has an equivalent flag.
+  wm_agent_emit_flag "$WM_AGENT_NAME_FLAG" "$ID"
+  [ -n "$MODEL" ]  && wm_agent_emit_flag "$WM_AGENT_MODEL_FLAG"  "$MODEL"
+  [ -n "$EFFORT" ] && wm_agent_emit_flag "$WM_AGENT_EFFORT_FLAG" "$EFFORT"
   # Remote-Control-visible by default (WM_REMOTE_CONTROL, mirroring
   # WM_PERMISSION_MODE's on-by-default/empty-to-disable convention): the pilot can
   # reach a crew member from claude.ai/code, not only via tmux attach. The
   # wm-prefixed name matches the tmux window name ($WINDOW), so the member reads
   # identically in both places. Fails soft on non-subscription (API-key) auth -
   # verified empirically: the session starts normally and Remote Control is just
-  # quietly unavailable - so defaulting this on is safe everywhere.
-  [ -n "$REMOTE_CONTROL" ] && printf ' --remote-control %s' "$(quote "wm-$ID")"
-  printf ' --add-dir %s' "$(quote "$WM_HOME")"
-  printf ' --add-dir %s' "$(quote "$WM_REPO")"
-  printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
-  # Global scope: add every discovered repo so the member can work across all of
-  # them (the cwd is the workspace root, which need not be a git checkout itself).
-  if [ "$SCOPE" = global ]; then
-    printf '%s\n' "$GLOBAL_REPO_DIRS" | while IFS= read -r _d; do
-      [ -n "$_d" ] && printf ' --add-dir %s' "$(quote "$_d")"
-    done
+  # quietly unavailable - so defaulting this on is safe everywhere. Only claude
+  # populates WM_AGENT_REMOTE_CONTROL_FLAG today, so every other adapter simply
+  # skips this - there is no Remote-Control-equivalent connection to register.
+  [ -n "$REMOTE_CONTROL" ] && wm_agent_emit_flag "$WM_AGENT_REMOTE_CONTROL_FLAG" "wm-$ID"
+  # --add-dir / --settings (the CLAUDE.md-exclusion mechanism, issue #213) are
+  # claude-specific mechanisms with no descriptor field of their own yet - the
+  # adapter contract (plan §4.3) does not define an equivalent for any other
+  # CLI, so these stay a claude-only special case rather than a
+  # descriptor-driven one. A non-claude crew member reaches $WM_HOME/$WM_REPO
+  # by plain filesystem access instead (no sandbox to widen), and does not yet
+  # have wingman's own CLAUDE.md-exclusion problem solved for it - see the
+  # plan's §10.2 "gap this extension surfaces" note for the sibling case.
+  if [ "$AGENT" = claude ]; then
+    printf ' --add-dir %s' "$(quote "$WM_HOME")"
+    printf ' --add-dir %s' "$(quote "$WM_REPO")"
+    printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
+    # Global scope: add every discovered repo so the member can work across
+    # all of them (the cwd is the workspace root, which need not be a git
+    # checkout itself).
+    if [ "$SCOPE" = global ]; then
+      printf '%s\n' "$GLOBAL_REPO_DIRS" | while IFS= read -r _d; do
+        [ -n "$_d" ] && printf ' --add-dir %s' "$(quote "$_d")"
+      done
+    fi
   fi
-  printf ' --append-system-prompt "$(cat %s)"' "$(quote "$SYSPROMPT")"
+  # System-prompt delivery (plan §4.5): claude's WM_AGENT_SYSPROMPT_MODE=flag
+  # keeps today's single mechanism unchanged (the opening objective is still
+  # delivered separately below); a non-flag-mode adapter folds the opening
+  # objective into this same launch-line argument instead, which is what
+  # WM_AGENT_OPENING_DELIVERED_AT_LAUNCH (set by wm_agent_emit_sysprompt)
+  # tells the delivery step below to skip re-sending.
+  wm_agent_emit_sysprompt "$SYSPROMPT" "$OPENING"
   printf '\n'
 } > "$LAUNCH"
 chmod +x "$LAUNCH"
@@ -538,12 +598,14 @@ if ! wm_state crew-get --id "$ID" >/dev/null 2>&1; then
 fi
 
 # --- deliver the opening objective as the first user message -----------------
+# Skipped entirely for a non-flag-mode adapter (positional/prompt-flag, plan
+# §4.5): wm_agent_emit_sysprompt already folded $OPENING into the launch line
+# itself above, so sending it again here would deliver it twice.
+if [ "$WM_AGENT_OPENING_DELIVERED_AT_LAUNCH" != 1 ]; then
 # A small head start off the window launch; wm_tmux_send_message then waits for the
 # TUI to actually be ready before typing and confirms the submit registered, so a
 # variable startup no longer leaves the objective unsent in the input box.
 sleep "${WM_SPAWN_DELAY:-2}"
-OPENING="$OBJECTIVE"
-[ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
 # WM_CLEAR_KEYS="" (issue #157): this window was just created, so there is no
 # pre-existing composed text to clear, and unlike every other
 # wm_tmux_send_message caller (crew-say/crew-ask/watch-fleet/crew-standdown,
@@ -576,6 +638,7 @@ if [ "$_opening_rc" -ne 0 ]; then
   printf '%s\n' "${WINGMAN_CREW_ID:-}" > "$WM_HOME/outbox-meta/$ID/$(basename "$_openfile")"
   printf '%s\n' "$OPENING" > "$_openfile"
   wm_warn "opening objective NOT confirmed delivered to '$ID' (its pane may be sitting on a permission/trust dialog - see: bin/crew-takeover $ID). It is QUEUED for automatic retry by the watcher; if '$ID' ends before that happens, you'll be notified instead of the objective silently vanishing. To deliver manually instead: bin/crew-say $ID \"$OPENING\""
+fi
 fi
 
 if [ "$SCOPE" = global ]; then

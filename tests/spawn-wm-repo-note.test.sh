@@ -9,8 +9,8 @@
 # against an unrelated repo; absent for a global-scope spawn even when the
 # wingman repo is among the discovered/added repos (global scope's cwd is the
 # workspace root, not the wingman repo, so the auto-load hazard never fires
-# there). Uses a stub agent (WM_AGENT) and an isolated tmux session so no real
-# claude launches and the live fleet is untouched.
+# there). Uses a stub agent (WM_AGENT_BIN_OVERRIDE) and an isolated tmux
+# session so no real claude launches and the live fleet is untouched.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -23,7 +23,7 @@ mkdir -p "$WS/repoA"
 git -C "$WS/repoA" init -q
 printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$WS/stub.sh"; chmod +x "$WS/stub.sh"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 WM_READY_POLL=0 \
+export WM_AGENT_BIN_OVERRIDE="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 WM_READY_POLL=0 \
   WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 # [projects].roots points global-scope discovery at this unrelated workspace (so

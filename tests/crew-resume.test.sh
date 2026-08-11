@@ -517,4 +517,35 @@ assert_not_contains "the flag does not leak: the healthy member's queued nudge c
   "$(cat "$WINGMAN_HOME/outbox/wt4/$q_wt4" 2>/dev/null)" "re-isolate into a fresh worktree"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #25 review round 1, finding 3: WM_AGENT_BIN_OVERRIDE is honored
+# as a FALLBACK exec target when $WM_AGENT is unset -----------------------
+# The regression this guards: wm_guard_test_fixture_agent (bin/lib/common.sh)
+# now accepts WM_AGENT_BIN_OVERRIDE as proof "a stub was configured" (it has
+# to, since that is the suite's own ambient default post-#25 - see
+# tests/lib.sh), but this file's own exec-line composition, unconverted
+# until this file gets its own adapter port, must still land on that SAME
+# stub, not silently fall through to `exec claude` once the guard's own
+# check no longer requires $WM_AGENT specifically. Explicit WM_AGENT still
+# wins when a test sets it (every other case in this file relies on that,
+# unchanged) - only the fallback ORDER when $WM_AGENT is unset is under test
+# here.
+FALLBACK_STUB="$STUB_DIR/fallback-marker.sh"
+FALLBACK_MARKER="$STUB_DIR/fallback-invoked"
+cat > "$FALLBACK_STUB" <<EOF
+#!/usr/bin/env bash
+printf 'FALLBACK_STUB_INVOKED %s\n' "\$*" > "$FALLBACK_MARKER"
+exec sleep 600
+EOF
+chmod +x "$FALLBACK_STUB"
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id fb1 --type developer --objective x --repo /tmp --window wm-fb1 --session-id sess-fb1 >/dev/null
+wm_state crew-set --id fb1 --status died >/dev/null
+out_fb="$(env -u WM_AGENT WM_AGENT_BIN_OVERRIDE="$FALLBACK_STUB" "$CR" fb1 2>&1)"
+assert_contains "with \$WM_AGENT unset, WM_AGENT_BIN_OVERRIDE alone still resumes" "$out_fb" "1 resumed"
+assert_true "the fallback stub was the one actually execed, not real claude" "[ -f '$FALLBACK_MARKER' ]"
+assert_contains "the launch script's exec line names the fallback stub" \
+  "$(grep '^exec ' "$WINGMAN_HOME/crew/fb1.resume.sh" 2>/dev/null)" "$FALLBACK_STUB"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 test_summary

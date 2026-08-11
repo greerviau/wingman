@@ -78,6 +78,16 @@ SCHEMA = (
 # Tables that additionally accept arbitrary crew-type keys alongside `default`
 # (see for_type below), so unknown-key detection must not flag them.
 PER_TYPE_TABLES = ("models", "effort")
+# Per-type tables nested one level under another top-level table, rather than
+# being top-level themselves - `[harness.agent]` (default/developer/... keys,
+# issue #25) alongside `[harness]`'s own existing flat `agent` scalar, exactly
+# like `[models]` already works for models but scoped under `[harness]`
+# instead of living at the top level. Kept distinct from PER_TYPE_TABLES
+# (rather than merged into it) because problems()'s structural walk only ever
+# sees TOP-LEVEL table names when it iterates `data.items()` - a nested
+# table's own validation has to happen from inside its parent's branch of that
+# walk, not by table name membership the way models/effort are.
+DOTTED_PER_TYPE_TABLES = ("harness.agent",)
 # The raw passthrough table: any WM_* variable, exported verbatim. This is what
 # reaches the ~100 knobs SCHEMA deliberately does not model - internal timings,
 # thresholds, detector regexes, each documented at its point of use rather than
@@ -179,21 +189,34 @@ def _type_keys(crew_type):
 
 
 def for_type(table_name, crew_type, data=None):
-    """The `[models]`/`[effort]` value for one crew type, or None when the file
-    names nothing for it.
+    """The `[models]`/`[effort]`/`[harness.agent]` value for one crew type, or
+    None when the file names nothing for it.
 
     Specificity decides: `"software-development/developer"` wins over
     `developer`. `default` is deliberately NOT consulted here - it is exported
-    as $WM_MODEL/$WM_EFFORT by env_exports, which is what puts it *below* an
-    explicitly-set environment variable in the precedence chain while a per-type
-    entry stays above one.
+    as $WM_MODEL/$WM_EFFORT/$WM_AGENT by env_exports, which is what puts it
+    *below* an explicitly-set environment variable in the precedence chain
+    while a per-type entry stays above one.
+
+    `table_name` may be dotted (`"harness.agent"`) to reach a table nested
+    under another (`[harness.agent]`, as opposed to `[harness]`'s own flat
+    `agent` scalar). A dotted lookup that resolves to something other than a
+    table - the scalar-`agent`-under-`[harness]` shape a pilot may already be
+    using - returns None gracefully rather than erroring: there is simply no
+    per-type table to search there, so the caller falls through to its next
+    precedence tier (the plain $WM_AGENT env-backed scalar) exactly as if the
+    key were absent.
     """
     data = load() if data is None else data
-    table = data.get(table_name)
+    table = data
+    for part in table_name.split("."):
+        if not isinstance(table, dict):
+            return None
+        table = table.get(part)
     if table is None:
         return None
     if not isinstance(table, dict):
-        raise ConfigError("[%s] must be a table" % table_name)
+        return None
     for key in _type_keys(crew_type):
         if key in table:
             value = table[key]
@@ -303,8 +326,27 @@ def env_exports(data=None, environ=None):
         section = data.get(table)
         if not isinstance(section, dict) or key not in section:
             continue
+        raw = section[key]
+        # The DOTTED_PER_TYPE_TABLES handling (mirroring resolved()'s own
+        # exclusion, but not simply skipping the row the way that one does):
+        # `[harness.agent]` used as the new per-type table makes
+        # section["agent"] a dict, not the scalar this SCHEMA row expects.
+        # Its own `default` key is exactly [models]/[effort]'s `default`
+        # symmetry - PER_TYPE_TABLES carries `default` into $WM_MODEL/$WM_EFFORT
+        # from right here, and DOTTED_PER_TYPE_TABLES needs the identical
+        # treatment for $WM_AGENT, or `[harness.agent] default = "..."`
+        # becomes silently inert: for_type() never consults `default` itself
+        # (by design - see its own docstring), so if this export doesn't
+        # carry it into $WM_AGENT, no code path reads the key at all, despite
+        # config.example.toml documenting it as the fleet-wide default. Only
+        # a table with NO `default` key at all (per-type entries only) has
+        # nothing to export here - that's the one shape genuinely absent.
+        if "%s.%s" % (table, key) in DOTTED_PER_TYPE_TABLES and isinstance(raw, dict):
+            if "default" not in raw:
+                continue
+            raw = raw["default"]
         lines.append("export %s=%s" % (
-            var, shlex.quote(_env_value(table, key, kind, section[key]))))
+            var, shlex.quote(_env_value(table, key, kind, raw))))
         applied.append(var)
     for var, value in sorted(env_table(data).items()):
         if var in environ:
@@ -374,6 +416,23 @@ def problems(data=None, known_types=()):
                     found.append(str(exc))
             continue
         for key, raw in section.items():
+            if table == "harness" and key == "agent" and isinstance(raw, dict):
+                # [harness.agent]: the per-type table (default/developer/...,
+                # issue #25), not harness.agent's own plain-scalar SCHEMA row -
+                # validated the same way a PER_TYPE_TABLES entry is validated
+                # below, just reached from inside harness's own branch since a
+                # DOTTED_PER_TYPE_TABLES name is never a top-level table name
+                # this outer walk would see on its own.
+                for subkey, subraw in raw.items():
+                    if subkey != "default" and known_types and subkey not in bare_types:
+                        found.append(
+                            "harness.agent.%s names no crew type - see "
+                            "`bin/spawn-crew --list-types`" % subkey)
+                        continue
+                    if isinstance(subraw, (dict, list)):
+                        found.append(
+                            "harness.agent.%s must be a single value" % subkey)
+                continue
             if table in PER_TYPE_TABLES:
                 if key != "default" and known_types and key not in bare_types:
                     found.append(
@@ -437,9 +496,22 @@ def resolved(data=None, environ=None):
             rows.append((name, _display(kind, environ[var]), "env"))
             continue
         section = data.get(table)
-        if isinstance(section, dict) and key in section:
+        _raw = section.get(key) if isinstance(section, dict) else None
+        # The DOTTED_PER_TYPE_TABLES handling: `[harness.agent]` used as the
+        # new per-type table (rather than harness.agent's own plain scalar
+        # shape) makes section["agent"] a dict, not a scalar. Its `default`
+        # key IS this row's scalar value - the same symmetry env_exports()
+        # carries into $WM_AGENT, so this bare "harness.agent" row has to
+        # agree with what actually got exported, or `bin/config show` would
+        # report "default"/empty for a setting that is, in fact, in force.
+        # Only a table with no `default` key at all has nothing to show
+        # here; the per-type block below renders the rest either way
+        # (harness.agent.default, harness.agent.<type>, ...).
+        if name in DOTTED_PER_TYPE_TABLES and isinstance(_raw, dict):
+            _raw = _raw.get("default")
+        if isinstance(section, dict) and key in section and _raw is not None:
             try:
-                value = _env_value(table, key, kind, section[key])
+                value = _env_value(table, key, kind, _raw)
             except ConfigError as exc:
                 rows.append((name, "<invalid: %s>" % exc, "config.local.toml"))
             else:
@@ -456,6 +528,23 @@ def resolved(data=None, environ=None):
             if key == "default":
                 continue
             rows.append(("%s.%s" % (table, key), _stringify(section[key]),
+                         "config.local.toml"))
+    # Same rendering, for a table nested one level down (`[harness.agent]`
+    # rather than a top-level `[models]`) - `default` IS listed here (unlike
+    # the loop above): the plain SCHEMA row above only renders it when
+    # harness.agent is used in its OTHER, scalar shape, so a per-type-table
+    # `default` would otherwise never be shown anywhere.
+    for dotted in DOTTED_PER_TYPE_TABLES:
+        parts = dotted.split(".")
+        section = data
+        for part in parts:
+            section = section.get(part) if isinstance(section, dict) else None
+        if not isinstance(section, dict):
+            continue
+        for key in sorted(section):
+            if isinstance(section[key], (dict, list)):
+                continue
+            rows.append(("%s.%s" % (dotted, key), _stringify(section[key]),
                          "config.local.toml"))
     # The raw passthrough, likewise open-ended. An entry the environment already
     # overrides is shown with the environment's value, so the rendering never
@@ -490,7 +579,8 @@ def main(argv=None):
 
     a = sub.add_parser("for-type",
                        help="the [models]/[effort] value for one crew type")
-    a.add_argument("--table", required=True, choices=list(PER_TYPE_TABLES))
+    a.add_argument("--table", required=True,
+                   choices=list(PER_TYPE_TABLES) + list(DOTTED_PER_TYPE_TABLES))
     a.add_argument("--type", required=True, dest="crew_type")
 
     a = sub.add_parser("check", help="report structural problems; exit 1 if any")

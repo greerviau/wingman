@@ -19,8 +19,8 @@
 #     therefore bin/doctor) rejects a typo instead of ignoring it;
 #   - a malformed file is announced and applies nothing, rather than half-applying.
 #
-# Uses a stub agent (WM_AGENT) and an isolated tmux session, so no real claude
-# launches and the live fleet is untouched.
+# Uses a stub agent (WM_AGENT_BIN_OVERRIDE) and an isolated tmux session, so
+# no real claude launches and the live fleet is untouched.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -63,7 +63,7 @@ done
 cp "$TEST_REPO/tests/fixtures/stub-agent.sh" "$WS/stub.sh"
 chmod +x "$WS/stub.sh"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 \
+export WM_AGENT_BIN_OVERRIDE="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_READY_TRIES=4 \
   WM_READY_POLL=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home           # also points WM_CONFIG_TOML at this test's own file
 wm_trust_repo "$WS"
@@ -325,6 +325,110 @@ EOF
 assert_false "a wrong-typed setting fails --check" "'$CONFIG' --check"
 assert_contains "the type error is named" \
   "$("$CONFIG" --check 2>&1)" "projects.roots must be an array of strings"
+
+# --- [harness.agent]: the per-type table form of harness.agent (issue #25) --
+# Exactly like [models]/[effort]'s per-type tables above, but nested one level
+# under [harness] rather than living at the top level - see wm_config.py's
+# for_type() dotted-path support and problems()'s harness.agent special case.
+wm_write_config <<'EOF'
+[harness.agent]
+default = "claude"
+developer = "codex"
+EOF
+assert_true "a well-formed [harness.agent] per-type table passes --check" "'$CONFIG' --check"
+assert_eq "for-type harness.agent resolves the per-type entry" \
+  "$(wm_cfg for-type --table harness.agent --type developer)" "codex"
+assert_eq "for-type harness.agent falls back to no per-type entry for an unlisted type" \
+  "$(wm_cfg for-type --table harness.agent --type reviewer; echo $?)" "1"
+
+# --- issue #25 review round 1, finding 1: a [harness.agent] TABLE must not
+# poison env-exports for every OTHER setting in the file --------------------
+# The regression this guards: env_exports() iterates SCHEMA, and the
+# ("harness","agent",SCALAR,"WM_AGENT") row used to try to coerce
+# section["agent"] straight to a scalar with no shape check, unconditionally
+# raising ConfigError the instant [harness.agent] is used as a table -
+# bin/lib/common.sh's own sourcing block treats ANY ConfigError from this
+# function as "the whole file is unusable, apply nothing," so a single
+# per-type [harness.agent] table used to silently drop every other setting
+# in the file (models, effort, projects, the rest of [harness], all of
+# [env]) with only a warning, not a hard failure.
+wm_write_config <<'EOF'
+[models]
+default = "shown-model-with-harness-agent-table"
+
+[harness.agent]
+default = "claude"
+developer = "codex"
+EOF
+exports_with_table="$(unset WM_MODEL WM_AGENT; wm_cfg env-exports)"
+assert_contains "[models].default still exports when [harness.agent] is a table alongside it" \
+  "$exports_with_table" "WM_MODEL=shown-model-with-harness-agent-table"
+# issue #25 review round 2, finding NEW-1: [harness.agent]'s own `default` key
+# has to reach $WM_AGENT too, exactly like [models]/[effort]'s `default` reaches
+# $WM_MODEL/$WM_EFFORT - config.example.toml documents it as the fleet-wide
+# default twice, and for_type() deliberately never consults `default` itself
+# (see its own docstring), so env_exports carrying it into $WM_AGENT is the
+# ONLY place that key is ever read at all. A prior fix here (round 1) skipped
+# the whole per-type-table shape unconditionally, which fixed the poisoning
+# bug but silently dropped `default` along with it - the opposite failure
+# mode (too-loud became too-quiet), caught in review round 2 before merge.
+assert_contains "[harness.agent]'s own default key reaches \$WM_AGENT, exactly like [models]/[effort]'s default" \
+  "$exports_with_table" "WM_AGENT=claude"
+assert_true "sourcing common.sh with this file present does not declare it unusable" \
+  "! (unset WM_MODEL WM_AGENT; . '$TEST_REPO/bin/lib/common.sh' 2>&1 | grep -q 'is unusable')"
+
+# The precedence chain stays intact once WM_AGENT carries the table's
+# `default`: an explicit per-type entry still wins over it (spawn-crew's own
+# resolution order, [harness.agent] per-type > $WM_AGENT > "claude").
+assert_eq "for-type harness.agent's per-type entry still resolves independently of default" \
+  "$(wm_cfg for-type --table harness.agent --type developer)" "codex"
+
+# resolved()/bin/config show must agree with what env-exports actually
+# applies - the bare "harness.agent" row has to show the table's `default`
+# value too, not report "default"/empty for a setting that is, in fact, in
+# force (the same symmetry fix, applied to the resolved-view renderer).
+table_default_shown="$(unset WM_MODEL WM_AGENT; WINGMAN_RUN_ID=$RUN "$CONFIG" 2>&1)"
+assert_contains "bin/config shows harness.agent's table-default value" "$table_default_shown" "harness.agent"
+assert_contains "...and attributes it to the file, not silently to 'default'" "$table_default_shown" "claude"
+
+# A table with per-type entries but NO default key at all has nothing to
+# export - there is no fleet-wide value to carry into $WM_AGENT, unlike the
+# case above.
+wm_write_config <<'EOF'
+[harness.agent]
+developer = "codex"
+EOF
+no_default_exports="$(unset WM_AGENT; wm_cfg env-exports)"
+assert_not_contains "a [harness.agent] table with no default key exports nothing for WM_AGENT" \
+  "$no_default_exports" "WM_AGENT="
+
+wm_write_config <<'EOF'
+[harness.agent]
+develper = "codex"
+EOF
+assert_false "a [harness.agent] key naming no crew type fails --check" "'$CONFIG' --check"
+assert_contains "the bad crew type is named" \
+  "$("$CONFIG" --check 2>&1)" "harness.agent.develper names no crew type"
+
+wm_write_config <<'EOF'
+[harness.agent]
+default = { nested = "table" }
+EOF
+assert_false "a non-scalar [harness.agent] value fails --check" "'$CONFIG' --check"
+assert_contains "the shape error is named" \
+  "$("$CONFIG" --check 2>&1)" "harness.agent.default must be a single value"
+
+# The plain scalar shape (harness.agent as harness's own flat `agent` key,
+# unchanged since before issue #25) still works exactly as before - the two
+# shapes are mutually exclusive per-file (TOML itself rejects redefining
+# harness.agent as both), not a regression in the older one.
+wm_write_config <<'EOF'
+[harness]
+agent = "claude"
+EOF
+assert_true "the plain harness.agent scalar still passes --check" "'$CONFIG' --check"
+scalar_shown="$(WINGMAN_RUN_ID=$RUN "$CONFIG" 2>&1)"
+assert_contains "bin/config still shows the plain scalar form" "$scalar_shown" "harness.agent"
 
 # --- [env]: the raw passthrough for the unmodeled knobs ----------------------
 # Wingman has ~100 WM_* variables with no typed home. Carrying them here is what

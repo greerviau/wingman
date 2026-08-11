@@ -354,16 +354,29 @@ wm_tmux() { tmux "$@"; }
 # fixture. wm-test-* is the suite's own tmux-session naming convention
 # (tests/lib.sh: WM_TMUX_SESSION="wm-test-${WM_TEST_RUN_ID:-x}-$$-$RANDOM");
 # the wm-test. temp-dir prefix is the suite's own mktemp convention (see
-# wm_mktemp_dir). Either match plus an unset WM_AGENT means nobody meant to
-# launch anything real - a test that does mean to launch something always
-# stubs WM_AGENT itself.
+# wm_mktemp_dir). Either match plus no configured stub override means nobody
+# meant to launch anything real - a test that does mean to launch something
+# always stubs it itself.
+#
+# Checks WM_AGENT_BIN_OVERRIDE first (issue #25): since the adapter port,
+# $WM_AGENT selects a DESCRIPTOR (claude/pi/codex/...), not a binary path
+# directly, so its mere presence no longer reliably signals "a stub was
+# configured" - claude is WM_AGENT's own built-in default and is exactly the
+# real thing this guard exists to catch. WM_AGENT_BIN_OVERRIDE is the
+# variable that actually redirects the exec target (bin/lib/agent.sh's
+# wm_agent_resolve), so its presence is the real "a test opted in" signal for
+# a caller that has been migrated to it (bin/spawn-crew). $WM_AGENT is still
+# accepted too, transitionally, for a caller not yet migrated
+# (bin/crew-resume, until plan step 5) whose own test fixtures still set it
+# directly.
 wm_guard_test_fixture_agent() {
+  [ -n "${WM_AGENT_BIN_OVERRIDE:-}" ] && return 0
   [ -n "${WM_AGENT:-}" ] && return 0
   case "$WM_TMUX_SESSION" in
-    wm-test-*) wm_die "WM_TMUX_SESSION='$WM_TMUX_SESSION' looks like a test fixture and WM_AGENT is unset; refusing to launch a real '${1:-claude}'. Set WM_AGENT to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
+    wm-test-*) wm_die "WM_TMUX_SESSION='$WM_TMUX_SESSION' looks like a test fixture and no stub is configured; refusing to launch a real '${1:-claude}'. Set WM_AGENT_BIN_OVERRIDE to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
   esac
   case "$WM_HOME" in
-    "${TMPDIR:-/tmp}"/wm-test.*/*|"${TMPDIR:-/tmp}"/wm-test.*) wm_die "WINGMAN_HOME='$WM_HOME' looks like a test fixture and WM_AGENT is unset; refusing to launch a real '${1:-claude}'. Set WM_AGENT to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
+    "${TMPDIR:-/tmp}"/wm-test.*/*|"${TMPDIR:-/tmp}"/wm-test.*) wm_die "WINGMAN_HOME='$WM_HOME' looks like a test fixture and no stub is configured; refusing to launch a real '${1:-claude}'. Set WM_AGENT_BIN_OVERRIDE to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
   esac
 }
 

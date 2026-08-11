@@ -162,14 +162,20 @@ assert_true "case4: the check passes once the session name is derived from \$WM_
 # WM_AGENT unset, which launched real `claude --resume ... --permission-mode
 # bypassPermissions` processes. This drives the real launch point
 # (bin/crew-resume), not just the guard function in isolation.
+#
+# Both WM_AGENT and WM_AGENT_BIN_OVERRIDE unset (issue #25): the suite's
+# default stub is WM_AGENT_BIN_OVERRIDE (tests/lib.sh) now, not WM_AGENT - the
+# whole point of this case is "nothing configured at all", so both have to be
+# cleared, or the suite's own default stub would silently satisfy the guard
+# and this case would stop testing what it claims to.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id g5 --type developer --objective x --repo /tmp --window wm-g5 --session-id sess-g5-teardown >/dev/null
 wm_state crew-set --id g5 --status died >/dev/null
 c5_pre="$(pgrep -f 'claude --resume sess-g5-teardown' | wc -l | tr -d ' ')"
-c5_out="$(env -u WM_AGENT "$TEST_REPO/bin/crew-resume" g5 2>&1)"; c5_rc=$?
+c5_out="$(env -u WM_AGENT -u WM_AGENT_BIN_OVERRIDE "$TEST_REPO/bin/crew-resume" g5 2>&1)"; c5_rc=$?
 c5_post="$(pgrep -f 'claude --resume sess-g5-teardown' | wc -l | tr -d ' ')"
-assert_true "case5: crew-resume refuses to launch into a wm-test-* fixture with WM_AGENT unset" \
+assert_true "case5: crew-resume refuses to launch into a wm-test-* fixture with no stub configured" \
   "[ $c5_rc -ne 0 ]"
 assert_contains "case5: the refusal names why" "$c5_out" "looks like a test fixture"
 assert_eq "case5: no real claude process was ever spawned" "$c5_pre" "0"

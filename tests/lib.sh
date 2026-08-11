@@ -381,7 +381,7 @@ wm_cleanup_all() {
 }
 
 # Defense-in-depth safe default for the automated suite: any test that omits
-# its own WM_AGENT stub gets a harmless one instead of falling through to a
+# its own stub override gets a harmless one instead of falling through to a
 # real `claude` launch. This does not cover the vector actually reproduced
 # for issue #38 (a manual bin/crew-resume invocation against a leaked
 # fixture never sources this file) - that is closed by
@@ -389,7 +389,16 @@ wm_cleanup_all() {
 # launch point calls regardless of who invoked it. sleep infinity (not sleep
 # 60) so it cannot expire mid-file in a long-running suite like
 # watch-fleet.test.sh.
-export WM_AGENT="${WM_AGENT:-$TEST_REPO/tests/fixtures/stub-agent.sh}"
+#
+# WM_AGENT_BIN_OVERRIDE, not WM_AGENT (issue #25): $WM_AGENT now selects a
+# DESCRIPTOR (bin/lib/agents/<name>.sh - claude by default), not a binary
+# path directly, so setting it to a stub path would make bin/spawn-crew die
+# looking for a nonexistent "bin/lib/agents/<stub-path>.sh" descriptor
+# instead of substituting the exec target. WM_AGENT_BIN_OVERRIDE is the
+# escape hatch that still redirects just the exec target while leaving the
+# claude descriptor's own real flag/preflight/detection logic in force - see
+# bin/lib/agent.sh's wm_agent_resolve.
+export WM_AGENT_BIN_OVERRIDE="${WM_AGENT_BIN_OVERRIDE:-$TEST_REPO/tests/fixtures/stub-agent.sh}"
 
 ok()   { _TESTS_RUN=$((_TESTS_RUN+1)); printf '  ok   - %s\n' "$1"; }
 fail() { _TESTS_RUN=$((_TESTS_RUN+1)); _TESTS_FAIL=$((_TESTS_FAIL+1)); printf '  FAIL - %s\n' "$1"; }

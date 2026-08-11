@@ -45,11 +45,11 @@ Wingman wires this up in both directions:
 The **crew** coordination layer - tmux windows, the JSON status files, the watcher loop, and the board - does not depend on any one agent harness.
 A crew member is just an agent CLI running in a tmux window that keeps its status file current.
 
-The default launch recipe uses the `claude` CLI and its flags, and that is the single place to change for a different harness: it is isolated in `bin/spawn-crew` and overridable via `WM_AGENT`.
+The launch recipe is per-CLI **descriptor**-driven (`bin/lib/agent.sh`, `bin/lib/agents/<name>.sh`, issue #25): `bin/spawn-crew` resolves which descriptor to use (an explicit `--agent`, then `config.local.toml`'s `[harness.agent]` table, then `$WM_AGENT`, then the built-in default `claude`) and composes every launch flag from that descriptor's fields, rather than hardcoding one CLI's flag shape. Swapping harnesses means adding a descriptor and pointing selection at it - both isolated in `bin/lib/agents/`, never leaking into the crew coordination layer itself. `claude` is the only descriptor shipped so far; further ones land alongside the rest of issue #25's per-CLI adapter work.
 Wingman deliberately avoids a harness's native background-agent/attach/resume features to run or take over *crew*, because that would wed the crew layer to one harness. tmux attach is the takeover path precisely because it is neutral - it reaches whatever agent CLI is in the window.
 
 The one thing that is legitimately harness-specific is **how the watcher wakes wingman** (see below) - a private loop between wingman and its own supervisor, not part of the crew layer.
-Swapping harnesses means swapping that one arming primitive, exactly as it means swapping the `WM_AGENT` launch line; both are isolated, neither leaks into the crew coordination layer.
+Swapping harnesses means swapping that one arming primitive, exactly as it means swapping which agent descriptor `bin/spawn-crew` resolves; both are isolated, neither leaks into the crew coordination layer.
 
 ## The wake loop
 
@@ -158,7 +158,7 @@ Firing advances only the fired dimension, so a co-occurring lower-priority event
 The event-decision logic lives in `bin/lib/pr-eval.py` (pure, unit-testable with canned JSON); `bin/pr-watch` is the thin poll loop around it.
 
 This keeps the two watch loops cleanly separated at different levels: `watch-fleet` is wingman's channel to its crew (forge-agnostic), `pr-watch` is a crew member's channel to the forge.
-The forge-specific part is isolated in `pr-watch`'s `gh` calls, overridable via `WM_GH` (point it at another binary or wrapper), exactly as the agent launch line is isolated in `spawn-crew` behind `WM_AGENT`; a non-GitHub forge swaps this one script.
+The forge-specific part is isolated in `pr-watch`'s `gh` calls, overridable via `WM_GH` (point it at another binary or wrapper), exactly as the agent launch recipe is isolated in `spawn-crew` behind its per-CLI descriptor resolution; a non-GitHub forge swaps this one script.
 Analyst (and other non-PR) members have no external signal to poll, so they arm no watcher - they idle in `review` until the pilot's feedback arrives via `crew-say`.
 
 ## The crew hierarchy (leads)

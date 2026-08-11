@@ -9,7 +9,8 @@
 # session is created by spawn-crew itself (not dependent on any external
 # starter); the fleet SURVIVES the sibling (orchestrator) session dying; and
 # window targeting never prefix-matches a neighbouring window. Uses a stub
-# agent (WM_AGENT) and throwaway session names so the live fleet is untouched.
+# agent (WM_AGENT_BIN_OVERRIDE) and throwaway session names so the live fleet
+# is untouched.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -21,7 +22,7 @@ mkdir -p "$WS/repoA"
 git -C "$WS/repoA" init -q
 printf '#!/usr/bin/env bash\nexec sleep 120\n' > "$WS/stub.sh"; chmod +x "$WS/stub.sh"
 
-export WM_AGENT="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
+export WM_AGENT_BIN_OVERRIDE="$WS/stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0 WM_SUBMIT_POLL=0.2 WM_SUBMIT_TRIES=1
 test_new_home
 # Point discovery at the workspace through this test's own isolated settings
 # file (test_new_home creates the path), not the repo root's - so the suite
