@@ -185,8 +185,20 @@ input="$(printf 'i1\tdied\tX\t\ni2\tdied\tX\t\ni3\tdied\tX\t\ni4\tdied\tX\t\ni5\
 out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
 assert_contains "the outage subset (4 of 4 outage-tagged) collapses on its own" "$out" "correlated:api-outage-death"
 assert_contains "the collapsed row names all four outage-tagged ids" "$out" "i1"
-assert_false "the untagged minority (i5) is never absorbed into the outage-death bucket" \
-  "printf '%s\n' \"$out\" | grep -A0 correlated:api-outage-death | grep -q i5"
+# assert_false evals its whole argument string, and this batch's synthetic
+# note text (asserted a few lines up) literally embeds `bin/crew-resume
+# --all-died` in backticks as recovery guidance - interpolating "$out"
+# straight into an eval'd string let that backtick pair execute for real as
+# a second round of shell parsing, actually running crew-resume against this
+# test's own WINGMAN_HOME. That was always fragile but only became an
+# observable failure once crew-resume's own per-member preflight (issue #25)
+# started printing the member id being checked, which happened to include
+# "i5" and satisfied the grep this assertion was trying to rule out (PR #335
+# review round 2). Extracting the relevant line via a plain, non-eval'd
+# command substitution first avoids the double-parse entirely.
+outage_bucket_line="$(printf '%s\n' "$out" | grep -A0 correlated:api-outage-death)"
+assert_not_contains "the untagged minority (i5) is never absorbed into the outage-death bucket" \
+  "$outage_bucket_line" "i5"
 assert_contains "the untagged minority (i5) still passes through as its own row" "$out" "i5	died	X	"
 assert_false "the untagged minority never collapses into mass-death either (count < min-count)" \
   "printf '%s\n' \"$out\" | grep -q correlated:mass-death"
