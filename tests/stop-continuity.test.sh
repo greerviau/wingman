@@ -669,17 +669,33 @@ echo "  SKIP - case 219a quarantined pending issue #263 (mid-window re-claim del
 # direct regression against conflating a clean rollover with a re-arm after
 # an unexpected watch-cycle exit. Mirror of test (9) sub-case (b), whose own
 # assert_not_contains "window rolled" this must not violate. ---
+#
+# issue #308: this case relies on the test's own `kill -9` landing well
+# before the referee subshell's `sleep "$window"` naturally fires (which
+# writes "rolled" to $exitfile and TERM-kills the child itself, on a clean
+# schedule this test must never race). WM_STOP_CONTINUITY_WINDOW=10 gave the
+# test's own kill only a ~10s margin to land - under real CI CPU-saturating
+# parallelism (multiple watch-fleet-daemon-heavy test files now co-scheduled
+# in the same wave, see #308's own comment thread), both "how long until the
+# test's shell actually dispatches kill -9" and "how long the referee's own
+# background subshell takes to be scheduled and write $exitfile" can stretch
+# under contention, closing that margin enough to flip which one wins the
+# race. Widened to 60s: the test's own success path does not get slower for
+# it (the hook's own budget check trips on window's magnitude regardless of
+# how large window is - see hooks/stop-continuity.sh's own accounting - so a
+# larger window only widens the safety margin against the race, it does not
+# make a passing run wait any longer for anything).
 new_home
 add_crew_window d7cp
 wm_state crew-set --id d7cp --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=10
+export WM_STOP_CONTINUITY_WINDOW=60
 export WM_STOP_CONTINUITY_LIFETIME=1
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7cp.out" 2>&1 &
 h7cp=$!; wm_track "$h7cp"
 assert_true "the first (and only, per the 1s lifetime) iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid7cp="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpid7cp" 2>/dev/null
-assert_true "the hook exits" "wait_for_gone $h7cp 100"
+assert_true "the hook exits" "wait_for_gone $h7cp 300"
 wait "$h7cp" 2>/dev/null
 out7cp="$(cat "$WINGMAN_HOME/hook7cp.out" 2>/dev/null)"
 assert_contains "the budget-exhaustion body names the unexpected watch-cycle exit" "$out7cp" "re-arming after an unexpected watch-cycle exit"
@@ -921,7 +937,16 @@ assert_true "the child claims and arms" "wait_for_file '$WINGMAN_HOME/watch.pid'
 assert_true "the child genuinely armed (not merely attempted)" "wait_for_content '$WINGMAN_HOME/stop-autoarm.log' 'armed pid='"
 cpide="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpide" 2>/dev/null
-assert_true "the hook notices the death and exits" "wait_for_gone $hpe 100"
+# issue #300: the path from "child observed dead" to "hook process exits"
+# runs the accounting logic above (--classify, an active_crew re-check, the
+# budget check) - several `uv run --no-project` subprocess spawns, each with
+# real startup overhead that grows under CPU-saturating CI parallelism (the
+# same root mechanism #308 documents for the window/lifetime race just
+# above). The default 100-try (20s) wait_for_gone budget was measured
+# generous enough for a quiet local run but not always enough once several
+# concurrent watch-fleet-daemon-heavy test files are competing for CPU in
+# the same wave; widened for headroom, not because the real work changed.
+assert_true "the hook notices the death and exits" "wait_for_gone $hpe 300"
 wait "$hpe" 2>/dev/null
 out_sre="$(cat "$WINGMAN_HOME/sre.out" 2>/dev/null)"
 assert_false "a successful-arm-then-kill is NOT misrouted to the claim-failure branch" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
