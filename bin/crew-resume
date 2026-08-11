@@ -128,23 +128,34 @@ RESUME_RESULT=""
 
 # wm_crew_relaunch_note <cwd> <artifact> <artifact-url> <delivery> \
 #   <allow-merge:true|false> <review-gate-waived:true|false> \
-#   <constraints-newline-separated> <spawned-at> <summary>
+#   <constraints-newline-separated> <spawned-at> <summary> <objective> <input>
 #
-# Prints the three-layer relaunch progress note (plan §4.8, issue #25) an
-# adapter with no WM_AGENT_RESUME_FLAG gets in place of a true --resume: this
-# member's prior conversation is gone, so what it starts cold with has to be
-# durable, structured facts, not just a compressed status line. Layer 1
-# (durably recorded structured fields) and layer 2 (worktree git state) come
-# first and are framed as ground truth; layer 3 (the free-text `summary`) is
-# explicitly last and explicitly NOT the source of truth - it is the one part
-# of this note that was not mechanically derived from durable state and can
-# be stale or incomplete (see the plan's own reasoning for this ordering).
+# Prints the relaunch progress note (plan §4.8, issue #25) an adapter with no
+# WM_AGENT_RESUME_FLAG gets in place of a true --resume: this member's prior
+# conversation is gone, so what it starts cold with has to be durable,
+# structured facts, not just a compressed status line - starting with what
+# the assignment even IS, since a genuinely fresh session cannot be expected
+# to infer that from the progress facts alone (PR #335 review round 1,
+# finding 2: an earlier version of this function dropped the objective
+# entirely, leaving a relaunched no-resume-flag member with a full account of
+# what it had already done and nothing telling it what it was doing it for).
+# Layer 0 (the objective/input handoff, unchanged since spawn) comes first;
+# layer 1 (durably recorded structured fields) and layer 2 (worktree git
+# state) come next and are framed as ground truth; layer 3 (the free-text
+# `summary`) is explicitly last and explicitly NOT the source of truth - it
+# is the one part of this note that was not mechanically derived from
+# durable state and can be stale or incomplete (see the plan's own reasoning
+# for this ordering).
 wm_crew_relaunch_note() {
   _wcrn_cwd="$1"; _wcrn_artifact="$2"; _wcrn_artifact_url="$3"; _wcrn_delivery="$4"
   _wcrn_allow_merge="$5"; _wcrn_review_gate_waived="$6"; _wcrn_constraints="$7"
-  _wcrn_spawned_at="$8"; _wcrn_summary="$9"
+  _wcrn_spawned_at="$8"; _wcrn_summary="$9"; _wcrn_objective="${10}"; _wcrn_input="${11}"
   printf 'You are being **relaunched after an interruption, not a first assignment**. Your prior conversation context is NOT available - do not assume any of your own past reasoning is still valid. Treat the facts below as ground truth, and verify current state (a worktree diff, the roster fields below, any PR'"'"'s actual review status) before taking any further action, mirroring the status contract'"'"'s own "your checkout is a claim, not verified truth" discipline, applied here to your own prior work.\n\n'
-  printf '## What is already durably recorded (grants and deliverables)\n\n'
+  printf '## Your assignment (unchanged since spawn)\n\n%s\n' "${_wcrn_objective:-(no objective was recorded at spawn)}"
+  if [ -n "$_wcrn_input" ]; then
+    printf '\nInput handoff: read the plan/spec at `%s` and follow it (the worktree state below shows how far you already got).\n' "$_wcrn_input"
+  fi
+  printf '\n## What is already durably recorded (grants and deliverables)\n\n'
   _wcrn_any=0
   if [ -n "$_wcrn_artifact" ]; then
     if [ -n "$_wcrn_artifact_url" ]; then
@@ -186,7 +197,8 @@ wm_crew_relaunch_note() {
   fi
   printf '## Your own last reported summary (context only - the facts above are the source of truth, not this)\n\n%s\n' "${_wcrn_summary:-(none recorded)}"
   unset _wcrn_cwd _wcrn_artifact _wcrn_artifact_url _wcrn_delivery _wcrn_allow_merge \
-    _wcrn_review_gate_waived _wcrn_constraints _wcrn_spawned_at _wcrn_summary _wcrn_any _wcrn_cl
+    _wcrn_review_gate_waived _wcrn_constraints _wcrn_spawned_at _wcrn_summary _wcrn_any _wcrn_cl \
+    _wcrn_objective _wcrn_input
 }
 
 resume_one() {
@@ -205,11 +217,11 @@ resume_one() {
   # the false/unset distinction the git/PR workflow depends on. Printed
   # separately, preserving all three states as "true"/"false"/"".
   #
-  # scope/objective/summary/artifact/artifact_url/delivery/spawned_at (issue #25,
-  # plan §4.8): the relaunch mode's progress note is built from these - a
-  # single-line field is flattened (embedded newlines replaced with a literal
-  # "\n" marker) so the fixed-field read below can never desync on a
-  # multi-line summary/objective.
+  # scope/objective/input/summary/artifact/artifact_url/delivery/spawned_at
+  # (issue #25, plan §4.8): the relaunch mode's rebuilt brief and progress
+  # note are built from these - a single-line field is flattened (embedded
+  # newlines replaced with a literal "\n" marker) so the fixed-field read
+  # below can never desync on a multi-line summary/objective.
   _lines="$(printf '%s' "$_info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
@@ -220,14 +232,14 @@ for k in ("repo", "session_id", "window", "worktree", "status", "type", "scope",
 for k in ("is_git", "has_remote"):
     v = d.get(k)
     print("" if v is None else ("true" if v else "false"))
-for k in ("objective", "summary", "artifact", "artifact_url", "delivery", "spawned_at"):
+for k in ("objective", "input", "summary", "artifact", "artifact_url", "delivery", "spawned_at"):
     print(flat(d.get(k)))
 for k in ("allow_merge", "review_gate_waived"):
     print("true" if d.get(k) else "false")')"
   {
     read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type
     read -r _scope; read -r _agent; read -r _is_git; read -r _has_remote
-    read -r _objective; read -r _summary; read -r _artifact; read -r _artifact_url; read -r _delivery; read -r _spawned_at
+    read -r _objective; read -r _input; read -r _summary; read -r _artifact; read -r _artifact_url; read -r _delivery; read -r _spawned_at
     read -r _allow_merge; read -r _review_gate_waived
   } <<EOF
 $_lines
@@ -380,10 +392,16 @@ for c in (d.get("constraints") or []):
     _rl_target_is_wm_repo=0
     [ "$_scope" = repo ] && [ "$_repo" = "$WM_REPO" ] && _rl_target_is_wm_repo=1
     _relaunch_sysprompt="$WM_HOME/crew/$_rid.sysprompt.md"
+    # "$_input" (not ""): the original --input plan/report pointer, now
+    # durably recorded on the roster record itself (PR #335 review round 1,
+    # finding 3) - rebuilding this file with a hardcoded "" here would
+    # silently erase the only durable record of that handoff the first time
+    # a no-resume-flag member is relaunched.
     wm_compose_crew_sysprompt "$_relaunch_sysprompt" "$_rid" "$_type" "$_repo" "$_scope" \
-      "$_constraints" "$_rl_target_is_wm_repo" "" "$PLAYBOOK" "$_rl_include_pr_delivery"
+      "$_constraints" "$_rl_target_is_wm_repo" "$_input" "$PLAYBOOK" "$_rl_include_pr_delivery"
     _relaunch_note="$(wm_crew_relaunch_note "$_cwd" "$_artifact" "$_artifact_url" "$_delivery" \
-      "$_allow_merge" "$_review_gate_waived" "$_constraints" "$_spawned_at" "$_summary")"
+      "$_allow_merge" "$_review_gate_waived" "$_constraints" "$_spawned_at" "$_summary" \
+      "$_objective" "$_input")"
   fi
 
   # --- write the resume launch script (avoids all in-tmux quoting) -----------

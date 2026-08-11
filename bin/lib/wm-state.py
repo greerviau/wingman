@@ -655,6 +655,15 @@ def cmd_crew_add(args):
         "id": args.id,
         "type": args.type,
         "objective": args.objective,
+        # The --input plan/report pointer given at spawn (bin/spawn-crew
+        # --input), durably recorded (issue #25 PR #335 review, finding 3):
+        # bin/crew-resume's relaunch mode rebuilds this member's
+        # .sysprompt.md from scratch, and this field is the only place that
+        # handoff pointer survives to be threaded back through - without it,
+        # a relaunch silently drops the only durable record of which
+        # plan/report this member was given. Empty for a spawn with no
+        # --input, matching objective's own default.
+        "input": getattr(args, "input", "") or "",
         "repo": args.repo,
         "scope": getattr(args, "scope", "repo") or "repo",
         # Owner: the crew id that spawned this member ("" = top level, spawned by
@@ -4526,6 +4535,7 @@ def _args_crew_add(a):
     a.add_argument("--id", required=True)
     a.add_argument("--type", required=True)
     a.add_argument("--objective", default="")
+    a.add_argument("--input", default="")
     a.add_argument("--repo", required=True)
     a.add_argument("--window", required=True)
     a.add_argument("--session-id", required=True, dest="session_id")

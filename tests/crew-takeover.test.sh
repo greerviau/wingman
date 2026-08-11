@@ -94,6 +94,15 @@ assert_contains "names the actual status rather than guessing died" "$out3" "sta
 assert_contains "still offers the manual resume command" "$out3" "--resume 'sess-t3'"
 assert_false "never claims died-specific recovery framing for a normal finish" \
   "printf '%s\n' \"$out3\" | grep -q 'session state survived'"
+# PR #335 review round 1, finding 1: RESUMABLE is only meaningfully computed
+# for a died record, but print_resume_hint used to reuse its died-framed
+# wording (all three of its true/false/default cases said "'$ID' died")
+# regardless of the caller's actual status - wrongly telling a member that
+# finished normally, or any other non-died status, that it "died".
+assert_false "never claims this member died at all when status=done" \
+  "printf '%s\n' \"$out3\" | grep -q \"'t3' died\""
+assert_not_contains "never claims claude's transcript layout 'isn't understood' either (that framing is died-specific)" \
+  "$out3" "is not independently checkable"
 
 # --- a refs/wip/<id> ref (auto-anchored at death, issue #251) is surfaced,
 # even for a died member whose transcript is ALSO gone - it may be the only

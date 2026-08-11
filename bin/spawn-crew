@@ -533,7 +533,7 @@ fi
 # --parent stamps ownership from the spawning crew's id: empty for wingman (the
 # top orchestrator has no $WINGMAN_CREW_ID), the lead's own id when a lead spawns.
 # Owner-scoping (surfacing, the watcher, crew-list) all fall out of this field.
-ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
+ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" --input "$INPUT" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
   --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE" \
   --agent "$AGENT")

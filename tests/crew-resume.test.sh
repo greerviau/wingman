@@ -571,4 +571,70 @@ assert_contains "the launch script's exec line names the fallback stub" \
   "$(grep '^exec ' "$WINGMAN_HOME/crew/fb1.resume.sh" 2>/dev/null)" "$FALLBACK_STUB"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #25 plan §4.8 / §7 test 8: relaunch mode's actual composed brief -
+# (PR #335 review round 1, finding 4: this file previously had zero coverage
+# of relaunch mode itself - only tests/crew-takeover.test.sh's hint-text
+# check, which never runs bin/crew-resume at all). A throwaway descriptor
+# with no WM_AGENT_RESUME_FLAG (same shape as crew-takeover.test.sh's own
+# __test-no-resume-flag, unconditionally removed before test_summary since
+# this file cannot use its own trap) forces relaunch mode; WM_AGENT_SYSPROMPT_
+# MODE=positional folds the whole composed payload into the launch script's
+# own command line, so it can be asserted on directly with no live-pane
+# capture needed - WM_AGENT_OPENING_DELIVERED_AT_LAUNCH=1 for this mode, so
+# crew-resume never attempts a separate post-launch nudge either. ------------
+RELAUNCH_DESC="$TEST_REPO/bin/lib/agents/__test-relaunch-positional.sh"
+cat > "$RELAUNCH_DESC" <<'EOF'
+WM_AGENT_BIN="__test-relaunch-positional"
+WM_AGENT_DISPLAY_NAME="Test Relaunch Positional Adapter"
+WM_AGENT_SYSPROMPT_MODE=positional
+EOF
+test_new_home
+wm_trust_repo /tmp
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rl1 --type developer \
+  --objective "port the widget subsystem to the new adapter layer" \
+  --input "docs/plans/widget-plan.md" \
+  --repo /tmp --window wm-rl1 --session-id sess-rl1 \
+  --agent __test-relaunch-positional >/dev/null
+wm_state crew-set --id rl1 --status died --artifact /tmp/widget-report.md \
+  --delivery "https://github.com/x/y/pull/9" --allow-merge true \
+  --summary "landed the first half; second half still open" >/dev/null
+out_rl="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" rl1 2>&1)"
+assert_contains "relaunch (no resume flag) still reports resumed" "$out_rl" "1 resumed"
+rl_script="$(cat "$WINGMAN_HOME/crew/rl1.resume.sh")"
+# Finding 2: the objective is actually present, not silently dropped.
+assert_contains "relaunch brief carries the 'your assignment' section" "$rl_script" "Your assignment (unchanged since spawn)"
+assert_contains "...with the actual objective text" "$rl_script" "port the widget subsystem to the new adapter layer"
+# Finding 3: the --input handoff pointer survives into BOTH the rebuilt
+# sysprompt.md (via wm_compose_crew_sysprompt) and the relaunch note itself,
+# rather than being silently dropped when the file is overwritten.
+assert_contains "relaunch brief's assignment section carries the input handoff pointer" "$rl_script" "docs/plans/widget-plan.md"
+rl_sysprompt="$(cat "$WINGMAN_HOME/crew/rl1.sysprompt.md")"
+assert_contains "the rebuilt sysprompt.md itself still carries the original input handoff" \
+  "$rl_sysprompt" "Input handoff: read the plan/spec at \`docs/plans/widget-plan.md\` and follow it."
+# The rest of the three-layer progress note, unaffected by this fix but worth
+# confirming still present and in the right relative order now that a new
+# section was inserted ahead of them.
+assert_contains "durably-recorded section: the artifact" "$rl_script" "widget-report.md"
+assert_contains "durably-recorded section: the delivery" "$rl_script" "pull/9"
+assert_contains "durably-recorded section: allow_merge" "$rl_script" "Merge autonomy (--allow-merge) is already granted"
+assert_contains "worktree-state section header present" "$rl_script" "Worktree state as of relaunch"
+assert_contains "last-reported-summary section present" "$rl_script" "Your own last reported summary"
+assert_contains "...with the actual summary text" "$rl_script" "landed the first half; second half still open"
+order_check="$(uv run --no-project --quiet python -c '
+import sys
+text = sys.stdin.read()
+markers = [
+    "Your assignment (unchanged since spawn)",
+    "What is already durably recorded",
+    "Worktree state as of relaunch",
+    "Your own last reported summary",
+]
+positions = [text.find(m) for m in markers]
+print("ok" if all(p != -1 for p in positions) and positions == sorted(positions) else "bad: %r" % positions)
+' <<<"$rl_script")"
+assert_eq "the four sections appear in the documented order (assignment, durable grants, worktree, summary)" "$order_check" "ok"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+rm -f "$RELAUNCH_DESC"
+
 test_summary
