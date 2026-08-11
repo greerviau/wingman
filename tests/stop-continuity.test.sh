@@ -1032,6 +1032,52 @@ assert_true "the standdown marker is cleared shortly after the claim (a few line
 kill "$mc" 2>/dev/null
 unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
 
+# issue #331: the owner-scoped complement to the genuine-death trip above -
+# the SAME bounded-loop real-kill mechanism, but under WINGMAN_CREW_ID, so the
+# mechanical crew-set flip is exercised through the actual hook/--classify
+# invocation shape a real lead session hits, not a direct `--classify --owner`
+# call (already covered in tests/watch-fleet-classify.test.sh) or a synthetic
+# marker (the d8g block above).
+new_home
+export WINGMAN_CREW_ID=d8h
+add_crew_window d8h
+wm_state crew-set --id d8h --status working --summary busy >/dev/null
+# active_crew (step 4's own precondition) counts d8h's own DIRECT REPORTS,
+# not d8h itself - without one in flight, the hook exits at step 4 before
+# ever reaching the classify/arm logic below. A real tmux window too, not
+# just the roster record: this test runs real watch-fleet cycles, whose own
+# reconcile step flips a LIVE_STATES record with no matching live window to
+# died within a poll or two (see add_crew_window's own header above).
+wm_state crew-add --id wkrh --type developer --objective x --repo /tmp --window wm-wkrh --session-id s-wkrh --parent d8h >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-wkrh 'sleep 600'
+wm_state crew-set --id wkrh --status working --summary coding >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=30
+export WM_STOP_CONTINUITY_LIFETIME=30
+_oround=0
+while [ ! -f "$WINGMAN_HOME/watch-d8h.suppressed" ] && [ "$_oround" -lt 6 ]; do
+  _oround=$((_oround+1))
+  _oprev_pid="$(cat "$WINGMAN_HOME/watch-d8h.pid" 2>/dev/null)"
+  printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/osr$_oround.out" 2>/dev/null &
+  ohp=$!; wm_track "$ohp"
+  _on=0
+  while kill -0 "$ohp" 2>/dev/null && [ "$_on" -lt 100 ]; do
+    _ocur_pid="$(cat "$WINGMAN_HOME/watch-d8h.pid" 2>/dev/null)"
+    if [ -n "$_ocur_pid" ] && [ "$_ocur_pid" != "$_oprev_pid" ]; then
+      kill -9 "$_ocur_pid" 2>/dev/null
+      break
+    fi
+    sleep 0.1; _on=$((_on+1))
+  done
+  wait_for_gone "$ohp" 100 >/dev/null 2>&1
+  wait "$ohp" 2>/dev/null
+done
+assert_true "the owner-scoped standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch-d8h.suppressed' ]"
+d8h_get="$(wm_state crew-get --id d8h)"
+assert_contains "the real owner-scoped trip flips d8h's own status to blocked" "$d8h_get" "\"status\": \"blocked\""
+assert_contains "the real owner-scoped trip's blocker carries the standdown tag" "$d8h_get" "\"blocker\": \"watch-fleet-standdown:"
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
+unset WINGMAN_CREW_ID
+
 # stop-guard.sh nags with the standdown's own composed text while it holds -
 # not the routine nudge - and treats a foreign-run stamp as inactive
 # (cross-hook predicate-consistency, and the precondition-regression pair).
@@ -1051,6 +1097,34 @@ guard_out2="$(printf '{"stop_hook_active": false}' | bash "$GUARD")"
 assert_eq "a foreign-run standdown reads as inactive to stop-guard (cross-hook predicate consistency)" "$guard_out2" ""
 unset WINGMAN_RUN_ID
 rm -f "$WINGMAN_HOME/watch.suppressed"
+
+# issue #331: this hook's own marker-active gate (:394, gate 7 above) also
+# mechanically re-asserts the affected owner's crew-set status - not just
+# stop-guard.sh's branch. Synthetic marker, owner-scoped, same style as the
+# d8c block just above.
+new_home
+export WINGMAN_CREW_ID=d8g
+add_crew_window d8g
+wm_state crew-set --id d8g --status working --summary busy >/dev/null
+# active_crew (step 4's own precondition) counts d8g's own DIRECT REPORTS,
+# not d8g itself (crew-list --owner filters on parent == owner) - without a
+# child in flight, active_crew is 0 and the hook exits at step 4, never
+# reaching the marker-active gate at step 7 at all.
+wm_state crew-add --id wkrg --type developer --objective x --repo /tmp --window wm-wkrg --session-id s-wkrg --parent d8g >/dev/null
+wm_state crew-set --id wkrg --status working --summary coding >/dev/null
+{
+  printf '%s\n' "run-c"
+  printf '%s\n' "the watcher for this session has died 3 times in a row (composed remedy text)"
+} > "$WINGMAN_HOME/watch-d8g.suppressed"
+export WINGMAN_RUN_ID=run-c
+out_d8g="$(run_hook)"
+assert_eq "the gate's own stdout is still silent (existing behavior unchanged)" "$out_d8g" ""
+d8g_get="$(wm_state crew-get --id d8g)"
+assert_contains "the gate's own re-assertion flips d8g's status to blocked" "$d8g_get" "\"status\": \"blocked\""
+assert_contains "the re-assertion's blocker carries the standdown tag" "$d8g_get" "\"blocker\": \"watch-fleet-standdown:"
+unset WINGMAN_RUN_ID
+unset WINGMAN_CREW_ID
+rm -f "$WINGMAN_HOME/watch-d8g.suppressed"
 
 # Claim-failure recovery companion: a successful manual claim clears the
 # claim-failure marker, not just ages it.

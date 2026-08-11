@@ -301,4 +301,30 @@ out="$(run_hook 'bin/watch-fleet' true)"
 assert_contains "an unreadable WINGMAN_HOME denies (fail-closed)" "$out" '"permissionDecision": "deny"'
 chmod 755 "$WINGMAN_HOME"
 
+# --- issue #331, cross-file-agreement nice-to-have: this guard is entirely
+# unaffected by #331 (it derives the marker path and denies independently of
+# crew-set/roster state, exercised throughout this file already) - but at the
+# moment it denies an arm attempt, crew-get for the same owner should ALSO
+# show blocked, i.e. the two independent signals (tool-level denial,
+# status-level visibility) agree during the same standdown without either
+# depending on the other. Calls wm_assert_standdown_blocked directly (the
+# same helper hooks/stop-continuity.sh and hooks/stop-guard.sh call) rather
+# than going through a full Stop-hook invocation, matching this file's own
+# narrow focus on the guard alone.
+test_new_home
+wm_state crew-add --id leadg --type lead --objective x --repo /tmp --window wm-leadg --session-id s-leadg >/dev/null
+wm_state crew-set --id leadg --status working --summary busy >/dev/null
+printf '%s\n%s\n' "" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch-leadg.suppressed"
+(
+  WM_HOME="$WINGMAN_HOME"
+  WM_UV="uv run --no-project --quiet"
+  STATE_PY="$TEST_REPO/bin/lib/wm-state.py"
+  . "$TEST_REPO/hooks/lib/watcher-liveness.sh"
+  wm_assert_standdown_blocked leadg "$WINGMAN_HOME/watch-leadg.suppressed"
+)
+out="$(WINGMAN_CREW_ID=leadg run_hook 'bin/watch-fleet' true)"
+assert_contains "the guard denies leadg's own arm attempt while the marker holds" "$out" '"permissionDecision": "deny"'
+assert_contains "crew-get for leadg agrees: status is blocked at the same moment" "$(wm_state crew-get --id leadg)" "\"status\": \"blocked\""
+rm -f "$WINGMAN_HOME/watch-leadg.suppressed"
+
 test_summary

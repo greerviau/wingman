@@ -412,6 +412,10 @@ assert_contains "the composed text names --clear-standdown as the way out" "$mar
 # dissolve its own standdown (issue #198).
 assert_not_contains "the composed text never says to resume by running /watch" "$marker_body" "Resume it by running"
 assert_not_contains "the composed text never says to arm bin/watch-fleet" "$marker_body" "arming bin/watch-fleet"
+
+# issue #331, spec case 2: the unscoped owner ("") has no crew record at all -
+# the trip above must never have attempted a crew-set write for it.
+assert_false "no crew record is ever created for the unscoped owner" "[ -f '$WINGMAN_HOME/crew/.json' ]"
 unset WINGMAN_RUN_ID
 
 # The stale-claim-lock hint composes the lock-specific remedy, naming
@@ -437,6 +441,67 @@ assert_contains "the stale-claim-lock remedy also names --clear-standdown as the
 unset WM_CLAIM_HARD_STALE_AGE
 kill "$_lock_holder" 2>/dev/null
 rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null
+
+# --- issue #331: an owner-scoped trip mechanically mirrors the standdown ------
+# onto the affected owner's own crew-set status, and --clear-standdown ---------
+# restores it symmetrically (only when it is still the standdown's own write) --
+test_new_home
+
+# Case 1: an owner-scoped trip flips the record to blocked with a
+# watch-fleet-standdown:-tagged blocker.
+wm_state crew-add --id leadA --type lead --objective x --repo /tmp --window wm-leadA --session-id s-leadA >/dev/null
+wm_state crew-set --id leadA --status working --summary busy >/dev/null
+wm_timeout 10 "$WF" --classify --owner leadA >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadA >/dev/null 2>&1
+leadA_trip="$(wm_timeout 10 "$WF" --classify --owner leadA 2>/dev/null)"
+assert_eq "the third owner-scoped classification trips spurious-repeated" "$leadA_trip" "spurious-repeated 3 clean-exit-or-sigterm"
+leadA_get="$(wm_state crew-get --id leadA)"
+assert_contains "the owner-scoped trip flips leadA's own status to blocked" "$leadA_get" "\"status\": \"blocked\""
+assert_contains "the owner-scoped trip's blocker carries the standdown tag" "$leadA_get" "\"blocker\": \"watch-fleet-standdown:"
+
+# Case 4: needs-attention (leadA's parent, owner "") surfaces it as blocked.
+na_leadA="$(wm_state needs-attention --owner "")"
+assert_contains "needs-attention surfaces the newly-blocked leadA" "$na_leadA" "leadA"
+assert_contains "needs-attention's row for leadA carries blocked" "$na_leadA" "blocked"
+
+# Case 6: --clear-standdown restores leadA's status to working and clears the
+# blocker (decision 3.5(A), the restore-when-it-is-still-ours direction).
+"$WF" --owner leadA --clear-standdown >/dev/null 2>&1
+leadA_get2="$(wm_state crew-get --id leadA)"
+assert_contains "clear-standdown restores leadA's status to working" "$leadA_get2" "\"status\": \"working\""
+assert_contains "clear-standdown clears leadA's blocker" "$leadA_get2" "\"blocker\": null"
+
+# Case 4 (continued): once restored to working, needs-attention no longer
+# surfaces leadA - working is not in ATTENTION_STATES, so this holds
+# regardless of ack state.
+na_leadA2="$(wm_state needs-attention --owner "")"
+assert_not_contains "needs-attention no longer surfaces leadA once restored" "$na_leadA2" "leadA"
+
+# The other half of decision 3.5(A): --clear-standdown must NOT restore when
+# the record has since been re-blocked on a genuinely different question.
+wm_state crew-add --id leadC --type lead --objective x --repo /tmp --window wm-leadC --session-id s-leadC >/dev/null
+wm_state crew-set --id leadC --status working --summary busy >/dev/null
+wm_timeout 10 "$WF" --classify --owner leadC >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadC >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadC >/dev/null 2>&1
+wm_state crew-set --id leadC --status blocked --blocker "need a call on the API shape" >/dev/null
+"$WF" --owner leadC --clear-standdown >/dev/null 2>&1
+leadC_get="$(wm_state crew-get --id leadC)"
+assert_contains "a superseded blocker is left blocked, not restored to working" "$leadC_get" "\"status\": \"blocked\""
+assert_contains "the superseded blocker's own unrelated text survives untouched" "$leadC_get" "need a call on the API shape"
+assert_not_contains "the superseded blocker never carries the standdown tag" "$leadC_get" "watch-fleet-standdown:"
+
+# Case 7: a lead's own parked item (#203) survives alongside the standdown tag
+# in the composed blocker.
+wm_state crew-add --id leadB --type lead --objective x --repo /tmp --window wm-leadB --session-id s-leadB >/dev/null
+wm_state crew-set --id leadB --status working --summary busy >/dev/null
+wm_state crew-set --id leadB --park "issue-9:waiting on a design call" >/dev/null
+wm_timeout 10 "$WF" --classify --owner leadB >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadB >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadB >/dev/null 2>&1
+leadB_get="$(wm_state crew-get --id leadB)"
+assert_contains "leadB's composed blocker carries the standdown tag" "$leadB_get" "watch-fleet-standdown:"
+assert_contains "leadB's composed blocker also carries its own parked item" "$leadB_get" "[issue-9] waiting on a design call"
 
 # A plain spurious (below budget) writes no marker.
 test_new_home

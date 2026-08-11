@@ -121,4 +121,16 @@ check_owner() {
 check_owner "" unscoped
 check_owner "leadx" scoped
 
+# issue #331: WM_STANDDOWN_TAG is duplicated (not sourced) between this file
+# and bin/watch-fleet, exactly like the per-owner path block above - a future
+# edit to one and not the other would silently stop the standdown's own
+# skip-write/restore-check logic from recognizing its own trip-time write,
+# reintroducing the exact announced-bump wake-storm issue #331 exists to
+# prevent. Grep-based, not sourced: bin/watch-fleet is a full script, not a
+# library (see this file's own header for why agreement with it is otherwise
+# proven behaviorally, not by sourcing).
+_lib_tag_line="$(grep -F 'WM_STANDDOWN_TAG:=' "$LIB")"
+_wf_tag_line="$(grep -F 'WM_STANDDOWN_TAG:=' "$WF")"
+assert_eq "WM_STANDDOWN_TAG's literal default is byte-identical between watcher-liveness.sh and bin/watch-fleet" "$_lib_tag_line" "$_wf_tag_line"
+
 test_summary
