@@ -73,16 +73,17 @@ tool works whether or not jq is installed.
 """
 import argparse
 import datetime
-import glob
-import hashlib
 import json
 import os
 import re
-import secrets
-import subprocess
 import sys
-import tempfile
 import time
+# glob, hashlib, secrets, subprocess, and tempfile are each used by only a
+# handful of functions (see their own local `import` lines below), so they're
+# deferred to those call sites instead of paid on every invocation regardless
+# of which of the 38 subcommands actually runs - unlike the modules imported
+# above, which are broadly used enough (state read/write, argument parsing)
+# that deferring them would just move the same cost into the hot path.
 
 # wingman's settings file reader, for the [prefs] layer under the per-run
 # preference store (see _config_prefs). This script's own directory is added to
@@ -312,6 +313,7 @@ def is_resumable(record):
     mode issue #251 itself was filed over. A `bin/crew-takeover` degraded
     branch never trusts a bare `False` from this function alone to withhold
     the resume command outright - see its own comment for why."""
+    import glob
     session_id = record.get("session_id")
     if not session_id:
         return False
@@ -411,6 +413,7 @@ def read_json(path, default):
 
 
 def write_json(path, obj):
+    import tempfile
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=d)
@@ -576,12 +579,14 @@ def _review_preimage(token_bytes, crew_id, verdict):
     # crew_id binds the preimage to the specific roster record for defense in
     # depth; the actual security comes from token_bytes being an independent
     # 256-bit random value per reviewer, not from this.
+    import hashlib
     return hashlib.sha256(
         token_bytes + b"\x00" + crew_id.encode("utf-8") + b"\x00" + _verdict_label(verdict)
     ).digest()
 
 
 def _review_commitment(preimage_bytes):
+    import hashlib
     return hashlib.sha256(preimage_bytes).hexdigest()
 
 
@@ -590,6 +595,7 @@ def _review_preimage_for_commit(token_bytes, crew_id, commit_sha):
     # (which is fixed per id+verdict forever). Used only for "approve" - the
     # only verdict this merge gate's staleness check consumes (see #135's
     # decision to leave request-changes unchecked).
+    import hashlib
     return hashlib.sha256(
         token_bytes + b"\x00" + crew_id.encode("utf-8") + b"\x00" +
         b"approve" + b"\x00" + commit_sha.strip().lower().encode("utf-8")
@@ -785,6 +791,7 @@ def _artifact_marker_url(member_id, artifact_path, cwd=None):
     hooks/artifact-link-guard.sh already performs to gate the crew-set call
     that triggers this lookup, so a stale marker (edited-but-not-republished
     file) yields no URL here either."""
+    import hashlib
     if not artifact_path:
         return None
     session_id = None
@@ -1028,6 +1035,7 @@ def cmd_crew_set(args):
                         and r.get("review_commit_approve"):
                     bound = r.get("review_delivery_bound")
                     if args.delivery and bound and bound != args.delivery:
+                        import secrets
                         new_token_hex = secrets.token_hex(32)
                         _apply_review_token(r, new_token_hex)
                         print("review-token: %s" % new_token_hex)
@@ -1412,6 +1420,8 @@ def _anchor_died_worktree(record_id, worktree):
     never itself hang or fail a reconcile call - any exception (a timeout, a
     stale index.lock, git not on PATH) is caught and reported as a failure
     reason, never raised."""
+    import subprocess
+    import tempfile
     if not worktree or not os.path.isdir(worktree):
         return None, None
     tmp_index = None
@@ -1792,6 +1802,7 @@ def _ps_tree(root_pid):
     terminal still defaults to a fixed column width on BSD/macOS and would
     silently truncate a long command line, defeating `--proc-re` with no
     error. Empty dict if the root is gone or ps cannot be read."""
+    import subprocess
     try:
         out = subprocess.check_output(
             ["ps", "-ax", "-ww", "-o", "pid=,ppid=,time=,etime=,args="],
@@ -3240,6 +3251,7 @@ def _children_signature(children):
     the reports half - this is what cmd_stall_recheck's forward-motion
     clearing predicate compares against the `children_sig` recorded at flip
     time (see _impose_stall)."""
+    import hashlib
     payload = json.dumps(_child_tuples(children), sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -3253,6 +3265,7 @@ def _forward_motion_signature(candidate, children):
     spends materially more time sitting in `working` with active reports
     (it no longer flips to `blocked` for a single parked item), which is
     exactly the shape this check polices."""
+    import hashlib
     own = (candidate.get("summary"), candidate.get("blocker"),
            candidate.get("artifact"), candidate.get("delivery"),
            tuple(sorted((p.get("ref"), p.get("note")) for p in candidate.get("parked") or [])))
@@ -4472,13 +4485,19 @@ def _cell(val):
 # ---------------------------------------------------------------- cli
 
 
-def build_parser():
-    p = argparse.ArgumentParser(prog="wm-state")
-    sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init").set_defaults(fn=cmd_init)
 
-    a = sub.add_parser("crew-add")
+# One function per subcommand, so build_parser() can build only the
+# invoked subcommand's arguments instead of all 38 up front (issue #326).
+# Each function is a pure relocation of that subcommand's original
+# add_argument/set_defaults calls - no argument, default, or comment changed.
+
+
+def _args_init(a):
+    a.set_defaults(fn=cmd_init)
+
+
+def _args_crew_add(a):
     a.add_argument("--id", required=True)
     a.add_argument("--type", required=True)
     a.add_argument("--objective", default="")
@@ -4541,7 +4560,8 @@ def build_parser():
     a.add_argument("--review-token", default=None, dest="review_token")
     a.set_defaults(fn=cmd_crew_add)
 
-    a = sub.add_parser("crew-set")
+
+def _args_crew_set(a):
     a.add_argument("--id", required=True)
     a.add_argument("--status")
     a.add_argument("--summary")
@@ -4627,32 +4647,36 @@ def build_parser():
     a.add_argument("--parked-clear", action="store_true", dest="parked_clear")
     a.set_defaults(fn=cmd_crew_set)
 
-    a = sub.add_parser("crew-get")
+
+def _args_crew_get(a):
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_crew_get)
 
+
+def _args_crew_derive_id(a):
     # crew-derive-id (issue #178): the sole way spawn-crew turns a candidate
     # slug into a guaranteed-unused id - checks the roster AND the prune
     # archive under one lock, so a pruned id can never be handed out again.
     # See cmd_crew_derive_id's own docstring for the full rationale.
-    a = sub.add_parser("crew-derive-id")
     a.add_argument("--base", required=True)
     a.set_defaults(fn=cmd_crew_derive_id)
 
+
+def _args_record_delivery(a):
     # record-delivery (issue #194): bin/crew-say and wm_outbox_try_redeliver
     # call this on every CONFIRMED delivery into a crew member's own pane, so
     # cmd_needs_attention's muffle-window check can later tell an answered
     # blocker from a live one. Never called by a member on itself.
-    a = sub.add_parser("record-delivery")
     a.add_argument("--to", required=True)
     a.add_argument("--from", dest="sender", default="")
     a.set_defaults(fn=cmd_record_delivery)
 
+
+def _args_review_sign(a):
     # review-sign (issue #135): produces the preimage for a reviewer's own
     # review-token commitment, to embed in a comment-fallback PR verdict (see
     # playbooks/software-development/reviewer.md step 4). Unrestricted - see
     # cmd_review_sign's own docstring for why.
-    a = sub.add_parser("review-sign")
     a.add_argument("--verdict", required=True, choices=("approve", "request changes"))
     # Optional override for the rare case a live reviewer's cached
     # $WM_REVIEW_TOKEN went stale mid-session (its own delivery-change
@@ -4664,7 +4688,8 @@ def build_parser():
     a.add_argument("--commit", default=None)
     a.set_defaults(fn=cmd_review_sign)
 
-    a = sub.add_parser("crew-list")
+
+def _args_crew_list(a):
     a.add_argument("--json", action="store_true")
     a.add_argument("--status")
     a.add_argument("--active", action="store_true")
@@ -4681,9 +4706,12 @@ def build_parser():
     a.add_argument("--parked", action="store_true")
     a.set_defaults(fn=cmd_crew_list)
 
-    sub.add_parser("render-board").set_defaults(fn=cmd_render_board)
 
-    a = sub.add_parser("reconcile")
+def _args_render_board(a):
+    a.set_defaults(fn=cmd_render_board)
+
+
+def _args_reconcile(a):
     a.add_argument("--windows", default="")
     # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
     # omit or pass a lead id to keep reconcile to the global death-flip only.
@@ -4701,11 +4729,13 @@ def build_parser():
     a.add_argument("--grace-seconds", type=int, default=15, dest="grace_seconds")
     a.set_defaults(fn=cmd_reconcile)
 
-    a = sub.add_parser("standdown")
+
+def _args_standdown(a):
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_standdown)
 
-    a = sub.add_parser("prune")
+
+def _args_prune(a):
     a.add_argument("--all-terminal", action="store_true", dest="all_terminal")
     a.add_argument("--older-than-days", type=int, dest="older_than_days")
     a.add_argument("--dry-run", action="store_true", dest="dry_run")
@@ -4713,10 +4743,11 @@ def build_parser():
     a.add_argument("--owner", default=None)
     a.set_defaults(fn=cmd_prune)
 
+
+def _args_stall_check(a):
     # The watcher's silent-stall backstop: supplies the two signals Python cannot
     # observe cheaply (the pane-idle age and the pane root pid); all policy,
     # timestamp math, and process-tree probing stay here.
-    a = sub.add_parser("stall-check")
     a.add_argument("--id", required=True)
     a.add_argument("--pane-idle", type=int, required=True, dest="pane_idle")
     a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
@@ -4767,14 +4798,17 @@ def build_parser():
     a.add_argument("--nudge-attempts", type=int, default=0, dest="nudge_attempts")
     a.set_defaults(fn=cmd_stall_check)
 
+
+def _args_liveness_probe(a):
     # Read-only exposure of cmd_stall_check's own branch-(a) proof-of-life
     # probe (issue #234), so bin/watch-fleet can ask the same question BEFORE
     # typing a check-in nudge into a pane, not only afterwards via stall-check.
-    a = sub.add_parser("liveness-probe")
     a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
     a.add_argument("--root-grace", type=int, default=30, dest="root_grace")
     a.set_defaults(fn=cmd_liveness_probe)
 
+
+def _args_wedge_check(a):
     # Foreground-watcher wedge detection (issue #202, layer B): flips a
     # 'working' OR 'blocked' member to 'stalled' once its pane has repainted
     # continuously (never idle at a prompt) for --threshold seconds of
@@ -4783,7 +4817,6 @@ def build_parser():
     # running that long. Called per member per bin/watch-fleet poll, ABOVE
     # the blocked skip (see the call site comment in bin/watch-fleet) - see
     # cmd_wedge_check's own docstring for the full design.
-    a = sub.add_parser("wedge-check")
     a.add_argument("--id", required=True)
     a.add_argument("--pane-idle", type=int, required=True, dest="pane_idle")
     a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
@@ -4796,6 +4829,8 @@ def build_parser():
     a.add_argument("--proc-re", default=None, dest="proc_re")
     a.set_defaults(fn=cmd_wedge_check)
 
+
+def _args_loop_wedge_check(a):
     # Foreground-poll-loop wedge detection (issue #268, layer B): the
     # identical detector shape as wedge-check just above, generalized to a
     # second --proc-re pattern (default WM_LOOP_WEDGE_PROC_RE_DEFAULT: a
@@ -4804,7 +4839,6 @@ def build_parser():
     # loop-guard.sh (layer A) misses. Called per member per bin/watch-fleet
     # poll, alongside the existing wedge-check call - see cmd_loop_wedge_
     # check's own docstring for the full design.
-    a = sub.add_parser("loop-wedge-check")
     a.add_argument("--id", required=True)
     a.add_argument("--pane-idle", type=int, required=True, dest="pane_idle")
     a.add_argument("--pane-pid", type=int, required=True, dest="pane_pid")
@@ -4817,7 +4851,8 @@ def build_parser():
     a.add_argument("--proc-re", default=None, dest="proc_re")
     a.set_defaults(fn=cmd_loop_wedge_check)
 
-    a = sub.add_parser("needs-attention")
+
+def _args_needs_attention(a):
     # Emit only this owner's direct reports ("" = top level). Omit for every layer.
     a.add_argument("--owner", default=None)
     # Suppression selector (Fix A / #8): "ack" (default) is the watcher/fire gate
@@ -4827,20 +4862,22 @@ def build_parser():
     a.add_argument("--only-acked", action="store_true", dest="only_acked")
     a.set_defaults(fn=cmd_needs_attention)
 
+
+def _args_group_attention(a):
     # Pure display filter over needs-attention's TSV: collapses a fleet-wide
     # correlated batch (mass death, correlated API outage) into one synthetic
     # row. Never call ack/mark-handled against its output - those must always
     # target the real ids from the original needs-attention call.
-    a = sub.add_parser("group-attention")
     a.add_argument("--owner", default=None)
     a.add_argument("--mass-min-count", type=int, default=2, dest="mass_min_count")
     a.add_argument("--mass-min-ratio", type=float, default=0.5, dest="mass_min_ratio")
     a.set_defaults(fn=cmd_group_attention)
 
+
+def _args_outage_update(a):
     # The persisted fleet-wide outage-state machine (issue #23, item 0).
     # Called every bin/watch-fleet iteration from wingman's own top-level
     # cycle only (--owner "").
-    a = sub.add_parser("outage-update")
     a.add_argument("--owner", default="")
     a.add_argument("--signal-working", type=int, default=0, dest="signal_working")
     a.add_argument("--died", default="")
@@ -4849,12 +4886,13 @@ def build_parser():
     a.add_argument("--quiet-seconds", type=int, default=15, dest="quiet_seconds")
     a.set_defaults(fn=cmd_outage_update)
 
+
+def _args_usage_update(a):
     # The persisted fleet-wide usage-quota-approach state machine (issue #24).
     # Called every bin/watch-fleet iteration from wingman's own top-level
     # cycle only (--owner "" - the account's usage quota is shared fleet-
     # wide, never per-lead-team). --owner is accepted for shape-parity with
     # outage-update's own call signature but is not otherwise used here.
-    a = sub.add_parser("usage-update")
     a.add_argument("--owner", default="")
     a.add_argument("--five-hour-pct", type=float, default=None, dest="five_hour_pct")
     a.add_argument("--five-hour-resets-at", type=float, default=None, dest="five_hour_resets_at")
@@ -4863,20 +4901,24 @@ def build_parser():
     a.add_argument("--warn-threshold", type=float, default=80.0, dest="warn_threshold")
     a.set_defaults(fn=cmd_usage_update)
 
-    a = sub.add_parser("usage-decide")
+
+def _args_usage_decide(a):
     a.add_argument("--decision", required=True, choices=("wait", "continue"))
     a.set_defaults(fn=cmd_usage_decide)
 
+
+def _args_review_resurface_check(a):
     # Bounded resurface for a `review` member with no live dependency watcher
     # (issue #187). Called every bin/watch-fleet iteration, owner-scoped like
     # needs-attention; only ever fires (writes review-resurfaced.json) once
     # --window-secs has elapsed for a given id with no fresh pr-watch beacon.
-    a = sub.add_parser("review-resurface-check")
     a.add_argument("--owner", default=None)
     a.add_argument("--window-secs", type=int, default=21600, dest="window_secs")  # 6h, generous default
     a.add_argument("--waker-grace", type=int, default=120, dest="waker_grace")
     a.set_defaults(fn=cmd_review_resurface_check)
 
+
+def _args_forward_motion_check(a):
     # Structural forward-motion / logical-stall detection (issue #199, Gap
     # B): flips a WORKING candidate with active reports to 'stalled' once its
     # own roster-shape signature has shown no change for --window-secs, even
@@ -4890,7 +4932,6 @@ def build_parser():
     # see cmd_forward_motion_check's own docstring. No --root-grace: that
     # parameter is _probe_execution's branch (a) alone, which this call path
     # never reaches.
-    a = sub.add_parser("forward-motion-check")
     a.add_argument("--owner", default=None)
     a.add_argument("--window-secs", type=int, default=1800, dest="window_secs")  # 30 min default
     a.add_argument("--probe-gap", type=int, default=10, dest="probe_gap")
@@ -4898,6 +4939,8 @@ def build_parser():
     a.add_argument("--pane-pids-stdin", action="store_true", dest="pane_pids_stdin")
     a.set_defaults(fn=cmd_forward_motion_check)
 
+
+def _args_stall_recheck(a):
     # The stalled re-evaluation (issue #235): re-runs the SAME detector's own
     # evidence recorded on a 'stalled' record's `stall` object at flip time
     # (see _stall_contradicted), and reverts the record only on a sustained
@@ -4907,7 +4950,6 @@ def build_parser():
     # --pane-pid 0 is a valid, deliberate "cannot tell" (a pane whose pid did
     # not resolve this poll), not an error - every branch of
     # _stall_contradicted must still answer correctly for it.
-    a = sub.add_parser("stall-recheck")
     a.add_argument("--id", required=True)
     a.add_argument("--pane-pid", type=int, default=0, dest="pane_pid")
     a.add_argument("--pane-changed", type=int, default=0, dest="pane_changed")
@@ -4915,47 +4957,57 @@ def build_parser():
     a.add_argument("--confirmations", type=int, default=2)
     a.set_defaults(fn=cmd_stall_recheck)
 
-    a = sub.add_parser("ack")
+
+def _args_ack(a):
     a.add_argument("--id", required=True)
     a.add_argument("--updated", required=True)
     a.set_defaults(fn=cmd_ack)
 
-    a = sub.add_parser("mark-handled")
+
+def _args_mark_handled(a):
     a.add_argument("--id", required=True)
     a.add_argument("--updated", required=True)
     a.set_defaults(fn=cmd_mark_handled)
 
-    a = sub.add_parser("projects-set")
+
+def _args_projects_set(a):
     a.add_argument("--data")
     a.add_argument("--stdin", action="store_true")
     a.set_defaults(fn=cmd_projects_set)
 
-    sub.add_parser("projects-get").set_defaults(fn=cmd_projects_get)
 
-    a = sub.add_parser("projects-lookup")
+def _args_projects_get(a):
+    a.set_defaults(fn=cmd_projects_get)
+
+
+def _args_projects_lookup(a):
     a.add_argument("--name", required=True)
     a.set_defaults(fn=cmd_projects_lookup)
 
-    a = sub.add_parser("pref-get")
+
+def _args_pref_get(a):
     a.add_argument("--run-id", required=True, dest="run_id")
     a.add_argument("--key", required=True)
     a.set_defaults(fn=cmd_pref_get)
 
-    a = sub.add_parser("pref-set")
+
+def _args_pref_set(a):
     a.add_argument("--run-id", required=True, dest="run_id")
     a.add_argument("--key", required=True)
     a.add_argument("--value", required=True)
     a.set_defaults(fn=cmd_pref_set)
 
-    a = sub.add_parser("prefs-list")
+
+def _args_prefs_list(a):
     a.add_argument("--run-id", required=True, dest="run_id")
     a.add_argument("--with-source", action="store_true", dest="with_source",
                    help="append the layer each value came from "
                         "(run | config.local.toml)")
     a.set_defaults(fn=cmd_prefs_list)
 
+
+def _args_ask_new(a):
     # --- ask channel: request/response between a caller and its delegate -------
-    a = sub.add_parser("ask-new")
     a.add_argument("--id", required=True)
     # `--from` is a Python keyword, so it lands in args.sender.
     a.add_argument("--from", default="", dest="sender")
@@ -4963,7 +5015,8 @@ def build_parser():
     a.add_argument("--question", required=True)
     a.set_defaults(fn=cmd_ask_new)
 
-    a = sub.add_parser("ask-reply")
+
+def _args_ask_reply(a):
     a.add_argument("--id", required=True)
     a.add_argument("--responder", required=True)
     a.add_argument("--answer", required=True)
@@ -4971,30 +5024,115 @@ def build_parser():
     a.add_argument("--max-chars", type=int, default=None, dest="max_chars")
     a.set_defaults(fn=cmd_ask_reply)
 
-    a = sub.add_parser("ask-get")
+
+def _args_ask_get(a):
     a.add_argument("--id", required=True)
     a.set_defaults(fn=cmd_ask_get)
 
-    a = sub.add_parser("ask-resolve")
+
+def _args_ask_resolve(a):
     a.add_argument("--id", required=True)
     a.add_argument("--status", required=True, choices=("timeout", "undeliverable"))
     a.add_argument("--note", default=None)
     a.set_defaults(fn=cmd_ask_resolve)
 
-    a = sub.add_parser("ask-list")
+
+def _args_ask_list(a):
     a.add_argument("--from", default=None, dest="sender")
     a.add_argument("--status", default=None)
     a.set_defaults(fn=cmd_ask_list)
 
-    a = sub.add_parser("ask-prune")
+
+def _args_ask_prune(a):
     a.add_argument("--older-than-hours", type=int, default=None, dest="older_than_hours")
     a.set_defaults(fn=cmd_ask_prune)
 
+
+_SUBCOMMAND_ARGS = {
+    "init": _args_init,
+    "crew-add": _args_crew_add,
+    "crew-set": _args_crew_set,
+    "crew-get": _args_crew_get,
+    "crew-derive-id": _args_crew_derive_id,
+    "record-delivery": _args_record_delivery,
+    "review-sign": _args_review_sign,
+    "crew-list": _args_crew_list,
+    "render-board": _args_render_board,
+    "reconcile": _args_reconcile,
+    "standdown": _args_standdown,
+    "prune": _args_prune,
+    "stall-check": _args_stall_check,
+    "liveness-probe": _args_liveness_probe,
+    "wedge-check": _args_wedge_check,
+    "loop-wedge-check": _args_loop_wedge_check,
+    "needs-attention": _args_needs_attention,
+    "group-attention": _args_group_attention,
+    "outage-update": _args_outage_update,
+    "usage-update": _args_usage_update,
+    "usage-decide": _args_usage_decide,
+    "review-resurface-check": _args_review_resurface_check,
+    "forward-motion-check": _args_forward_motion_check,
+    "stall-recheck": _args_stall_recheck,
+    "ack": _args_ack,
+    "mark-handled": _args_mark_handled,
+    "projects-set": _args_projects_set,
+    "projects-get": _args_projects_get,
+    "projects-lookup": _args_projects_lookup,
+    "pref-get": _args_pref_get,
+    "pref-set": _args_pref_set,
+    "prefs-list": _args_prefs_list,
+    "ask-new": _args_ask_new,
+    "ask-reply": _args_ask_reply,
+    "ask-get": _args_ask_get,
+    "ask-resolve": _args_ask_resolve,
+    "ask-list": _args_ask_list,
+    "ask-prune": _args_ask_prune,
+}
+# Registering a subcommand is now two separate edits (the _args_* function and
+# its _SUBCOMMAND_ARGS entry) where writing add_parser() used to be the whole
+# registration - so a forgotten dict entry would silently drop a subcommand
+# from the CLI with nothing else to catch it. This pins the two back together.
+assert {n for n in globals() if n.startswith("_args_")} == {fn.__name__ for fn in _SUBCOMMAND_ARGS.values()}, \
+    "a module-level _args_* function is missing from _SUBCOMMAND_ARGS (or vice versa)"
+
+
+def build_parser(only=None):
+    """Build the wm-state argparse tree. With `only` omitted (None), builds
+    every subcommand's full argument set, exactly as this function always
+    has - the only path that can produce a top-level --help listing or an
+    "invalid choice" error naming every subcommand, so it's used whenever
+    the invoked subcommand can't be determined up front (see main()).
+    With `only` set to a known subcommand name, builds ONLY that one
+    subcommand's parser - skipping both the add_parser() and add_argument()
+    calls for the other 37, which are never needed to parse or dispatch a
+    single already-known subcommand (see issue #326). `sub.metavar` is
+    pinned to the full 38-name list explicitly in this branch: left alone,
+    argparse auto-derives the "cmd" positional's metavar from however many
+    choices are actually registered, so with only one subparser built it
+    would shrink to "{<only>}" - changing the usage: banner on any error the
+    TOP-level parser itself raises (e.g. an unrecognized trailing argument
+    after a valid subcommand), even though that error has nothing to do with
+    which subcommand was invoked."""
+    p = argparse.ArgumentParser(prog="wm-state")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    if only is not None:
+        sub.metavar = "{%s}" % ",".join(_SUBCOMMAND_ARGS)
+        _SUBCOMMAND_ARGS[only](sub.add_parser(only))
+        return p
+    for name, add_args in _SUBCOMMAND_ARGS.items():
+        add_args(sub.add_parser(name))
     return p
 
 
 def main():
-    args = build_parser().parse_args()
+    # A recognized subcommand as argv[1] (the overwhelming common case - this
+    # is how every caller in the codebase invokes wm-state) is unambiguous:
+    # build ONLY that one subcommand's parser (see build_parser's docstring).
+    # Anything else - no args, -h/--help, an unrecognized token - falls back
+    # to the full build, so top-level --help and "invalid choice" errors keep
+    # listing every subcommand exactly as they always have (issue #326).
+    only = sys.argv[1] if len(sys.argv) >= 2 and sys.argv[1] in _SUBCOMMAND_ARGS else None
+    args = build_parser(only=only).parse_args()
     args.fn(args)
 
 
