@@ -133,6 +133,14 @@ else
     # representable under the kill switch too; this ordering is what makes
     # that representable.
     if wm_run_scoped_marker_active "$suppressedfile"; then
+      # Mechanically re-assert the affected owner's crew-set status too
+      # (issue #331) - every Stop event this branch fires, not only once at
+      # trip time, so the session's own in-between self-reports ("--status
+      # working ... not re-arming") never leave the standdown invisible to
+      # needs-attention for long. See wm_assert_standdown_blocked's own
+      # comment (hooks/lib/watcher-liveness.sh) for why this is safe to call
+      # unconditionally here without spamming a fresh `announced` every poll.
+      wm_assert_standdown_blocked "$OWNER" "$suppressedfile"
       # Nag with the standdown's OWN composed remedy text (count/hint/log
       # pointer), never the routine nudge below - the routine text would
       # tell the model to arm a cycle, and the resulting arm would clear the
