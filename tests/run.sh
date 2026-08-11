@@ -164,11 +164,20 @@ fi
 # instead of queuing behind quick files that merely sort earlier
 # alphabetically (a plain directory-order launch would let a slot free up
 # from a fast file and start another fast file well before a slow file later
-# in the alphabet ever gets a slot). Ranking is from
-# docs/analysis/2026-07-14-test-suite-runtime.md's per-file timings; a file
-# not in this list, or a rank that has since drifted, still just runs - this
-# is a scheduling hint, not a required inventory.
-_wm_priority="watch-fleet.test.sh stall-nudge-confirmation.test.sh crew-resume.test.sh playbook-resolution.test.sh watch-fleet-classify.test.sh spawn-scope.test.sh tmux-session-targeting.test.sh stall-check.test.sh"
+# in the alphabet ever gets a slot). The suite's wall clock is bounded by
+# total work over the job pool (sum of every file's duration / job count),
+# not by any single file, so this list needs to front-load enough of the
+# genuinely heavy files that the pool stays saturated until close to that
+# floor - a short list that misses a heavy file (or pads itself with files
+# that are not actually heavy) can leave the pool idling on the wrong file
+# late in the run and lengthen the wall clock rather than shorten it.
+# Ranking below is every file that measured at 30s or more in a single real
+# CI run's per-file start/end timestamps (the same measurement method as
+# docs/analysis/2026-07-14-test-suite-runtime.md); a file not in this list,
+# or a rank that has since drifted, still just runs - this is a scheduling
+# hint, not a required inventory, but re-derive it from a real CI run rather
+# than adding entries by guesswork if it needs updating.
+_wm_priority="stop-continuity.test.sh group-attention.test.sh watch-fleet-lifecycle.test.sh watch-fleet.test.sh watch-fleet-recovery.test.sh crew-resume.test.sh watch-fleet-classify.test.sh forward-motion-check.test.sh stall-recheck.test.sh crew-standdown-remote-control.test.sh busy-pane-refusal.test.sh stall-nudge-confirmation.test.sh playbook-resolution.test.sh wedge-check.test.sh composer-confirm-delivery.test.sh tmux-session-targeting.test.sh stall-check.test.sh outbox-wake-and-retry-log.test.sh session-guard-hook-sync.test.sh"
 
 _wm_ordered=()
 for _p in $_wm_priority; do
