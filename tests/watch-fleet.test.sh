@@ -9,12 +9,11 @@
 # freeze detector's own false-positive/false-negative matrix, SIGURG immunity,
 # the concurrent-arm TOCTOU close, and the api-error nudge/escalation path.
 # Split from a single, much larger file (then named tests/watch-fleet.test.sh)
-# once it became ~92% of the CI test job's own wall clock - see
-# docs/analysis/2026-08-11-test-suite-slowness-investigation.md. Two sibling
-# files continue this suite: tests/watch-fleet-recovery.test.sh (Remote
-# Control/lock/outage/usage-limit recovery) and
-# tests/watch-fleet-lifecycle.test.sh (ownership, self-correction, and the
-# orphan-watcher-lifecycle self-checks).
+# once it became ~92% of the CI test job's own wall clock (measured directly
+# from CI logs, not estimated). Two sibling files continue this suite:
+# tests/watch-fleet-recovery.test.sh (Remote Control/lock/outage/usage-limit
+# recovery) and tests/watch-fleet-lifecycle.test.sh (ownership,
+# self-correction, and the orphan-watcher-lifecycle self-checks).
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 # For wm_composer_text_in/wm_composer_is_empty, used by z1/ae1/ae2 below to

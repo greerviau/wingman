@@ -100,9 +100,8 @@ assert_false "case2: directly-created dir torn down after SIGINT" \
 # traps do not chain). This is the permanent, whole-suite version of the check
 # below (tests/run.sh's own static check, run before every suite loop); this
 # case pins it to the files that content now lives in - watch-fleet.test.sh
-# was later split into three (see
-# docs/analysis/2026-08-11-test-suite-slowness-investigation.md), so all three
-# are checked, not just the one that kept the original name.
+# was later split into three, so all three are checked, not just the one
+# that kept the original name.
 assert_false "case3: watch-fleet.test.sh and its split siblings no longer install their own EXIT trap" \
   "grep -qE '^[[:space:]]*trap .* EXIT' \
     '$TEST_REPO/tests/watch-fleet.test.sh' \

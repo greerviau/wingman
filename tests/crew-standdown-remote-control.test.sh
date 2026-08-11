@@ -3,8 +3,9 @@
 # live crew member's window (issue #96): `/remote-control` is a blind stateful
 # toggle, not an idempotent disconnect, so it must only be sent when the
 # roster's own already-vetted `remote_control_connected` field (written by
-# bin/watch-fleet's stability-gated poll - see tests/watch-fleet.test.sh) says
-# the session is (or is assumed to still be) connected. crew-standdown itself
+# bin/watch-fleet's stability-gated poll - see
+# tests/watch-fleet-recovery.test.sh) says the session is (or is assumed to
+# still be) connected. crew-standdown itself
 # does no pane inspection at all - every case below sets the roster fields
 # directly via wm_state crew-add/crew-set rather than needing a stub pane to
 # simulate connection state, closing the round-2 review's test-blind-spot note
@@ -133,9 +134,9 @@ assert_false "case G: the window is closed" "tmux list-windows -t '=$WM_TMUX_SES
 # pipe-pane` logs everything the pane ever displayed (including any
 # /remote-control keystrokes standdown types - the terminal echoes them
 # whether or not the foreground process reads them, exactly like the reconnect
-# side in tests/watch-fleet.test.sh) to a plain file that survives the window
-# being killed, so this re-run of A/B/C/F/G confirms the literal content, not
-# just the end state.
+# side in tests/watch-fleet-recovery.test.sh) to a plain file that survives
+# the window being killed, so this re-run of A/B/C/F/G confirms the literal
+# content, not just the end state.
 run_and_capture() {
   # run_and_capture <id> <mode> <banner-text-or-empty>
   # mode:

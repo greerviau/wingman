@@ -13,8 +13,8 @@
 # the stale-code self-check's own anti-spin bound and worktree-removal race).
 # One of three sibling files split from a single, much larger file (then named
 # tests/watch-fleet.test.sh) once it became ~92% of the CI test job's own wall
-# clock - see docs/analysis/2026-08-11-test-suite-slowness-investigation.md.
-# See tests/watch-fleet.test.sh for the wake loop's core arm/fire/stall/
+# clock (measured directly from CI logs, not estimated). See
+# tests/watch-fleet.test.sh for the wake loop's core arm/fire/stall/
 # permission-freeze semantics, and tests/watch-fleet-recovery.test.sh for
 # Remote Control/lock/outage/usage-limit recovery.
 set -u

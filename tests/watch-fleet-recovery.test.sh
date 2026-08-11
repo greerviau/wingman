@@ -11,8 +11,8 @@
 # detection (including the sweep of long-dead sessions' usage/*.json files).
 # One of three sibling files split from a single, much larger file (then named
 # tests/watch-fleet.test.sh) once it became ~92% of the CI test job's own wall
-# clock - see docs/analysis/2026-08-11-test-suite-slowness-investigation.md.
-# See tests/watch-fleet.test.sh for the wake loop's core arm/fire/stall/
+# clock (measured directly from CI logs, not estimated). See
+# tests/watch-fleet.test.sh for the wake loop's core arm/fire/stall/
 # permission-freeze semantics, and tests/watch-fleet-lifecycle.test.sh for
 # ownership, self-correction, and the orphan-watcher-lifecycle self-checks.
 set -u
@@ -23,7 +23,6 @@ set -u
 . "$TEST_REPO/bin/lib/common.sh"
 
 WF="$TEST_REPO/bin/watch-fleet"
-COMPOSER_STUB="$TEST_REPO/tests/fixtures/composer-stub.sh"
 export WM_WATCH_INTERVAL=1
 # The watcher blocks until an event fires, so bound every foreground run with
 # wm_timeout and reap any backgrounded one on exit (lib.sh's shared trap; every
