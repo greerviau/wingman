@@ -38,6 +38,15 @@
 # this resolves to the real path in every case that actually surfaces it.
 : "${WM_STANDDOWN_FALLBACK:=Fleet supervision is standing down after repeated watch-fleet deaths for this session (see ${WM_HOME:-}/watch-spurious.log); supervision is not being maintained. Report this to the pilot and stop. Do NOT arm a watch-fleet cycle and do NOT run /watch in response - lifting the standdown is up to the pilot, via 'bin/watch-fleet --clear-standdown' (or a fresh run).}"
 
+# WM_STANDDOWN_TAG marks a crew-set --blocker value as the standdown's own
+# (issue #331), distinguishing it from an ordinary blocked question at a
+# glance - wm_assert_standdown_blocked below and bin/watch-fleet's own
+# --clear-standdown restore-check both key off this same prefix. Must stay
+# byte-identical to bin/watch-fleet's own copy (duplicated, not sourced - see
+# wm_owner_paths' own header above for why that duplication between these two
+# files is already accepted).
+: "${WM_STANDDOWN_TAG:=watch-fleet-standdown:}"
+
 # wm_owner_paths <owner> <wm_home>
 # Derives the owner key once and sets every owner-keyed path both hooks (and
 # bin/watch-fleet's own per-owner block, re-derived independently there - see
@@ -170,4 +179,67 @@ EOF
     printf '%s' "You have a pending question with no live waiter:$_wur_unwaited
 Arm 'bin/crew-ask await --id <req>' as a harness-tracked background task for each so its exit wakes you when the answer lands, then you may stop."
   fi
+}
+
+# wm_assert_standdown_blocked <owner> <suppressedfile>
+# Mechanically (re-)asserts <owner>'s crew-set status as `blocked`, with a
+# $WM_STANDDOWN_TAG-prefixed blocker, while a spurious-repeated standdown
+# marker holds (issue #331) - the observability half of #198's refusal to
+# re-arm. Without this, the affected session's OWN next self-report (e.g.
+# "--status working ... not re-arming") silently reverts the mechanical flip
+# bin/watch-fleet's trip branch made, and the standdown goes invisible to
+# needs-attention again until something restores it. Call this from every
+# Stop-hook branch that already gates on
+# wm_run_scoped_marker_active "$suppressedfile" (stop-continuity.sh's own
+# persistent gate, stop-guard.sh's own no-watcher marker-active branch) - it
+# must run every such Stop event for as long as the marker holds, mirroring
+# hooks/no-foreground-watcher-guard.sh's own posture of enforcing the refusal
+# continuously rather than once.
+#
+# No-op if <owner> is empty (wingman's own top-level session has no crew
+# record of itself - a human watches that pane directly, nothing crew-set-
+# watches owner "") or <suppressedfile> is unreadable.
+#
+# Never writes unconditionally. bin/lib/wm-state.py's cmd_crew_set bumps
+# `announced` (needs-attention's own dedup key) on EVERY non-silent `blocked`
+# call, whether or not the blocker text actually changed - verified directly
+# against the current implementation: the same-pointer "don't re-announce"
+# suppression is `review`-only by explicit design; `blocked`/`done` are
+# unconditionally treated as genuine because --silent is already forbidden
+# for them, so cmd_crew_set has no notion of a redundant `blocked` refresh.
+# Calling this unconditionally on every Stop event the marker holds would
+# therefore re-bump `announced` every time, defeating needs-attention's
+# ack/handled dedup (keyed on exact (id, announced)) and re-surfacing the
+# SAME standdown as a brand-new event on every poll - a wake-storm on the
+# very state this fix exists to make visible ONCE, not repeatedly. So: read
+# the current record first via `crew-get`, and skip the write entirely when
+# it is already `blocked` with a blocker that already starts with
+# $WM_STANDDOWN_TAG - a PREFIX check, not full equality, because a lead with
+# its own parked items (#203) has this composed lead-in appended with
+# " | parked: ..." by cmd_crew_set itself, which must not be mistaken for
+# drift. Nothing else in this codebase ever writes a blocker starting with
+# this tag, so the prefix alone is conclusive. Only a genuine drift (a
+# different status, or a blocker that lost the tag - e.g. the affected
+# session's own "--status working" self-report) triggers a write, and THAT
+# write's own fresh `announced` is exactly correct: a standdown resurfacing
+# after being clobbered is a legitimately new, attention-worthy event.
+wm_assert_standdown_blocked() {
+  _wasb_owner="$1"; _wasb_file="$2"
+  [ -n "$_wasb_owner" ] || return 0
+  _wasb_already="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-get --id "$_wasb_owner" 2>/dev/null \
+    | $WM_UV python -c '
+import json, sys
+tag = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print("1" if d.get("status") == "blocked" and (d.get("blocker") or "").startswith(tag) else "0")
+' "$WM_STANDDOWN_TAG" 2>/dev/null)"
+  [ "$_wasb_already" = "1" ] && return 0
+  _wasb_body="$(tail -n +2 "$_wasb_file" 2>/dev/null)"
+  [ -n "$_wasb_body" ] || _wasb_body="$WM_STANDDOWN_FALLBACK"
+  _wasb_blocker="$WM_STANDDOWN_TAG fleet supervision for this session is standing down after repeated watch-fleet deaths - not an ordinary blocker; do NOT tell this session to just re-arm, that is denied outright while the standdown holds. Run 'bin/watch-fleet --clear-standdown' once the cause is understood. Full detail: $_wasb_body"
+  WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-set --id "$_wasb_owner" --status blocked \
+    --blocker "$_wasb_blocker" >/dev/null 2>&1
 }

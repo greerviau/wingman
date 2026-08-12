@@ -412,6 +412,10 @@ assert_contains "the composed text names --clear-standdown as the way out" "$mar
 # dissolve its own standdown (issue #198).
 assert_not_contains "the composed text never says to resume by running /watch" "$marker_body" "Resume it by running"
 assert_not_contains "the composed text never says to arm bin/watch-fleet" "$marker_body" "arming bin/watch-fleet"
+
+# issue #331, spec case 2: the unscoped owner ("") has no crew record at all -
+# the trip above must never have attempted a crew-set write for it.
+assert_false "no crew record is ever created for the unscoped owner" "[ -f '$WINGMAN_HOME/crew/.json' ]"
 unset WINGMAN_RUN_ID
 
 # The stale-claim-lock hint composes the lock-specific remedy, naming
@@ -437,6 +441,67 @@ assert_contains "the stale-claim-lock remedy also names --clear-standdown as the
 unset WM_CLAIM_HARD_STALE_AGE
 kill "$_lock_holder" 2>/dev/null
 rmdir "$WINGMAN_HOME/watch.pid.lock" 2>/dev/null
+
+# --- issue #331: an owner-scoped trip mechanically mirrors the standdown ------
+# onto the affected owner's own crew-set status, and --clear-standdown ---------
+# restores it symmetrically (only when it is still the standdown's own write) --
+test_new_home
+
+# Case 1: an owner-scoped trip flips the record to blocked with a
+# watch-fleet-standdown:-tagged blocker.
+wm_state crew-add --id leadA --type lead --objective x --repo /tmp --window wm-leadA --session-id s-leadA >/dev/null
+wm_state crew-set --id leadA --status working --summary busy >/dev/null
+wm_timeout 10 "$WF" --classify --owner leadA >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadA >/dev/null 2>&1
+leadA_trip="$(wm_timeout 10 "$WF" --classify --owner leadA 2>/dev/null)"
+assert_eq "the third owner-scoped classification trips spurious-repeated" "$leadA_trip" "spurious-repeated 3 clean-exit-or-sigterm"
+leadA_get="$(wm_state crew-get --id leadA)"
+assert_contains "the owner-scoped trip flips leadA's own status to blocked" "$leadA_get" "\"status\": \"blocked\""
+assert_contains "the owner-scoped trip's blocker carries the standdown tag" "$leadA_get" "\"blocker\": \"watch-fleet-standdown:"
+
+# Case 4: needs-attention (leadA's parent, owner "") surfaces it as blocked.
+na_leadA="$(wm_state needs-attention --owner "")"
+assert_contains "needs-attention surfaces the newly-blocked leadA" "$na_leadA" "leadA"
+assert_contains "needs-attention's row for leadA carries blocked" "$na_leadA" "blocked"
+
+# Case 6: --clear-standdown restores leadA's status to working and clears the
+# blocker (decision 3.5(A), the restore-when-it-is-still-ours direction).
+"$WF" --owner leadA --clear-standdown >/dev/null 2>&1
+leadA_get2="$(wm_state crew-get --id leadA)"
+assert_contains "clear-standdown restores leadA's status to working" "$leadA_get2" "\"status\": \"working\""
+assert_contains "clear-standdown clears leadA's blocker" "$leadA_get2" "\"blocker\": null"
+
+# Case 4 (continued): once restored to working, needs-attention no longer
+# surfaces leadA - working is not in ATTENTION_STATES, so this holds
+# regardless of ack state.
+na_leadA2="$(wm_state needs-attention --owner "")"
+assert_not_contains "needs-attention no longer surfaces leadA once restored" "$na_leadA2" "leadA"
+
+# The other half of decision 3.5(A): --clear-standdown must NOT restore when
+# the record has since been re-blocked on a genuinely different question.
+wm_state crew-add --id leadC --type lead --objective x --repo /tmp --window wm-leadC --session-id s-leadC >/dev/null
+wm_state crew-set --id leadC --status working --summary busy >/dev/null
+wm_timeout 10 "$WF" --classify --owner leadC >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadC >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadC >/dev/null 2>&1
+wm_state crew-set --id leadC --status blocked --blocker "need a call on the API shape" >/dev/null
+"$WF" --owner leadC --clear-standdown >/dev/null 2>&1
+leadC_get="$(wm_state crew-get --id leadC)"
+assert_contains "a superseded blocker is left blocked, not restored to working" "$leadC_get" "\"status\": \"blocked\""
+assert_contains "the superseded blocker's own unrelated text survives untouched" "$leadC_get" "need a call on the API shape"
+assert_not_contains "the superseded blocker never carries the standdown tag" "$leadC_get" "watch-fleet-standdown:"
+
+# Case 7: a lead's own parked item (#203) survives alongside the standdown tag
+# in the composed blocker.
+wm_state crew-add --id leadB --type lead --objective x --repo /tmp --window wm-leadB --session-id s-leadB >/dev/null
+wm_state crew-set --id leadB --status working --summary busy >/dev/null
+wm_state crew-set --id leadB --park "issue-9:waiting on a design call" >/dev/null
+wm_timeout 10 "$WF" --classify --owner leadB >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadB >/dev/null 2>&1
+wm_timeout 10 "$WF" --classify --owner leadB >/dev/null 2>&1
+leadB_get="$(wm_state crew-get --id leadB)"
+assert_contains "leadB's composed blocker carries the standdown tag" "$leadB_get" "watch-fleet-standdown:"
+assert_contains "leadB's composed blocker also carries its own parked item" "$leadB_get" "[issue-9] waiting on a design call"
 
 # A plain spurious (below budget) writes no marker.
 test_new_home
@@ -508,5 +573,68 @@ scout="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
 assert_eq "a hand-written stale-code exit record classifies as exactly stale-code" "$scout" "stale-code"
 assert_eq "a stale-code exit resets the spurious-failure count to 0" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
 assert_false "the record is consumed (deleted) after being read" "[ -f '$WINGMAN_HOME/watch-exit' ]"
+
+# ============================================================================
+# issue #196: low-volume 'rolled'-outcome telemetry
+# ============================================================================
+# hooks/stop-continuity.sh's referee writes 'rolled' to the exit record
+# before killing a cycle it is deliberately rotating - a success, not a
+# failure, so watch-spurious.log never recorded it and there was no way to
+# compute the real rollover rate (only the failure side was ever visible).
+# These prove the rollup added for it: classify still reports/consumes
+# 'rolled' exactly like any other exit record, nothing is logged below the
+# configured batch size, and exactly one watch-spurious.log line appears once
+# a batch fills, carrying the accumulated count via the same spurlog() used
+# by every other kind.
+
+# --- a single rolled classification: reported, consumed, no log line yet ---
+test_new_home
+printf 'rolled\n' > "$WINGMAN_HOME/watch-exit"
+rout="$(wm_timeout 10 "$WF" --classify 2>/dev/null)"
+assert_eq "a hand-written rolled exit record classifies as exactly rolled" "$rout" "rolled"
+assert_false "the record is consumed (deleted) after being read" "[ -f '$WINGMAN_HOME/watch-exit' ]"
+assert_eq "a rolled exit resets the spurious-failure count to 0" "$(cat "$WINGMAN_HOME/watch-spurious-count" 2>/dev/null)" "0"
+assert_eq "the rolled counter advances to 1" "$(cat "$WINGMAN_HOME/watch-rolled-count" 2>/dev/null)" "1"
+assert_false "below the default batch size (20), nothing is logged yet" "[ -f '$WINGMAN_HOME/watch-spurious.log' ]"
+
+# --- missing rolled-count file reads as 0, not an unbound-variable crash ---
+test_new_home
+assert_false "no rolled-count file exists yet" "[ -f '$WINGMAN_HOME/watch-rolled-count' ]"
+printf 'rolled\n' > "$WINGMAN_HOME/watch-exit"
+wm_timeout 10 "$WF" --classify >/dev/null 2>&1
+assert_eq "the first rolled classification against a missing count file starts at 1" "$(cat "$WINGMAN_HOME/watch-rolled-count" 2>/dev/null)" "1"
+
+# --- WM_ROLLED_LOG_EVERY is env-overridable: a batch of 1 logs immediately -
+test_new_home
+printf 'rolled\n' > "$WINGMAN_HOME/watch-exit"
+rout1="$(wm_timeout 10 env WM_ROLLED_LOG_EVERY=1 "$WF" --classify 2>/dev/null)"
+assert_eq "still reports rolled regardless of the batch size" "$rout1" "rolled"
+expected_line="$(printf '\t<top>\trolled\tcount=1')"
+assert_contains "one log line appears, via the same spurlog() column format as every other kind" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "$expected_line"
+assert_eq "the counter resets to 0 once its batch is logged" "$(cat "$WINGMAN_HOME/watch-rolled-count" 2>/dev/null)" "0"
+
+# --- the batch accumulates silently, then logs exactly once at the boundary
+test_new_home
+_r=1
+while [ "$_r" -le 3 ]; do
+  printf 'rolled\n' > "$WINGMAN_HOME/watch-exit"
+  wm_timeout 10 env WM_ROLLED_LOG_EVERY=3 "$WF" --classify >/dev/null 2>&1
+  _r=$((_r + 1))
+done
+loglines="$(grep -c 'rolled' "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null || true)"
+assert_eq "three rollovers with a batch size of 3 produce exactly one log line" "$loglines" "1"
+assert_contains "the logged line carries the full accumulated count, not just the batch size" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "count=3"
+assert_eq "the counter resets after the batch logs" "$(cat "$WINGMAN_HOME/watch-rolled-count" 2>/dev/null)" "0"
+
+# --- an owner-scoped cycle keys its own rolled counter and log column, ------
+# matching every other per-owner file (SPURCOUNTFILE et al.) ----------------
+test_new_home
+printf 'rolled\n' > "$WINGMAN_HOME/watch-exit-leadx"
+oout="$(wm_timeout 10 env WM_ROLLED_LOG_EVERY=1 "$WF" --classify --owner leadx 2>/dev/null)"
+assert_eq "an owner-scoped rolled classification still reports rolled" "$oout" "rolled"
+expected_owner_line="$(printf '\tleadx\trolled\tcount=1')"
+assert_contains "the owner-scoped log line carries the owner column, not <top>" "$(cat "$WINGMAN_HOME/watch-spurious.log" 2>/dev/null)" "$expected_owner_line"
+assert_eq "the owner-scoped rolled counter resets independently of the top-level one" "$(cat "$WINGMAN_HOME/watch-rolled-count-leadx" 2>/dev/null)" "0"
+assert_false "the top-level rolled counter is untouched by the owner-scoped classification" "[ -f '$WINGMAN_HOME/watch-rolled-count' ]"
 
 test_summary

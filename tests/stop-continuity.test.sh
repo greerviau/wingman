@@ -669,17 +669,52 @@ echo "  SKIP - case 219a quarantined pending issue #263 (mid-window re-claim del
 # direct regression against conflating a clean rollover with a re-arm after
 # an unexpected watch-cycle exit. Mirror of test (9) sub-case (b), whose own
 # assert_not_contains "window rolled" this must not violate. ---
+#
+# issue #308: this case relies on the test's own `kill -9` landing well
+# before the referee subshell's `sleep "$window"` naturally fires (which
+# writes "rolled" to $exitfile and TERM-kills the child itself, on a clean
+# schedule this test must never race). A first fix here widened
+# WM_STOP_CONTINUITY_WINDOW from 10 to 60, reasoning that the hook's own
+# budget check trips on window's magnitude regardless of its size (see
+# hooks/stop-continuity.sh's own accounting), so a larger window only widens
+# the safety margin without slowing a passing run down - true, but that
+# widened margin STILL lost the race under real CI load (observed: "window
+# rolled" even at window=60). The reasoning missed where the referee's own
+# countdown actually starts: `sleep "$window"` is launched essentially
+# CONCURRENTLY with the child's own spawn (hooks/stop-continuity.sh's claim
+# loop starts both back to back), not after the child successfully claims -
+# so the time the child itself takes to spawn, initialize, and claim (write
+# $WINGMAN_HOME/watch.pid, several `uv run` subprocess startups deep) is
+# already eating into the SAME window budget before this test's own `wait_
+# for_file`/`kill -9` sequence even begins. Under real CI CPU-saturating
+# parallelism that claim time itself can balloon, so no window value bounded
+# by "a few tens of seconds" reliably survives it.
+#
+# Fixed at the actual root instead of guessing a bigger number: this case
+# does not need the referee's own natural timeout to ever be reachable at
+# all - the whole point is that the EXTERNAL kill preempts it, and every
+# other case in this file that genuinely exercises a natural window rollover
+# (e.g. case 2 above) already covers that behavior with its own window
+# value. Setting the window absurdly large (1 hour) makes the referee's own
+# natural firing structurally unreachable within any realistic test
+# duration, removing the race outright rather than continuing to widen a
+# margin that can always be closed again by enough contention. The test's
+# own wall-clock duration in the success path is still bounded by wait_
+# for_gone's own timeout below, not by window's magnitude, for the same
+# "budget check trips almost immediately" reasoning as before - only now
+# there is no finite window value left for real contention to ever close
+# the gap against.
 new_home
 add_crew_window d7cp
 wm_state crew-set --id d7cp --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=10
+export WM_STOP_CONTINUITY_WINDOW=3600
 export WM_STOP_CONTINUITY_LIFETIME=1
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook7cp.out" 2>&1 &
 h7cp=$!; wm_track "$h7cp"
 assert_true "the first (and only, per the 1s lifetime) iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid7cp="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpid7cp" 2>/dev/null
-assert_true "the hook exits" "wait_for_gone $h7cp 100"
+assert_true "the hook exits" "wait_for_gone $h7cp 300"
 wait "$h7cp" 2>/dev/null
 out7cp="$(cat "$WINGMAN_HOME/hook7cp.out" 2>/dev/null)"
 assert_contains "the budget-exhaustion body names the unexpected watch-cycle exit" "$out7cp" "re-arming after an unexpected watch-cycle exit"
@@ -913,7 +948,18 @@ rm -f "$WINGMAN_HOME/stop-continuity.claimfail"
 new_home
 add_crew_window d8e
 wm_state crew-set --id d8e --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=30
+# issue #300: originally window=30 with a widened wait_for_gone budget - but
+# the SAME structural race case 7c' above turned out to have (the referee's
+# own `sleep "$window"` is launched essentially concurrently with the
+# child's own spawn, not after this test's later `wait_for_file`/kill -9
+# sequence even begins, so real CI contention inflating child-claim time
+# eats directly into whatever window budget is left for this test's own
+# kill to preempt it) applies here too - this block's own final assertion
+# (the spurious count) depends on --classify seeing "spurious", not "rolled"
+# for the exact same reason 7c's rewake body does. Fixed the same way: an
+# unreachably large window removes the race outright rather than leaving a
+# finite margin real contention can still close.
+export WM_STOP_CONTINUITY_WINDOW=3600
 assert_false "no spurious-count file exists yet" "[ -f '$WINGMAN_HOME/watch-spurious-count' ]"
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/sre.out" 2>&1 &
 hpe=$!; wm_track "$hpe"
@@ -921,7 +967,14 @@ assert_true "the child claims and arms" "wait_for_file '$WINGMAN_HOME/watch.pid'
 assert_true "the child genuinely armed (not merely attempted)" "wait_for_content '$WINGMAN_HOME/stop-autoarm.log' 'armed pid='"
 cpide="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpide" 2>/dev/null
-assert_true "the hook notices the death and exits" "wait_for_gone $hpe 100"
+# The path from "child observed dead" to "hook process exits" runs the
+# accounting logic above (--classify, an active_crew re-check, the budget
+# check) - several `uv run --no-project` subprocess spawns, each with real
+# startup overhead that grows under the same CPU-saturating CI parallelism.
+# The default 100-try (20s) wait_for_gone budget was generous enough for a
+# quiet local run but not always enough under real contention; widened for
+# headroom, not because the real work changed.
+assert_true "the hook notices the death and exits" "wait_for_gone $hpe 300"
 wait "$hpe" 2>/dev/null
 out_sre="$(cat "$WINGMAN_HOME/sre.out" 2>/dev/null)"
 assert_false "a successful-arm-then-kill is NOT misrouted to the claim-failure branch" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
@@ -1032,6 +1085,52 @@ assert_true "the standdown marker is cleared shortly after the claim (a few line
 kill "$mc" 2>/dev/null
 unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
 
+# issue #331: the owner-scoped complement to the genuine-death trip above -
+# the SAME bounded-loop real-kill mechanism, but under WINGMAN_CREW_ID, so the
+# mechanical crew-set flip is exercised through the actual hook/--classify
+# invocation shape a real lead session hits, not a direct `--classify --owner`
+# call (already covered in tests/watch-fleet-classify.test.sh) or a synthetic
+# marker (the d8g block above).
+new_home
+export WINGMAN_CREW_ID=d8h
+add_crew_window d8h
+wm_state crew-set --id d8h --status working --summary busy >/dev/null
+# active_crew (step 4's own precondition) counts d8h's own DIRECT REPORTS,
+# not d8h itself - without one in flight, the hook exits at step 4 before
+# ever reaching the classify/arm logic below. A real tmux window too, not
+# just the roster record: this test runs real watch-fleet cycles, whose own
+# reconcile step flips a LIVE_STATES record with no matching live window to
+# died within a poll or two (see add_crew_window's own header above).
+wm_state crew-add --id wkrh --type developer --objective x --repo /tmp --window wm-wkrh --session-id s-wkrh --parent d8h >/dev/null
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-wkrh 'sleep 600'
+wm_state crew-set --id wkrh --status working --summary coding >/dev/null
+export WM_STOP_CONTINUITY_WINDOW=30
+export WM_STOP_CONTINUITY_LIFETIME=30
+_oround=0
+while [ ! -f "$WINGMAN_HOME/watch-d8h.suppressed" ] && [ "$_oround" -lt 6 ]; do
+  _oround=$((_oround+1))
+  _oprev_pid="$(cat "$WINGMAN_HOME/watch-d8h.pid" 2>/dev/null)"
+  printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/osr$_oround.out" 2>/dev/null &
+  ohp=$!; wm_track "$ohp"
+  _on=0
+  while kill -0 "$ohp" 2>/dev/null && [ "$_on" -lt 100 ]; do
+    _ocur_pid="$(cat "$WINGMAN_HOME/watch-d8h.pid" 2>/dev/null)"
+    if [ -n "$_ocur_pid" ] && [ "$_ocur_pid" != "$_oprev_pid" ]; then
+      kill -9 "$_ocur_pid" 2>/dev/null
+      break
+    fi
+    sleep 0.1; _on=$((_on+1))
+  done
+  wait_for_gone "$ohp" 100 >/dev/null 2>&1
+  wait "$ohp" 2>/dev/null
+done
+assert_true "the owner-scoped standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch-d8h.suppressed' ]"
+d8h_get="$(wm_state crew-get --id d8h)"
+assert_contains "the real owner-scoped trip flips d8h's own status to blocked" "$d8h_get" "\"status\": \"blocked\""
+assert_contains "the real owner-scoped trip's blocker carries the standdown tag" "$d8h_get" "\"blocker\": \"watch-fleet-standdown:"
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
+unset WINGMAN_CREW_ID
+
 # stop-guard.sh nags with the standdown's own composed text while it holds -
 # not the routine nudge - and treats a foreign-run stamp as inactive
 # (cross-hook predicate-consistency, and the precondition-regression pair).
@@ -1051,6 +1150,34 @@ guard_out2="$(printf '{"stop_hook_active": false}' | bash "$GUARD")"
 assert_eq "a foreign-run standdown reads as inactive to stop-guard (cross-hook predicate consistency)" "$guard_out2" ""
 unset WINGMAN_RUN_ID
 rm -f "$WINGMAN_HOME/watch.suppressed"
+
+# issue #331: this hook's own marker-active gate (:394, gate 7 above) also
+# mechanically re-asserts the affected owner's crew-set status - not just
+# stop-guard.sh's branch. Synthetic marker, owner-scoped, same style as the
+# d8c block just above.
+new_home
+export WINGMAN_CREW_ID=d8g
+add_crew_window d8g
+wm_state crew-set --id d8g --status working --summary busy >/dev/null
+# active_crew (step 4's own precondition) counts d8g's own DIRECT REPORTS,
+# not d8g itself (crew-list --owner filters on parent == owner) - without a
+# child in flight, active_crew is 0 and the hook exits at step 4, never
+# reaching the marker-active gate at step 7 at all.
+wm_state crew-add --id wkrg --type developer --objective x --repo /tmp --window wm-wkrg --session-id s-wkrg --parent d8g >/dev/null
+wm_state crew-set --id wkrg --status working --summary coding >/dev/null
+{
+  printf '%s\n' "run-c"
+  printf '%s\n' "the watcher for this session has died 3 times in a row (composed remedy text)"
+} > "$WINGMAN_HOME/watch-d8g.suppressed"
+export WINGMAN_RUN_ID=run-c
+out_d8g="$(run_hook)"
+assert_eq "the gate's own stdout is still silent (existing behavior unchanged)" "$out_d8g" ""
+d8g_get="$(wm_state crew-get --id d8g)"
+assert_contains "the gate's own re-assertion flips d8g's status to blocked" "$d8g_get" "\"status\": \"blocked\""
+assert_contains "the re-assertion's blocker carries the standdown tag" "$d8g_get" "\"blocker\": \"watch-fleet-standdown:"
+unset WINGMAN_RUN_ID
+unset WINGMAN_CREW_ID
+rm -f "$WINGMAN_HOME/watch-d8g.suppressed"
 
 # Claim-failure recovery companion: a successful manual claim clears the
 # claim-failure marker, not just ages it.

@@ -379,29 +379,47 @@ for c in (d.get("constraints") or []):
   _relaunch_sysprompt=""
   _relaunch_note=""
   if [ -z "$WM_AGENT_RESUME_FLAG" ]; then
-    wm_resolve_playbook "$_type"
-    _rl_role_name="$(basename "$PLAYBOOK")"
-    case "$_rl_role_name" in
-      *.local.md) _rl_role_name="${_rl_role_name%.local.md}" ;;
-      *.md)       _rl_role_name="${_rl_role_name%.md}" ;;
-    esac
-    _rl_include_pr_delivery=0
-    case " developer ml-engineer data-engineer " in
-      *" $_rl_role_name "*) _rl_include_pr_delivery=1 ;;
-    esac
-    _rl_target_is_wm_repo=0
-    [ "$_scope" = repo ] && [ "$_repo" = "$WM_REPO" ] && _rl_target_is_wm_repo=1
-    _relaunch_sysprompt="$WM_HOME/crew/$_rid.sysprompt.md"
-    # "$_input" (not ""): the original --input plan/report pointer, now
-    # durably recorded on the roster record itself (PR #335 review round 1,
-    # finding 3) - rebuilding this file with a hardcoded "" here would
-    # silently erase the only durable record of that handoff the first time
-    # a no-resume-flag member is relaunched.
-    wm_compose_crew_sysprompt "$_relaunch_sysprompt" "$_rid" "$_type" "$_repo" "$_scope" \
-      "$_constraints" "$_rl_target_is_wm_repo" "$_input" "$PLAYBOOK" "$_rl_include_pr_delivery"
-    _relaunch_note="$(wm_crew_relaunch_note "$_cwd" "$_artifact" "$_artifact_url" "$_delivery" \
-      "$_allow_merge" "$_review_gate_waived" "$_constraints" "$_spawned_at" "$_summary" \
-      "$_objective" "$_input")"
+    _rl_sysprompt_path="$WM_HOME/crew/$_rid.sysprompt.md"
+    # Subshelled (never called directly, same reasoning and pattern as the
+    # agent preflight above - PR #335 review round 2, nice-to-have):
+    # wm_resolve_playbook calls wm_die on an unresolvable/ambiguous type,
+    # which would otherwise kill this WHOLE crew-resume process - including
+    # every member still waiting in a --all-died batch - rather than just
+    # skipping this one. wm_compose_crew_sysprompt's file write survives the
+    # subshell exiting (only shell variables are subshell-scoped, not file
+    # writes); the composed note text is captured back via stdout, the one
+    # value from inside the subshell the parent shell still needs.
+    if _relaunch_note="$(
+      wm_resolve_playbook "$_type"
+      _rl_role_name="$(basename "$PLAYBOOK")"
+      case "$_rl_role_name" in
+        *.local.md) _rl_role_name="${_rl_role_name%.local.md}" ;;
+        *.md)       _rl_role_name="${_rl_role_name%.md}" ;;
+      esac
+      _rl_include_pr_delivery=0
+      case " developer ml-engineer data-engineer " in
+        *" $_rl_role_name "*) _rl_include_pr_delivery=1 ;;
+      esac
+      _rl_target_is_wm_repo=0
+      [ "$_scope" = repo ] && [ "$_repo" = "$WM_REPO" ] && _rl_target_is_wm_repo=1
+      # "$_input" (not ""): the original --input plan/report pointer, now
+      # durably recorded on the roster record itself (PR #335 review round 1,
+      # finding 3) - rebuilding this file with a hardcoded "" here would
+      # silently erase the only durable record of that handoff the first
+      # time a no-resume-flag member is relaunched.
+      wm_compose_crew_sysprompt "$_rl_sysprompt_path" "$_rid" "$_type" "$_repo" "$_scope" \
+        "$_constraints" "$_rl_target_is_wm_repo" "$_input" "$PLAYBOOK" "$_rl_include_pr_delivery"
+      wm_crew_relaunch_note "$_cwd" "$_artifact" "$_artifact_url" "$_delivery" \
+        "$_allow_merge" "$_review_gate_waived" "$_constraints" "$_spawned_at" "$_summary" \
+        "$_objective" "$_input"
+    )"; then
+      _relaunch_sysprompt="$_rl_sysprompt_path"
+    else
+      wm_warn "'$_rid': could not compose the relaunch brief - no playbook resolved for type '$_type' (see the message above); not relaunching."
+      RESUME_RESULT="skip: preflight failed"
+      release_claim
+      return
+    fi
   fi
 
   # --- write the resume launch script (avoids all in-tmux quoting) -----------
@@ -452,9 +470,15 @@ for c in (d.get("constraints") or []):
     # absurdly high here, the gate can never be satisfied regardless of
     # transcript size or session age. Scoped to this one resumed process only
     # (never written to the shared ~/.claude.json), so it has no effect on the
-    # human's own everyday interactive sessions.
-    echo "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=${WM_RESUME_TOKEN_THRESHOLD:-999999999}"
-    echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
+    # human's own everyday interactive sessions. Claude-specific (issue #25
+    # review round 1/2 nice-to-have): a claude-only env var leaking into every
+    # other adapter's own process is harmless today (nothing reads it) but
+    # wrong to export unconditionally - gated the same way crew-takeover's
+    # identical block already is.
+    if [ "$_resolved_agent_name" = claude ]; then
+      echo "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=${WM_RESUME_TOKEN_THRESHOLD:-999999999}"
+      echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
+    fi
     # The resuming session's own run id, exactly as spawn-crew captures it at
     # spawn time: a resume is an action of the CURRENT wingman sit-down, so the
     # preferences answered for that sit-down govern the resumed member (the

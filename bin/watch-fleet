@@ -215,6 +215,9 @@ if [ -n "$OWNER" ]; then
   BEATFILE="$WM_HOME/watch-$_key.beat"
   EXITFILE="$WM_HOME/watch-exit-$_key"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count-$_key"
+  # Low-volume 'rolled' telemetry (issue #196) - see the ROLLEDCOUNTFILE
+  # comment at the --classify dispatch for what this counts and why.
+  ROLLEDCOUNTFILE="$WM_HOME/watch-rolled-count-$_key"
   RUNFILE="$WM_HOME/watch-$_key.run"
   CODEFILE="$WM_HOME/watch-$_key.code"
   CODECHECKFILE="$WM_HOME/watch-$_key.codecheck"
@@ -241,6 +244,7 @@ else
   BEATFILE="$WM_HOME/watch.beat"
   EXITFILE="$WM_HOME/watch-exit"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
+  ROLLEDCOUNTFILE="$WM_HOME/watch-rolled-count"
   RUNFILE="$WM_HOME/watch.run"
   CODEFILE="$WM_HOME/watch.code"
   CODECHECKFILE="$WM_HOME/watch.codecheck"
@@ -635,6 +639,32 @@ YOUR action: report the paragraph above to the pilot, together with the pilot re
   printf '%s\n\nPILOT REMEDY (their action, not yours - relay it): %s' "$_srr_body" "$_srr_remedy"
 }
 
+# WM_STANDDOWN_TAG marks a crew-set --blocker value as THIS mechanism's own
+# (issue #331), not an ordinary pilot question - hooks/lib/watcher-liveness.sh
+# keys its own re-assertion skip-check off the same prefix, and the
+# --clear-standdown branch below keys its own restore-check off it too. Must
+# stay byte-identical to that file's own copy (duplicated, not sourced - bin/
+# watch-fleet does not source hooks/lib/*, matching wm_owner_paths' own
+# accepted duplication with this file's per-owner path block).
+: "${WM_STANDDOWN_TAG:=watch-fleet-standdown:}"
+
+# spurious_repeated_blocker <reason-text>
+# The owner-facing crew-set --blocker counterpart to a tripped standdown: a
+# $WM_STANDDOWN_TAG-tagged summary a receiving owner can recognize at a
+# glance, warning off the "just re-arm it" mistake #198's own reproduced
+# incident actually hit, followed by the exact <reason-text> already composed
+# for $SUPPRESSEDFILE (spurious_repeated_reason's own output, passed in - not
+# recomputed here) as supporting detail. hooks/lib/watcher-liveness.sh's
+# wm_assert_standdown_blocked composes this SAME template independently, from
+# the marker's own line 2+, on every subsequent Stop event - byte-identical
+# whenever <reason-text> hasn't changed, which is what lets it detect
+# "already asserted" and skip a redundant write (see its own comment for why
+# that matters).
+spurious_repeated_blocker() {
+  printf '%s fleet supervision for this session is standing down after repeated watch-fleet deaths - not an ordinary blocker; do NOT tell this session to just re-arm, that is denied outright while the standdown holds. Run '"'"'bin/watch-fleet --clear-standdown'"'"' once the cause is understood. Full detail: %s' \
+    "$WM_STANDDOWN_TAG" "$1"
+}
+
 case "$MODE" in
   --classify)
     # Dispatched here, alongside --status/--stop/--start, deliberately BEFORE
@@ -660,6 +690,30 @@ case "$MODE" in
       # comment below for why a claim-time reset would silently revert the
       # fix this budget exists to provide).
       printf '0\n' > "$SPURCOUNTFILE"
+      # Low-volume 'rolled'-outcome telemetry (issue #196): a deliberate
+      # rollover (hooks/stop-continuity.sh's referee writing 'rolled' before
+      # its kill) is not a failure and $SPURLOG deliberately never recorded
+      # it - but that leaves no way to compute what fraction of expected
+      # rollovers actually complete cleanly vs. end up misclassified as
+      # spurious, since only the failure side was ever visible. Logging
+      # every occurrence here would dwarf $SPURLOG's existing volume (this
+      # branch can fire as often as every $WM_STOP_CONTINUITY_WINDOW, ~480s
+      # by default, per active owner), so this rolls up silently in
+      # $ROLLEDCOUNTFILE and writes exactly one $SPURLOG line, via the same
+      # spurlog() used by every other kind, per WM_ROLLED_LOG_EVERY
+      # occurrences - enough for a future investigation to derive the
+      # rollover rate from timestamps without the log growing unbounded.
+      if [ "$_outcome" = "rolled" ]; then
+        _rolled_count="$(cat "$ROLLEDCOUNTFILE" 2>/dev/null)"
+        case "$_rolled_count" in ''|*[!0-9]*) _rolled_count=0 ;; esac
+        _rolled_count=$((_rolled_count + 1))
+        _rolled_every="${WM_ROLLED_LOG_EVERY:-20}"
+        if [ "$_rolled_count" -ge "$_rolled_every" ]; then
+          spurlog rolled "count=$_rolled_count"
+          _rolled_count=0
+        fi
+        printf '%s\n' "$_rolled_count" > "$ROLLEDCOUNTFILE"
+      fi
       printf '%s\n' "$_outcome"
       exit 0
     fi
@@ -716,11 +770,24 @@ case "$MODE" in
       # both leave the same durable trace. Written before the printed
       # outcome below so a consumer that reacts to it by reading the marker
       # in the same breath always finds it.
+      _srr_text="$(spurious_repeated_reason "$_count" "$_hint")"
       {
         printf '%s\n' "${WINGMAN_RUN_ID:-}"
-        spurious_repeated_reason "$_count" "$_hint"
+        printf '%s' "$_srr_text"
       } > "$SUPPRESSEDFILE"
       printf '0\n' > "$SPURCOUNTFILE"
+      # Mechanically mirror the standdown onto the affected owner's own
+      # crew-set record (issue #331), immediately, at the one point every
+      # --classify consumer converges on - this is exactly why
+      # $SUPPRESSEDFILE itself is written HERE and not duplicated per caller
+      # (see the comment above); the status flip lives at the same point for
+      # the same reason. Guarded on a non-empty $OWNER: wingman's own
+      # top-level session has no crew record of itself (a human watches that
+      # pane directly, nothing crew-set-watches owner "").
+      if [ -n "$OWNER" ]; then
+        wm_state crew-set --id "$OWNER" --status blocked \
+          --blocker "$(spurious_repeated_blocker "$_srr_text")" >/dev/null 2>&1
+      fi
       printf 'spurious-repeated %s %s\n' "$_count" "$_hint"
     else
       spurlog spurious "$_hint"
@@ -790,6 +857,50 @@ case "$MODE" in
     # writer outside --classify, which the comment at rule 2 above forbids.
     if [ -f "$SUPPRESSEDFILE" ]; then
       rm -f "$SUPPRESSEDFILE"
+      # Symmetric with how the standdown was opened above: restore the
+      # affected owner's crew-set status to `working`, but ONLY if the
+      # on-disk blocker still carries $WM_STANDDOWN_TAG - if something else
+      # has since re-blocked the session on a genuinely different question,
+      # leave that record alone (issue #331, decision 3.5(A)). Omitting
+      # --blocker on a --status working call clears the field for free
+      # (cmd_crew_set only ever populates `blocker` while status ==
+      # blocked), so nothing else needs to touch it explicitly.
+      if [ -n "$OWNER" ]; then
+        _cs_should_restore="$(wm_state crew-get --id "$OWNER" 2>/dev/null | wm_py -c '
+import json, sys
+tag = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print("1" if d.get("status") == "blocked" and (d.get("blocker") or "").startswith(tag) else "0")
+' "$WM_STANDDOWN_TAG" 2>/dev/null)"
+        if [ "$_cs_should_restore" = "1" ]; then
+          wm_state crew-set --id "$OWNER" --status working \
+            --summary "fleet supervision standdown cleared by the pilot" >/dev/null 2>&1
+        fi
+      fi
+      # Known, accepted fail-closed corner cases (neither is a wrong or
+      # dangerous state, both degrade to option (B)'s own behavior):
+      # (a) if `wm_state crew-get --id "$OWNER"` above fails or returns
+      #     nothing (a transient uv/venv hiccup, or the record genuinely
+      #     absent), $_cs_should_restore stays "0" and the restore is
+      #     skipped, leaving the record blocked even though the marker was
+      #     just cleared; (b) a narrower race: this rm -f happens BEFORE the
+      #     crew-get/crew-set above, so a Stop hook for the same owner that
+      #     is concurrently past its own wm_run_scoped_marker_active check
+      #     (marker still existed at that instant) but has not yet finished
+      #     wm_assert_standdown_blocked's own crew-get+crew-set can land its
+      #     write AFTER this restore, leaving the record blocked with a
+      #     fresh `announced` bump. Both cases self-heal: once the marker
+      #     file is gone, no further hook call re-asserts, so the affected
+      #     session's own next self-report (on essentially every subsequent
+      #     turn) supersedes the stale blocked state. Worst case is one
+      #     extra, spurious needs-attention surfacing for an already-
+      #     resolved standdown - not a storm, not a stuck state. Matches
+      #     this codebase's existing "fail closed, defer" philosophy (e.g.
+      #     the owner-status self-check elsewhere in this script, "ambiguous
+      #     ... debounced rather than acted on immediately").
       wm_ok "standdown lifted; fleet continuity will re-arm on the next Stop event"
     else
       wm_info "no standdown in force"

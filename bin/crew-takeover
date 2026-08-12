@@ -174,11 +174,22 @@ if [ "$live" = 1 ]; then
   wm_info "Take the wheel of '$ID' (live). Run in your own shell:"
   printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
   echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
-elif [ "$STATUS" = died ] && [ -z "$SID" ]; then
-  # No session id was ever recorded - genuinely nothing to resume (distinct
-  # from RESUMABLE=false below, where a session id exists but its transcript
-  # could not be found; offering `--resume ''` here would just be wrong).
-  wm_warn "'$ID' died and no session_id was ever recorded for it - there is no session to resume."
+elif [ -z "$SID" ]; then
+  # No session id was ever recorded - genuinely nothing to resume regardless
+  # of status (distinct from RESUMABLE=false below, where a session id
+  # exists but its transcript could not be found; offering `--resume ''`
+  # here would just be wrong). Checked before either branch below, not only
+  # for status=died (PR #335 review round 2, nice-to-have): a non-died,
+  # non-live member with no SID used to fall through to print_resume_hint,
+  # which silently printed a resume command with no --resume flag at all
+  # (wm_agent_emit_flag no-ops on an empty value) - a runnable command that
+  # starts a FRESH session instead of failing loudly about there being
+  # nothing to resume.
+  if [ "$STATUS" = died ]; then
+    wm_warn "'$ID' died and no session_id was ever recorded for it - there is no session to resume."
+  else
+    wm_warn "'$ID' has no live window (status=$STATUS) and no session_id was ever recorded for it - there is no session to resume."
+  fi
 elif [ "$STATUS" = died ]; then
   print_resume_hint "$RESUMABLE"
 else

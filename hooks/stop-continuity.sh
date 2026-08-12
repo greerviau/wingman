@@ -391,7 +391,10 @@ wm_run_scoped_marker_active "$stopfile" && exit 0
 # (issue #198), not by this hook - it exists no matter which consumer
 # observed the trip (this hook, a lead's model-driven `/watch`, or a bare
 # diagnostic call), so this gate catches a standdown from any of them.
-wm_run_scoped_marker_active "$suppressedfile" && exit 0
+if wm_run_scoped_marker_active "$suppressedfile"; then
+  wm_assert_standdown_blocked "$OWNER" "$suppressedfile"
+  exit 0
+fi
 
 # 8. Claim-failure backoff check: a rolling backoff, not a standdown - a claim
 # failure may be transient, so this rate-limits automatic retry to once per

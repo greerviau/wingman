@@ -601,7 +601,16 @@ wm_state crew-set --id rl1 --status died --artifact /tmp/widget-report.md \
   --summary "landed the first half; second half still open" >/dev/null
 out_rl="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" rl1 2>&1)"
 assert_contains "relaunch (no resume flag) still reports resumed" "$out_rl" "1 resumed"
+assert_eq "relaunch preserves the crew id's window name" "$(field_of rl1 window)" "wm-rl1"
+assert_true "the relaunched window exists under the SAME name" \
+  "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-rl1"
 rl_script="$(cat "$WINGMAN_HOME/crew/rl1.resume.sh")"
+# Round 2 nice-to-have: relaunch mode's whole point is that it composes NO
+# resume-shaped flag (there is no session to resume) - the property this
+# mode exists to guarantee, worth a permanent, explicit negative rather than
+# only exercising it incidentally via the fixture's throwaway descriptor
+# never defining WM_AGENT_RESUME_FLAG in the first place.
+assert_not_contains "relaunch composes no resume-shaped flag at all" "$rl_script" "--resume"
 # Finding 2: the objective is actually present, not silently dropped.
 assert_contains "relaunch brief carries the 'your assignment' section" "$rl_script" "Your assignment (unchanged since spawn)"
 assert_contains "...with the actual objective text" "$rl_script" "port the widget subsystem to the new adapter layer"
