@@ -33,7 +33,7 @@ out1="$("$CT" t1 2>&1)"
 assert_contains "leads with recovery, not absence" "$out1" "session state survived"
 assert_contains "states this command recovers it" "$out1" "This command recovers it"
 assert_contains "prints the exact resume command with the right repo" "$out1" "cd '$REPO_A'"
-assert_contains "prints the exact resume command with the right session id" "$out1" "--resume sess-t1"
+assert_contains "prints the exact resume command with the right session id" "$out1" "--resume 'sess-t1'"
 assert_contains "also offers bin/crew-resume as the automated path" "$out1" "bin/crew-resume t1"
 
 # --- died + transcript NOT found: honest, but never withholds the resume
@@ -52,7 +52,7 @@ out2="$("$CT" t2 2>&1)"
 assert_contains "explains the transcript wasn't found at the expected location" \
   "$out2" "no session transcript was found at the expected location"
 assert_contains "frames it as a possible false negative, not a certainty" "$out2" "false negative"
-assert_contains "still offers the resume command despite the negative check (MF-3)" "$out2" "--resume sess-t2"
+assert_contains "still offers the resume command despite the negative check (MF-3)" "$out2" "--resume 'sess-t2'"
 assert_false "never claims session state survived when it did not" \
   "printf '%s\n' \"$out2\" | grep -q 'session state survived'"
 
@@ -91,9 +91,18 @@ wm_state crew-set --id t3 --status done --summary "shipped" >/dev/null
 
 out3="$("$CT" t3 2>&1)"
 assert_contains "names the actual status rather than guessing died" "$out3" "status=done"
-assert_contains "still offers the manual resume command" "$out3" "--resume sess-t3"
+assert_contains "still offers the manual resume command" "$out3" "--resume 'sess-t3'"
 assert_false "never claims died-specific recovery framing for a normal finish" \
   "printf '%s\n' \"$out3\" | grep -q 'session state survived'"
+# PR #335 review round 1, finding 1: RESUMABLE is only meaningfully computed
+# for a died record, but print_resume_hint used to reuse its died-framed
+# wording (all three of its true/false/default cases said "'$ID' died")
+# regardless of the caller's actual status - wrongly telling a member that
+# finished normally, or any other non-died status, that it "died".
+assert_false "never claims this member died at all when status=done" \
+  "printf '%s\n' \"$out3\" | grep -q \"'t3' died\""
+assert_not_contains "never claims claude's transcript layout 'isn't understood' either (that framing is died-specific)" \
+  "$out3" "is not independently checkable"
 
 # --- a refs/wip/<id> ref (auto-anchored at death, issue #251) is surfaced,
 # even for a died member whose transcript is ALSO gone - it may be the only
@@ -156,5 +165,30 @@ assert_contains "a live member still gets the tmux attach command" "$out5" "tmux
 assert_false "a live member never shows the died/resume framing" \
   "printf '%s\n' \"$out5\" | grep -q 'session state survived'"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #25: a died member on an adapter with NO resume flag points at
+# crew-resume's relaunch mode instead of a manual command with nothing to
+# resume. No real non-claude adapter exists yet (stage 4+), so a throwaway
+# test-only descriptor exercises the branch directly - removed unconditionally
+# before test_summary; this file cannot use its own `trap ... EXIT` (lib.sh's
+# shared trap is the suite's only one, enforced by tests/run.sh's own static
+# check), so cleanup here is a plain, unconditional rm instead. ---------------
+NORESUME_DESC="$TEST_REPO/bin/lib/agents/__test-no-resume-flag.sh"
+cat > "$NORESUME_DESC" <<'EOF'
+WM_AGENT_BIN="__test-no-resume-flag"
+WM_AGENT_DISPLAY_NAME="Test No-Resume-Flag Adapter"
+EOF
+test_new_home
+REPO_E="$(wm_mktemp_dir)/repo-e"
+mkdir -p "$REPO_E"
+wm_state crew-add --id t6 --type developer --objective x --repo "$REPO_E" --window wm-t6 --session-id sess-t6 --agent __test-no-resume-flag >/dev/null
+wm_state crew-set --id t6 --status died >/dev/null
+out6="$("$CT" t6 2>&1)"
+assert_contains "names the adapter's own display name" "$out6" "Test No-Resume-Flag Adapter"
+assert_contains "says there is no manual resume command to hand-compose" "$out6" "no manual resume command"
+assert_contains "points at bin/crew-resume as the recovery path" "$out6" "bin/crew-resume t6"
+assert_false "never prints a bogus manual resume command with no flag to fill" \
+  "printf '%s\n' \"$out6\" | grep -q -- '--resume'"
+rm -f "$NORESUME_DESC"
 
 test_summary

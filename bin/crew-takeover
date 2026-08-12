@@ -21,6 +21,7 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
 ID="${1:-}"
 [ -n "$ID" ] || wm_die "usage: crew-takeover <id>"
@@ -31,16 +32,124 @@ info="$(wm_state crew-get --id "$ID" 2>/dev/null)" || wm_die "no crew member '$I
 # orphan-adopted record can carry an empty repo AND session_id, issue #79)
 # would collapse two adjacent delimiters into one and silently shift every
 # field after it - including STATUS, which now selects the branch below.
+#
+# RESUMABLE is a real tri-state now (issue #25): "" (None from
+# wm-state.py's is_resumable) means "not checkable for this record's
+# adapter," never the same as "false" (checked, transcript genuinely
+# absent) - see is_resumable's own comment for why the two need different
+# wording below.
 _lines="$(printf '%s' "$info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
 r = d.get("resumable")
-for k in ("repo", "session_id", "window", "status", "worktree", "wip_anchor_error"):
+for k in ("repo", "session_id", "window", "status", "worktree", "wip_anchor_error", "agent"):
     print(d.get(k) or "")
 print("" if r is None else ("true" if r else "false"))')"
-{ read -r REPO; read -r SID; read -r WINDOW; read -r STATUS; read -r WORKTREE; read -r WIP_ERROR; read -r RESUMABLE; } <<EOF
+{
+  read -r REPO; read -r SID; read -r WINDOW; read -r STATUS; read -r WORKTREE; read -r WIP_ERROR
+  read -r RECORD_AGENT; read -r RESUMABLE
+} <<EOF
 $_lines
 EOF
+
+# The member's OWN recorded adapter (issue #25), not $WM_AGENT/the caller's
+# own environment - the whole point of persisting this at spawn time is that
+# the spawning process's environment is long gone by takeover time. Absent
+# means claude (every record predating this field was necessarily claude).
+RESOLVED_AGENT_NAME="${RECORD_AGENT:-claude}"
+wm_agent_resolve "$RESOLVED_AGENT_NAME"
+
+# print_resume_hint - the manual/wingman-assisted recovery advice for a dead
+# (or otherwise unreachable) member, dispatched on the resolved adapter's own
+# WM_AGENT_RESUME_FLAG (issue #25, plan §4.8): an adapter with a real resume
+# flag gets the manual command, adapter-composed, plus the wingman shortcut;
+# an adapter with none has nothing to hand-compose at all, so this points at
+# bin/crew-resume's relaunch mode as the ONLY recovery path instead of
+# printing a resume command with nothing to resume.
+#
+# Called from two branches below: STATUS=died (the ordinary case, where the
+# death/transcript-resumability framing below is accurate), and the generic
+# "no live window" fallback for any OTHER status (e.g. done, or a stale
+# record reconcile hasn't caught up with yet). Reads $STATUS (this script's
+# own global, not a parameter - matching every other free variable this
+# function already reads) to pick wording: reusing the died-framed messages
+# for a non-died status would tell a done/otherwise-fine member it "died" and
+# that its transcript layout "isn't understood" (PR #335 review round 1,
+# finding 1) - neither claim is true outside the died case, since RESUMABLE
+# itself is only meaningfully computed for a died record.
+print_resume_hint() {
+  _prh_resumable="$1"
+  if [ -n "$WM_AGENT_RESUME_FLAG" ]; then
+    if [ "$STATUS" = died ]; then
+      case "$_prh_resumable" in
+        true)
+          # Lead with recovery (issue #251): a died member's session_id is on
+          # record and its transcript is confirmed present on disk, so this is
+          # a resume, not a dead end - independent of whether the worktree
+          # itself survived.
+          wm_ok "'$ID' died, but its session state survived: the transcript is intact on disk. This command recovers it."
+          ;;
+        false)
+          # Never let a failed existence check withhold the resume command
+          # outright (review round 1, MF-3): the check has known blind spots
+          # even after falling back to a glob scan server-side (a relocated
+          # ~/.claude home this box's env doesn't reflect, a naming-scheme
+          # drift in a newer CLI) - a negative here is evidence, not proof, and
+          # withholding the command entirely is the exact "confident and
+          # wrong" misreading issue #251 was filed over, just inverted.
+          wm_warn "'$ID' died - no session transcript was found at the expected location, but this may be a false negative (a relocated Claude Code home, or a naming scheme this check doesn't yet know about). Try the resume anyway; it costs nothing to attempt and fails fast if the transcript is genuinely gone:"
+          ;;
+        *)
+          # RESUMABLE="" (issue #25): resumability was never checked at all for
+          # this record's adapter (is_resumable only understands claude's own
+          # transcript layout) - a genuinely different situation from a failed
+          # check (false), so it gets its own wording rather than reusing
+          # either the confident-recovery or the failed-negative framing.
+          wm_info "'$ID' died - session-transcript resumability is not independently checkable for $WM_AGENT_DISPLAY_NAME (only claude's own transcript layout is understood here). Try the resume anyway; it costs nothing to attempt:"
+          ;;
+      esac
+    else
+      # Not died (PR #335 review round 1, finding 1) - the caller has already
+      # printed "'$ID' has no live window (status=$STATUS)." above; no
+      # death/transcript claim belongs here, since none of the RESUMABLE
+      # cases above describe what this status actually means.
+      wm_info "If a session id was recorded for it, you can still try reopening it:"
+    fi
+    wm_info "Resume it yourself, from its repo:"
+    printf '\n    cd %s && %s' "$(quote "$REPO")" "$WM_AGENT_BIN"
+    wm_agent_emit_flag "$WM_AGENT_RESUME_FLAG" "$SID"
+    # --settings (claudeMdExcludes): claude-specific, no descriptor field of
+    # its own yet - same gate bin/spawn-crew/bin/crew-resume both use.
+    [ "$RESOLVED_AGENT_NAME" = claude ] && printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
+    printf '\n\n'
+    echo "Or let wingman do it for you: bin/crew-resume $ID"
+    if [ "$RESOLVED_AGENT_NAME" = claude ]; then
+      echo "On a large/old transcript, Claude Code may show a 'resume from summary?' menu that"
+      echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
+      echo "safe choice. To skip that prompt outright, export these first:"
+      printf '\n    export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999 CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999\n\n'
+    fi
+  else
+    # No resume flag exists for this adapter (plan §3's corrected table -
+    # confirmed for none of the four follow-on target CLIs) - there is
+    # nothing to hand-compose, so relaunch mode (bin/crew-resume, plan §4.8)
+    # is the ONLY recovery path: a fresh session under the same crew
+    # id/window/worktree, with a progress note in place of the lost
+    # conversation - not a true resume, and worth saying so plainly rather
+    # than implying one exists.
+    #
+    # "died on"/"has no live window on" (PR #335 review round 1, finding 1,
+    # same fix as the WM_AGENT_RESUME_FLAG branch above): STATUS is not
+    # necessarily died here either.
+    if [ "$STATUS" = died ]; then
+      wm_info "'$ID' died on $WM_AGENT_DISPLAY_NAME, which has no manual resume command - there is nothing to hand-compose here."
+    else
+      wm_info "'$ID' has no live window on $WM_AGENT_DISPLAY_NAME, which has no manual resume command - there is nothing to hand-compose here."
+    fi
+    wm_info "wingman's relaunch mode is the recovery path instead: a FRESH session under the same crew id/window/worktree, re-delivered a brief plus a progress note built from what is already on record (not a true resume - the prior conversation itself is not recoverable):"
+    printf '\n    bin/crew-resume %s\n\n' "$ID"
+  fi
+}
 
 live=0
 if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
@@ -65,45 +174,27 @@ if [ "$live" = 1 ]; then
   wm_info "Take the wheel of '$ID' (live). Run in your own shell:"
   printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
   echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
-elif [ "$STATUS" = died ] && [ -z "$SID" ]; then
-  # No session id was ever recorded - genuinely nothing to resume (distinct
-  # from RESUMABLE=false below, where a session id exists but its transcript
-  # could not be found; offering `--resume ''` here would just be wrong).
-  wm_warn "'$ID' died and no session_id was ever recorded for it - there is no session to resume."
-elif [ "$STATUS" = died ]; then
-  if [ "$RESUMABLE" = true ]; then
-    # Lead with recovery (issue #251): a died member's session_id is on record
-    # and its transcript is confirmed present on disk, so this is a resume,
-    # not a dead end - independent of whether the worktree itself survived.
-    wm_ok "'$ID' died, but its session state survived: the transcript is intact on disk. This command recovers it."
+elif [ -z "$SID" ]; then
+  # No session id was ever recorded - genuinely nothing to resume regardless
+  # of status (distinct from RESUMABLE=false below, where a session id
+  # exists but its transcript could not be found; offering `--resume ''`
+  # here would just be wrong). Checked before either branch below, not only
+  # for status=died (PR #335 review round 2, nice-to-have): a non-died,
+  # non-live member with no SID used to fall through to print_resume_hint,
+  # which silently printed a resume command with no --resume flag at all
+  # (wm_agent_emit_flag no-ops on an empty value) - a runnable command that
+  # starts a FRESH session instead of failing loudly about there being
+  # nothing to resume.
+  if [ "$STATUS" = died ]; then
+    wm_warn "'$ID' died and no session_id was ever recorded for it - there is no session to resume."
   else
-    # Never let a failed existence check withhold the resume command outright
-    # (review round 1, MF-3): the check has known blind spots even after
-    # falling back to a glob scan server-side (a relocated ~/.claude home this
-    # box's env doesn't reflect, a naming-scheme drift in a newer CLI) - a
-    # negative here is evidence, not proof, and withholding the command
-    # entirely is the exact "confident and wrong" misreading issue #251 was
-    # filed over, just inverted.
-    wm_warn "'$ID' died - no session transcript was found at the expected location, but this may be a false negative (a relocated Claude Code home, or a naming scheme this check doesn't yet know about). Try the resume anyway; it costs nothing to attempt and fails fast if the transcript is genuinely gone:"
+    wm_warn "'$ID' has no live window (status=$STATUS) and no session_id was ever recorded for it - there is no session to resume."
   fi
-  wm_info "Resume it yourself, from its repo:"
-  printf '\n    cd %s && <your-agent-cli> --resume %s --settings %s\n\n' \
-    "$(quote "$REPO")" "$SID" "$(quote "$(wm_claude_md_excludes)")"
-  echo "(with Claude Code, that's <your-agent-cli> = claude.) Or let wingman do it for you: bin/crew-resume $ID"
-  echo "On a large/old transcript, Claude Code may show a 'resume from summary?' menu that"
-  echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
-  echo "safe choice. To skip that prompt outright, export these first:"
-  printf '\n    export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999 CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999\n\n'
+elif [ "$STATUS" = died ]; then
+  print_resume_hint "$RESUMABLE"
 else
   wm_warn "'$ID' has no live window (status=$STATUS)."
-  wm_info "If you want to resume it yourself, from its repo:"
-  printf '\n    cd %s && <your-agent-cli> --resume %s --settings %s\n\n' \
-    "$(quote "$REPO")" "$SID" "$(quote "$(wm_claude_md_excludes)")"
-  echo "(with Claude Code, that's <your-agent-cli> = claude - resume is refused if the session is still live.)"
-  echo "On a large/old transcript, Claude Code may show a 'resume from summary?' menu that"
-  echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
-  echo "safe choice. To skip that prompt outright, export these first:"
-  printf '\n    export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999 CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999\n\n'
+  print_resume_hint "$RESUMABLE"
 fi
 
 if [ -n "$WIP_SHA" ]; then

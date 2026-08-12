@@ -214,6 +214,57 @@ wm_claude_md_excludes() {
     "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO"
 }
 
+# wm_compose_crew_sysprompt <out-file> <id> <type> <repo-or-workspace-root> \
+#   <scope> <constraints-newline-separated> <target-is-wm-repo:0|1> \
+#   <input-path-or-empty> <playbook-path> <include-pr-delivery:0|1>
+#
+# Writes the crew-facing assignment header + playbook + status contract that
+# both a fresh spawn (bin/spawn-crew) and a relaunch (bin/crew-resume's
+# relaunch mode, plan §4.8) deliver as this member's own persona/brief -
+# extracted here (issue #25) so the two call sites can never drift apart on
+# what "the crew brief" actually contains. Byte-identical to bin/spawn-crew's
+# own inline block before this extraction; a caller that wants relaunch-only
+# content (the progress note) appends it to the same file afterward, rather
+# than this function trying to grow a mode flag for it.
+wm_compose_crew_sysprompt() {
+  _wcs_out="$1"; _wcs_id="$2"; _wcs_type="$3"; _wcs_repo="$4"; _wcs_scope="$5"
+  _wcs_constraints="$6"; _wcs_target_is_wm_repo="$7"; _wcs_input="$8"
+  _wcs_playbook="$9"; _wcs_include_pr_delivery="${10}"
+  {
+    printf '# Your assignment\n\n'
+    if [ "$_wcs_scope" = global ]; then
+      printf 'Crew id: **%s**  |  Type: **%s**  |  Scope: **global project scope**\n\n' "$_wcs_id" "$_wcs_type"
+      printf 'You are grounded at the workspace root `%s`, with every discovered repo available. ' "$_wcs_repo"
+      printf 'This work is not tied to one repo: **determine the target repo(s) yourself** from the objective, and `cd` into a specific repo for any repo-local work (branches, commits, PRs). If it turns out the work belongs to a single repo, just operate there.\n\n'
+    else
+      printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$_wcs_id" "$_wcs_type" "$_wcs_repo"
+    fi
+    if [ -n "$_wcs_constraints" ]; then
+      printf '**Standing constraints from the human, for this whole effort - do not relax any of these without a fresh, explicit instruction from the human (see CLAUDE.md, "A pilot constraint is not yours to relax"):**\n\n'
+      while IFS= read -r _wcs_cline; do
+        [ -n "$_wcs_cline" ] && printf -- '- %s\n' "$_wcs_cline"
+      done <<<"$_wcs_constraints"
+      printf '\n'
+    fi
+    if [ "$_wcs_target_is_wm_repo" -eq 1 ]; then
+      printf '**About this repo'"'"'s CLAUDE.md:** the file `CLAUDE.md` at this repo'"'"'s root - if it is anywhere in your context, whether your harness loaded it automatically or you opened it yourself - is written entirely in first person for the **wingman orchestrator** role - the top-level session the pilot starts directly, not this session. Nothing in it is a rule for you. You are a **%s** crew member: your role, permissions, and instructions are the playbook below and the objective above - follow those. Where CLAUDE.md says "you" (e.g. "you never edit playbooks yourself," "never do heavy work yourself"), it describes the orchestrator session'"'"'s own behavior, not a restriction on this one; treat CLAUDE.md only as optional background reading about how wingman is built, useful if it helps your actual task.\n\n' "$_wcs_type"
+    fi
+    if [ -n "$_wcs_input" ]; then
+      printf 'Input handoff: read the plan/spec at `%s` and follow it.\n\n' "$_wcs_input"
+    fi
+    printf -- '---\n\n'
+    cat "$_wcs_playbook"
+    if [ "$_wcs_include_pr_delivery" -eq 1 ]; then
+      printf '\n\n---\n\n'
+      cat "$WM_PLAYBOOKS/_delivery.md"
+    fi
+    printf '\n\n---\n\n'
+    cat "$WM_PLAYBOOKS/_status-contract.md"
+  } > "$_wcs_out"
+  unset _wcs_out _wcs_id _wcs_type _wcs_repo _wcs_scope _wcs_constraints \
+    _wcs_target_is_wm_repo _wcs_input _wcs_playbook _wcs_include_pr_delivery _wcs_cline
+}
+
 # Escape find(1) -name glob metacharacters (\, *, ?, [, ]) so a crew type
 # containing one of these is matched as a literal filename, not a pattern -
 # find -name treats its argument as a shell glob, and an unescaped --type
@@ -358,20 +409,17 @@ wm_tmux() { tmux "$@"; }
 # meant to launch anything real - a test that does mean to launch something
 # always stubs it itself.
 #
-# Checks WM_AGENT_BIN_OVERRIDE first (issue #25): since the adapter port,
-# $WM_AGENT selects a DESCRIPTOR (claude/pi/codex/...), not a binary path
-# directly, so its mere presence no longer reliably signals "a stub was
-# configured" - claude is WM_AGENT's own built-in default and is exactly the
-# real thing this guard exists to catch. WM_AGENT_BIN_OVERRIDE is the
-# variable that actually redirects the exec target (bin/lib/agent.sh's
-# wm_agent_resolve), so its presence is the real "a test opted in" signal for
-# a caller that has been migrated to it (bin/spawn-crew). $WM_AGENT is still
-# accepted too, transitionally, for a caller not yet migrated
-# (bin/crew-resume, until plan step 5) whose own test fixtures still set it
-# directly.
+# Checks WM_AGENT_BIN_OVERRIDE (issue #25): since the adapter port, $WM_AGENT
+# selects a DESCRIPTOR (claude/pi/codex/...), not a binary path directly, so
+# its mere presence no longer reliably signals "a stub was configured" -
+# claude is WM_AGENT's own built-in default and is exactly the real thing
+# this guard exists to catch. WM_AGENT_BIN_OVERRIDE is the variable that
+# actually redirects the exec target (bin/lib/agent.sh's wm_agent_resolve
+# applies it to WM_AGENT_BIN), used by every launch point now that
+# bin/spawn-crew and bin/crew-resume are both descriptor-driven (plan steps 3
+# and 5) - its presence is the real "a test opted in" signal.
 wm_guard_test_fixture_agent() {
   [ -n "${WM_AGENT_BIN_OVERRIDE:-}" ] && return 0
-  [ -n "${WM_AGENT:-}" ] && return 0
   case "$WM_TMUX_SESSION" in
     wm-test-*) wm_die "WM_TMUX_SESSION='$WM_TMUX_SESSION' looks like a test fixture and no stub is configured; refusing to launch a real '${1:-claude}'. Set WM_AGENT_BIN_OVERRIDE to a stub, or pass the real agent explicitly, before calling $(basename "$0")." ;;
   esac
@@ -1084,8 +1132,46 @@ wm_tmux_pane_ready() {
 # nothing left that can go stale.
 wm_tmux_send_message() {
   wm_tmux_send_lock "$1" || return $?
+  # $3 (issue #25, optional): a resolved agent NAME (not a crew id - the
+  # caller's own job to resolve, since it usually already has it cheaply,
+  # e.g. bin/watch-fleet's own per-member loop), used to temporarily swap
+  # WM_COMPOSER_RULE_RE/WM_COMPOSER_ANCHOR/WM_COMPOSER_TAIL/WM_CLEAR_KEYS to
+  # THIS member's own descriptor values for the duration of this one send,
+  # restored unconditionally afterward. No current caller passes it:
+  # composer-anchor data stays genuinely unknown for every follow-on CLI
+  # even once its own descriptor exists (plan §8), so there is nothing yet
+  # for a caller to gain by opting in - this exists so a future caller with
+  # real per-adapter composer data can use it without another signature
+  # change, and so every composer-mode call site inside
+  # _wm_tmux_send_message_locked below inherits the swap for free (they
+  # already read these globals directly, never a parameter of their own).
+  _wtsm_saved_rule_re="$WM_COMPOSER_RULE_RE"
+  _wtsm_saved_anchor="$WM_COMPOSER_ANCHOR"
+  _wtsm_saved_tail="$WM_COMPOSER_TAIL"
+  _wtsm_saved_clear="${WM_CLEAR_KEYS-C-c}"
+  if [ -n "${3:-}" ] && [ "${3:-}" != claude ] && [ -f "$WM_LIB/agents/$3.sh" ]; then
+    wm_agent_resolve "$3"
+    if [ -n "$WM_AGENT_COMPOSER_RULE_RE" ] && [ -n "$WM_AGENT_COMPOSER_ANCHOR" ]; then
+      WM_COMPOSER_RULE_RE="$WM_AGENT_COMPOSER_RULE_RE"
+      WM_COMPOSER_ANCHOR="$WM_AGENT_COMPOSER_ANCHOR"
+    else
+      # Not yet characterized for this adapter (plan §4.3's documented gap:
+      # "composer-based confirm is skipped"). WM_COMPOSER_TAIL=0 makes
+      # wm_composer_text_in's own `tail -n 0` scan zero lines, so it always
+      # reports "not recognized" and every caller falls through to the
+      # whole-pane-checksum confirm path below - never claude's own
+      # rule/anchor pattern matched against a different CLI's pane, which
+      # could false-positive/negative in an undefined way.
+      WM_COMPOSER_TAIL=0
+    fi
+    WM_CLEAR_KEYS="$WM_AGENT_CLEAR_KEYS"
+  fi
   _wm_tmux_send_message_locked "$1" "$2"
   _sm_lrc=$?
+  WM_COMPOSER_RULE_RE="$_wtsm_saved_rule_re"
+  WM_COMPOSER_ANCHOR="$_wtsm_saved_anchor"
+  WM_COMPOSER_TAIL="$_wtsm_saved_tail"
+  WM_CLEAR_KEYS="$_wtsm_saved_clear"
   wm_tmux_send_unlock "$1"
   return "$_sm_lrc"
 }

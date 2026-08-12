@@ -59,6 +59,7 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
 ALL_DIED=0
 OWNER_ARG=""
@@ -97,23 +98,24 @@ print(state.get("state", "clear") if isinstance(state, dict) else "clear")
   fi
 fi
 
-# --- reconcile user-scope guard hooks (issue #241) ---------------------------
-# The third session-creation choke point (bin/wingman, bin/spawn-crew above,
-# and this): crew-resume writes its own launcher script and opens its own
-# tmux window, bypassing bin/spawn-crew's preflight entirely, so a resumed
-# session would otherwise bind whatever settings.json happened to exist -
-# exactly the recovery window (a pre-authorized --all-died after a mass-death
-# event) where an unguarded agent is most likely to do damage. Hoisted above
-# the per-member loop: this is process-global, runs once per invocation
-# (not once per resumed member), and a --all-died batch refuses as a whole
-# rather than resuming some members unguarded.
-if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
-    --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
-  wm_launch_failure "guard-hook sync (resume)" "$_sync_err"
-  wm_die "could not wire the user-level guard hooks this resumed session needs: $_sync_err
-Fix the reported problem, or run 'bin/doctor -y', then retry this resume."
-fi
-
+# --- preflight: the resolved adapter's own gates (issue #16, #241, #25) ------
+# Was a single hoisted-above-the-loop sync-user-hooks.py call (the third
+# session-creation choke point alongside bin/wingman and bin/spawn-crew - a
+# resumed session otherwise bypasses spawn-crew's preflight entirely and
+# binds whatever settings.json happens to exist, exactly the recovery window
+# - a pre-authorized --all-died after a mass-death event - where an
+# unguarded agent is most likely to do damage). Now per-member instead
+# (resume_one, below), via the resolved adapter's own WM_AGENT_PREFLIGHT -
+# claude's wraps workspace-trust and Bypass-Permissions acceptance too, per
+# the same relocation bin/spawn-crew's own preflight went through (issue
+# #25), not just hook-sync. Per-member is required because trust is
+# genuinely per-repo and different members in one --all-died batch can be in
+# different repos or even on different adapters (each record carries its own
+# `agent` field) - but the net effect for hook-sync itself (repo-independent)
+# is unchanged: a broken hooks manifest fails identically for every member's
+# own check, so a --all-died batch still refuses as a whole in practice, just
+# via N independent failures instead of one hoisted one.
+#
 # Same model/effort/permission-mode resolution convention as bin/spawn-crew: no
 # CLI flags here (a resumed session has no per-call --model/--effort of its
 # own), just the same env-var defaults.
@@ -123,6 +125,81 @@ EFFORT="${WM_EFFORT:-}"
 
 # Set by resume_one() for its caller to tally: "resumed" or "skip: <reason>".
 RESUME_RESULT=""
+
+# wm_crew_relaunch_note <cwd> <artifact> <artifact-url> <delivery> \
+#   <allow-merge:true|false> <review-gate-waived:true|false> \
+#   <constraints-newline-separated> <spawned-at> <summary> <objective> <input>
+#
+# Prints the relaunch progress note (plan §4.8, issue #25) an adapter with no
+# WM_AGENT_RESUME_FLAG gets in place of a true --resume: this member's prior
+# conversation is gone, so what it starts cold with has to be durable,
+# structured facts, not just a compressed status line - starting with what
+# the assignment even IS, since a genuinely fresh session cannot be expected
+# to infer that from the progress facts alone (PR #335 review round 1,
+# finding 2: an earlier version of this function dropped the objective
+# entirely, leaving a relaunched no-resume-flag member with a full account of
+# what it had already done and nothing telling it what it was doing it for).
+# Layer 0 (the objective/input handoff, unchanged since spawn) comes first;
+# layer 1 (durably recorded structured fields) and layer 2 (worktree git
+# state) come next and are framed as ground truth; layer 3 (the free-text
+# `summary`) is explicitly last and explicitly NOT the source of truth - it
+# is the one part of this note that was not mechanically derived from
+# durable state and can be stale or incomplete (see the plan's own reasoning
+# for this ordering).
+wm_crew_relaunch_note() {
+  _wcrn_cwd="$1"; _wcrn_artifact="$2"; _wcrn_artifact_url="$3"; _wcrn_delivery="$4"
+  _wcrn_allow_merge="$5"; _wcrn_review_gate_waived="$6"; _wcrn_constraints="$7"
+  _wcrn_spawned_at="$8"; _wcrn_summary="$9"; _wcrn_objective="${10}"; _wcrn_input="${11}"
+  printf 'You are being **relaunched after an interruption, not a first assignment**. Your prior conversation context is NOT available - do not assume any of your own past reasoning is still valid. Treat the facts below as ground truth, and verify current state (a worktree diff, the roster fields below, any PR'"'"'s actual review status) before taking any further action, mirroring the status contract'"'"'s own "your checkout is a claim, not verified truth" discipline, applied here to your own prior work.\n\n'
+  printf '## Your assignment (unchanged since spawn)\n\n%s\n' "${_wcrn_objective:-(no objective was recorded at spawn)}"
+  if [ -n "$_wcrn_input" ]; then
+    printf '\nInput handoff: read the plan/spec at `%s` and follow it (the worktree state below shows how far you already got).\n' "$_wcrn_input"
+  fi
+  printf '\n## What is already durably recorded (grants and deliverables)\n\n'
+  _wcrn_any=0
+  if [ -n "$_wcrn_artifact" ]; then
+    if [ -n "$_wcrn_artifact_url" ]; then
+      printf -- '- A deliverable was already produced: `%s` (published: %s)\n' "$_wcrn_artifact" "$_wcrn_artifact_url"
+    else
+      printf -- '- A deliverable was already produced: `%s`\n' "$_wcrn_artifact"
+    fi
+    _wcrn_any=1
+  fi
+  if [ -n "$_wcrn_delivery" ]; then
+    printf -- '- A branch/PR was already opened: %s\n' "$_wcrn_delivery"
+    _wcrn_any=1
+  fi
+  if [ "$_wcrn_allow_merge" = true ]; then
+    printf -- '- Merge autonomy (--allow-merge) is already granted for this effort.\n'
+    _wcrn_any=1
+  fi
+  if [ "$_wcrn_review_gate_waived" = true ]; then
+    printf -- '- The review gate is already waived for this effort.\n'
+    _wcrn_any=1
+  fi
+  if [ -n "$_wcrn_constraints" ]; then
+    printf -- '- Standing pilot constraints already captured (repeated from above - do not re-derive or re-ask for these):\n'
+    while IFS= read -r _wcrn_cl; do
+      [ -n "$_wcrn_cl" ] && printf '  - %s\n' "$_wcrn_cl"
+    done <<<"$_wcrn_constraints"
+    _wcrn_any=1
+  fi
+  [ "$_wcrn_any" = 0 ] && printf -- '- (none recorded yet)\n'
+  printf '\n## Worktree state as of relaunch\n\n'
+  if [ -n "$_wcrn_cwd" ] && [ -d "$_wcrn_cwd" ] && git -C "$_wcrn_cwd" rev-parse --show-toplevel >/dev/null 2>&1; then
+    printf '```\n$ git log --oneline --since=%s\n' "$_wcrn_spawned_at"
+    git -C "$_wcrn_cwd" log --oneline --since="$_wcrn_spawned_at" 2>/dev/null
+    printf '\n$ git status\n'
+    git -C "$_wcrn_cwd" status 2>/dev/null
+    printf '```\n\n'
+  else
+    printf '(not a git checkout, or no longer present at relaunch time - nothing to show)\n\n'
+  fi
+  printf '## Your own last reported summary (context only - the facts above are the source of truth, not this)\n\n%s\n' "${_wcrn_summary:-(none recorded)}"
+  unset _wcrn_cwd _wcrn_artifact _wcrn_artifact_url _wcrn_delivery _wcrn_allow_merge \
+    _wcrn_review_gate_waived _wcrn_constraints _wcrn_spawned_at _wcrn_summary _wcrn_any _wcrn_cl \
+    _wcrn_objective _wcrn_input
+}
 
 resume_one() {
   _rid="$1"
@@ -139,17 +216,43 @@ resume_one() {
   # absent/None field to the identical empty string, silently destroying exactly
   # the false/unset distinction the git/PR workflow depends on. Printed
   # separately, preserving all three states as "true"/"false"/"".
+  #
+  # scope/objective/input/summary/artifact/artifact_url/delivery/spawned_at
+  # (issue #25, plan §4.8): the relaunch mode's rebuilt brief and progress
+  # note are built from these - a single-line field is flattened (embedded
+  # newlines replaced with a literal "\n" marker) so the fixed-field read
+  # below can never desync on a multi-line summary/objective.
   _lines="$(printf '%s' "$_info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
-for k in ("repo", "session_id", "window", "worktree", "status", "type"):
+def flat(v):
+    return (v or "").replace("\n", "\\n")
+for k in ("repo", "session_id", "window", "worktree", "status", "type", "scope", "agent"):
     print(d.get(k) or "")
 for k in ("is_git", "has_remote"):
     v = d.get(k)
-    print("" if v is None else ("true" if v else "false"))')"
-  { read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type; read -r _is_git; read -r _has_remote; } <<EOF
+    print("" if v is None else ("true" if v else "false"))
+for k in ("objective", "input", "summary", "artifact", "artifact_url", "delivery", "spawned_at"):
+    print(flat(d.get(k)))
+for k in ("allow_merge", "review_gate_waived"):
+    print("true" if d.get(k) else "false")')"
+  {
+    read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type
+    read -r _scope; read -r _agent; read -r _is_git; read -r _has_remote
+    read -r _objective; read -r _input; read -r _summary; read -r _artifact; read -r _artifact_url; read -r _delivery; read -r _spawned_at
+    read -r _allow_merge; read -r _review_gate_waived
+  } <<EOF
 $_lines
 EOF
+  # Constraints (list of {text, set_at}) are variable-length, so extracted
+  # separately - one "text" value per line, matching bin/spawn-crew's own
+  # $CONSTRAINTS shape exactly (newline-separated raw text, no "- " prefix),
+  # so it can be handed straight to wm_compose_crew_sysprompt.
+  _constraints="$(printf '%s' "$_info" | wm_py -c '
+import sys, json
+d = json.load(sys.stdin)
+for c in (d.get("constraints") or []):
+    print((c.get("text") or "").replace("\n", " "))')"
 
   # Idempotency guard 1: only a currently-died member is a resume target.
   if [ "$_status" != "died" ]; then
@@ -225,6 +328,28 @@ EOF
     _worktree_fallback=1
   fi
 
+  # --- resolve the agent CLI adapter and run its preflight (issue #25) -------
+  # This member's OWN recorded adapter, not $WM_AGENT/the caller's own
+  # environment - a --all-died batch can span members on different adapters,
+  # and the resolution has to be per-member for exactly that reason (unlike
+  # the process-global PERM_MODE above). Empty/absent `agent` means "claude"
+  # (see wm-state.py's crew-add --agent comment).
+  _resolved_agent_name="${_agent:-claude}"
+  wm_agent_resolve "$_resolved_agent_name"
+  # Subshelled (never called directly): claude_preflight's own gates call
+  # wm_die on failure, which would otherwise kill this WHOLE crew-resume
+  # process - including every member still waiting in a --all-died batch -
+  # rather than just skipping this one. A subshell's exit/wm_die only ends
+  # the subshell; its own stderr (the actual failure message) still reaches
+  # the caller normally, since a subshell shares stdout/stderr with its
+  # parent unless redirected.
+  if [ -n "$WM_AGENT_PREFLIGHT" ] && ! ( "$WM_AGENT_PREFLIGHT" "$_repo" "$PERM_MODE" resume ); then
+    wm_warn "'$_rid': agent preflight failed - not relaunching (see the message above)."
+    RESUME_RESULT="skip: preflight failed"
+    release_claim
+    return
+  fi
+
   # --- regenerate the review-signing token (reviewer type only, issue #135) --
   # WM_REVIEW_TOKEN is never persisted anywhere except the crashed process's
   # own (now-gone) environment - it cannot be recovered, so a resumed
@@ -241,6 +366,60 @@ EOF
   if [ "${_type##*/}" = reviewer ]; then
     _review_token="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
     wm_state crew-set --id "$_rid" --regenerate-review-token "$_review_token" >/dev/null
+  fi
+
+  # --- relaunch mode: re-compose the brief + progress note (plan §4.8) -------
+  # Only when the resolved adapter has no WM_AGENT_RESUME_FLAG - computed
+  # here, before the launch script is written, so the exec-composition block
+  # below can just deliver it via wm_agent_emit_sysprompt like any other
+  # descriptor-driven field. wm_resolve_playbook/ROLE_NAME/INCLUDE_PR_DELIVERY
+  # mirror bin/spawn-crew's own resolution exactly (wm_compose_crew_sysprompt
+  # is the shared function both call), re-derived from the roster record
+  # since crew-resume never persisted them itself.
+  _relaunch_sysprompt=""
+  _relaunch_note=""
+  if [ -z "$WM_AGENT_RESUME_FLAG" ]; then
+    _rl_sysprompt_path="$WM_HOME/crew/$_rid.sysprompt.md"
+    # Subshelled (never called directly, same reasoning and pattern as the
+    # agent preflight above - PR #335 review round 2, nice-to-have):
+    # wm_resolve_playbook calls wm_die on an unresolvable/ambiguous type,
+    # which would otherwise kill this WHOLE crew-resume process - including
+    # every member still waiting in a --all-died batch - rather than just
+    # skipping this one. wm_compose_crew_sysprompt's file write survives the
+    # subshell exiting (only shell variables are subshell-scoped, not file
+    # writes); the composed note text is captured back via stdout, the one
+    # value from inside the subshell the parent shell still needs.
+    if _relaunch_note="$(
+      wm_resolve_playbook "$_type"
+      _rl_role_name="$(basename "$PLAYBOOK")"
+      case "$_rl_role_name" in
+        *.local.md) _rl_role_name="${_rl_role_name%.local.md}" ;;
+        *.md)       _rl_role_name="${_rl_role_name%.md}" ;;
+      esac
+      _rl_include_pr_delivery=0
+      case " developer ml-engineer data-engineer " in
+        *" $_rl_role_name "*) _rl_include_pr_delivery=1 ;;
+      esac
+      _rl_target_is_wm_repo=0
+      [ "$_scope" = repo ] && [ "$_repo" = "$WM_REPO" ] && _rl_target_is_wm_repo=1
+      # "$_input" (not ""): the original --input plan/report pointer, now
+      # durably recorded on the roster record itself (PR #335 review round 1,
+      # finding 3) - rebuilding this file with a hardcoded "" here would
+      # silently erase the only durable record of that handoff the first
+      # time a no-resume-flag member is relaunched.
+      wm_compose_crew_sysprompt "$_rl_sysprompt_path" "$_rid" "$_type" "$_repo" "$_scope" \
+        "$_constraints" "$_rl_target_is_wm_repo" "$_input" "$PLAYBOOK" "$_rl_include_pr_delivery"
+      wm_crew_relaunch_note "$_cwd" "$_artifact" "$_artifact_url" "$_delivery" \
+        "$_allow_merge" "$_review_gate_waived" "$_constraints" "$_spawned_at" "$_summary" \
+        "$_objective" "$_input"
+    )"; then
+      _relaunch_sysprompt="$_rl_sysprompt_path"
+    else
+      wm_warn "'$_rid': could not compose the relaunch brief - no playbook resolved for type '$_type' (see the message above); not relaunching."
+      RESUME_RESULT="skip: preflight failed"
+      release_claim
+      return
+    fi
   fi
 
   # --- write the resume launch script (avoids all in-tmux quoting) -----------
@@ -291,9 +470,15 @@ EOF
     # absurdly high here, the gate can never be satisfied regardless of
     # transcript size or session age. Scoped to this one resumed process only
     # (never written to the shared ~/.claude.json), so it has no effect on the
-    # human's own everyday interactive sessions.
-    echo "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=${WM_RESUME_TOKEN_THRESHOLD:-999999999}"
-    echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
+    # human's own everyday interactive sessions. Claude-specific (issue #25
+    # review round 1/2 nice-to-have): a claude-only env var leaking into every
+    # other adapter's own process is harmless today (nothing reads it) but
+    # wrong to export unconditionally - gated the same way crew-takeover's
+    # identical block already is.
+    if [ "$_resolved_agent_name" = claude ]; then
+      echo "export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=${WM_RESUME_TOKEN_THRESHOLD:-999999999}"
+      echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
+    fi
     # The resuming session's own run id, exactly as spawn-crew captures it at
     # spawn time: a resume is an action of the CURRENT wingman sit-down, so the
     # preferences answered for that sit-down govern the resumed member (the
@@ -321,26 +506,42 @@ EOF
     # The freshly regenerated review-signing token (reviewer type only),
     # exactly like a fresh spawn - see the regeneration block above.
     [ -n "$_review_token" ] && echo "export WM_REVIEW_TOKEN=$(quote "$_review_token")"
-    # $WM_AGENT still wins when set (issue #25) - crew-resume's own adapter
-    # port is a later stage (plan step 5), so this file still execs $WM_AGENT
-    # directly rather than resolving a descriptor, and every existing
-    # crew-resume test fixture sets a call-specific $WM_AGENT stub that must
-    # keep winning here. WM_AGENT_BIN_OVERRIDE is the FALLBACK, only when
-    # $WM_AGENT is unset: wm_guard_test_fixture_agent (bin/lib/common.sh) now
-    # checks WM_AGENT_BIN_OVERRIDE first, and the suite's ambient test stub
-    # (tests/lib.sh) is that variable, not $WM_AGENT - without this fallback,
-    # a fixture relying only on the ambient default would pass the guard but
-    # still land on `exec claude`, a real launch.
-    _resume_agent_bin="${WM_AGENT:-${WM_AGENT_BIN_OVERRIDE:-claude}}"
-    wm_guard_test_fixture_agent "$_resume_agent_bin"
-    printf 'exec %s' "$_resume_agent_bin"
-    printf ' --resume %s' "$(quote "$_sid")"
-    [ -n "$PERM_MODE" ] && printf ' --permission-mode %s' "$(quote "$PERM_MODE")"
-    printf ' --add-dir %s' "$(quote "$WM_HOME")"
-    printf ' --add-dir %s' "$(quote "$_repo")"
-    printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
-    [ -n "$MODEL" ]  && printf ' --model %s'  "$(quote "$MODEL")"
-    [ -n "$EFFORT" ] && printf ' --effort %s' "$(quote "$EFFORT")"
+    # The resolved agent CLI drives everything from here on (issue #25),
+    # exactly like bin/spawn-crew's own launch composition -
+    # wm_agent_resolve already applied WM_AGENT_BIN_OVERRIDE to WM_AGENT_BIN,
+    # so this needs no separate fallback of its own.
+    wm_guard_test_fixture_agent "$WM_AGENT_BIN"
+    [ -n "$WM_AGENT_ENV_UNSET" ] && echo "unset $WM_AGENT_ENV_UNSET"
+    printf 'exec '
+    [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"
+    printf '%s' "$WM_AGENT_BIN"
+    if [ -n "$WM_AGENT_RESUME_FLAG" ]; then
+      # A true resume: the CLI's own resume flag restores full conversation
+      # context, so no system-prompt re-delivery is needed at all - unchanged
+      # from claude's original behavior, the only adapter with this flag
+      # populated today.
+      wm_agent_emit_flag "$WM_AGENT_RESUME_FLAG" "$_sid"
+    fi
+    [ -n "$PERM_MODE" ] && wm_agent_emit_flag "$WM_AGENT_BYPASS_FLAG" "$PERM_MODE"
+    # --add-dir/--settings: claude-specific, no descriptor field of their own
+    # yet - see bin/spawn-crew's identical gate and comment (issue #25; the
+    # adapter contract, plan §4.3, has no equivalent for any other CLI).
+    if [ "$_resolved_agent_name" = claude ]; then
+      printf ' --add-dir %s' "$(quote "$WM_HOME")"
+      printf ' --add-dir %s' "$(quote "$_repo")"
+      printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
+    fi
+    [ -n "$MODEL" ]  && wm_agent_emit_flag "$WM_AGENT_MODEL_FLAG"  "$MODEL"
+    [ -n "$EFFORT" ] && wm_agent_emit_flag "$WM_AGENT_EFFORT_FLAG" "$EFFORT"
+    if [ -z "$WM_AGENT_RESUME_FLAG" ]; then
+      # Relaunch mode (plan §4.8): no session to resume, so this is a fresh
+      # session under the SAME crew id/window/worktree instead, delivering
+      # the re-composed brief plus the three-layer progress note - computed
+      # just above this block - in place of a resume flag with no id to fill.
+      wm_agent_emit_sysprompt "$_relaunch_sysprompt" "$_relaunch_note"
+    else
+      WM_AGENT_OPENING_DELIVERED_AT_LAUNCH=0
+    fi
     printf '\n'
   } > "$_launch"
   chmod +x "$_launch"
@@ -370,7 +571,18 @@ EOF
   # answer to that dialog. Non-fatal here - the window and roster record are
   # already in place - but the nudge was NOT delivered, so it is surfaced rather
   # than silently assumed to have landed.
-  _resume_nudge="Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
+  # Skipped entirely when the launch itself already delivered the full brief
+  # + progress note (relaunch mode's flag/positional/prompt-flag sysprompt
+  # modes, plan §4.8, §4.5) - only a genuine post-launch delivery still needs
+  # to happen: a true --resume (unchanged), or the reserved
+  # pointer-after-ready mode no current adapter uses, which gets the full
+  # relaunch note here instead of the short nudge below.
+  if [ "$WM_AGENT_OPENING_DELIVERED_AT_LAUNCH" != 1 ]; then
+  if [ -n "$_relaunch_note" ]; then
+    _resume_nudge="$_relaunch_note"
+  else
+    _resume_nudge="Your previous window was interrupted (likely a tmux/host crash); this is a resumed session continuing your prior work. Check bin/crew-list/your own last status, re-arm any watcher you had running, and continue."
+  fi
   # issue #135: a resumed reviewer's review-signing token was just
   # regenerated above, invalidating any pre-crash comment-fallback proof.
   [ "${_type##*/}" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
@@ -416,6 +628,7 @@ EOF
     printf '%s\n' "${WINGMAN_CREW_ID:-}" > "$WM_HOME/outbox-meta/$_rid/$(basename "$_resume_qfile")"
     printf '%s\n' "$_resume_nudge" > "$_resume_qfile"
     wm_warn "'$_rid': the resume nudge is QUEUED at $_resume_qfile; the watcher will retry it automatically."
+  fi
   fi
 
   # --- verify the resume actually took -----------------------------------------
@@ -524,13 +737,24 @@ fi
 resumed=0
 skipped=0
 skip_notes=""
+# A preflight failure (issue #25, #241) is an environmental/configuration
+# problem, not a routine "nothing to do" skip like "not died" or "window
+# already exists" - it means this session's guards could not be wired at
+# all, and the caller needs a non-zero exit to notice, exactly like the
+# hard wm_die this replaced (a single hoisted check, pre-#25) always gave.
+# Other skip reasons keep the script's long-standing exit-0 behavior:
+# nothing before this port ever made THOSE contribute to the exit status,
+# and no test relies on them doing so now.
+preflight_failures=0
 for _t in $TARGETS; do
   [ -n "$_t" ] || continue
   resume_one "$_t"
   case "$RESUME_RESULT" in
     resumed) resumed=$((resumed+1)) ;;
+    "skip: preflight failed") skipped=$((skipped+1)); skip_notes="$skip_notes; $_t ($RESUME_RESULT)"; preflight_failures=$((preflight_failures+1)) ;;
     *) skipped=$((skipped+1)); skip_notes="$skip_notes; $_t ($RESUME_RESULT)" ;;
   esac
 done
 
 wm_info "$resumed resumed, $skipped skipped${skip_notes:+: ${skip_notes#; }}"
+[ "$preflight_failures" -eq 0 ] || exit 1

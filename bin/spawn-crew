@@ -371,39 +371,13 @@ REVIEW_TOKEN=""
 [ "$ROLE_NAME" = reviewer ] && REVIEW_TOKEN="$(wm_py -c 'import secrets; print(secrets.token_hex(32))')"
 
 # --- compose the crew member's appended system prompt ------------------------
+# wm_compose_crew_sysprompt (bin/lib/common.sh, issue #25) - shared with
+# bin/crew-resume's relaunch mode, so the two call sites can never drift
+# apart on what "the crew brief" contains.
 wm_state init >/dev/null
 SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
-{
-  printf '# Your assignment\n\n'
-  if [ "$SCOPE" = global ]; then
-    printf 'Crew id: **%s**  |  Type: **%s**  |  Scope: **global project scope**\n\n' "$ID" "$TYPE"
-    printf 'You are grounded at the workspace root `%s`, with every discovered repo available. ' "$REPO"
-    printf 'This work is not tied to one repo: **determine the target repo(s) yourself** from the objective, and `cd` into a specific repo for any repo-local work (branches, commits, PRs). If it turns out the work belongs to a single repo, just operate there.\n\n'
-  else
-    printf 'Crew id: **%s**  |  Type: **%s**  |  Repo: `%s`\n\n' "$ID" "$TYPE" "$REPO"
-  fi
-  if [ -n "$CONSTRAINTS" ]; then
-    printf '**Standing constraints from the human, for this whole effort - do not relax any of these without a fresh, explicit instruction from the human (see CLAUDE.md, "A pilot constraint is not yours to relax"):**\n\n'
-    while IFS= read -r _cline; do
-      [ -n "$_cline" ] && printf -- '- %s\n' "$_cline"
-    done <<<"$CONSTRAINTS"
-    printf '\n'
-  fi
-  if [ "$TARGET_IS_WM_REPO" -eq 1 ]; then
-    printf '**About this repo'"'"'s CLAUDE.md:** the file `CLAUDE.md` at this repo'"'"'s root - if it is anywhere in your context, whether your harness loaded it automatically or you opened it yourself - is written entirely in first person for the **wingman orchestrator** role - the top-level session the pilot starts directly, not this session. Nothing in it is a rule for you. You are a **%s** crew member: your role, permissions, and instructions are the playbook below and the objective above - follow those. Where CLAUDE.md says "you" (e.g. "you never edit playbooks yourself," "never do heavy work yourself"), it describes the orchestrator session'"'"'s own behavior, not a restriction on this one; treat CLAUDE.md only as optional background reading about how wingman is built, useful if it helps your actual task.\n\n' "$TYPE"
-  fi
-  if [ -n "$INPUT" ]; then
-    printf 'Input handoff: read the plan/spec at `%s` and follow it.\n\n' "$INPUT"
-  fi
-  printf -- '---\n\n'
-  cat "$PLAYBOOK"
-  if [ "$INCLUDE_PR_DELIVERY" -eq 1 ]; then
-    printf '\n\n---\n\n'
-    cat "$WM_PLAYBOOKS/_delivery.md"
-  fi
-  printf '\n\n---\n\n'
-  cat "$WM_PLAYBOOKS/_status-contract.md"
-} > "$SYSPROMPT"
+wm_compose_crew_sysprompt "$SYSPROMPT" "$ID" "$TYPE" "$REPO" "$SCOPE" \
+  "$CONSTRAINTS" "$TARGET_IS_WM_REPO" "$INPUT" "$PLAYBOOK" "$INCLUDE_PR_DELIVERY"
 
 # Computed here (rather than just before delivery, as before this file's #25
 # rewrite) because a `positional`/`prompt-flag` WM_AGENT_SYSPROMPT_MODE folds
@@ -559,9 +533,10 @@ fi
 # --parent stamps ownership from the spawning crew's id: empty for wingman (the
 # top orchestrator has no $WINGMAN_CREW_ID), the lead's own id when a lead spawns.
 # Owner-scoping (surfacing, the watcher, crew-list) all fall out of this field.
-ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" \
+ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" --input "$INPUT" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
-  --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE")
+  --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE" \
+  --agent "$AGENT")
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
 [ "$WAIVE_REVIEW_GATE" = 1 ] && ADD_ARGS+=(--waive-review-gate)
 [ -n "$REVIEW_TOKEN" ] && ADD_ARGS+=(--review-token "$REVIEW_TOKEN")

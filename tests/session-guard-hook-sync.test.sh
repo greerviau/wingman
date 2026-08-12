@@ -127,11 +127,16 @@ test_new_home
 MIRROR_OK3="$(wm_mktemp_dir)/mirror-ok"
 mk_mirror "$MIRROR_OK3"
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+# crew-resume's own preflight now includes workspace-trust (issue #25's
+# claude_preflight, relocated - not just hook-sync), so this fixture's own
+# --repo /tmp needs trusting here too, exactly like the spawn-crew section
+# above trusts its own target repo.
+wm_trust_repo /tmp
 wm_state crew-add --id wiring-resume-ok --type developer --objective x --repo /tmp --window wm-wiring-resume-ok --session-id sess-wro >/dev/null
 wm_state crew-set --id wiring-resume-ok --status died >/dev/null
 STUB3="$(wm_mktemp_dir)/stub.sh"
 printf '#!/usr/bin/env bash\nexec sleep 60\n' > "$STUB3"; chmod +x "$STUB3"
-out11c="$(WM_AGENT="$STUB3" "$MIRROR_OK3/bin/crew-resume" wiring-resume-ok 2>&1)"
+out11c="$(WM_AGENT_BIN_OVERRIDE="$STUB3" "$MIRROR_OK3/bin/crew-resume" wiring-resume-ok 2>&1)"
 assert_contains "bin/crew-resume: a healthy repo resumes the member" "$out11c" "1 resumed"
 assert_eq "bin/crew-resume: every manifest hook is registered before the window opens" \
   "$(registered_count "$WM_CLAUDE_USER_SETTINGS")" "$MANIFEST_COUNT"
@@ -180,9 +185,13 @@ test_new_home
 MIRROR_BAD3="$(wm_mktemp_dir)/mirror-bad"
 mk_mirror "$MIRROR_BAD3" "hooks/no-direct-edit-guard.sh" missing
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+# Trust /tmp here too (issue #25) so this test's actual failure mode stays
+# the hook-sync break its own section title names, not an incidental
+# workspace-trust gap that would make it pass for the wrong reason.
+wm_trust_repo /tmp
 wm_state crew-add --id wiring-resume-bad --type developer --objective x --repo /tmp --window wm-wiring-resume-bad --session-id sess-wrb >/dev/null
 wm_state crew-set --id wiring-resume-bad --status died >/dev/null
-out12c="$(WM_AGENT="$STUB3" "$MIRROR_BAD3/bin/crew-resume" wiring-resume-bad 2>&1)"; rc12c=$?
+out12c="$(WM_AGENT_BIN_OVERRIDE="$STUB3" "$MIRROR_BAD3/bin/crew-resume" wiring-resume-bad 2>&1)"; rc12c=$?
 assert_true "bin/crew-resume: a broken repo exits non-zero" "[ $rc12c -ne 0 ]"
 assert_eq "bin/crew-resume: the member stays died" \
   "$(wm_state crew-get --id wiring-resume-bad | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("status"))')" "died"
@@ -195,7 +204,7 @@ assert_false "bin/crew-resume: no .resume.sh launcher was written" \
 # hoisted once per invocation, so one bad reconcile blocks every member).
 wm_state crew-add --id wiring-resume-bad2 --type developer --objective y --repo /tmp --window wm-wiring-resume-bad2 --session-id sess-wrb2 >/dev/null
 wm_state crew-set --id wiring-resume-bad2 --status died >/dev/null
-out12d="$(WM_AGENT="$STUB3" "$MIRROR_BAD3/bin/crew-resume" --all-died 2>&1)"; rc12d=$?
+out12d="$(WM_AGENT_BIN_OVERRIDE="$STUB3" "$MIRROR_BAD3/bin/crew-resume" --all-died 2>&1)"; rc12d=$?
 assert_true "bin/crew-resume --all-died: a broken repo exits non-zero" "[ $rc12d -ne 0 ]"
 assert_eq "bin/crew-resume --all-died: first member stays died" \
   "$(wm_state crew-get --id wiring-resume-bad | uv run --no-project --quiet python -c 'import sys,json;print(json.load(sys.stdin).get("status"))')" "died"

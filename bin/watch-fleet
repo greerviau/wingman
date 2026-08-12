@@ -165,6 +165,7 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
 # Resolved once, at startup (issue #237, part 1): the worktree-removal
 # self-check below tests this directory's continued existence every poll. A
@@ -1359,8 +1360,20 @@ prompt_freeze_check() {
   # WM_RESUME_PROMPT_RE's own docstring in lib/common.sh for why this is a
   # second, distinctly-worded regex rather than folded permanently into
   # WM_PERM_PROMPT_RE's own default.
+  #
+  # $FREEZE_PERM_RE/$FREEZE_RESUME_RE (issue #25), set by the caller just
+  # before this call from the CURRENT member's own recorded adapter -
+  # claude's own values (the pre-existing globals) for every claude member,
+  # which is the vast majority of calls and every call before this port. A
+  # follow-on adapter with no populated freeze signature falls through to
+  # these same claude-shaped defaults too (§4.3's documented degradation:
+  # "freeze detection for this CLI is a known, documented gap"), not a
+  # blank/no-op scan - matching this detector's own fail-toward-caution
+  # design, since a real freeze going undetected is worse than an
+  # occasional false-shaped match against a CLI whose own dialog text
+  # happens to differ.
   prompt_shape_in "$(printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL")" \
-    "${WM_PERM_PROMPT_RE}|${WM_RESUME_PROMPT_RE}" || return 1
+    "${FREEZE_PERM_RE}|${FREEZE_RESUME_RE}" || return 1
   PFC_SHAPE=1
   [ "$PANE_STABLE" = 1 ]
 }
@@ -1819,9 +1832,15 @@ for r in data:
     # absent reads as True (see cmd_crew_add in bin/lib/wm-state.py).
     if st in ("working", "blocked", "review", "stalled"):
         rc = "1" if r.get("remote_control", True) else "0"
-        print(r.get("id", "") + ":" + st + ":" + rc)
+        # agent (issue #25): folded into this SAME per-poll dump rather than
+        # a separate wm_state crew-get per member, which would add a real
+        # subprocess fork to this hot loop for every member on every poll -
+        # a cost this detector, unlike a one-shot launch/resume call, cannot
+        # absorb.
+        print(r.get("id", "") + ":" + st + ":" + rc + ":" + (r.get("agent") or ""))
 ' 2>/dev/null); do
-      _id="${_row%%:*}"; _rest="${_row#*:}"; _orig_status="${_rest%%:*}"; _rc_enabled="${_rest#*:}"
+      _id="${_row%%:*}"; _rest="${_row#*:}"; _orig_status="${_rest%%:*}"; _rest2="${_rest#*:}"
+      _rc_enabled="${_rest2%%:*}"; _agent="${_rest2#*:}"
       _win="wm-$_id"
       wm_tmux_windows | grep -qx "$_win" || continue
       wm_pane_snapshot "$_id" "$_win"
@@ -1967,6 +1986,20 @@ for r in data:
       case "$_orig_status" in
         review|stalled) continue ;;
       esac
+
+      # This member's OWN recorded adapter (issue #25), not the global
+      # claude-shaped defaults - only resolved for a confirmed non-claude,
+      # on-disk descriptor (the common case, empty/claude, never pays this
+      # at all); a stale/removed descriptor name degrades to the existing
+      # global default rather than resolving (which would wm_die and take
+      # down the whole watcher for every member, not just this one).
+      FREEZE_PERM_RE="$WM_PERM_PROMPT_RE"
+      FREEZE_RESUME_RE="$WM_RESUME_PROMPT_RE"
+      if [ -n "$_agent" ] && [ "$_agent" != claude ] && [ -f "$WM_LIB/agents/$_agent.sh" ]; then
+        wm_agent_resolve "$_agent"
+        [ -n "$WM_AGENT_PERM_PROMPT_RE" ] && FREEZE_PERM_RE="$WM_AGENT_PERM_PROMPT_RE"
+        [ -n "$WM_AGENT_RESUME_PROMPT_RE" ] && FREEZE_RESUME_RE="$WM_AGENT_RESUME_PROMPT_RE"
+      fi
 
       if prompt_freeze_check && ! liveness_veto "$_id"; then
         # Which of the two dialog shapes prompt_freeze_check actually matched

@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # E2E: bin/crew-resume, the bulk/single relaunch of a `died` crew member via
-# `claude --resume <session-id>` (#22). Uses a stub agent (WM_AGENT) and an
-# isolated tmux session per test.new_home, exactly like spawn-scope.test.sh, so
+# `claude --resume <session-id>` (#22). Uses a stub agent (WM_AGENT_BIN_OVERRIDE)
+# and an isolated tmux session per test.new_home, exactly like spawn-scope.test.sh, so
 # no real claude launches. Proves both idempotency guards, tree preservation
 # across a lead + its sub-crew, and the fallback-to-manual path when the
 # resumed process exits immediately (a stale/invalid session id).
+#
+# Every fixture's `--repo /tmp` is trusted (wm_trust_repo /tmp) right after
+# each test_new_home: crew-resume's own preflight now includes
+# workspace-trust (issue #25's claude_preflight, relocated from
+# bin/spawn-crew - not just the hook-sync check this file used to be the
+# only thing crew-resume ran), so an untrusted repo would otherwise refuse
+# every single resume in this file.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
@@ -61,10 +68,11 @@ chmod +x "$STDERR_CRASH_STUB"
 
 # --- a died member with a live session resumes --------------------------------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r1 --type developer --objective x --repo /tmp --window wm-r1 --session-id sess-r1 >/dev/null
 wm_state crew-set --id r1 --status died >/dev/null
-out="$(WM_AGENT="$ALIVE_STUB" WINGMAN_RUN_ID=run-resume-test "$CR" r1 2>&1)"
+out="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" WINGMAN_RUN_ID=run-resume-test "$CR" r1 2>&1)"
 assert_contains "resume reports one resumed" "$out" "1 resumed"
 assert_true "window wm-r1 exists after resume" \
   "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-r1"
@@ -103,6 +111,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # over, and a live `working` member should not keep rendering `wip-ref:
 # refs/wip/<id> (<sha>)` for a crash it just recovered from -------------------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id rw1 --type developer --objective x --repo /tmp --window wm-rw1 --session-id sess-rw1 >/dev/null
 wm_state crew-set --id rw1 --status died >/dev/null
@@ -116,7 +125,7 @@ for r in d:
         r["wip_anchor_error"] = "stale index.lock"
 json.dump(d, open(path, "w"))
 ' "$WINGMAN_HOME/crew.json"
-out_rw="$(WM_AGENT="$ALIVE_STUB" "$CR" rw1 2>&1)"
+out_rw="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" rw1 2>&1)"
 assert_contains "the resume succeeds" "$out_rw" "1 resumed"
 assert_eq "wip_ref_sha is cleared on successful resume" "$(field_of rw1 wip_ref_sha)" ""
 assert_eq "wip_anchor_error is cleared on successful resume too" "$(field_of rw1 wip_anchor_error)" ""
@@ -129,10 +138,11 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # was ever attempted); only the nudge is queued for the watcher's outbox
 # retry, and crew-resume warns rather than silently dropping it.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id rgate1 --type developer --objective x --repo /tmp --window wm-rgate1 --session-id sess-rgate1 >/dev/null
 wm_state crew-set --id rgate1 --status died >/dev/null
-out_gate="$(WM_AGENT="$DIALOG_STUB" "$CR" rgate1 2>&1)"
+out_gate="$(WM_AGENT_BIN_OVERRIDE="$DIALOG_STUB" "$CR" rgate1 2>&1)"
 assert_contains "the resume itself still succeeds despite the undeliverable nudge" "$out_gate" "1 resumed"
 assert_eq "status flips to working" "$(field_of rgate1 status)" "working"
 assert_contains "crew-resume warns the nudge was not delivered (dialog-shaped)" \
@@ -162,6 +172,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # them beforehand), so the composer stub's knobs are baked into a thin
 # wrapper script rather than set as plain env vars on the crew-resume call.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id rswallow1 --type developer --objective x --repo /tmp --window wm-rswallow1 --session-id sess-rswallow1 >/dev/null
 wm_state crew-set --id rswallow1 --status died >/dev/null
@@ -173,7 +184,7 @@ export WM_TEST_BUSY=0 WM_TEST_SWALLOW=1 WM_TEST_MARKER='$SWALLOW_MARKER'
 exec "$TEST_REPO/tests/fixtures/composer-stub.sh"
 SWALLOWEOF
 chmod +x "$SWALLOW_STUB"
-out_swallow="$(WM_AGENT="$SWALLOW_STUB" \
+out_swallow="$(WM_AGENT_BIN_OVERRIDE="$SWALLOW_STUB" \
   WM_SUBMIT_DELAY=0.3 WM_READY_POLL=0.3 WM_SUBMIT_POLL=0.4 WM_READY_TRIES=20 WM_SUBMIT_TRIES=8 \
   "$CR" rswallow1 2>&1)"
 assert_contains "the resume itself still succeeds despite the unconfirmed nudge" "$out_swallow" "1 resumed"
@@ -195,6 +206,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # elapses - proving the lock-contended path is now diagnosed and queued too,
 # not silently swallowed into the old generic "QUEUED" line.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id rlock1 --type developer --objective x --repo /tmp --window wm-rlock1 --session-id sess-rlock1 >/dev/null
 wm_state crew-set --id rlock1 --status died >/dev/null
@@ -220,7 +232,7 @@ done
 _lock_holder_pid="$(awk '{print $2}' "$WINGMAN_HOME/lock-holder.out")"
 assert_true "the holder process genuinely acquired the send lock" "[ -n \"$_lock_holder_pid\" ]"
 
-out_lock="$(WM_AGENT="$ALIVE_STUB" WM_SEND_LOCK_WAIT=1 "$CR" rlock1 2>&1)"
+out_lock="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" WM_SEND_LOCK_WAIT=1 "$CR" rlock1 2>&1)"
 assert_contains "the resume itself still succeeds despite the contended nudge" "$out_lock" "1 resumed"
 assert_eq "status flips to working" "$(field_of rlock1 status)" "working"
 assert_contains "crew-resume warns the nudge was not delivered (rc 4 wording)" \
@@ -237,12 +249,13 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- a resume outside any wingman run exports an empty run id ------------------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r1b --type lead --objective x --repo /tmp --window wm-r1b --session-id sess-r1b >/dev/null
 wm_state crew-set --id r1b --status died >/dev/null
 _saved_run_id="${WINGMAN_RUN_ID:-}"
 unset WINGMAN_RUN_ID
-out="$(WM_AGENT="$ALIVE_STUB" "$CR" r1b 2>&1)"
+out="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" r1b 2>&1)"
 [ -n "$_saved_run_id" ] && export WINGMAN_RUN_ID="$_saved_run_id"
 assert_contains "resume without a run id still resumes" "$out" "1 resumed"
 launch="$(cat "$WINGMAN_HOME/crew/r1b.resume.sh")"
@@ -254,24 +267,26 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- idempotency guard 1: --all-died twice resumes zero the second time -------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r2 --type developer --objective x --repo /tmp --window wm-r2 --session-id sess-r2 >/dev/null
 wm_state crew-set --id r2 --status died >/dev/null
-out2a="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+out2a="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" --all-died 2>&1)"
 assert_contains "first --all-died resumes the died member" "$out2a" "1 resumed"
-out2b="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+out2b="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" --all-died 2>&1)"
 assert_contains "second --all-died is a no-op" "$out2b" "0 resumed"
 assert_eq "status is still working after the no-op re-run" "$(field_of r2 status)" "working"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- idempotency guard 2: a pre-existing window is left alone -----------------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r3 --type developer --objective x --repo /tmp --window wm-r3 --session-id sess-r3 >/dev/null
 wm_state crew-set --id r3 --status died >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION:" -n wm-r3 'sleep 600'
 before_pid="$(tmux list-panes -t "$WM_TMUX_SESSION:wm-r3" -F '#{pane_pid}' 2>/dev/null)"
-out3="$(WM_AGENT="$ALIVE_STUB" "$CR" r3 2>&1)"
+out3="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" r3 2>&1)"
 assert_contains "a pre-existing window is skipped, not duplicated" "$out3" "window already exists"
 after_pid="$(tmux list-panes -t "$WM_TMUX_SESSION:wm-r3" -F '#{pane_pid}' 2>/dev/null)"
 assert_eq "the original window's pane is untouched" "$after_pid" "$before_pid"
@@ -284,13 +299,14 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # identical name rather than failing or deduping - an atomic mkdir claim closes
 # it instead, same pattern as #12's watcher arm lock).
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id crx1 --type developer --objective x --repo /tmp --window wm-crx1 --session-id sess-crx1 >/dev/null
 wm_state crew-set --id crx1 --status died >/dev/null
-WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_WINDOW=3 WM_RESUME_VERIFY_POLL=1 \
+WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" WM_RESUME_VERIFY_WINDOW=3 WM_RESUME_VERIFY_POLL=1 \
   "$CR" crx1 >"$WINGMAN_HOME/race-a.log" 2>&1 &
 race_a=$!
-WM_AGENT="$ALIVE_STUB" WM_RESUME_VERIFY_WINDOW=3 WM_RESUME_VERIFY_POLL=1 \
+WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" WM_RESUME_VERIFY_WINDOW=3 WM_RESUME_VERIFY_POLL=1 \
   "$CR" crx1 >"$WINGMAN_HOME/race-b.log" 2>&1 &
 race_b=$!
 wait "$race_a" 2>/dev/null
@@ -308,12 +324,13 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- a lead + its sub-crew, both died, both resumed: tree preserved -----------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id lead1 --type lead --objective L --repo /tmp --window wm-lead1 --session-id sess-lead1 >/dev/null
 wm_state crew-add --id wkr1 --type developer --objective W --repo /tmp --window wm-wkr1 --session-id sess-wkr1 --parent lead1 >/dev/null
 wm_state crew-set --id lead1 --status died >/dev/null
 wm_state crew-set --id wkr1 --status died >/dev/null
-out4="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+out4="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" --all-died 2>&1)"
 assert_contains "both dead members are resumed" "$out4" "2 resumed"
 assert_eq "the lead's status flips to working" "$(field_of lead1 status)" "working"
 assert_eq "the worker's status flips to working" "$(field_of wkr1 status)" "working"
@@ -332,26 +349,28 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # dies again later - it must still be resumable, not stuck forever behind a
 # claim dir that the first batch's non-last processing left behind.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id lk1 --type developer --objective a --repo /tmp --window wm-lk1 --session-id sess-lk1 >/dev/null
 wm_state crew-add --id lk2 --type developer --objective b --repo /tmp --window wm-lk2 --session-id sess-lk2 >/dev/null
 wm_state crew-set --id lk1 --status died >/dev/null
 wm_state crew-set --id lk2 --status died >/dev/null
-out4b="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"
+out4b="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" --all-died 2>&1)"
 assert_contains "both members resume in the first batch" "$out4b" "2 resumed"
 tmux kill-window -t "$WM_TMUX_SESSION:wm-lk1" 2>/dev/null
 wm_state crew-set --id lk1 --status died >/dev/null
-out4c="$(WM_AGENT="$ALIVE_STUB" "$CR" lk1 2>&1)"
+out4c="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" lk1 2>&1)"
 assert_contains "the re-died member (processed first in the earlier batch) resumes again" "$out4c" "1 resumed"
 assert_eq "its status flips back to working" "$(field_of lk1 status)" "working"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- a --resume that exits immediately falls back to the manual path ----------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id r5 --type developer --objective x --repo /tmp --window wm-r5 --session-id sess-r5 >/dev/null
 wm_state crew-set --id r5 --status died >/dev/null
-out5="$(WM_AGENT="$DEAD_STUB" WM_RESUME_VERIFY_WINDOW=5 WM_RESUME_VERIFY_POLL=1 "$CR" r5 2>&1)"
+out5="$(WM_AGENT_BIN_OVERRIDE="$DEAD_STUB" WM_RESUME_VERIFY_WINDOW=5 WM_RESUME_VERIFY_POLL=1 "$CR" r5 2>&1)"
 assert_contains "a failed resume reports the manual fallback" "$out5" "resume failed"
 assert_eq "status is left died after a failed resume" "$(field_of r5 status)" "died"
 assert_false "the vanished window is not left behind" \
@@ -361,12 +380,13 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # --- outage-timing guard (issue #23, item 3): refuses while the fleet
 # outage-state reads active, unless --force is passed ------------------------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id o1 --type developer --objective x --repo /tmp --window wm-o1 --session-id sess-o1 >/dev/null
 wm_state crew-set --id o1 --status died >/dev/null
 printf '{"state": "active", "since": "2026-07-15T00:00:00.000000Z", "last_signal": null, "signal_count": 2}\n' \
   > "$WINGMAN_HOME/api-outage-state.json"
-out_o1="$(WM_AGENT="$ALIVE_STUB" "$CR" o1 2>&1)"; rc_o1=$?
+out_o1="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" o1 2>&1)"; rc_o1=$?
 assert_eq "crew-resume refuses while the outage is active" "$rc_o1" "1"
 assert_contains "the refusal names the outage" "$out_o1" "API outage is currently active"
 assert_contains "the refusal names the --force escape hatch" "$out_o1" "--force"
@@ -374,41 +394,44 @@ assert_eq "the member stays died, nothing was relaunched" "$(field_of o1 status)
 assert_false "no window was created for the refused resume" \
   "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-o1"
 
-out_o2="$(WM_AGENT="$ALIVE_STUB" "$CR" o1 --force 2>&1)"
+out_o2="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" o1 --force 2>&1)"
 assert_contains "--force proceeds despite the active outage" "$out_o2" "1 resumed"
 assert_eq "the member resumes (status flips to working) with --force" "$(field_of o1 status)" "working"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # A --all-died batch is refused the identical way.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id o3 --type developer --objective x --repo /tmp --window wm-o3 --session-id sess-o3 >/dev/null
 wm_state crew-set --id o3 --status died >/dev/null
 printf '{"state": "active", "since": "2026-07-15T00:00:00.000000Z", "last_signal": null, "signal_count": 2}\n' \
   > "$WINGMAN_HOME/api-outage-state.json"
-out_o3="$(WM_AGENT="$ALIVE_STUB" "$CR" --all-died 2>&1)"; rc_o3=$?
+out_o3="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" --all-died 2>&1)"; rc_o3=$?
 assert_eq "--all-died also refuses while the outage is active" "$rc_o3" "1"
 assert_eq "the member stays died" "$(field_of o3 status)" "died"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # A clear (or absent) outage state never gates a resume at all.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id o4 --type developer --objective x --repo /tmp --window wm-o4 --session-id sess-o4 >/dev/null
 wm_state crew-set --id o4 --status died >/dev/null
 printf '{"state": "clear", "since": "2026-07-15T00:00:00.000000Z", "last_signal": null, "signal_count": 0}\n' \
   > "$WINGMAN_HOME/api-outage-state.json"
-out_o4="$(WM_AGENT="$ALIVE_STUB" "$CR" o4 2>&1)"
+out_o4="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" o4 2>&1)"
 assert_contains "state clear: resume proceeds without --force" "$out_o4" "1 resumed"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # No state file at all (fresh install) fails open, matching the spawn guard's
 # own posture.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id o5 --type developer --objective x --repo /tmp --window wm-o5 --session-id sess-o5 >/dev/null
 wm_state crew-set --id o5 --status died >/dev/null
-out_o5="$(WM_AGENT="$ALIVE_STUB" "$CR" o5 2>&1)"
+out_o5="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" o5 2>&1)"
 assert_contains "no state file: resume proceeds without --force" "$out_o5" "1 resumed"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
@@ -418,10 +441,11 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # forever. WM_RESUME_VERIFY_WINDOW=6 sets a deadline comfortably past the
 # stub's 4s delayed crash, so the verify loop's polling must catch it.
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id dc1 --type developer --objective x --repo /tmp --window wm-dc1 --session-id sess-dc1 >/dev/null
 wm_state crew-set --id dc1 --status died >/dev/null
-out_dc="$(WM_AGENT="$DELAYED_CRASH_STUB" WM_RESUME_VERIFY_WINDOW=6 WM_RESUME_VERIFY_POLL=0.3 "$CR" dc1 2>&1)"
+out_dc="$(WM_AGENT_BIN_OVERRIDE="$DELAYED_CRASH_STUB" WM_RESUME_VERIFY_WINDOW=6 WM_RESUME_VERIFY_POLL=0.3 "$CR" dc1 2>&1)"
 assert_contains "a delayed crash inside the verify window is caught, not reported as resumed" "$out_dc" "resume failed"
 assert_not_contains "a delayed crash never gets reported as resumed" "$out_dc" "1 resumed"
 assert_eq "status is left died for a delayed crash caught by the verify window" "$(field_of dc1 status)" "died"
@@ -434,11 +458,12 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 REMOVED_WT="$STUB_DIR/worktree-cleaned-up-after-merge"
 mkdir -p "$REMOVED_WT"; rmdir "$REMOVED_WT"
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id wt1 --type developer --objective x --repo /tmp \
   --window wm-wt1 --session-id sess-wt1 --worktree "$REMOVED_WT" >/dev/null
 wm_state crew-set --id wt1 --status died >/dev/null
-out_wt="$(WM_AGENT="$ALIVE_STUB" "$CR" wt1 2>&1)"
+out_wt="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" wt1 2>&1)"
 assert_contains "a missing worktree falls back to the repo root instead of failing" "$out_wt" "1 resumed"
 assert_contains "the operator is told about the fallback" "$out_wt" "no longer exists"
 assert_eq "status flips to working despite the missing worktree" "$(field_of wt1 status)" "working"
@@ -460,11 +485,12 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 LIVE_WT="$STUB_DIR/worktree-still-here"
 mkdir -p "$LIVE_WT"
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id wt2 --type developer --objective x --repo /tmp \
   --window wm-wt2 --session-id sess-wt2 --worktree "$LIVE_WT" >/dev/null
 wm_state crew-set --id wt2 --status died >/dev/null
-out_wt2="$(WM_AGENT="$ALIVE_STUB" "$CR" wt2 2>&1)"
+out_wt2="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" wt2 2>&1)"
 assert_contains "an existing worktree still resumes normally" "$out_wt2" "1 resumed"
 launch_wt2="$(cat "$WINGMAN_HOME/crew/wt2.resume.sh")"
 assert_contains "the launch script cd's into the worktree" "$launch_wt2" "cd '$LIVE_WT'"
@@ -474,10 +500,11 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- #221 part 2: a fast-crashing resume surfaces its captured stderr --------
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id se1 --type developer --objective x --repo /tmp --window wm-se1 --session-id sess-se1 >/dev/null
 wm_state crew-set --id se1 --status died >/dev/null
-out_se="$(WM_AGENT="$STDERR_CRASH_STUB" "$CR" se1 2>&1)"
+out_se="$(WM_AGENT_BIN_OVERRIDE="$STDERR_CRASH_STUB" "$CR" se1 2>&1)"
 assert_contains "a stderr-crashing resume still reports the manual fallback" "$out_se" "resume failed"
 assert_contains "the real cause is surfaced from the captured stderr, not just the generic message" \
   "$out_se" "invalid session id xyz"
@@ -498,6 +525,7 @@ mkdir -p "$REMOVED_WT2"; rmdir "$REMOVED_WT2"
 LIVE_WT2="$STUB_DIR/worktree-still-here-batch"
 mkdir -p "$LIVE_WT2"
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id wt3 --type developer --objective x --repo /tmp \
   --window wm-wt3 --session-id sess-wt3 --worktree "$REMOVED_WT2" >/dev/null
@@ -505,7 +533,7 @@ wm_state crew-add --id wt4 --type developer --objective x --repo /tmp \
   --window wm-wt4 --session-id sess-wt4 --worktree "$LIVE_WT2" >/dev/null
 wm_state crew-set --id wt3 --status died >/dev/null
 wm_state crew-set --id wt4 --status died >/dev/null
-out_batch="$(WM_AGENT="$DIALOG_STUB" "$CR" --all-died 2>&1)"
+out_batch="$(WM_AGENT_BIN_OVERRIDE="$DIALOG_STUB" "$CR" --all-died 2>&1)"
 assert_contains "both batch members resume despite each one's undeliverable nudge" "$out_batch" "2 resumed"
 q_wt3="$(ls "$WINGMAN_HOME/outbox/wt3" 2>/dev/null | grep -v '^sent-' | head -1)"
 q_wt4="$(ls "$WINGMAN_HOME/outbox/wt4" 2>/dev/null | grep -v '^sent-' | head -1)"
@@ -517,18 +545,12 @@ assert_not_contains "the flag does not leak: the healthy member's queued nudge c
   "$(cat "$WINGMAN_HOME/outbox/wt4/$q_wt4" 2>/dev/null)" "re-isolate into a fresh worktree"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
-# --- issue #25 review round 1, finding 3: WM_AGENT_BIN_OVERRIDE is honored
-# as a FALLBACK exec target when $WM_AGENT is unset -----------------------
-# The regression this guards: wm_guard_test_fixture_agent (bin/lib/common.sh)
-# now accepts WM_AGENT_BIN_OVERRIDE as proof "a stub was configured" (it has
-# to, since that is the suite's own ambient default post-#25 - see
-# tests/lib.sh), but this file's own exec-line composition, unconverted
-# until this file gets its own adapter port, must still land on that SAME
-# stub, not silently fall through to `exec claude` once the guard's own
-# check no longer requires $WM_AGENT specifically. Explicit WM_AGENT still
-# wins when a test sets it (every other case in this file relies on that,
-# unchanged) - only the fallback ORDER when $WM_AGENT is unset is under test
-# here.
+# --- issue #25: crew-resume's own exec target is fully descriptor-driven ---
+# (plan step 5, superseding round 1's original quick fix - $WM_AGENT is no
+# longer read directly for the exec target at all; the roster's own `agent`
+# field selects the descriptor via wm_agent_resolve, and
+# WM_AGENT_BIN_OVERRIDE - the suite's own ambient default, tests/lib.sh -
+# redirects its resolved WM_AGENT_BIN exactly like bin/spawn-crew's does.)
 FALLBACK_STUB="$STUB_DIR/fallback-marker.sh"
 FALLBACK_MARKER="$STUB_DIR/fallback-invoked"
 cat > "$FALLBACK_STUB" <<EOF
@@ -538,14 +560,90 @@ exec sleep 600
 EOF
 chmod +x "$FALLBACK_STUB"
 test_new_home
+wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 wm_state crew-add --id fb1 --type developer --objective x --repo /tmp --window wm-fb1 --session-id sess-fb1 >/dev/null
 wm_state crew-set --id fb1 --status died >/dev/null
-out_fb="$(env -u WM_AGENT WM_AGENT_BIN_OVERRIDE="$FALLBACK_STUB" "$CR" fb1 2>&1)"
-assert_contains "with \$WM_AGENT unset, WM_AGENT_BIN_OVERRIDE alone still resumes" "$out_fb" "1 resumed"
+out_fb="$(WM_AGENT_BIN_OVERRIDE="$FALLBACK_STUB" "$CR" fb1 2>&1)"
+assert_contains "a legacy record (no agent field) still resumes via the claude descriptor's own resolution" "$out_fb" "1 resumed"
 assert_true "the fallback stub was the one actually execed, not real claude" "[ -f '$FALLBACK_MARKER' ]"
 assert_contains "the launch script's exec line names the fallback stub" \
   "$(grep '^exec ' "$WINGMAN_HOME/crew/fb1.resume.sh" 2>/dev/null)" "$FALLBACK_STUB"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# --- issue #25 plan §4.8 / §7 test 8: relaunch mode's actual composed brief -
+# (PR #335 review round 1, finding 4: this file previously had zero coverage
+# of relaunch mode itself - only tests/crew-takeover.test.sh's hint-text
+# check, which never runs bin/crew-resume at all). A throwaway descriptor
+# with no WM_AGENT_RESUME_FLAG (same shape as crew-takeover.test.sh's own
+# __test-no-resume-flag, unconditionally removed before test_summary since
+# this file cannot use its own trap) forces relaunch mode; WM_AGENT_SYSPROMPT_
+# MODE=positional folds the whole composed payload into the launch script's
+# own command line, so it can be asserted on directly with no live-pane
+# capture needed - WM_AGENT_OPENING_DELIVERED_AT_LAUNCH=1 for this mode, so
+# crew-resume never attempts a separate post-launch nudge either. ------------
+RELAUNCH_DESC="$TEST_REPO/bin/lib/agents/__test-relaunch-positional.sh"
+cat > "$RELAUNCH_DESC" <<'EOF'
+WM_AGENT_BIN="__test-relaunch-positional"
+WM_AGENT_DISPLAY_NAME="Test Relaunch Positional Adapter"
+WM_AGENT_SYSPROMPT_MODE=positional
+EOF
+test_new_home
+wm_trust_repo /tmp
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id rl1 --type developer \
+  --objective "port the widget subsystem to the new adapter layer" \
+  --input "docs/plans/widget-plan.md" \
+  --repo /tmp --window wm-rl1 --session-id sess-rl1 \
+  --agent __test-relaunch-positional >/dev/null
+wm_state crew-set --id rl1 --status died --artifact /tmp/widget-report.md \
+  --delivery "https://github.com/x/y/pull/9" --allow-merge true \
+  --summary "landed the first half; second half still open" >/dev/null
+out_rl="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" rl1 2>&1)"
+assert_contains "relaunch (no resume flag) still reports resumed" "$out_rl" "1 resumed"
+assert_eq "relaunch preserves the crew id's window name" "$(field_of rl1 window)" "wm-rl1"
+assert_true "the relaunched window exists under the SAME name" \
+  "tmux list-windows -t '$WM_TMUX_SESSION' -F '#{window_name}' 2>/dev/null | grep -qx wm-rl1"
+rl_script="$(cat "$WINGMAN_HOME/crew/rl1.resume.sh")"
+# Round 2 nice-to-have: relaunch mode's whole point is that it composes NO
+# resume-shaped flag (there is no session to resume) - the property this
+# mode exists to guarantee, worth a permanent, explicit negative rather than
+# only exercising it incidentally via the fixture's throwaway descriptor
+# never defining WM_AGENT_RESUME_FLAG in the first place.
+assert_not_contains "relaunch composes no resume-shaped flag at all" "$rl_script" "--resume"
+# Finding 2: the objective is actually present, not silently dropped.
+assert_contains "relaunch brief carries the 'your assignment' section" "$rl_script" "Your assignment (unchanged since spawn)"
+assert_contains "...with the actual objective text" "$rl_script" "port the widget subsystem to the new adapter layer"
+# Finding 3: the --input handoff pointer survives into BOTH the rebuilt
+# sysprompt.md (via wm_compose_crew_sysprompt) and the relaunch note itself,
+# rather than being silently dropped when the file is overwritten.
+assert_contains "relaunch brief's assignment section carries the input handoff pointer" "$rl_script" "docs/plans/widget-plan.md"
+rl_sysprompt="$(cat "$WINGMAN_HOME/crew/rl1.sysprompt.md")"
+assert_contains "the rebuilt sysprompt.md itself still carries the original input handoff" \
+  "$rl_sysprompt" "Input handoff: read the plan/spec at \`docs/plans/widget-plan.md\` and follow it."
+# The rest of the three-layer progress note, unaffected by this fix but worth
+# confirming still present and in the right relative order now that a new
+# section was inserted ahead of them.
+assert_contains "durably-recorded section: the artifact" "$rl_script" "widget-report.md"
+assert_contains "durably-recorded section: the delivery" "$rl_script" "pull/9"
+assert_contains "durably-recorded section: allow_merge" "$rl_script" "Merge autonomy (--allow-merge) is already granted"
+assert_contains "worktree-state section header present" "$rl_script" "Worktree state as of relaunch"
+assert_contains "last-reported-summary section present" "$rl_script" "Your own last reported summary"
+assert_contains "...with the actual summary text" "$rl_script" "landed the first half; second half still open"
+order_check="$(uv run --no-project --quiet python -c '
+import sys
+text = sys.stdin.read()
+markers = [
+    "Your assignment (unchanged since spawn)",
+    "What is already durably recorded",
+    "Worktree state as of relaunch",
+    "Your own last reported summary",
+]
+positions = [text.find(m) for m in markers]
+print("ok" if all(p != -1 for p in positions) and positions == sorted(positions) else "bad: %r" % positions)
+' <<<"$rl_script")"
+assert_eq "the four sections appear in the documented order (assignment, durable grants, worktree, summary)" "$order_check" "ok"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+rm -f "$RELAUNCH_DESC"
 
 test_summary
