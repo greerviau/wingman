@@ -8,6 +8,17 @@ set -u
 
 HOOK="$TEST_REPO/hooks/stop-guard.sh"
 
+# field <id> <key> - extract one field from crew-get's JSON (issue #331's
+# announced-stability regression needs the raw announced stamp, not just a
+# substring match).
+field() {
+  wm_state crew-get --id "$1" | uv run --no-project --quiet python3 -c "
+import json, sys
+v = json.load(sys.stdin).get('$2')
+print(v if v is not None else '')
+"
+}
+
 test_new_home
 wm_state crew-add --id h1 --type developer --objective x --repo /tmp --window wm-h1 --session-id s1 >/dev/null
 wm_state crew-set --id h1 --status blocked --blocker "need a call on the API shape" >/dev/null
@@ -137,6 +148,10 @@ unset WINGMAN_CREW_ID
 # default now (issue #185), same as out4, with the same three companions.
 test_new_home
 export WINGMAN_CREW_ID=lead2
+# issue #331: lead2 itself must be a registered crew member (not just its
+# child wkr2) for the new crew-get-based assertions below to succeed at all.
+wm_state crew-add --id lead2 --type lead --objective x --repo /tmp --window wm-lead2 --session-id s-lead2 >/dev/null
+wm_state crew-set --id lead2 --status working --summary busy >/dev/null
 wm_state crew-add --id wkr2 --type developer --objective x --repo /tmp --window wm-wkr2 --session-id s2 --parent lead2 >/dev/null
 wm_state crew-set --id wkr2 --status working --summary "coding" >/dev/null
 sleep 30 & gpid=$!
@@ -156,6 +171,33 @@ export WINGMAN_RUN_ID=lead2-run
 outeg="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
 assert_contains "an active owner-scoped standdown: the composed remedy text" "$outeg" "test remedy text"
 assert_not_contains "an active owner-scoped standdown: NOT the routine nudge" "$outeg" "Arm one by running 'bin/watch-fleet'"
+
+# issue #331: the hook's marker-active branch mechanically re-asserts lead2's
+# OWN crew-set status too, not just the model-facing Stop-block reason.
+lead2_get="$(wm_state crew-get --id lead2)"
+assert_contains "the mechanical re-assertion flips lead2 to blocked" "$lead2_get" "\"status\": \"blocked\""
+assert_contains "the mechanical re-assertion's blocker carries the standdown tag" "$lead2_get" "\"blocker\": \"watch-fleet-standdown:"
+
+# The announced-stability regression (§1.2 of the plan): calling
+# wm_assert_standdown_blocked again on an UNCHANGED already-blocked+tagged
+# record must not re-bump `announced` - that bump is what would defeat
+# needs-attention's ack/handled dedup and re-surface the same standdown as a
+# brand-new event on every Stop event the marker holds (a wake-storm).
+announced1="$(field lead2 announced)"
+assert_true "announced is stamped after the first re-assertion" "[ -n '$announced1' ]"
+bash "$HOOK" <<<'{"stop_hook_active": false}' >/dev/null
+announced2="$(field lead2 announced)"
+assert_eq "a second Stop event with the marker unchanged does not re-bump announced" "$announced2" "$announced1"
+
+# Case 3, the actual incident regression: the affected session's own errant
+# self-report ("not re-arming") clobbers the blocked status set by the trip.
+# The hook's own re-assertion, on the very next Stop event, must restore it.
+wm_state crew-set --id lead2 --status working --summary "standdown tripped - not re-arming" >/dev/null
+assert_contains "the self-report genuinely clobbered the status first" "$(wm_state crew-get --id lead2)" "\"status\": \"working\""
+bash "$HOOK" <<<'{"stop_hook_active": false}' >/dev/null
+lead2_restored="$(wm_state crew-get --id lead2)"
+assert_contains "the hook's re-assertion restores lead2 to blocked" "$lead2_restored" "\"status\": \"blocked\""
+assert_contains "the restored blocker again carries the standdown tag" "$lead2_restored" "\"blocker\": \"watch-fleet-standdown:"
 
 printf '%s\n%s\n' "some-other-run" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch-lead2.suppressed"
 outeh="$(printf '{"stop_hook_active": false}' | bash "$HOOK")"
