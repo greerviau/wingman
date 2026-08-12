@@ -741,13 +741,19 @@ assert_true "the first iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid
 # that is neither, the genuinely quiet "nothing left to do here" case this
 # test means to exercise.
 wm_state crew-set --id d7d --status stood-down --summary "wrapped up" >/dev/null
-_start7d="$(date +%s)"
 assert_true "the hook exits" "wait_for_gone $h7d 100"
-_elapsed7d=$(( $(date +%s) - _start7d ))
 wait "$h7d" 2>/dev/null
 out7d="$(cat "$WINGMAN_HOME/hook7d.out" 2>/dev/null)"
 assert_eq "no stdout - the empty-fleet break is silent" "$out7d" ""
-assert_true "the exit happened well inside the 60s lifetime (the fleet-empty break fired, not the budget)" "[ '$_elapsed7d' -lt 40 ]"
+# issue #346: was a wall-clock "$_elapsed7d -lt 40" proxy for "broke on the
+# first iteration, not a second window" - real but load-sensitive (a
+# genuinely correct exit can still take longer than 40s under heavy
+# contention, per the ~14x uv-subprocess slowdown docs/analysis/
+# 2026-08-11-test-suite-slowness-investigation.md measured). The file
+# already has the load-independent observable for exactly this - the same
+# armed-count check cases 7/7b/7e/7f/8e use.
+armed_count7d="$(grep -c 'armed pid=' "$WINGMAN_HOME/stop-autoarm.log" 2>/dev/null)"
+assert_eq "the fleet-empty break fired after exactly one claim, not a second window" "$armed_count7d" "1"
 assert_false "no live watch-fleet child is left behind" "[ -f '$WINGMAN_HOME/watch.pid' ]"
 unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1  # restore the file-level lever, not merely unset it
 
@@ -1053,7 +1059,11 @@ while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
     fi
     sleep 0.1; _n=$((_n+1))
   done
-  wait_for_gone "$hp" 100 >/dev/null 2>&1
+  # 300 tries (60s), not the 100-try default (issue #346): this loop's own
+  # kill reaches hook exit via the same external-SIGKILL -> --classify
+  # forensics chain as case 8e above, which already needed 300 tries under
+  # real CI contention for the identical reason.
+  wait_for_gone "$hp" 300 >/dev/null 2>&1
   wait "$hp" 2>/dev/null
   _trip_out="$(cat "$WINGMAN_HOME/sr$_round.out" 2>/dev/null)"
   _trip_err="$(cat "$WINGMAN_HOME/sr$_round.err" 2>/dev/null)"
@@ -1121,7 +1131,9 @@ while [ ! -f "$WINGMAN_HOME/watch-d8h.suppressed" ] && [ "$_oround" -lt 6 ]; do
     fi
     sleep 0.1; _on=$((_on+1))
   done
-  wait_for_gone "$ohp" 100 >/dev/null 2>&1
+  # 300 tries (60s), not the 100-try default (issue #346): same
+  # kill -> --classify forensics chain as case 8e/8b above, owner-scoped.
+  wait_for_gone "$ohp" 300 >/dev/null 2>&1
   wait "$ohp" 2>/dev/null
 done
 assert_true "the owner-scoped standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch-d8h.suppressed' ]"
@@ -1206,14 +1218,34 @@ unset WINGMAN_RUN_ID
 rm -f "$WINGMAN_HOME/watch.suppressed"
 
 # --- (9) The referee's write-before-kill ordering + the wait-time snapshot ---
+#
+# issue #346: both sub-cases below need to land the fire/kill NEAR the
+# window's own natural expiry (that proximity is the whole point - it's what
+# exercises the write-before-kill race in hooks/stop-continuity.sh, not an
+# incidental detail) - but a FIXED post-claim sleep assumes the claim itself
+# consumed close to none of the window's budget. It doesn't: the referee's
+# own `sleep "$window"` (hooks/stop-continuity.sh:527) starts essentially
+# concurrently with the child's own spawn, not after this test's own
+# wait_for_file returns, so claim time comes directly out of the same
+# budget the fixed sleep assumed was still fully available (the same root
+# cause issue #308 diagnosed for case 7c', below). Fixed by measuring the
+# actual elapsed time since the hook was launched and sleeping only what's
+# actually left, minus a safety margin - this lands consistently near
+# expiry regardless of how long the claim took, instead of assuming it took
+# ~0s. The window itself is also widened (8->30, 5->30) for absolute slack,
+# matching the 10-30s windows already used elsewhere in this file for
+# exactly this reason (cases 7b, 7e, 8b, 8h).
 new_home
 add_crew_window d9
 wm_state crew-set --id d9 --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=8
+export WM_STOP_CONTINUITY_WINDOW=30
+_start9="$(date +%s)"
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook9r.out" 2>&1 &
 h9r=$!; wm_track "$h9r"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
-sleep 3
+_elapsed9=$(( $(date +%s) - _start9 ))
+_remaining9=$(( WM_STOP_CONTINUITY_WINDOW - _elapsed9 - 3 ))
+[ "$_remaining9" -gt 0 ] && sleep "$_remaining9"
 wm_state crew-set --id d9 --status review --summary "done" >/dev/null
 assert_true "the hook exits (via fire, not the referee's rollover)" "wait_for_gone $h9r 100"
 wait "$h9r" 2>/dev/null
@@ -1225,19 +1257,27 @@ unset WM_STOP_CONTINUITY_WINDOW
 new_home
 add_crew_window d9b
 wm_state crew-set --id d9b --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=5
+export WM_STOP_CONTINUITY_WINDOW=30
+_start9b="$(date +%s)"
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook9s.out" 2>&1 &
 h9s=$!; wm_track "$h9s"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid9s="$(cat "$WINGMAN_HOME/watch.pid")"
 # Kill the child directly, close to the window's own expiry (not "well
 # before" it), so the referee's own sleep could plausibly still complete
-# during the reap/cancellation gap if the snapshot fix were absent. A little
-# more slack than the bare minimum, so ordinary system-load jitter in the
-# claim/startup path doesn't turn this into a flaky test in either direction.
-sleep 4.3
+# during the reap/cancellation gap if the snapshot fix were absent. Measured
+# from the hook's own launch (see the file-wide comment above), not a fixed
+# offset - lands ~3s before expiry regardless of how long the claim itself
+# took under load.
+_elapsed9b=$(( $(date +%s) - _start9b ))
+_remaining9b=$(( WM_STOP_CONTINUITY_WINDOW - _elapsed9b - 3 ))
+[ "$_remaining9b" -gt 0 ] && sleep "$_remaining9b"
 kill -9 "$cpid9s" 2>/dev/null
-assert_true "the hook exits" "wait_for_gone $h9s 100"
+# 300 tries (60s), not the 100-try default: this kill reaches the hook's
+# exit via the same external-SIGKILL-to-a-claimed-child -> --classify
+# forensics chain as cases 7c'/8e below, which already needed 300 tries
+# under real CI contention for the identical reason (issue #346).
+assert_true "the hook exits" "wait_for_gone $h9s 300"
 wait "$h9s" 2>/dev/null
 out9s="$(cat "$WINGMAN_HOME/hook9s.out" 2>/dev/null)"
 assert_not_contains "an external kill near expiry is never misreported as rolled" "$out9s" "window rolled"
@@ -1283,8 +1323,14 @@ export WM_STOP_CONTINUITY_WINDOW=30
 manualpid=$!; wm_track "$manualpid"
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook11.out" 2>&1 &
 h11=$!; wm_track "$h11"
-sleep 2
-assert_true "exactly one cycle survives the race" "[ -s '$WINGMAN_HOME/watch.pid' ]"
+# issue #346: was a fixed `sleep 2` before checking watch.pid - under load
+# the claim negotiation between the two concurrently-started processes above
+# is not guaranteed to finish inside 2s, which would fail this assertion for
+# a reason unrelated to the property under test. `--stop` above unconditionally
+# removes $PIDFILE, so wait_for_file here can only return true once one side
+# has genuinely (re-)claimed - the same idiom case (3) already uses for the
+# identical "exactly one claims" property.
+assert_true "exactly one cycle survives the race" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 assert_true "the stale --stop sanction was cleared by whichever side won the claim" "wait_for_file_gone '$WINGMAN_HOME/watch.stopped'"
 kill -TERM "$h11" 2>/dev/null
 _survivor="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
