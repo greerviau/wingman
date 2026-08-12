@@ -32,7 +32,7 @@ GP_PYTHONPATH="$TEST_REPO/hooks/lib"
 # =============================================================================
 invariant_out="$(PYTHONPATH="$GP_PYTHONPATH" uv run --no-project --quiet python -c '
 import sys
-from guard_policy import GuardInput, GuardDenied, evaluate_no_worker_spawn_guard, evaluate_no_direct_edit_guard
+from guard_policy import GuardInput, GuardDenied, evaluate_no_worker_spawn_guard, evaluate_no_direct_edit_guard, no_direct_edit_guard_active
 
 def gi(**over):
     base = dict(tool_name="", command="", cwd="/tmp", crew_id="dev1", crew_type="",
@@ -60,9 +60,26 @@ try:
 except GuardDenied:
     edit_denied = True
 print("edit:%s" % ("denied" if edit_denied else "allowed"))
+
+# PR #338 review round 2, must-fix 1: the corpus case originally named for
+# this (see Part 2 history) went through the full bash entry point, whose
+# OWN unchanged activation pre-gate short-circuits before crew_id is unset
+# and CLAUDE_PROJECT_DIR is not set in this test context - both the buggy
+# (round-1) rsplit-based core and the fixed exact-match core produce the
+# identical bash-level outcome there regardless of which one is actually
+# running, so that corpus case could never fail even reverted to the bug
+# (reviewer confirmed this by mutation). Asserting no_direct_edit_guard_
+# active() directly, bypassing the bash pre-gate entirely, is what actually
+# exercises the fixed comparison: a category-qualified lead type
+# ("common/lead") must stay INACTIVE, matching the original bash pre-gate'"'"'s
+# own exact string comparison (`= "lead"`), not the base-role-name match
+# no-worker-spawn-guard uses for its own, different, caller-is-lead check.
+qualified_lead_active = no_direct_edit_guard_active(gi(tool_name="Edit", crew_type="common/lead"))
+print("qualified_lead_active:%s" % qualified_lead_active)
 ')"
 assert_contains "no-worker-spawn-guard fails CLOSED on an absent crew_type" "$invariant_out" "spawn:denied"
 assert_contains "no-direct-edit-guard fails OPEN on an absent crew_type (opposite direction)" "$invariant_out" "edit:allowed"
+assert_contains "no-direct-edit-guard stays inactive for a category-qualified lead type (exact-match only, asserted directly against the core)" "$invariant_out" "qualified_lead_active:False"
 
 # =============================================================================
 # Part 2: decision equivalence - pre-extraction hooks vs the rewired ones
@@ -92,6 +109,18 @@ cp "$FIXTURE_DIR/no-merge-guard.sh" "$OLD_MERGE"
 cp "$FIXTURE_DIR/no-direct-edit-guard.sh" "$OLD_EDIT"
 cp "$FIXTURE_DIR/no-worker-spawn-guard.sh" "$OLD_SPAWN"
 chmod +x "$OLD_MERGE" "$OLD_EDIT" "$OLD_SPAWN"
+# PR #338 review round 2, must-fix 2: an empty or missing fixture (a bad
+# checkout, a botched future edit to tests/fixtures/guard-policy-pre-
+# extraction/) makes the "old" side of every equivalence_check below exit 0
+# with no output regardless of input - silently losing every denial
+# comparison rather than failing loudly. Reviewer reproduced by deleting one
+# fixture: 23 run, 6 failed - the exact phantom "lost every denial" shape
+# the original extraction bug itself would have produced, not an obvious
+# setup error a future maintainer could tell apart from a real regression.
+# Fail fast and explicitly instead.
+for _fixture in "$OLD_MERGE" "$OLD_EDIT" "$OLD_SPAWN"; do
+  [ -s "$_fixture" ] || { echo "guard-policy.test.sh: fixture copy at $_fixture is empty or missing - refusing to run the decision-equivalence corpus against a broken baseline" >&2; exit 1; }
+done
 
 NEW_MERGE="$TEST_REPO/hooks/no-merge-guard.sh"
 NEW_EDIT="$TEST_REPO/hooks/no-direct-edit-guard.sh"
@@ -194,15 +223,18 @@ equivalence_check "no-direct-edit: lead, a test-runner Bash call is denied" \
 equivalence_check "no-direct-edit: lead, an ordinary Bash call is allowed" \
   "$OLD_EDIT" "$NEW_EDIT" "$(payload Bash "git status")"
 
-# PR #338 review round 1, should-fix: the original bash pre-gate's own
-# WINGMAN_CREW_TYPE=lead check is an EXACT string comparison, unlike no-
-# worker-spawn-guard's base-role-name match - a category-qualified lead
-# (e.g. "common/lead") must stay INACTIVE here, matching the original
-# byte-for-byte, not silently gain activation via a base-role-name match
-# guard_policy.py's own core must never apply on its own initiative.
-export WINGMAN_CREW_TYPE=common/lead
-equivalence_check "no-direct-edit: a category-qualified lead type (common/lead) stays inactive (exact-match only)" \
-  "$OLD_EDIT" "$NEW_EDIT" "$(payload Edit "" "" "$EDIT_REPO/x.py")"
+# PR #338 review round 1, should-fix (the exact-match lead check) is covered
+# in Part 1 above, directly against no_direct_edit_guard_active(), not here:
+# review round 2, must-fix 1 found that an equivalence_check for this shape
+# routes through both hook scripts' OWN UNCHANGED bash activation pre-gate,
+# which exits before crew_id/CLAUDE_PROJECT_DIR ever reach python in this
+# test's own env (crew_id unset, no CLAUDE_PROJECT_DIR) - so it produces the
+# identical bash-level outcome whether the core's own comparison is exact-
+# match or the round-1 base-role-name bug, and can never actually fail
+# either way (reviewer confirmed by reverting the fix and re-running: still
+# 23/23). A corpus case cannot exercise this specific property at all while
+# the bash pre-gate stays in front of it by design (must-fix 1.3's own
+# reasoning); asserting the core function directly is the only way to.
 
 export WINGMAN_CREW_TYPE=developer
 equivalence_check "no-direct-edit: a worker's own Edit inside a git repo is allowed (inactive)" \
