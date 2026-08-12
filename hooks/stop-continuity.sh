@@ -234,12 +234,52 @@ if found:
 # 4) - a status flip, a delivery change, or a pr-watch cycle armed
 # independently by the model can all happen mid-loop, and the tail call is
 # what stays fresh for whichever iteration follows.
+#
+# The crew-get round trip (2 subprocess spins: crew-get itself, plus the
+# python one-liner that decodes it) is skipped whenever nothing about the
+# roster could possibly have changed since THIS SAME PROCESS's own last real
+# check (PR #347 review): crew.json is the single shared roster file every
+# crew-set write touches (bin/lib/wm-state.py's cmd_crew_set), so a plain
+# `[ crew.json -nt $_cpn_sentinel ]` bash builtin - no subprocess at all -
+# is an airtight proxy for "did OWNER's own status/delivery change" (a
+# COARSER invariant than strictly needed, since it also trips on an
+# unrelated record changing, but that only ever costs one extra real
+# recheck, never a missed one). Gated on the in-memory `$_cpn_have_cache`,
+# never a sentinel inherited from a prior invocation: a brand-new hook
+# process always starts with no cached value, so its very first call - the
+# pre-loop seed call above the fast path - always does the real check
+# regardless of the sentinel file's own age. Only a LATER call from the
+# SAME process's own loop (Change 7's tail, once per iteration) can hit the
+# cache, which is exactly where the measurable, repeated overhead this
+# closes actually came from - every owner-scoped continuity loop elsewhere
+# in this codebase now paid one full crew-get round trip per iteration even
+# when nothing about its own record was changing turn to turn, immaterial
+# at the production window (~480s) but a measurable fraction of a
+# compressed test window.
+#
+# Only the record-eligibility half (crew-get + the status/delivery decode)
+# is cached - never wm_pr_watch_up's own liveness check, which depends on
+# pr-watch's own pidfile/beatfile mtimes, not crew.json, and so is NOT
+# provably unchanged just because crew.json is unchanged (an independently
+# armed or died pr-watch cycle is exactly the case AC1a's own header
+# comment above already calls out). wm_pr_watch_up therefore still runs
+# fresh on every call that reaches it - bounded to the population that
+# actually has a PR-shaped delivery in the first place, not every
+# owner-scoped invocation.
 compute_pr_watch_needed() {
   pr_watch_needed=0; pr_ref=""
   [ -n "$OWNER" ] || return 0
-  _cpn_json="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-get --id "$OWNER" 2>/dev/null)"
-  [ -n "$_cpn_json" ] || return 0
-  _cpn_fields="$(printf '%s' "$_cpn_json" | $WM_UV python -c '
+  _cpn_sentinel="$WM_HOME/stop-continuity-pwc${_okey:+-$_okey}.stamp"
+  if [ -n "${_cpn_have_cache:-}" ] && [ -f "$_cpn_sentinel" ] \
+    && ! [ "$WM_HOME/crew.json" -nt "$_cpn_sentinel" ]; then
+    _cpn_delivery="$_cpn_cached_delivery"
+  else
+    _cpn_json="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-get --id "$OWNER" 2>/dev/null)"
+    touch "$_cpn_sentinel" 2>/dev/null
+    _cpn_have_cache=1
+    _cpn_delivery=""
+    if [ -n "$_cpn_json" ]; then
+      _cpn_fields="$(printf '%s' "$_cpn_json" | $WM_UV python -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -248,13 +288,18 @@ except Exception:
 print(d.get("status") or "")
 print(d.get("delivery") or "")
 ' 2>/dev/null)"
-  _cpn_status="$(printf '%s\n' "$_cpn_fields" | sed -n 1p)"
-  _cpn_delivery="$(printf '%s\n' "$_cpn_fields" | sed -n 2p)"
-  case "$_cpn_status" in
-    working|review) : ;;
-    *) return 0 ;;
-  esac
-  printf '%s' "$_cpn_delivery" | grep -Eq '/pull/[0-9]+$' || return 0
+      _cpn_status="$(printf '%s\n' "$_cpn_fields" | sed -n 1p)"
+      _cpn_delivery_candidate="$(printf '%s\n' "$_cpn_fields" | sed -n 2p)"
+      case "$_cpn_status" in
+        working|review)
+          printf '%s' "$_cpn_delivery_candidate" | grep -Eq '/pull/[0-9]+$' \
+            && _cpn_delivery="$_cpn_delivery_candidate"
+          ;;
+      esac
+    fi
+    _cpn_cached_delivery="$_cpn_delivery"
+  fi
+  [ -n "$_cpn_delivery" ] || return 0
   wm_pr_watch_up "$OWNER" "$WM_HOME"
   [ "$pr_watch_up" = 1 ] && return 0
   pr_watch_needed=1
