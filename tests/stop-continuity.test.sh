@@ -972,18 +972,9 @@ kill -9 "$cpide" 2>/dev/null
 # check) - several `uv run --no-project` subprocess spawns, each with real
 # startup overhead that grows under the same CPU-saturating CI parallelism.
 # The default 100-try (20s) wait_for_gone budget was generous enough for a
-# quiet local run but not always enough under real contention; widened to
-# 300 (60s) first, which still timed out under real CI load (window=3600
-# above already rules out the referee-race mechanism 7c' had - that fix DID
-# hold here too, since this failure is a genuine wait_for_gone TIMEOUT, not
-# a misclassification like 7c's own "window rolled" symptom was). This
-# specific block does more real subprocess work before the kill than 7c'
-# does (an extra wait_for_content on $armlog, on top of the same --classify/
-# active_crew-recheck/budget-check chain afterward), so under sufficiently
-# heavy contention the aggregate real time can still exceed 60s even with
-# the race itself gone. Widened again, with real headroom this time rather
-# than another minimal bump.
-assert_true "the hook notices the death and exits" "wait_for_gone $hpe 600"
+# quiet local run but not always enough under real contention; widened for
+# headroom, not because the real work changed.
+assert_true "the hook notices the death and exits" "wait_for_gone $hpe 300"
 wait "$hpe" 2>/dev/null
 out_sre="$(cat "$WINGMAN_HOME/sre.out" 2>/dev/null)"
 assert_false "a successful-arm-then-kill is NOT misrouted to the claim-failure branch" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
