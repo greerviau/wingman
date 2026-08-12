@@ -1267,7 +1267,7 @@ fi
 : > "$BEATFILE" || true
 release_claim
 trap 'rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"; exit 0' INT TERM
-wm_ok "watcher: armed pid=$$ (interval ${INTERVAL}s)"
+wm_ok "$(date -u +%Y-%m-%dT%H:%M:%SZ) watcher: armed pid=$$ (interval ${INTERVAL}s)"
 # Forensics only - prevents nothing (issue #202, plan section 2.4: a
 # foreground and a `run_in_background: true` Bash call are indistinguishable
 # from inside this process, so nothing here can detect or refuse either
