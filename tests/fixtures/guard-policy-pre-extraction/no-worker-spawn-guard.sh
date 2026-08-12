@@ -67,10 +67,6 @@
 # Registered user-level by bin/doctor (crew sessions have their project root
 # in other repos, where this repo's project settings never load) - same
 # reasoning as every other crew-facing hook.
-#
-# issue #25 stage 3 (12a): the decision logic above is now a transport-
-# agnostic function, evaluate_no_worker_spawn_guard(), in
-# hooks/lib/guard_policy.py - this file is the Claude Code entry point only.
 # bash-3.2-safe.
 set -u
 
@@ -89,44 +85,107 @@ if [ -z "${WINGMAN_CREW_ID:-}" ]; then
 fi
 
 printf '%s' "$INPUT" | \
-  WINGMAN_CREW_ID="${WINGMAN_CREW_ID:-}" \
   WINGMAN_CREW_TYPE="${WINGMAN_CREW_TYPE:-}" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
 import json, os, sys
 
-from guard_policy import GuardDenied, GuardInput, evaluate_no_worker_spawn_guard
+from cmd_match import command_segments, resolve_command
 
 try:
     data = json.load(sys.stdin)
 except Exception:
     data = {}
 
-if not isinstance(data, dict):
-    data = {}
+if not isinstance(data, dict) or data.get("tool_name") != "Bash":
+    sys.exit(0)
 
 tool_input = data.get("tool_input", {}) or {}
-gi = GuardInput(
-    tool_name=data.get("tool_name") or "",
-    command=tool_input.get("command", "") or "",
-    cwd=data.get("cwd") or os.getcwd(),
-    crew_id=os.environ.get("WINGMAN_CREW_ID", ""),
-    crew_type=os.environ.get("WINGMAN_CREW_TYPE", ""),
-    file_path="",
-    notebook_path="",
-    project_dir="",
-    home=os.path.expanduser(os.environ.get("WINGMAN_HOME") or "~/.wingman"),
+command = tool_input.get("command", "") or ""
+
+crew_type = os.environ.get("WINGMAN_CREW_TYPE", "")
+caller_is_lead = crew_type.rsplit("/", 1)[-1] == "lead"
+
+segments = command_segments(command)
+
+PARSE_FAIL_REASON = (
+    "This command could not be fully parsed - an unterminated quote, an "
+    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+    "terminator line was never found, including inside a `bash -c`/`eval` "
+    "payload - so it is denied rather than partially checked (issue #56), "
+    "since this command mentions spawn-crew and could not be verified "
+    "safe. Reformat it into well-formed shell syntax and retry."
 )
 
-try:
-    evaluate_no_worker_spawn_guard(gi)
-except GuardDenied as e:
+
+def deny(reason):
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": str(e),
+            "permissionDecisionReason": reason,
         }
     }))
+    sys.exit(0)
+
+
+if segments is None:
+    deny(PARSE_FAIL_REASON)
+
+
+def all_flag_values(argv, *names):
+    # Every occurrence of a --type-shaped flag, not just the first: bin/
+    # the spawn-crew parsing loop itself (--type) TYPE="$2"; shift 2 is
+    # last-wins, so a single call can legally carry more than one --type
+    # token. Rather than replicate that last-wins selection exactly, this
+    # collects every occurrence and the caller denies if ANY of them
+    # resolves to "lead" - simpler than matching the precedence of
+    # spawn-crew itself, and strictly safer: it
+    # cannot be bypassed by a spawn-crew --type developer --type lead trick
+    # that relies on the hook only ever inspecting the first occurrence.
+    values = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in names and i + 1 < len(argv):
+            values.append(argv[i + 1])
+            i += 2
+            continue
+        for name in names:
+            if tok.startswith(name + "="):
+                values.append(tok[len(name) + 1:])
+                break
+        i += 1
+    return values
+
+
+for seg in segments:
+    b, argv = resolve_command(seg)
+    if not argv or b != "spawn-crew":
+        continue
+
+    if not caller_is_lead:
+        deny(
+            "Spawning crew is not yours to do from a %s session (issue "
+            "#212) - bin/spawn-crew is restricted to orchestrator-type "
+            "callers (wingman'"'"'s own top-level session, or a lead) by "
+            "CLAUDE.md'"'"'s depth cap (pilot -> wingman -> lead -> worker). "
+            "If this work genuinely needs another crew member (e.g. a "
+            "reviewer for your PR), report --status blocked naming exactly "
+            "what you need - your lead/owner spawns it as its own direct "
+            "report instead." % (crew_type or "worker")
+        )
+
+    target_types = all_flag_values(argv, "--type")
+    if any(t.rsplit("/", 1)[-1] == "lead" for t in target_types):
+        deny(
+            "A lead may not spawn a further lead (issue #212) - CLAUDE.md'"'"'s "
+            "depth cap is \"a lead spawns workers but not further leads.\" "
+            "Spawn a software-analyst/architect/developer/reviewer worker "
+            "instead; deeper management nesting is a future opt-in (see "
+            "playbooks/common/lead.md'"'"'s Guardrails section), not something "
+            "to reach for now."
+        )
+
 sys.exit(0)
 ' 2>/dev/null
 
