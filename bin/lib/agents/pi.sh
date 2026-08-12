@@ -18,14 +18,19 @@
 # see this stage's PR description for the full verification log. Confirmed
 # live: the --approve bypass flag (dialog appears without it whenever
 # project-local resources like .agents/skills exist, and is cleanly skipped
-# with it - see WM_AGENT_BYPASS_FLAG below), the composer's separated shape
-# and its exact rule character, --append-system-prompt accepting literal
+# with it - see WM_AGENT_BYPASS_FLAG below), the composer's separated shape,
+# its exact rule character, AND its byte-exact empty anchor (a genuinely
+# blank content row, confirmed against a real post-submit pane - see
+# WM_AGENT_COMPOSER_ANCHOR below), --append-system-prompt accepting literal
 # text without error, --model/--thinking/--name composing and rendering
 # correctly together in the status bar, Escape/Ctrl-C/`/quit` control
-# values, and --offline/--no-session hygiene. NOT verified live (no
-# credentials in this environment): an actual model turn, so tool-call
-# permission-prompt behavior, busy-queue behavior, and the composer's
-# byte-exact anchor glyph (if any) when genuinely idle mid-session remain
+# values, and --offline/--no-session hygiene. Also confirmed live: a real
+# submit against a pane with no configured provider still registers locally
+# (composer clears, a new error line appears in the transcript above it) -
+# proof the whole-pane-checksum fallback path genuinely detects this case,
+# not merely that the code takes that branch. NOT verified live (no
+# credentials in this environment): an actual successful model turn, so
+# tool-call permission-prompt behavior and busy-queue behavior remain
 # unconfirmed and stay at their documented degrade defaults below.
 
 WM_AGENT_BIN=pi
@@ -108,22 +113,28 @@ WM_AGENT_CLEAR_KEYS="C-c"
 # solid horizontal rule lines, no glyph or border on the content row itself
 # - exactly the plan's §4.6 "separated" shape, and its rule character (U+2500
 # "─", repeated far past WM_COMPOSER_RULE_MIN) is byte-identical to
-# common.sh's own $WM_COMPOSER_RULE_CHAR. Despite that match,
-# WM_AGENT_COMPOSER_RULE_RE/ANCHOR stay unset here exactly as the plan
-# specifies (§4.6: "the byte-exact anchor within that shape...stays not yet
-# characterized") - wm_tmux_send_message's own per-adapter swap requires
-# BOTH RULE_RE and ANCHOR non-empty before it activates (common.sh, the
-# `[ -n "$WM_AGENT_COMPOSER_RULE_RE" ] && [ -n "$WM_AGENT_COMPOSER_ANCHOR" ]`
-# guard), so setting one without the other would silently do nothing -
-# every idle-composer render this session observed showed plain typed text
-# with no leading glyph at all (unlike claude's own "❯" anchor), but without
-# a live model turn there is no way to confirm this holds for every idle
-# state (v2.1.220-style contextual hint text is a known claude-side
-# precedent per common.sh's own comment), so it is left genuinely
-# uncharacterized rather than guessed from a partial observation.
+# common.sh's own $WM_COMPOSER_RULE_CHAR, so WM_AGENT_COMPOSER_RULE_RE reuses
+# the shared ambient pattern directly rather than duplicating it.
+#
+# The anchor itself is now live-verified too (issue #25 stage 4, PR #348,
+# review follow-up): sent a real message against a live pi pane (--offline,
+# --approve, no provider credentials configured) and captured the composer
+# region immediately after Enter, once the local submit had genuinely
+# registered (confirmed by a new "Error: No API key found..." line appearing
+# in the transcript above it) - the emptied content row is a literal,
+# zero-byte blank line, not a glyph of any kind. WM_AGENT_COMPOSER_ANCHOR=""
+# is that real, confirmed value, not an unset placeholder - distinguished
+# from "not yet characterized" via WM_AGENT_COMPOSER_ANCHOR_EMPTY=1 (see
+# common.sh's own comment on this field). Only the PRE-submit fresh-launch
+# idle state was not independently re-confirmed blank in this same pass
+# (only the post-submit idle state was, directly) - no contextual-hint
+# mechanism (claude's own v2.1.220-style "❯ Try..." suggestion) was ever
+# observed for pi in this or the earlier verification pass, so this is
+# treated as the same state, not a guess.
 WM_AGENT_COMPOSER_SHAPE=separated
-WM_AGENT_COMPOSER_RULE_RE=""
+WM_AGENT_COMPOSER_RULE_RE="$WM_COMPOSER_RULE_RE"
 WM_AGENT_COMPOSER_ANCHOR=""
+WM_AGENT_COMPOSER_ANCHOR_EMPTY=1
 # Genuinely unknown, per the plan (§3: still uncharacterized for every
 # follow-on CLI) - pi has no per-tool permission-bypass system at all
 # (confirmed absent by design), so a permission prompt in the claude sense

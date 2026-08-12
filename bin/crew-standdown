@@ -16,6 +16,7 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
 ID="${1:-}"
 [ -n "$ID" ] || wm_die "usage: crew-standdown <id>"
@@ -108,14 +109,15 @@ EOF
       # menu rather than clearing it, so composer mode never reads it back as
       # "empty" and this call routinely exhausts to rc 5 even though the
       # submit itself always succeeds.
-      wm_tmux_send_message "$_target" "/remote-control"
+      _target_agent="$(wm_crew_agent_name "$cid")"
+      wm_tmux_send_message "$_target" "/remote-control" "$_target_agent"
       _rc_disc=$?
       if [ "$_rc_disc" -eq 6 ]; then
         # Busy with a composer already holding text - nothing was typed
         # (issue #214). One bounded retry gives the current turn a chance to
         # end before this member is killed with no disconnect attempt at all.
         sleep "${WM_RC_DISCONNECT_RETRY_WAIT:-3}"
-        wm_tmux_send_message "$_target" "/remote-control"
+        wm_tmux_send_message "$_target" "/remote-control" "$_target_agent"
         _rc_disc=$?
         [ "$_rc_disc" -eq 6 ] && wm_warn "'$cid's /remote-control disconnect could not be typed after one retry - the pane was still mid-turn with a pending composer. Its Remote Control registration may be left dangling after this standdown."
       fi

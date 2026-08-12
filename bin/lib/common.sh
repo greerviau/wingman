@@ -1130,6 +1130,33 @@ wm_tmux_pane_ready() {
 # every fd on it closes, including on an uncatchable SIGKILL of the
 # holder - there is no separate reclaim path to describe, because there is
 # nothing left that can go stale.
+
+# wm_crew_agent_name <id>
+#
+# The target crew member's own recorded WM_AGENT descriptor name (crew.json's
+# `agent` field, issue #25 §5 step 4), defaulting to "claude" when absent or
+# unreadable - the same default wm-state.py's crew-add and bin/crew-resume
+# already use for an unset field. Every wm_tmux_send_message call aimed at a
+# specific crew member's pane must supply that call's own $3 with this, or
+# every pane silently falls back to claude's own ambient composer rule/anchor
+# regardless of which adapter is actually resolved for that member (issue #25
+# stage 4 review finding, PR #348 MF1): a non-claude pane's composer can
+# byte-match claude's WM_COMPOSER_RULE_RE by coincidence (pi's rule character
+# is identical) while never matching its WM_COMPOSER_ANCHOR, so
+# wm_composer_is_empty never reports empty and every delivery is treated as
+# unconfirmed and endlessly re-sent.
+wm_crew_agent_name() {
+  _wcan_agent="$(wm_state crew-get --id "$1" 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print(d.get("agent") or "")' 2>/dev/null)"
+  printf '%s' "${_wcan_agent:-claude}"
+  unset _wcan_agent
+}
+
 wm_tmux_send_message() {
   wm_tmux_send_lock "$1" || return $?
   # $3 (issue #25, optional): a resolved agent NAME (not a crew id - the
@@ -1151,7 +1178,18 @@ wm_tmux_send_message() {
   _wtsm_saved_clear="${WM_CLEAR_KEYS-C-c}"
   if [ -n "${3:-}" ] && [ "${3:-}" != claude ] && [ -f "$WM_LIB/agents/$3.sh" ]; then
     wm_agent_resolve "$3"
-    if [ -n "$WM_AGENT_COMPOSER_RULE_RE" ] && [ -n "$WM_AGENT_COMPOSER_ANCHOR" ]; then
+    # An adapter whose real, live-verified empty-composer signature IS the
+    # literal empty string (pi, confirmed live - issue #25 stage 4, PR #348)
+    # cannot express that through WM_AGENT_COMPOSER_ANCHOR alone: an empty
+    # shell variable is indistinguishable from "field never populated,"
+    # which is exactly the OTHER, far more common case this same emptiness
+    # already has to mean (every adapter whose anchor is still genuinely "not
+    # yet characterized"). WM_AGENT_COMPOSER_ANCHOR_EMPTY is the explicit,
+    # affirmative escape hatch: set only once a live pane has actually
+    # confirmed the emptied composer renders as nothing at all, never
+    # inferred or guessed.
+    if [ -n "$WM_AGENT_COMPOSER_RULE_RE" ] \
+       && { [ -n "$WM_AGENT_COMPOSER_ANCHOR" ] || [ "$WM_AGENT_COMPOSER_ANCHOR_EMPTY" = 1 ]; }; then
       WM_COMPOSER_RULE_RE="$WM_AGENT_COMPOSER_RULE_RE"
       WM_COMPOSER_ANCHOR="$WM_AGENT_COMPOSER_ANCHOR"
     else
@@ -1795,11 +1833,12 @@ wm_outbox_try_redeliver() {
     # next poll.
     mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null
     wm_tmux_send_message "$_tr_target" \
-      "Queued message for you: read $_tr_obsent and act on it now - it is a direct message to you, not background material."
+      "Queued message for you: read $_tr_obsent and act on it now - it is a direct message to you, not background material." \
+      "$(wm_crew_agent_name "$_tr_id")"
     _tr_rc=$?
     [ "$_tr_rc" -ne 0 ] && mv "$_tr_obsent" "$_tr_obpath" 2>/dev/null
   else
-    wm_tmux_send_message "$_tr_target" "$_tr_obmsg"
+    wm_tmux_send_message "$_tr_target" "$_tr_obmsg" "$(wm_crew_agent_name "$_tr_id")"
     _tr_rc=$?
     [ "$_tr_rc" -eq 0 ] && { mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null || rm -f "$_tr_obpath"; }
   fi

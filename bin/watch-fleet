@@ -1915,7 +1915,7 @@ for r in data:
           # issue #188) both mark the cooldown like a success - the
           # keystrokes landed either way, and hammering /remote-control every
           # poll into a pane that doesn't repaint adds nothing.
-          wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control"
+          wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "/remote-control" "$(wm_crew_agent_name "$_id")"
           _rcretry_rc=$?
           if [ "$_rcretry_rc" -eq 0 ] || [ "$_rcretry_rc" -eq 3 ] || [ "$_rcretry_rc" -eq 5 ]; then
             : > "$_rcfile"
@@ -2224,7 +2224,7 @@ for r in data:
               _nudge_age=$(( _now - _nudge_clock ))
               _nudge_confirmed=0
             else
-              wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
+              wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg" "$(wm_crew_agent_name "$_id")"
               _nudge_rc=$?
               if [ "$_nudge_rc" -eq 0 ]; then
                 printf 'confirmed %d %d\n' "$_nudge_attempts" "$_now" > "$_nudgefile"
@@ -2255,7 +2255,7 @@ for r in data:
           *)
             _nudge_clock="$_now"
             _nudge_attempts=0
-            wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg"
+            wm_tmux_send_message "$(wm_tmux_win_target "$_win")" "$_nudge_msg" "$(wm_crew_agent_name "$_id")"
             _nudge_rc=$?
             if [ "$_nudge_rc" -eq 0 ]; then
               printf 'confirmed %d %d\n' "$_nudge_attempts" "$_now" > "$_nudgefile"

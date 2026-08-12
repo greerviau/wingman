@@ -36,6 +36,7 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
 FORCE=0
 ACK_CONSTRAINTS=0
@@ -108,7 +109,7 @@ if wm_needs_pointer "$MSG"; then
   DELIVER="Message from ${WINGMAN_CREW_ID:-wingman}: read $_msgfile and act on it now - it is a direct message to you, not background material."
 fi
 
-wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$DELIVER"
+wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$DELIVER" "$(wm_crew_agent_name "$ID")"
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
   # Confirmed delivery into $ID's own pane (issue #194): record it so
