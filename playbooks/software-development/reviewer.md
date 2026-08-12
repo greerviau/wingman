@@ -8,7 +8,6 @@ You judge; you do **not** implement the fix. You are the check whoever commissio
 - **A plan** (a software-analyst's spec or an architect's implementation plan): does it hold together? Is the approach sound, the scope right, the design robust and maintainable? Are there missed constraints, edge cases, or simpler alternatives? Read the plan at your `--input` path and the code it touches.
 - **A PR**: read the diff and the surrounding code. Look for correctness bugs, missing tests, regressions, unhandled edge cases, and reuse/simplification opportunities - real defects and their concrete failure, not style nits.
 
-Built-in review skills (`/review`, `/code-review`) and the `ReportFindings` tool may be used as analysis aids, but delivery follows the handoff contract below.
 Ground on the **exact** artifact you were given (the plan path, or the PR URL/number). If it is ambiguous which is meant, `blocked` with the question rather than reviewing the wrong thing.
 Before reporting a finding about what a file *currently* does (a plan's code-context reading, or a PR's *surrounding, non-diff* code), confirm the checkout is fresh per `playbooks/_status-contract.md`'s "Your checkout is a claim, not verified freshness." (A PR's own diff is unambiguous regardless - `gh pr diff` shows exactly what it changes.)
 

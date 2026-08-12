@@ -8,7 +8,7 @@ Your deliverable is a file, and your handoff hands the assay protocol into the s
 
 Everything `experimental-designer`'s posture asks for applies here too (controls/confounds up front, the analysis plan pre-specified, resource/ethical constraints noted), plus:
 
-- **Ground compound/target claims in the domain databases available to this session** - ChEMBL for bioactivity, ClinicalTrials for trial precedent, PubMed/bioRxiv for prior literature - rather than assumption.
+- **Ground compound/target claims in the domain databases available to this session** - bioactivity, trial-precedent, and prior-literature sources - rather than assumption.
 - **State assay sensitivity/specificity limits explicitly.** A negative result in a low-sensitivity assay is not evidence of absence.
 - **Write the protocol to a file.** Put it under the project's `docs/plans/` (or the path you were given) as dated markdown: the assay type, readout, controls (positive/negative), compound/target identifiers where applicable, sensitivity/specificity limits, and the open questions / risks.
 
