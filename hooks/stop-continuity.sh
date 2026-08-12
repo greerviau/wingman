@@ -241,21 +241,49 @@ if found:
 # check (PR #347 review): crew.json is the single shared roster file every
 # crew-set write touches (bin/lib/wm-state.py's cmd_crew_set), so a plain
 # `[ crew.json -nt $_cpn_sentinel ]` bash builtin - no subprocess at all -
-# is an airtight proxy for "did OWNER's own status/delivery change" (a
-# COARSER invariant than strictly needed, since it also trips on an
-# unrelated record changing, but that only ever costs one extra real
-# recheck, never a missed one). Gated on the in-memory `$_cpn_have_cache`,
-# never a sentinel inherited from a prior invocation: a brand-new hook
-# process always starts with no cached value, so its very first call - the
-# pre-loop seed call above the fast path - always does the real check
-# regardless of the sentinel file's own age. Only a LATER call from the
-# SAME process's own loop (Change 7's tail, once per iteration) can hit the
-# cache, which is exactly where the measurable, repeated overhead this
-# closes actually came from - every owner-scoped continuity loop elsewhere
-# in this codebase now paid one full crew-get round trip per iteration even
-# when nothing about its own record was changing turn to turn, immaterial
-# at the production window (~480s) but a measurable fraction of a
-# compressed test window.
+# is a proxy for "did OWNER's own status/delivery change" (a COARSER
+# invariant than strictly needed, since it also trips on an unrelated
+# record changing, but that only ever costs one extra real recheck, never
+# a missed one on its own).
+#
+# The sentinel is touched BEFORE the crew-get read, not after (PR #347
+# round-2 review, must-fix): touching after left a real, deterministically
+# reproduced gap - a crew.json write landing between the read returning and
+# the touch running was silently and durably lost, since the sentinel's OWN
+# timestamp would then postdate that write, making the next call's `-nt`
+# check see "not newer" and serve the stale cached value forever, until
+# some UNRELATED later write happened to land after the touch. Touching
+# first means ANY write from that instant onward - including one that
+# lands WHILE the crew-get call itself is running - makes crew.json look
+# newer than the sentinel on the NEXT check, forcing a fresh read; the only
+# residual case is a write racing strictly BEFORE the touch, which the
+# crew-get read (started immediately after) already picks up directly.
+#
+# A second, independent bound closes a narrower gap even the corrected
+# ordering does not fully cover: this file is explicitly bash-3.2-safe
+# (macOS's bundled bash), and `-nt` did not gain sub-second mtime
+# resolution until well after 3.2, so two crew.json writes landing in the
+# same wall-clock second could be indistinguishable to the mtime check
+# alone on that platform. `$SECONDS` (a plain bash builtin tracking elapsed
+# seconds since this process started, no subprocess) bounds the cache's own
+# worst-case age to $WM_PR_WATCH_NEEDED_CACHE_MAX_AGE (default 5s,
+# comfortably above even the tightest compressed test window's own
+# per-iteration cost and utterly negligible against the production ~480s
+# window) regardless of what the mtime comparison reports - so even a
+# same-second write that the mtime check alone would miss is picked up
+# within a small, bounded window rather than indefinitely.
+#
+# Gated on the in-memory `$_cpn_have_cache`, never a sentinel inherited
+# from a prior invocation: a brand-new hook process always starts with no
+# cached value, so its very first call - the pre-loop seed call above the
+# fast path - always does the real check regardless of the sentinel file's
+# own age. Only a LATER call from the SAME process's own loop (Change 7's
+# tail, once per iteration) can hit the cache, which is exactly where the
+# measurable, repeated overhead this closes actually came from - every
+# owner-scoped continuity loop elsewhere in this codebase now paid one full
+# crew-get round trip per iteration even when nothing about its own record
+# was changing turn to turn, immaterial at the production window (~480s)
+# but a measurable fraction of a compressed test window.
 #
 # Only the record-eligibility half (crew-get + the status/delivery decode)
 # is cached - never wm_pr_watch_up's own liveness check, which depends on
@@ -271,11 +299,13 @@ compute_pr_watch_needed() {
   [ -n "$OWNER" ] || return 0
   _cpn_sentinel="$WM_HOME/stop-continuity-pwc${_okey:+-$_okey}.stamp"
   if [ -n "${_cpn_have_cache:-}" ] && [ -f "$_cpn_sentinel" ] \
-    && ! [ "$WM_HOME/crew.json" -nt "$_cpn_sentinel" ]; then
+    && ! [ "$WM_HOME/crew.json" -nt "$_cpn_sentinel" ] \
+    && [ $(( SECONDS - ${_cpn_cached_at:-0} )) -lt "${WM_PR_WATCH_NEEDED_CACHE_MAX_AGE:-5}" ]; then
     _cpn_delivery="$_cpn_cached_delivery"
   else
-    _cpn_json="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-get --id "$OWNER" 2>/dev/null)"
     touch "$_cpn_sentinel" 2>/dev/null
+    _cpn_cached_at="$SECONDS"
+    _cpn_json="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-get --id "$OWNER" 2>/dev/null)"
     _cpn_have_cache=1
     _cpn_delivery=""
     if [ -n "$_cpn_json" ]; then
