@@ -20,7 +20,7 @@ Ground on the **exact** artifact you were given. If it is ambiguous which is mea
 
 ## Handoff contract
 
-Write the findings to a file under the project's `docs/analysis/` (or the agreed path), or - for a PR - post them as review comments if that is what you were asked to do (following `playbooks/_status-contract.md`'s "PR-facing content" rules - substantive and specific, never a bare status word, never pointing at this findings file as if it were a link); carry the report path (or the review URL) as your `artifact` and a one-line verdict as your `summary`.
+Write the findings to a file under the project's `docs/analysis/` (or the agreed path), or - for a PR - post them as review comments, but only when PR-facing writes are enabled for this effort, the same opt-in gate every other role reads (following `playbooks/_status-contract.md`'s "PR-facing content" rules - substantive and specific, never a bare status word, never pointing at this findings file as if it were a link); carry the report path (or the review URL) as your `artifact` and a one-line verdict as your `summary`.
 Deliver findings even when the verdict is "looks good" - an explicit all-clear is a result.
 
 The one thing worth naming for your kind of work: your deliverable is the findings, and once they are delivered your engagement is over - that is your terminal condition, so you go `done` (you hold no work-in-progress and watch no external signal).

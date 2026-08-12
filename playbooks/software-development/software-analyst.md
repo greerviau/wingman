@@ -13,7 +13,8 @@ Your deliverable is a file, and your handoff to a downstream `developer` is that
   When options exist, recommend one (favor correctness, simplicity, robustness, and long-term maintainability over development cost) and note the rest as follow-ups rather than presenting a menu.
 - **Write the plan to a file.** Put it under the repo's `docs/plans/` (or the path you were given) as dated markdown.
   A good plan states: the problem, the intended approach, the concrete steps, the files touched, the testing strategy, and the open questions / risks.
-  For any open question that is a closed-set decision (a small number of genuine options you can recommend one of), structure it per `playbooks/_status-contract.md`, "Structured open questions in a deliverable," so it can be offered to the requester as an actual choice instead of relayed as prose.
+  For a closed-set open question **in that file**, structure it per `playbooks/_status-contract.md`, "Structured open questions in a deliverable," so it can be offered to the requester as an actual choice instead of relayed as prose - that convention is internal machinery bounded to the deliverable you report back, so read its own scope note before carrying it anywhere else.
+- **When the directive asks for something other than a plan file, the directive wins.** If the work is meant to land as issues, tickets, or a document of some other kind, produce that, and let the conventions your session already carries for that kind of artifact decide its shape - nothing above is a spec for it.
 
 ## Investigate-only (report mode)
 
