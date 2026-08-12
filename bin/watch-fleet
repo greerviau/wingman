@@ -214,6 +214,9 @@ if [ -n "$OWNER" ]; then
   BEATFILE="$WM_HOME/watch-$_key.beat"
   EXITFILE="$WM_HOME/watch-exit-$_key"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count-$_key"
+  # Low-volume 'rolled' telemetry (issue #196) - see the ROLLEDCOUNTFILE
+  # comment at the --classify dispatch for what this counts and why.
+  ROLLEDCOUNTFILE="$WM_HOME/watch-rolled-count-$_key"
   RUNFILE="$WM_HOME/watch-$_key.run"
   CODEFILE="$WM_HOME/watch-$_key.code"
   CODECHECKFILE="$WM_HOME/watch-$_key.codecheck"
@@ -240,6 +243,7 @@ else
   BEATFILE="$WM_HOME/watch.beat"
   EXITFILE="$WM_HOME/watch-exit"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
+  ROLLEDCOUNTFILE="$WM_HOME/watch-rolled-count"
   RUNFILE="$WM_HOME/watch.run"
   CODEFILE="$WM_HOME/watch.code"
   CODECHECKFILE="$WM_HOME/watch.codecheck"
@@ -685,6 +689,30 @@ case "$MODE" in
       # comment below for why a claim-time reset would silently revert the
       # fix this budget exists to provide).
       printf '0\n' > "$SPURCOUNTFILE"
+      # Low-volume 'rolled'-outcome telemetry (issue #196): a deliberate
+      # rollover (hooks/stop-continuity.sh's referee writing 'rolled' before
+      # its kill) is not a failure and $SPURLOG deliberately never recorded
+      # it - but that leaves no way to compute what fraction of expected
+      # rollovers actually complete cleanly vs. end up misclassified as
+      # spurious, since only the failure side was ever visible. Logging
+      # every occurrence here would dwarf $SPURLOG's existing volume (this
+      # branch can fire as often as every $WM_STOP_CONTINUITY_WINDOW, ~480s
+      # by default, per active owner), so this rolls up silently in
+      # $ROLLEDCOUNTFILE and writes exactly one $SPURLOG line, via the same
+      # spurlog() used by every other kind, per WM_ROLLED_LOG_EVERY
+      # occurrences - enough for a future investigation to derive the
+      # rollover rate from timestamps without the log growing unbounded.
+      if [ "$_outcome" = "rolled" ]; then
+        _rolled_count="$(cat "$ROLLEDCOUNTFILE" 2>/dev/null)"
+        case "$_rolled_count" in ''|*[!0-9]*) _rolled_count=0 ;; esac
+        _rolled_count=$((_rolled_count + 1))
+        _rolled_every="${WM_ROLLED_LOG_EVERY:-20}"
+        if [ "$_rolled_count" -ge "$_rolled_every" ]; then
+          spurlog rolled "count=$_rolled_count"
+          _rolled_count=0
+        fi
+        printf '%s\n' "$_rolled_count" > "$ROLLEDCOUNTFILE"
+      fi
       printf '%s\n' "$_outcome"
       exit 0
     fi
