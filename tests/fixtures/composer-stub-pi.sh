@@ -46,8 +46,14 @@ D80="$(dashes 80)"
 # redrawn screen - composer mode then finds no rule lines, falls through to
 # the whole-pane-checksum path, and confirms on the independent busy tick
 # alone. Reproduced under 12-way concurrency (round-3 review), traced to
-# exactly this non-atomicity, not to anything in the production code. One
-# write call cannot itself be observed half-done the same way.
+# exactly this non-atomicity, not to anything in the production code. A
+# single write only stays atomic up to the pty's own buffer ceiling (the
+# Linux tty line discipline's N_TTY_BUF_SIZE, 4096 bytes - a kernel
+# constant, not independently measured on this host) - this frame is well
+# under that (measured directly: ~510 bytes for a bare-idle draw, most of
+# it the two 80-column, 3-bytes-per-character U+2500 rules; ~600 bytes
+# busy with a long typed buffer), so it is genuinely one write call here,
+# not merely one printf invocation the kernel could still fragment.
 draw() {
   _pad=18
   [ "$busy" = 1 ] && _pad=$((_pad-1))

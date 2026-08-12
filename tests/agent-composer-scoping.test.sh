@@ -157,7 +157,7 @@ assert_eq "and confirms immediately - composer mode now genuinely recognizes pi'
 # content as still-pending and refuse to confirm - this is issue #188's own
 # original motivation for composer mode existing at all, now proven for
 # pi's own anchor specifically rather than merely inferred from claude's.
-SESS_D="$WM_TMUX_SESSION-composer-scope-c1"
+SESS_D="$WM_TMUX_SESSION-composer-scope-d"
 wm_track_tmux "$SESS_D"
 MARKER_D="$(wm_mktemp_file)"
 : > "$MARKER_D"
@@ -176,7 +176,7 @@ assert_true "and the REAL composer-region check (pi's live-verified anchor) corr
 # never-submitted message, which is exactly why closing the anchor gap for
 # real (rather than leaving the fallback as pi's permanent answer) is a
 # genuine correctness improvement, not merely a nice-to-have.
-SESS_E="$WM_TMUX_SESSION-composer-scope-c2"
+SESS_E="$WM_TMUX_SESSION-composer-scope-e"
 wm_track_tmux "$SESS_E"
 MARKER_E="$(wm_mktemp_file)"
 : > "$MARKER_E"
