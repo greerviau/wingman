@@ -34,6 +34,24 @@
 # Also proves the real callers (crew-say, spawn-crew's opening objective,
 # crew-resume's relaunch nudge, watch-fleet's stall nudge, wm_outbox_try_
 # redeliver) now actually supply this, via wm_crew_agent_name.
+#
+# Round-2 review addendum (PR #348): the original version of this file had
+# two must-fix gaps the reviewer found by mutation testing - reverting the
+# fix under test and confirming the suite still passed 14/14 either way.
+# Both are closed here the same way, verified with the identical technique
+# before this file was finalized:
+#   - Case B alone (a clean, non-busy submit) cannot distinguish a genuine
+#     composer-region confirm from the pre-existing whole-pane-checksum
+#     fallback - both return rc 0, since ANY registered submit changes the
+#     pane. The busy/swallow cases below close this: only a real
+#     composer-region check can correctly refuse to confirm a message that
+#     never actually cleared, on a pane that is independently repainting for
+#     an unrelated reason (issue #188's own original motivation).
+#   - The "opening objective landed in the pane" check alone cannot prove
+#     spawn-crew's own $3 threading specifically, since the stub writes its
+#     SUBMITTED marker independent of what wm_tmux_send_message's own return
+#     code ends up being. Reading spawn-crew's own confirm-or-queue outcome
+#     (its stderr warning and outbox side effect) closes this instead.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 . "$TEST_REPO/bin/lib/common.sh"
@@ -91,6 +109,25 @@ WM_COMPOSER_ANCHOR="$WM_AGENT_COMPOSER_ANCHOR"
 assert_true "wm_composer_is_empty recognizes pi's genuinely-blank emptied composer row" "wm_composer_is_empty ''"
 WM_COMPOSER_ANCHOR="$_saved_composer_anchor"
 
+# --- adjacent-rule-lines edge case (round-2 review nice-to-have) -------------
+# Two rule lines with NO content line between them at all must read as "not
+# recognized" (rc 1), never as "recognized, empty region" (rc 0 printing
+# nothing) - the two cases used to be conflated (bin/lib/common.sh's old
+# `[ start -le end ] && print; return 0` unconditionally returned 0). That
+# was harmless for every adapter whose real anchor is a non-empty glyph (an
+# empty extraction never matches it either way), but pi's own anchor is now
+# genuinely the empty string, so a degenerate adjacent-rules render would
+# otherwise byte-match it and produce a false "confirmed" without ever
+# having inspected a real content line. Not observed against a real pi pane
+# (hardening, not a reproduced failure) - this is a direct, timing-
+# independent check of the fixed function itself.
+_rule_line="$(_x=0; while [ "$_x" -lt "$WM_COMPOSER_RULE_MIN" ]; do printf '%s' "$WM_COMPOSER_RULE_CHAR"; _x=$((_x+1)); done)"
+_adjacent_pane="$(printf 'some preceding transcript line\n%s\n%s\n' "$_rule_line" "$_rule_line")"
+_adjacent_out="$(wm_composer_text_in "$_adjacent_pane")"
+_adjacent_rc=$?
+assert_eq "adjacent rule lines (no content line between them) are 'not recognized', not 'recognized empty'" "$_adjacent_rc" "1"
+assert_eq "...and nothing is printed either way" "$_adjacent_out" ""
+
 # --- case B: "pi" threaded as $3 engages REAL composer-mode confirm ---------
 SESS_B="$WM_TMUX_SESSION-composer-scope-b"
 wm_track_tmux "$SESS_B"
@@ -102,6 +139,52 @@ wm_tmux_send_message "$SESS_B:box" "hello-pi-threaded" "pi"
 rc_b=$?
 assert_eq "threaded call against the identical pi-shaped pane also submits the text" "$(grep -c SUBMITTED "$MARKER_B")" "1"
 assert_eq "and confirms immediately - composer mode now genuinely recognizes pi's own empty anchor (rc 0)" "$rc_b" "0"
+
+# --- case C: the discriminator round-2 review demanded ------------------------
+# On a genuine, non-busy submit (case B above), a real composer-region
+# confirm and the pre-existing whole-pane-checksum fallback both return rc 0
+# against this stub - a clean submit always changes SOME pane byte, so rc
+# alone can't tell them apart (round-2 review, verified by reverting
+# WM_AGENT_COMPOSER_ANCHOR_EMPTY's consumption and observing this file still
+# passed 14/14). The two mechanisms only diverge on a BUSY pane whose
+# composer never actually clears: the checksum fallback sees ANY pane change
+# (an independent busy-tick line, here) and confirms regardless, while a
+# real composer-region check must keep reading the composer's own extracted
+# content as still-pending and refuse to confirm - this is issue #188's own
+# original motivation for composer mode existing at all, now proven for
+# pi's own anchor specifically rather than merely inferred from claude's.
+SESS_D="$WM_TMUX_SESSION-composer-scope-c1"
+wm_track_tmux "$SESS_D"
+MARKER_C1="$(wm_mktemp_file)"
+: > "$MARKER_C1"
+tmux new-session -d -s "$SESS_D" -n box "WM_TEST_MARKER='$MARKER_C1' WM_TEST_BUSY=1 WM_TEST_SWALLOW=1 bash '$STUB'"
+sleep 1
+wm_tmux_send_message "$SESS_D:box" "hello-pi-busy-swallowed" "pi"
+rc_c1=$?
+assert_eq "a busy, swallowing pi pane never actually submits" "$(grep -c SUBMITTED "$MARKER_C1")" "0"
+assert_true "and the REAL composer-region check (pi's live-verified anchor) correctly never confirms it either, despite the pane visibly repainting on its own busy clock (rc 5, never rc 0)" "[ '$rc_c1' -eq 5 ]"
+
+# The SAME busy/swallowing pane, but with composer mode forced OFF
+# (WM_COMPOSER_TAIL=0 - exactly what the per-adapter swap's "not yet
+# characterized" branch sets, i.e. what pi's descriptor did before this
+# stage's live anchor capture) - this is the whole-pane-checksum fallback
+# path in isolation, proving it WOULD have falsely confirmed the identical
+# never-submitted message, which is exactly why closing the anchor gap for
+# real (rather than leaving the fallback as pi's permanent answer) is a
+# genuine correctness improvement, not merely a nice-to-have.
+SESS_E="$WM_TMUX_SESSION-composer-scope-c2"
+wm_track_tmux "$SESS_E"
+MARKER_C2="$(wm_mktemp_file)"
+: > "$MARKER_C2"
+tmux new-session -d -s "$SESS_E" -n box "WM_TEST_MARKER='$MARKER_C2' WM_TEST_BUSY=1 WM_TEST_SWALLOW=1 bash '$STUB'"
+sleep 1
+_saved_tail="$WM_COMPOSER_TAIL"
+WM_COMPOSER_TAIL=0
+wm_tmux_send_message "$SESS_E:box" "hello-pi-busy-swallowed-fallback-only"
+rc_c2=$?
+WM_COMPOSER_TAIL="$_saved_tail"
+assert_eq "the identical busy, swallowing pane still never actually submits" "$(grep -c SUBMITTED "$MARKER_C2")" "0"
+assert_true "but the whole-pane-checksum fallback alone (composer mode forced off) falsely confirms it anyway, on the busy tick alone (rc 0) - the exact false positive closing the anchor gap prevents" "[ '$rc_c2' -eq 0 ]"
 
 # --- real callers now supply the agent name end-to-end -----------------------
 # crew-say: spawn a stub-agent pi crew member for real, then confirm crew-say's
@@ -120,13 +203,27 @@ chmod +x "$WS/pi-stub.sh"
 export WM_AGENT_BIN_OVERRIDE="$WS/pi-stub.sh" WM_SPAWN_DELAY=0 WM_SUBMIT_DELAY=0.3 WM_READY_TRIES=20 WM_READY_POLL=0.3 \
   WM_SUBMIT_POLL=0.4 WM_SUBMIT_TRIES=5
 wm_trust_repo "$WS/repoA"
-pid="$("$TEST_REPO/bin/spawn-crew" --type software-analyst --repo "$WS/repoA" --agent pi --objective "composer scoping crew-say check" 2>/dev/null | tail -1)"
+SPAWN_STDERR="$(wm_mktemp_file)"
+pid="$("$TEST_REPO/bin/spawn-crew" --type software-analyst --repo "$WS/repoA" --agent pi --objective "composer scoping crew-say check" 2>"$SPAWN_STDERR" | tail -1)"
 assert_true "a pi-adapter spawn (stubbed binary) succeeds" "[ -n '$pid' ]"
-# The opening objective itself already exercises spawn-crew's own threading
-# (this is the same call site fixed above) - confirm it actually landed
-# rather than being left unconfirmed/queued.
-assert_true "the opening objective confirmed delivered at spawn time (spawn-crew's own threading)" \
-  "grep -q 'SUBMITTED:1:' '$WS/pi-crew.marker'"
+# The opening objective landing in the pane (round-2 review, MF2): the
+# keystrokes reach the pane on BOTH a threaded and an unthreaded send
+# (SUBMITTED alone proves nothing about which anchor confirmed it - the
+# stub writes it the instant it sees Enter, independent of what
+# wm_tmux_send_message's own return code ends up being), so this alone was
+# never a real guard on spawn-crew:595's own threading. What IS a real
+# guard: spawn-crew's own confirm-or-queue branch reads that return code
+# directly - if $AGENT were dropped from that call, composer mode would
+# still engage (claude's ambient rule matches pi's rule character by the
+# same coincidence as case A above) but never confirm via claude's wrong
+# anchor, landing spawn-crew on its own "NOT confirmed delivered" warning
+# and outbox-queue path. Asserting neither fired is what actually depends
+# on $AGENT reaching that call.
+assert_true "the opening objective landed in the pane" "grep -q 'SUBMITTED:1:' '$WS/pi-crew.marker'"
+assert_not_contains "and spawn-crew's own confirm check (which depends on \$AGENT reaching wm_tmux_send_message) never falls back to its NOT-confirmed warning" \
+  "$(cat "$SPAWN_STDERR")" "NOT confirmed delivered"
+assert_eq "...nor does it fall back to queuing the objective for watcher retry" \
+  "$(ls "$WINGMAN_HOME/outbox/$pid" 2>/dev/null | grep -c .)" "0"
 
 : > "$WS/pi-crew.marker"
 "$TEST_REPO/bin/crew-say" "$pid" "follow-up via crew-say" >/dev/null 2>&1

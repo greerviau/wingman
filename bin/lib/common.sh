@@ -699,9 +699,23 @@ unset _wm_ct_i
 # itself be an empty string - not the same as "not recognized" below).
 # Returns 0 when a rule pair is found in the trailing WM_COMPOSER_TAIL lines
 # of the given text, 1 ("not recognized", nothing printed) when fewer than
-# two rule lines are found there - left entirely to the caller, which
-# reverts to the pre-#188 whole-pane-checksum behavior rather than treating
-# "not recognized" as any kind of refusal.
+# two rule lines are found there, OR when the two rule lines found are
+# adjacent with no content line at all between them - left entirely to the
+# caller, which reverts to the pre-#188 whole-pane-checksum behavior rather
+# than treating "not recognized" as any kind of refusal.
+#
+# The adjacent-rules case (round-2 review, issue #25 PR #348) is
+# deliberately its own "not recognized" branch, not folded into "recognized,
+# empty region": for an adapter whose true anchor is a non-empty glyph
+# (claude's "❯"+NBSP), an empty extraction here already reads as pending,
+# so this made no observable difference. For an adapter whose real,
+# live-verified anchor genuinely IS the empty string
+# (WM_AGENT_COMPOSER_ANCHOR_EMPTY, pi), an empty extraction from adjacent
+# rules would otherwise byte-match that anchor and produce a false
+# "confirmed" for a pane that was never actually shown to be empty - no
+# content line was ever inspected at all. Not observed against a real pi
+# pane (still hardening, not a fix for a reproduced failure), but restores
+# this function's "never a false confirmed" invariant for every adapter.
 wm_composer_text_in() {
   _ct_tail="$(printf '%s\n' "$1" | tail -n "$WM_COMPOSER_TAIL")"
   _ct_idxs="$(printf '%s\n' "$_ct_tail" | grep -nE "$WM_COMPOSER_RULE_RE" | cut -d: -f1)"
@@ -711,7 +725,8 @@ wm_composer_text_in() {
   _ct_top="$(printf '%s\n' "$_ct_idxs" | tail -n2 | head -n1)"
   _ct_start=$((_ct_top+1))
   _ct_end=$((_ct_bottom-1))
-  [ "$_ct_start" -le "$_ct_end" ] && printf '%s\n' "$_ct_tail" | sed -n "${_ct_start},${_ct_end}p"
+  [ "$_ct_start" -le "$_ct_end" ] || return 1
+  printf '%s\n' "$_ct_tail" | sed -n "${_ct_start},${_ct_end}p"
   return 0
 }
 
@@ -1164,14 +1179,17 @@ wm_tmux_send_message() {
   # e.g. bin/watch-fleet's own per-member loop), used to temporarily swap
   # WM_COMPOSER_RULE_RE/WM_COMPOSER_ANCHOR/WM_COMPOSER_TAIL/WM_CLEAR_KEYS to
   # THIS member's own descriptor values for the duration of this one send,
-  # restored unconditionally afterward. No current caller passes it:
-  # composer-anchor data stays genuinely unknown for every follow-on CLI
-  # even once its own descriptor exists (plan §8), so there is nothing yet
-  # for a caller to gain by opting in - this exists so a future caller with
-  # real per-adapter composer data can use it without another signature
-  # change, and so every composer-mode call site inside
-  # _wm_tmux_send_message_locked below inherits the swap for free (they
-  # already read these globals directly, never a parameter of their own).
+  # restored unconditionally afterward. Every non-test caller now passes it
+  # (wm_crew_agent_name, PR #348): spawn-crew, crew-say, crew-ask,
+  # crew-resume, crew-standdown, watch-fleet, and wm_outbox_try_redeliver
+  # all resolve the target's own recorded adapter and supply this rather
+  # than silently classifying every pane against claude's own ambient
+  # values regardless of which adapter is actually running there - see
+  # pi.sh's own WM_AGENT_COMPOSER_ANCHOR_EMPTY for the first adapter this
+  # now genuinely changes behavior for. Every composer-mode call site
+  # inside _wm_tmux_send_message_locked below inherits the swap for free
+  # (they already read these globals directly, never a parameter of their
+  # own).
   _wtsm_saved_rule_re="$WM_COMPOSER_RULE_RE"
   _wtsm_saved_anchor="$WM_COMPOSER_ANCHOR"
   _wtsm_saved_tail="$WM_COMPOSER_TAIL"

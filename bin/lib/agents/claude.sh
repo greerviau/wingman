@@ -55,6 +55,11 @@ WM_AGENT_CLEAR_KEYS="C-c"
 WM_AGENT_COMPOSER_SHAPE=bare
 WM_AGENT_COMPOSER_RULE_RE="$WM_COMPOSER_RULE_RE"
 WM_AGENT_COMPOSER_ANCHOR="$WM_COMPOSER_ANCHOR"
+# WM_AGENT_COMPOSER_ANCHOR_EMPTY (issue #25, PR #348) is not claude's field
+# to set: claude's own anchor is a real, non-empty glyph ("❯"+NBSP) above,
+# so the ambiguity this flag exists to resolve - "is the empty anchor field
+# unset, or is empty genuinely the right value?" - never arises for it. See
+# bin/lib/agents/pi.sh for the adapter this flag was actually added for.
 WM_AGENT_PERM_PROMPT_RE="$WM_PERM_PROMPT_RE"
 WM_AGENT_PERM_OPTION_RE="$WM_PERM_OPTION_RE"
 WM_AGENT_PERM_LEAD_RE="$WM_PERM_LEAD_RE"
