@@ -38,20 +38,30 @@ tick=0
 dashes() { _n="$1"; _s=""; _i=0; while [ "$_i" -lt "$_n" ]; do _s="${_s}─"; _i=$((_i+1)); done; printf '%s' "$_s"; }
 D80="$(dashes 80)"
 
+# Builds the whole frame into one variable and emits it with a single
+# printf (round-3 review, PR #348), rather than the ~6 separate printfs the
+# first version of this file used: under real load, a reader (wm_tmux_
+# pane_text) could catch the pane between the leading clear/home escape and
+# the frame content actually landing, observing a cleared-but-not-yet-
+# redrawn screen - composer mode then finds no rule lines, falls through to
+# the whole-pane-checksum path, and confirms on the independent busy tick
+# alone. Reproduced under 12-way concurrency (round-3 review), traced to
+# exactly this non-atomicity, not to anything in the production code. One
+# write call cannot itself be observed half-done the same way.
 draw() {
-  printf '\033[2J\033[H'
   _pad=18
   [ "$busy" = 1 ] && _pad=$((_pad-1))
+  _frame=$'\033[2J\033[H'
   _p=0
-  while [ "$_p" -lt "$_pad" ]; do printf '\n'; _p=$((_p+1)); done
+  while [ "$_p" -lt "$_pad" ]; do _frame="$_frame"$'\n'; _p=$((_p+1)); done
   if [ "$busy" = 1 ]; then
     tick=$((tick+1))
-    printf 'working... tick=%d\n' "$tick"
+    _frame="$_frame""working... tick=$tick"$'\n'
   fi
-  printf '%s\n' "$D80"
-  printf '%s\n' "$buf"
-  printf '%s\n' "$D80"
-  printf '\n'
+  _frame="$_frame$D80"$'\n'
+  _frame="$_frame$buf"$'\n'
+  _frame="$_frame$D80"$'\n\n'
+  printf '%s' "$_frame"
 }
 
 draw

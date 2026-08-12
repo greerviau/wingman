@@ -706,16 +706,26 @@ unset _wm_ct_i
 #
 # The adjacent-rules case (round-2 review, issue #25 PR #348) is
 # deliberately its own "not recognized" branch, not folded into "recognized,
-# empty region": for an adapter whose true anchor is a non-empty glyph
-# (claude's "❯"+NBSP), an empty extraction here already reads as pending,
-# so this made no observable difference. For an adapter whose real,
-# live-verified anchor genuinely IS the empty string
-# (WM_AGENT_COMPOSER_ANCHOR_EMPTY, pi), an empty extraction from adjacent
-# rules would otherwise byte-match that anchor and produce a false
-# "confirmed" for a pane that was never actually shown to be empty - no
-# content line was ever inspected at all. Not observed against a real pi
-# pane (still hardening, not a fix for a reproduced failure), but restores
-# this function's "never a false confirmed" invariant for every adapter.
+# empty region". This DOES change two branches in
+# _wm_tmux_send_message_locked for claude too on that specific degenerate
+# render, not only for an adapter with an empty anchor (round-3 review:
+# verified directly by comparing old vs new behavior against an adjacent-
+# rules pane under claude's own ambient anchor - old: text_in_rc=0, the
+# busy-pane refusal fires (rc 6) and composer mode engages; new:
+# text_in_rc=1, the busy refusal no longer fires and the call falls
+# through to the whole-pane-checksum path instead). That degenerate render
+# has never been observed for claude, whose composer always carries its
+# own anchor row between the rules, so this is not a reachable regression
+# in practice - but it is a real behavior change on paper, not "no
+# observable difference." What motivates the fix is a different adapter:
+# one whose real, live-verified anchor genuinely IS the empty string
+# (WM_AGENT_COMPOSER_ANCHOR_EMPTY, pi), where an empty extraction from
+# adjacent rules would otherwise byte-match that anchor and produce a
+# false "confirmed" for a pane that was never actually shown to be empty -
+# no content line was ever inspected at all. Not observed against a real
+# pi pane either (still hardening, not a fix for a reproduced failure),
+# but restores this function's "never a false confirmed" invariant for
+# every adapter.
 wm_composer_text_in() {
   _ct_tail="$(printf '%s\n' "$1" | tail -n "$WM_COMPOSER_TAIL")"
   _ct_idxs="$(printf '%s\n' "$_ct_tail" | grep -nE "$WM_COMPOSER_RULE_RE" | cut -d: -f1)"

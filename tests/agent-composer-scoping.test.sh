@@ -113,13 +113,17 @@ WM_COMPOSER_ANCHOR="$_saved_composer_anchor"
 # Two rule lines with NO content line between them at all must read as "not
 # recognized" (rc 1), never as "recognized, empty region" (rc 0 printing
 # nothing) - the two cases used to be conflated (bin/lib/common.sh's old
-# `[ start -le end ] && print; return 0` unconditionally returned 0). That
-# was harmless for every adapter whose real anchor is a non-empty glyph (an
-# empty extraction never matches it either way), but pi's own anchor is now
-# genuinely the empty string, so a degenerate adjacent-rules render would
+# `[ start -le end ] && print; return 0` unconditionally returned 0). This
+# is a real behavior change on that degenerate render for EVERY adapter,
+# claude included (round-3 review: the busy-pane refusal, rc 6, no longer
+# fires and composer mode no longer engages there either) - not merely a
+# claude-specific no-op, even though that render has never actually been
+# observed for claude, whose composer always carries its own anchor row
+# between the rules. What the fix is actually FOR: pi's own anchor is now
+# genuinely the empty string, so this same degenerate render would
 # otherwise byte-match it and produce a false "confirmed" without ever
 # having inspected a real content line. Not observed against a real pi pane
-# (hardening, not a reproduced failure) - this is a direct, timing-
+# either (hardening, not a reproduced failure) - this is a direct, timing-
 # independent check of the fixed function itself.
 _rule_line="$(_x=0; while [ "$_x" -lt "$WM_COMPOSER_RULE_MIN" ]; do printf '%s' "$WM_COMPOSER_RULE_CHAR"; _x=$((_x+1)); done)"
 _adjacent_pane="$(printf 'some preceding transcript line\n%s\n%s\n' "$_rule_line" "$_rule_line")"
@@ -140,7 +144,7 @@ rc_b=$?
 assert_eq "threaded call against the identical pi-shaped pane also submits the text" "$(grep -c SUBMITTED "$MARKER_B")" "1"
 assert_eq "and confirms immediately - composer mode now genuinely recognizes pi's own empty anchor (rc 0)" "$rc_b" "0"
 
-# --- case C: the discriminator round-2 review demanded ------------------------
+# --- cases D and E: the discriminator round-2 review demanded -----------------
 # On a genuine, non-busy submit (case B above), a real composer-region
 # confirm and the pre-existing whole-pane-checksum fallback both return rc 0
 # against this stub - a clean submit always changes SOME pane byte, so rc
@@ -155,14 +159,14 @@ assert_eq "and confirms immediately - composer mode now genuinely recognizes pi'
 # pi's own anchor specifically rather than merely inferred from claude's.
 SESS_D="$WM_TMUX_SESSION-composer-scope-c1"
 wm_track_tmux "$SESS_D"
-MARKER_C1="$(wm_mktemp_file)"
-: > "$MARKER_C1"
-tmux new-session -d -s "$SESS_D" -n box "WM_TEST_MARKER='$MARKER_C1' WM_TEST_BUSY=1 WM_TEST_SWALLOW=1 bash '$STUB'"
+MARKER_D="$(wm_mktemp_file)"
+: > "$MARKER_D"
+tmux new-session -d -s "$SESS_D" -n box "WM_TEST_MARKER='$MARKER_D' WM_TEST_BUSY=1 WM_TEST_SWALLOW=1 WM_TEST_TICK=1.0 bash '$STUB'"
 sleep 1
 wm_tmux_send_message "$SESS_D:box" "hello-pi-busy-swallowed" "pi"
-rc_c1=$?
-assert_eq "a busy, swallowing pi pane never actually submits" "$(grep -c SUBMITTED "$MARKER_C1")" "0"
-assert_true "and the REAL composer-region check (pi's live-verified anchor) correctly never confirms it either, despite the pane visibly repainting on its own busy clock (rc 5, never rc 0)" "[ '$rc_c1' -eq 5 ]"
+rc_d=$?
+assert_eq "a busy, swallowing pi pane never actually submits" "$(grep -c SUBMITTED "$MARKER_D")" "0"
+assert_true "and the REAL composer-region check (pi's live-verified anchor) correctly never confirms it either, despite the pane visibly repainting on its own busy clock (rc 5, never rc 0)" "[ '$rc_d' -eq 5 ]"
 
 # The SAME busy/swallowing pane, but with composer mode forced OFF
 # (WM_COMPOSER_TAIL=0 - exactly what the per-adapter swap's "not yet
@@ -174,17 +178,17 @@ assert_true "and the REAL composer-region check (pi's live-verified anchor) corr
 # genuine correctness improvement, not merely a nice-to-have.
 SESS_E="$WM_TMUX_SESSION-composer-scope-c2"
 wm_track_tmux "$SESS_E"
-MARKER_C2="$(wm_mktemp_file)"
-: > "$MARKER_C2"
-tmux new-session -d -s "$SESS_E" -n box "WM_TEST_MARKER='$MARKER_C2' WM_TEST_BUSY=1 WM_TEST_SWALLOW=1 bash '$STUB'"
+MARKER_E="$(wm_mktemp_file)"
+: > "$MARKER_E"
+tmux new-session -d -s "$SESS_E" -n box "WM_TEST_MARKER='$MARKER_E' WM_TEST_BUSY=1 WM_TEST_SWALLOW=1 WM_TEST_TICK=1.0 bash '$STUB'"
 sleep 1
 _saved_tail="$WM_COMPOSER_TAIL"
 WM_COMPOSER_TAIL=0
 wm_tmux_send_message "$SESS_E:box" "hello-pi-busy-swallowed-fallback-only"
-rc_c2=$?
+rc_e=$?
 WM_COMPOSER_TAIL="$_saved_tail"
-assert_eq "the identical busy, swallowing pane still never actually submits" "$(grep -c SUBMITTED "$MARKER_C2")" "0"
-assert_true "but the whole-pane-checksum fallback alone (composer mode forced off) falsely confirms it anyway, on the busy tick alone (rc 0) - the exact false positive closing the anchor gap prevents" "[ '$rc_c2' -eq 0 ]"
+assert_eq "the identical busy, swallowing pane still never actually submits" "$(grep -c SUBMITTED "$MARKER_E")" "0"
+assert_true "but the whole-pane-checksum fallback alone (composer mode forced off) falsely confirms it anyway, on the busy tick alone (rc 0) - the exact false positive closing the anchor gap prevents" "[ '$rc_e' -eq 0 ]"
 
 # --- real callers now supply the agent name end-to-end -----------------------
 # crew-say: spawn a stub-agent pi crew member for real, then confirm crew-say's
