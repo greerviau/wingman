@@ -1258,10 +1258,26 @@ rm -f "$WINGMAN_HOME/watch.suppressed"
 # reaches that write before the referee's subsequent `kill -TERM $child`
 # can land. Widening the gap between fire()'s own ack step and its
 # $EXITFILE write (modeling contention in that same production code path,
-# not editing this test) reliably catches at a 8-9s widened gap (3/3) -
-# reachable in principle under real CI contention - while 10s held clean
-# against the real, unmutated hook (5/5, no false positive). Re-verify
-# against the same kind of mutation before changing this value.
+# not editing this test) reliably catches at a 6-8s widened gap (round 3
+# independently reconstructed this: misses at 4s, catches 2/3 at 6s,
+# catches 3/3 at 8s and 10s) while 10s held clean against the real,
+# unmutated hook across 60 runs spanning loadavg 1.5-30.3, with zero
+# failures (round 3's own measurement; round 2's original 5/5 was a
+# smaller sample of the same claim).
+#
+# Sensitivity cost, stated plainly (round 3): the identical mutation
+# against this file's pre-#346 case 9 (window=8, fixed `sleep 3`, ~4.4s
+# margin) caught at a 3s gap - so the detection floor here moved from
+# ~3s of modelled contention to ~6-8s, roughly twice as coarse. That is
+# the direct, disclosed cost of the margin going from ~4.4s to 10s, not
+# a hidden regression - case 9 now proves the fire-vs-rollover ordering
+# holds against GROSS contention in `bin/watch-fleet`'s own ack-to-write
+# gap (multiple whole seconds), not fine-grained timing at the edge of
+# what's representable; case 9b (below), whose trigger has no comparable
+# latency to budget for, is what still carries the fine-grained
+# write-before-kill coverage this file's cases used to rely on case 9 for
+# too. Re-verify against the same kind of mutation before changing either
+# number.
 new_home
 add_crew_window d9
 wm_state crew-set --id d9 --status working --summary busy >/dev/null
@@ -1277,8 +1293,14 @@ _r9="$(remaining_before_expiry "$cpid9r" "$WM_STOP_CONTINUITY_WINDOW" 10)"
 # kill/flip below would then fire almost immediately after claim instead of
 # near expiry, making the assertion below unable to fail no matter what the
 # production code does (review, round 2). Guarded explicitly rather than
-# trusted implicitly.
-assert_true "remaining_before_expiry returned a real duration, not a silent failure" "case \"\$_r9\" in ''|*[!0-9.]*) false ;; *) true ;; esac"
+# trusted implicitly. Also rejects the literal "0" (review, round 3): a
+# claim slow enough to exceed window-minus-margin floors the helper's own
+# max(...,0), which is numeric and would otherwise pass this check while
+# silently degrading to the exact same "fires immediately, tests nothing
+# near expiry" failure mode - remote (measured claim time is under 1s
+# against a 10s budget here) but the same class of silent degradation as
+# the other two defects this file's review already found.
+assert_true "remaining_before_expiry returned a real, positive duration, not a silent failure" "case \"\$_r9\" in ''|0|*[!0-9.]*) false ;; *) true ;; esac"
 sleep "$_r9"
 wm_state crew-set --id d9 --status review --summary "done" >/dev/null
 assert_true "the hook exits (via fire, not the referee's rollover)" "wait_for_gone $h9r 100"
@@ -1328,8 +1350,9 @@ cpid9s="$(cat "$WINGMAN_HOME/watch.pid")"
 # sensitivity and tolerance for load-induced jitter, not an arbitrary
 # constant - re-verify against the same kind of mutation before changing it.
 _r9b="$(remaining_before_expiry "$cpid9s" "$WM_STOP_CONTINUITY_WINDOW" 1)"
-# See case 9's own identical guard above for why this assertion exists.
-assert_true "remaining_before_expiry returned a real duration, not a silent failure" "case \"\$_r9b\" in ''|*[!0-9.]*) false ;; *) true ;; esac"
+# See case 9's own identical guard above for why this assertion exists,
+# including why the literal "0" is rejected too, not just non-numeric.
+assert_true "remaining_before_expiry returned a real, positive duration, not a silent failure" "case \"\$_r9b\" in ''|0|*[!0-9.]*) false ;; *) true ;; esac"
 sleep "$_r9b"
 kill -9 "$cpid9s" 2>/dev/null
 # 600 tries (120s), not the 100-try default, for headroom: this kill
