@@ -571,6 +571,24 @@ assert_contains "the launch script's exec line names the fallback stub" \
   "$(grep '^exec ' "$WINGMAN_HOME/crew/fb1.resume.sh" 2>/dev/null)" "$FALLBACK_STUB"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
+# --- issue #353: crew-resume's OWN composition site also emits a non-empty
+# WM_AGENT_CONTEXT_SUPPRESS_FLAG, not just bin/spawn-crew's (round-2 review
+# of PR #354: crew-resume's copy of the emission line had no coverage of its
+# own - deleting it left the whole suite green). Uses the real codex
+# descriptor, not a throwaway fixture, since it is the one this field is
+# actually populated for today.
+test_new_home
+wm_trust_repo /tmp
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id cx1 --type developer --objective x --repo /tmp \
+  --window wm-cx1 --session-id sess-cx1 --agent codex >/dev/null
+wm_state crew-set --id cx1 --status died >/dev/null
+out_cx="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" cx1 2>&1)"
+assert_contains "a codex-agent'd died member resumes" "$out_cx" "1 resumed"
+assert_contains "crew-resume's own composition site emits the context-suppression flag too" \
+  "$(grep -E '(^|[[:space:]])exec ' "$WINGMAN_HOME/crew/cx1.resume.sh" 2>/dev/null)" "-c project_doc_max_bytes=0"
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
 # --- issue #25 plan §4.8 / §7 test 8: relaunch mode's actual composed brief -
 # (PR #335 review round 1, finding 4: this file previously had zero coverage
 # of relaunch mode itself - only tests/crew-takeover.test.sh's hint-text

@@ -459,6 +459,13 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"
   printf 'exec '
   printf '%s' "$WM_AGENT_BIN"
+  # Repo-doc-context suppression (issue #353): a fixed, descriptor-authored
+  # literal (never a %s-templated value, so no wm_agent_emit_flag/quoting
+  # involved - same treatment as WM_AGENT_ENV_PREFIX above), unconditionally
+  # appended for whichever adapter declares it. Empty for claude (its own
+  # --add-dir/--settings claudeMdExcludes mechanism below already covers this)
+  # and for any adapter with no equivalent suppression flag of its own yet.
+  [ -n "$WM_AGENT_CONTEXT_SUPPRESS_FLAG" ] && printf ' %s' "$WM_AGENT_CONTEXT_SUPPRESS_FLAG"
   # Crew run unattended, disposably, and scoped to one repo, so the default
   # bypassPermissions keeps a gated tool call from hanging forever on a prompt no
   # human is there to answer. (It does NOT clear the one-time workspace-trust
@@ -495,9 +502,12 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # adapter contract (plan §4.3) does not define an equivalent for any other
   # CLI, so these stay a claude-only special case rather than a
   # descriptor-driven one. A non-claude crew member reaches $WM_HOME/$WM_REPO
-  # by plain filesystem access instead (no sandbox to widen), and does not yet
-  # have wingman's own CLAUDE.md-exclusion problem solved for it - see the
-  # plan's §10.2 "gap this extension surfaces" note for the sibling case.
+  # by plain filesystem access instead (no sandbox to widen). Its own
+  # equivalent repo-doc-exclusion problem (issue #353) is what
+  # WM_AGENT_CONTEXT_SUPPRESS_FLAG above solves per-adapter as each one gets
+  # a descriptor field populated - codex's is solved as of issue #353; pi's
+  # and opencode's are tracked as a follow-up against their already-merged
+  # descriptors.
   if [ "$AGENT" = claude ]; then
     printf ' --add-dir %s' "$(quote "$WM_HOME")"
     printf ' --add-dir %s' "$(quote "$WM_REPO")"

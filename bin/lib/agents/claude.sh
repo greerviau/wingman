@@ -26,6 +26,13 @@ WM_AGENT_ENV_PREFIX=""
 # claude crew member legitimately inherits CLAUDECODE=1 from it - nothing to
 # unset for itself.
 WM_AGENT_ENV_UNSET=""
+# claude already has its own dedicated, claude-specific repo-doc-exclusion
+# mechanism (--add-dir/--settings claudeMdExcludes, issue #213/PR #215,
+# composed directly in bin/spawn-crew/bin/crew-resume, not descriptor-driven)
+# - this field exists for the other adapters that have no equivalent
+# special-cased path (issue #353). Left empty here; claude's own mechanism is
+# unaffected by this field either way.
+WM_AGENT_CONTEXT_SUPPRESS_FLAG=""
 
 # --- launch capability ----------------------------------------------------
 WM_AGENT_BYPASS_FLAG="--permission-mode %s"
