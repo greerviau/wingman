@@ -26,15 +26,10 @@ Never treat unset as `false`.
 
 ### Isolate
 
-Create your own worktree and branch directly off origin's freshly-fetched default branch so your setup never races with or clobbers the primary checkout:
-
-```
-git fetch origin
-git worktree add "$WINGMAN_WORKTREE" -b <feat|fix>/<short-description> origin/<default-branch>
-```
-
+Work in your own isolated workspace, on a new `<feat|fix>/<short-description>` branch off origin's freshly-fetched default branch, so your setup never races with or clobbers the primary checkout.
+However you create that workspace, register the path you actually used (see "Register your worktree path" above) so teardown can find it.
 Do this every time you start, including on a resumed or re-taken-over session, so your base is always current with origin.
-If `$WINGMAN_WORKTREE` is unset (a global-scope session), pick a path yourself and register it (see above) - if the target happens to be the wingman repo itself, name it `<repo-path>-<crew-id>` (the same convention repo scope uses) so it stays covered by wingman's own CLAUDE.md exclusion (`bin/spawn-crew`, issue #213).
+If `$WINGMAN_WORKTREE` is unset (a global-scope session), pick a path yourself - if the target happens to be the wingman repo itself, name it `<repo-path>-<crew-id>` (the same convention repo scope uses) so it stays covered by wingman's own CLAUDE.md exclusion (`bin/spawn-crew`, issue #213).
 
 ### Publish and open a PR
 
