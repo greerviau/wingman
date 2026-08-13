@@ -1314,7 +1314,7 @@ JSON
 out="$(run_hook "gh pr merge 500")"
 assert_contains "issue #138: shape 1, a stale APPROVED review is denied" \
   "$out" '"permissionDecision": "deny"'
-assert_contains "issue #138: shape-1 stale denial names stale evidence / issue #138" \
+assert_contains "issue #138: shape-1 stale denial names stale evidence" \
   "$out" "stale evidence"
 
 # --- test 3: shape 1, an APPROVED review with NO commit field at all is

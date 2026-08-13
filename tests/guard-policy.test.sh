@@ -85,9 +85,9 @@ assert_contains "no-direct-edit-guard stays inactive for a category-qualified le
 # Part 2: decision equivalence - pre-extraction hooks vs the rewired ones
 # =============================================================================
 # The pre-extraction blobs are static, checked-in fixtures (tests/fixtures/
-# guard-policy-pre-extraction/*.sh - byte-identical copies of the three hooks
-# as they stood immediately before 12a's extraction), NOT read live from a
-# git ref (PR #338 review round 1, must-fix): a branch name is neither
+# guard-policy-pre-extraction/*.sh - copies of the three hooks as they stood
+# immediately before 12a's extraction), NOT read live from a git ref (PR #338
+# review round 1, must-fix): a branch name is neither
 # durable (it disappears the moment the stage-2 branch merges and gets
 # deleted, breaking this suite permanently the day the PR that requires it
 # lands) nor even reliably present in a fresh clone today (a shallow CI
@@ -101,6 +101,22 @@ assert_contains "no-direct-edit-guard stays inactive for a category-qualified le
 # cmd_match.py - removed unconditionally before test_summary, matching this
 # suite's established throwaway-descriptor convention (this file cannot use
 # its own `trap ... EXIT`; lib.sh's shared trap is the only one allowed).
+#
+# WHICH HALF OF A FIXTURE IS LOAD-BEARING. The fixtures are frozen in their
+# CONTROL FLOW - the decision logic as it stood before the extraction - and
+# that is the whole point of comparing against them: it is what proves the
+# rewired hooks still deny and allow exactly what the originals did.
+# Their OUTPUT STRINGS are deliberately kept in sync with hooks/lib/
+# guard_policy.py instead, because equivalence_check asserts byte-identical
+# stdout and stdout carries permissionDecisionReason, so a deny reason
+# reworded on one side alone fails the comparison for a reason that has
+# nothing to do with behaviour.
+# The distinction matters when this suite goes red. Editing a fixture's
+# WORDING to match a deliberate rewording of the same string in
+# guard_policy.py is correct and expected. Editing a fixture's CONTROL FLOW
+# to make a failing assertion pass is never correct - it turns the whole
+# comparison into a tautology, since both sides would then be the code under
+# test. If a decision differs, the rewired hook is wrong, not the fixture.
 FIXTURE_DIR="$TEST_REPO/tests/fixtures/guard-policy-pre-extraction"
 OLD_MERGE="$TEST_REPO/hooks/no-merge-guard.OLD.sh"
 OLD_EDIT="$TEST_REPO/hooks/no-direct-edit-guard.OLD.sh"
