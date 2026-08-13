@@ -158,7 +158,11 @@ wm_agent_emit_flag() {
 #                 original single mechanism. The opening objective is NOT
 #                 folded in here; the caller still delivers it separately,
 #                 post-launch, exactly as before this adapter mechanism
-#                 existed.
+#                 existed. For WM_AGENT_BIN=grok specifically, the substituted
+#                 file is <sysprompt-file> plus bin/lib/agents/grok-crew-note.md
+#                 appended (a separate file, built fresh each call) rather
+#                 than <sysprompt-file> alone - every other adapter keeps
+#                 reading <sysprompt-file> unchanged.
 #   positional  - <sysprompt-file>'s content and <opening-text>, composed into
 #                 ONE bare positional argument (codex has no system-prompt
 #                 flag at all; pi requires the whole brief be exactly one
@@ -182,7 +186,18 @@ wm_agent_emit_sysprompt() {
   WM_AGENT_OPENING_DELIVERED_AT_LAUNCH=0
   case "$WM_AGENT_SYSPROMPT_MODE" in
     flag)
-      wm_agent_emit_flag "$WM_AGENT_SYSPROMPT_FLAG" "$_waes_file"
+      _waes_target="$_waes_file"
+      # Grok Build has no way to exclude this repo's AGENTS.md from a crew
+      # session's context (unlike Claude Code's claudeMdExcludes), so a grok
+      # crew member's own brief gets one further note appended, in a file
+      # built alongside the original rather than by mutating it - every other
+      # WM_AGENT_BIN keeps reading <sysprompt-file> exactly as composed by
+      # wm_compose_crew_sysprompt, untouched.
+      if [ "$WM_AGENT_BIN" = grok ]; then
+        _waes_target="$_waes_file.grok-note.md"
+        cat "$_waes_file" "$WM_LIB/agents/grok-crew-note.md" > "$_waes_target"
+      fi
+      wm_agent_emit_flag "$WM_AGENT_SYSPROMPT_FLAG" "$_waes_target"
       ;;
     positional|prompt-flag)
       _waes_brief="$(cat "$_waes_file"; printf '\n\n---\n\nYour first objective: %s\n' "$_waes_opening")"
@@ -197,5 +212,5 @@ wm_agent_emit_sysprompt() {
       : # nothing at launch - the caller delivers the combined brief post-launch
       ;;
   esac
-  unset _waes_file _waes_opening _waes_brief
+  unset _waes_file _waes_opening _waes_brief _waes_target
 }
