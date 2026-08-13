@@ -510,10 +510,17 @@ for c in (d.get("constraints") or []):
     # exactly like bin/spawn-crew's own launch composition -
     # wm_agent_resolve already applied WM_AGENT_BIN_OVERRIDE to WM_AGENT_BIN,
     # so this needs no separate fallback of its own.
+    #
+    # WM_AGENT_ENV_PREFIX before the literal `exec` word, not after - see
+    # bin/spawn-crew's own identical comment (round-2 review of PR #350):
+    # `exec VAR=val cmd` does not treat VAR=val as an env-prefix (exec is
+    # the command name there; VAR=val becomes its first argument, a
+    # literal program name bash then fails to find, rc 127) - only a bare
+    # `VAR=val cmd`, with no leading `exec`, gets that treatment.
     wm_guard_test_fixture_agent "$WM_AGENT_BIN"
     [ -n "$WM_AGENT_ENV_UNSET" ] && echo "unset $WM_AGENT_ENV_UNSET"
-    printf 'exec '
     [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"
+    printf 'exec '
     printf '%s' "$WM_AGENT_BIN"
     # Repo-doc-context suppression (issue #353): see bin/spawn-crew's
     # identical gate and comment - a fixed, descriptor-authored literal,
