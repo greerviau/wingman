@@ -995,7 +995,7 @@ wm_tmux_clear_pending_composer() {
 # longest quiet window is ~0.5s (100 samples at 0.5s, longest identical run 2);
 # an idle pane, with or without background work, holds still indefinitely
 # (100/100 and 40/40 identical). 1.5s is 3x that margin. Re-measure before
-# lowering it; see docs/plans/2026-08-03-issue-214-busy-pane-refusal-plan.md.
+# lowering it; see issue #214.
 WM_READY_QUIET="${WM_READY_QUIET:-1.5}"
 
 wm_tmux_pane_ready() {

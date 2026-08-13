@@ -138,7 +138,7 @@
 # `--allow-merge`/`--review-gate-waived` - see
 # check_regenerate_review_token_grant) since the crashed process's token is
 # unrecoverable. See `bin/lib/wm-state.py`'"'"'s `_apply_review_token` and
-# `docs/analysis/2026-07-16-issue-135-review-evidence-forgery-plan.md` for
+# issue #135 for
 # the full design and its threat-model boundary (a genuinely snooping peer
 # session on this shared-OS-user architecture is explicitly out of scope -
 # see that plan's "constraint that shapes every option" section).
@@ -177,7 +177,7 @@
 # or a delivery-change/resume regeneration not yet re-signed for a commit)
 # falls through to the pre-issue-#138 behavior unchanged - the same bounded,
 # additive backward-compat posture #135 established for its own proof check.
-# See `docs/analysis/2026-07-16-issue-138-review-evidence-commit-binding-plan.md`
+# See issue #138
 # for the full design, including the two rejected shortcuts and their exact
 # failure modes.
 #

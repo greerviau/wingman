@@ -6,11 +6,8 @@ claude-only shell hooks of the same name under hooks/ - this module carries
 the DECISION logic only; the .sh files remain the actual Claude Code entry
 points (stdin JSON in, env vars, PYTHONPATH, the deny JSON contract, and each
 hook's own cheap bash pre-gate) and are now thin callers into the functions
-below. See docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-
-implementation-plan.md sections 2c/5 and the stage-3 design review
-(docs/analysis/2026-08-11-issue-25-stage-3-guard-transport-design-review.md)
-for why this module exists and the corrections applied here versus the
-plan's original sketch.
+below. See issue #25 for why this module exists and the corrections applied
+here versus the plan's original sketch.
 
 Normalized input contract (GuardInput, below): the plan's own draft named
 only {tool_name, command, cwd, crew_id}. The design review found five more

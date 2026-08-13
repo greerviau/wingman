@@ -5,8 +5,7 @@
 # grok), chosen lowest-risk for two independent reasons the plan lays out
 # (§4.5/§4.6): a direct flag-mode system-prompt path, and a composer shape
 # that already matches wingman's existing extraction rule. See
-# docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md
-# §3/§4.3/§4.5/§4.6/§5 step 8 for the full research and schema this
+# issue #25 for the full research and schema this
 # descriptor implements, and bin/lib/agents/claude.sh for the field-by-field
 # schema reference this file follows.
 #

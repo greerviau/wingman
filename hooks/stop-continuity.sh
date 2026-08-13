@@ -41,8 +41,8 @@
 # of what this actually protects.
 #
 # Recursion is NOT guarded by stop_hook_active - see the self-owned in-flight
-# marker below and docs/plans/2026-08-02-issue-185-asyncrewake-autoarm-plan.md
-# ("Why stop_hook_active cannot be the recursion guard") for why that would be
+# marker below and issue #185 ("Why stop_hook_active cannot be the recursion
+# guard") for why that would be
 # wrong here specifically, even though hooks/stop-guard.sh's own pass-1/pass-2
 # structure correctly relies on it for a different purpose.
 # bash-3.2-safe.
@@ -570,8 +570,7 @@ case "$classify_out" in
     rewake "$(compose_attention_reason)" auto
     exit 2 ;;
   fire)
-    # #185's own reasoning (docs/plans/2026-08-02-issue-185-asyncrewake-
-    # autoarm-plan.md:201) is that rewaking a pre-claim fire here would
+    # #185's own reasoning is that rewaking a pre-claim fire here would
     # double-report against hooks/stop-guard.sh's own independent
     # `needs-attention` check on the same Stop - true, and left alone, for a
     # fire that actually carries a crew-status row. But that reasoning does

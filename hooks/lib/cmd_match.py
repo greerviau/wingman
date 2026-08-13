@@ -155,8 +155,8 @@ being mistaken for a write to a file named the following digit; a bash
 either, a documented, deliberate false-negative-only gap. Input redirection
 (`<`, `<<`, `<<<`) is not a write and is not covered by this recognition.
 
-Residual gaps, deliberately out of scope (see docs/plans/2026-07-13-issue-56-
-cmd-match-fail-closed.md): arithmetic expansion (`$((...))`) is not extracted
+Residual gaps, deliberately out of scope (see issue #56): arithmetic
+expansion (`$((...))`) is not extracted
 the way command/process substitution is; a substitution in COMMAND POSITION
 (`$(which gh) pr merge ...`) resolves to this module's inert placeholder
 rather than a real command name, so a guard matching on argv[0] does not catch

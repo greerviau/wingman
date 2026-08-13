@@ -457,7 +457,7 @@ for c in (d.get("constraints") or []):
     # "Don't ask me again") that nothing answers in an unattended relaunch,
     # hanging the session forever. Both env vars gate that prompt's size/age
     # check unconditionally (confirmed in the shipped CLI binary - see
-    # docs/plans/2026-07-15-issue-30-resume-hang-recovery-plan.md); set
+    # issue #30); set
     # absurdly high here, the gate can never be satisfied regardless of
     # transcript size or session age. Scoped to this one resumed process only
     # (never written to the shared ~/.claude.json), so it has no effect on the

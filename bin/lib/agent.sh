@@ -6,9 +6,8 @@
 # defining WM_AGENT_* variables that describe one CLI's launch flags,
 # preflight checks, system-prompt delivery, freeze/composer detection
 # signatures, guard-hook transport, and control values - see
-# bin/lib/agents/claude.sh for the full field list and
-# docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md
-# (§4.3) for the schema this file implements.
+# bin/lib/agents/claude.sh for the full field list and issue #25 for the
+# schema this file implements.
 #
 # Sourced, never executed; assumes bin/lib/common.sh has already been sourced
 # ($WM_LIB, wm_die must already exist). bash-3.2-safe: no associative arrays,

@@ -15,9 +15,8 @@
 # the exact event that kills everything else on the shared tmux server, so it
 # MUST run detached from any tracked task and, more importantly, in a cgroup
 # genuinely separate from the tmux server's own scope. A companion process
-# that stays inside the doomed cgroup dies with it and catches nothing - see
-# docs/analysis/2026-08-04-wingman-session-death-postmortem.md's own open
-# question about this. It writes to disk only; it wakes nobody and injects no
+# that stays inside the doomed cgroup dies with it and catches nothing.
+# It writes to disk only; it wakes nobody and injects no
 # keystrokes anywhere, so none of watch-fleet's wake-loop rules apply to it.
 #
 # Launched by bin/wingman on every startup, wrapped in `systemd-run --user

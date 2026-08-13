@@ -9,9 +9,8 @@
 # nothing to re-invoke, and the stall detector cannot see it either (an
 # armed background watcher and a wedged foreground one are indistinguishable
 # from a bare execution-probe boolean - see
-# docs/analysis/2026-08-03-issue-202-wedge-measurement.md and
-# docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-plan.md, section
-# 2.3). The incident this closes ran for 5h27m before a human noticed.
+# docs/analysis/2026-08-03-issue-202-wedge-measurement.md and issue #202).
+# The incident this closes ran for 5h27m before a human noticed.
 #
 # This is layer A (prevention) of the plan's two-layer design; layer B
 # (detection - wm-state wedge-check, called from bin/watch-fleet's own pane
