@@ -57,6 +57,12 @@ assert_contains "the exclusion names the repo root's .claude/CLAUDE.md" "$wlaunc
 assert_contains "the exclusion names the repo root's .claude/rules glob" "$wlaunch" "$TEST_REPO/.claude/rules/**"
 assert_contains "the exclusion also names the worktree-sibling glob's CLAUDE.md" "$wlaunch" "$TEST_REPO-*/CLAUDE.md"
 assert_contains "the exclusion also names the worktree-sibling glob's CLAUDE.local.md" "$wlaunch" "$TEST_REPO-*/CLAUDE.local.md"
+# Issue #351: AGENTS.md (root and worktree-sibling glob) is also excluded,
+# prophylactically - a no-op today since Claude Code doesn't discover
+# AGENTS.md on its own, but guards against a future Claude Code version that
+# does start reading it natively reopening the same persona-leak hazard.
+assert_contains "the exclusion also names the repo root's AGENTS.md" "$wlaunch" "$TEST_REPO/AGENTS.md"
+assert_contains "the exclusion also names the worktree-sibling glob's AGENTS.md" "$wlaunch" "$TEST_REPO-*/AGENTS.md"
 
 # --- repo scope, target is an unrelated repo: still unconditionally present ----
 # The regression guard against re-introducing a TARGET_IS_WM_REPO-only gate:
