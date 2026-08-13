@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# E2E: the CLAUDE.md persona-collision disambiguation note (issue #69).
-# bin/spawn-crew injects a preamble into a crew member's composed system
-# prompt (.sysprompt.md) whenever, and only whenever, that member's cwd will
-# be the wingman repo's own root - the one case where Claude Code's automatic
-# CLAUDE.md auto-load pulls in the orchestrator's own first-person persona
-# file for a crew session to read. Proves: present for a repo-scoped spawn
-# targeting the wingman repo root itself; absent for a repo-scoped spawn
+# E2E: the CLAUDE.md/AGENTS.md persona-collision disambiguation note (issue
+# #69). bin/spawn-crew injects a preamble into a crew member's composed
+# system prompt (.sysprompt.md) whenever, and only whenever, that member's
+# cwd will be the wingman repo's own root - the one case where a crew
+# member's own harness auto-loading this repo's root doc (Claude Code's
+# CLAUDE.md, or any other adapter's AGENTS.md - same content, either
+# filename) would otherwise pull in the orchestrator's own first-person
+# persona file for a crew session to read. Proves: present for a repo-scoped
+# spawn targeting the wingman repo root itself; absent for a repo-scoped spawn
 # against an unrelated repo; absent for a global-scope spawn even when the
 # wingman repo is among the discovered/added repos (global scope's cwd is the
 # workspace root, not the wingman repo, so the auto-load hazard never fires
@@ -56,6 +58,12 @@ assert_contains "the note is present when the target repo is the wingman repo it
   "$(cat "$wsysprompt")" "$NOTE_MARKER"
 assert_contains "the note names the crew's own type, not a generic hedge" \
   "$(cat "$wsysprompt")" "software-analyst"
+# The note must name AGENTS.md explicitly, not just CLAUDE.md: a crew member
+# whose own CLI harness surfaces this repo's root doc under the AGENTS.md
+# filename (every non-Claude-Code adapter, e.g. grok) needs to recognize it
+# as the same orchestrator-voiced file this note is warning about.
+assert_contains "the note also names AGENTS.md, not just CLAUDE.md" \
+  "$(cat "$wsysprompt")" "AGENTS.md"
 # The note must land ahead of the playbook/objective content (right after the
 # "Crew id / Type / Repo" header, before the --- separator and playbook body),
 # so it is the next thing read once the assignment begins.

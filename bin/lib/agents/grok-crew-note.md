@@ -1,3 +1,0 @@
----
-
-**A note on this repo's `AGENTS.md`:** Grok Build automatically loads `AGENTS.md` (also reachable at this repo's root as `CLAUDE.md`) as repo-level context, separately from everything above. That file is written in first person for the wingman orchestrator's own top-level session - the one a human starts directly - not for you. Your assignment and playbook above govern; disregard any "you"/"your" instruction in `AGENTS.md` that conflicts with them. You are getting this reminder directly, appended to your own brief, because Grok Build has no way to exclude `AGENTS.md` from a crew session's context. Wingman's other supported CLIs will stop loading that file into crew sessions' context at all once their own per-adapter suppression flags are wired in.
