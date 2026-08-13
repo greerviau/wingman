@@ -1,0 +1,209 @@
+# bin/lib/agents/codex.sh - the codex agent descriptor (issue #25).
+#
+# codex (npm @openai/codex, binary `codex`) is the third non-claude adapter
+# (plan §8's build order: pi, then opencode, then codex, then grok).
+# Exercises positional system-prompt delivery (codex has no system-prompt
+# flag at all) and a first-run project-trust dialog with no flag-based
+# bypass - see
+# docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md
+# §3/§4.3/§4.5/§4.6/§4.7/§5 step 8 for the full research and schema this
+# descriptor implements, and bin/lib/agents/claude.sh for the field-by-field
+# schema reference this file follows.
+#
+# Sourced by wm_agent_resolve (bin/lib/agent.sh), which has already sourced
+# bin/lib/common.sh.
+#
+# *** AGENTS.md gap (explicit, not papered over) ***
+# codex auto-loads a repo-root AGENTS.md for repo-level instructions/
+# conventions (plan §3) - it does NOT read CLAUDE.md. This repo currently
+# has no AGENTS.md, only CLAUDE.md, so a codex crew member spawned here gets
+# ZERO repo-level auto-loaded context beyond what this descriptor's own
+# positional brief delivers (the playbook + objective, composed by
+# wm_agent_emit_sysprompt - that part is unaffected and works normally). A
+# separate effort is porting AGENTS.md for this repo; this descriptor
+# deliberately does not duplicate that work, and does not attempt to work
+# around the gap (e.g. by pointing codex at CLAUDE.md itself, which codex
+# does not recognize) - it only documents that the gap exists and why, so a
+# future reader does not have to rediscover it. Revisit once AGENTS.md
+# lands.
+#
+# Hands-on verified (2026-08-13) against real codex-cli v0.147.0, launched
+# in a live tmux pane with a syntactically-valid but non-functional API key
+# (this environment has no real OpenAI credentials). Unlike opencode, codex
+# has no free/unauthenticated default model, but unlike pi, the sign-in flow
+# itself does not block reaching the real TUI - entering any string as an
+# API key (even an invalid one) is enough to get past onboarding into the
+# genuine trust dialog and composer. Confirmed live: the first-run project-
+# trust dialog ("Do you trust the contents of this directory?"), that it
+# persists per worktree path (a second launch in the same directory skips
+# straight to the TUI), --dangerously-bypass-approvals-and-sandbox (status
+# panel shows "permissions: YOLO mode"), the bare composer shape (a "› "
+# glyph - U+203A + a literal ASCII space, not NBSP - prefixing the composer
+# row, no border), --model and -c model_reasoning_effort=<value> composing
+# together correctly (status panel showed "gpt-5 high" for
+# `--model gpt-5 -c model_reasoning_effort=high`) - notably confirmed the
+# BARE (unquoted) value works fine, so no TOML-string-quoting trick is
+# needed in the flag template despite `-c`'s own values normally being
+# TOML-parsed (codex's own documented fallback: "If it fails to parse as
+# TOML, the raw string is used as a literal"), a real submit registering
+# and correctly triggering a genuine API round-trip (a 401 error surfaced
+# from codex's own retry logic, not a local/composer-level failure -
+# confirming delivery itself works end-to-end even though the call itself
+# can't succeed here), Escape interrupting ("esc to interrupt" shown live
+# during a retry), Ctrl-C clearing the composer without exiting, and
+# `/quit` cleanly exiting. Also confirmed live: the composer's own "empty"
+# render is NOT byte-stable - it shows a rotating suggested-prompt hint
+# (e.g. "Summarize recent commits") rather than a blank row, the same
+# contextual-hint hazard common.sh's own comment already documents for
+# claude's v2.1.220 - so WM_AGENT_COMPOSER_ANCHOR stays deliberately
+# uncharacterized rather than pinned to one observed hint string. NOT
+# verified live: an actual successful model turn (no real credentials in
+# this environment), the project-trust dialog's own exact freeze-signature
+# text (only that the dialog exists and what accepting it looks like), and
+# WM_AGENT_SLASH_SETTLE's own need (attributed below, not independently
+# re-derived - no in-session skill invocation was exercised this pass).
+
+WM_AGENT_BIN=codex
+WM_AGENT_DISPLAY_NAME="codex"
+
+# --- preflight and environment ------------------------------------------
+# Verified live: a first-run "Do you trust the contents of this directory?"
+# dialog blocks the TUI entirely until answered ("1. Yes, continue" /
+# "2. No, quit") - confirmed by walking through it directly - and there is
+# no CLI flag or documented config key to pre-accept it (unlike claude's
+# own workspace-trust, which claude_preflight below already automates via
+# claude-gate-check.py). No automation is wired up here yet: a codex crew
+# member's first launch in a given worktree will freeze on this dialog and
+# rely on the freeze detector + crew-takeover, exactly the documented
+# degradation for an adapter with no preflight function (bin/lib/agent.sh's
+# own WM_AGENT_PREFLIGHT doc comment). Confirmed live that trust DOES
+# persist per worktree path once accepted once (a second launch in the
+# same directory skips straight to the TUI), so this is a one-time cost
+# per worktree, not per-launch - still worth automating properly in a
+# follow-up (find and pre-populate whatever on-disk trust record codex
+# itself consults - not yet located this pass) rather than left as a
+# standing freeze risk indefinitely.
+WM_AGENT_PREFLIGHT=""
+WM_AGENT_ENV_PREFIX=""
+# The orchestrator that execs every crew member is always Claude Code, so a
+# non-claude crew member (codex included) would otherwise silently inherit
+# CLAUDECODE=1 from it (plan §5 step 8).
+WM_AGENT_ENV_UNSET="CLAUDECODE"
+
+# --- launch capability ----------------------------------------------------
+# Verified live: --dangerously-bypass-approvals-and-sandbox correctly puts
+# codex into "YOLO mode" (its own status panel's literal label) - no
+# per-tool-call approval prompt, matching the unattended-crew-member need
+# WM_AGENT_BYPASS_FLAG exists for.
+WM_AGENT_BYPASS_FLAG="--dangerously-bypass-approvals-and-sandbox"
+# "Force session ID at creation": plan §3 finding is "Not found" for codex
+# (confirmed directly against --help: no such flag on the base launch
+# command) - left empty, matching pi's and opencode's own settled
+# precedent (relaunch mode stands in, §4.8), not re-litigated here.
+WM_AGENT_SESSION_ID_FLAG=""
+# No display-name flag "at creation" either (plan §3) - confirmed directly
+# against --help, nothing resembling --name/--title on the base launch
+# command.
+WM_AGENT_NAME_FLAG=""
+WM_AGENT_REMOTE_CONTROL_FLAG=""
+WM_AGENT_MODEL_FLAG="--model %s"
+WM_AGENT_MODEL_VALUE_SHAPE="bare"
+# codex's own generic config-override flag (-c key=value), not a dedicated
+# effort flag - verified live that a bare (unquoted-by-us) value composes
+# and takes effect correctly: `-c model_reasoning_effort=high` alongside
+# `--model gpt-5` rendered "gpt-5 high" in codex's own status panel. The
+# %s placeholder receives wm_agent_emit_flag's own single-quoted value
+# (e.g. 'high'), which the shell strips before codex ever sees it, leaving
+# codex with the identical bare `model_reasoning_effort=high` this was
+# tested against directly - no extra TOML-string-quoting needed despite
+# -c's own values normally being TOML-parsed, since codex's own documented
+# fallback treats an unparseable bare word as a literal string.
+WM_AGENT_EFFORT_FLAG="-c model_reasoning_effort=%s"
+WM_AGENT_EFFORT_VALUES="low medium high xhigh"
+
+# --- system prompt and delivery -------------------------------------------
+# positional, not flag (plan §4.5): codex has no system-prompt flag at all
+# (confirmed against --help - no --system-prompt/--append-system-prompt/
+# --rules equivalent), only an optional [PROMPT] positional argument
+# ("Optional user prompt to start the session"). wm_agent_emit_sysprompt's
+# own positional case composes the sysprompt file's content and the opening
+# objective into that one argument.
+WM_AGENT_SYSPROMPT_MODE=positional
+WM_AGENT_SYSPROMPT_FLAG=""
+WM_AGENT_SUBMIT_SETTLE=""
+# codex needs a settle only for its own "$<skill>" form specifically, not
+# universally (plan §4.7: a leading "$" commonly starts ordinary text
+# elsewhere, e.g. "$5/month", "$HOME", so a blanket slash-settle rule would
+# slow every ordinary send for no reason). Attributed per the plan's own
+# firstmate-sourced finding, not independently re-derived this pass - no
+# in-session skill invocation was exercised against the real binary.
+WM_AGENT_SLASH_SETTLE="1"
+WM_AGENT_BUSY_MEANS_QUEUED=""
+# Verified live: a single Ctrl-C clears the composer's current text without
+# exiting.
+WM_AGENT_CLEAR_KEYS="C-c"
+
+# --- detection --------------------------------------------------------------
+# Verified live: codex's composer renders as a single row prefixed by "› "
+# (U+203A RIGHT-POINTING ANGLE QUOTATION MARK, U+0020 ASCII space - NOT
+# NBSP), no border, no closing rule line - exactly the plan's §4.6 "bare"
+# shape. WM_AGENT_COMPOSER_RULE_RE/ANCHOR stay unset: this shape has no
+# rule-line pair for RULE_RE to describe at all (only claude's own "bare"
+# shape happens to pair a glyph row with rule lines elsewhere in its own
+# frame - codex's does not), and separately, codex's own "empty" render
+# rotates through suggested-prompt hint text ("Summarize recent commits"
+# and others, confirmed by watching it change across launches) rather than
+# settling on one fixed byte sequence - the same contextual-hint hazard
+# common.sh's own comment already documents for claude's v2.1.220, so
+# pinning ANCHOR to one observed hint would risk exactly the false-
+# negative/false-positive class that comment warns against. Composer-based
+# confirm is correctly skipped; every send falls through to the
+# pre-existing whole-pane-checksum path, verified live to register a real
+# submit correctly (the pane visibly changed once codex attempted its own
+# API round-trip).
+WM_AGENT_COMPOSER_SHAPE=bare
+WM_AGENT_COMPOSER_RULE_RE=""
+WM_AGENT_COMPOSER_ANCHOR=""
+WM_AGENT_COMPOSER_ANCHOR_EMPTY=""
+# Genuinely unknown (plan §3): the project-trust dialog's own text is
+# confirmed to exist (see WM_AGENT_PREFLIGHT above) but its freeze
+# signature was not captured as a regex this pass, and codex's own
+# approval-policy prompts (a separate concept from the trust dialog,
+# gated by -a/--ask-for-approval) were never triggered live either, since
+# --dangerously-bypass-approvals-and-sandbox was used throughout
+# verification.
+WM_AGENT_PERM_PROMPT_RE=""
+WM_AGENT_PERM_OPTION_RE=""
+WM_AGENT_PERM_LEAD_RE=""
+WM_AGENT_RESUME_PROMPT_RE=""
+
+# --- resume, lifecycle, and verification -----------------------------------
+# codex has a real `codex resume [SESSION_ID] --last` subcommand (confirmed
+# against --help), but per the plan's own settled decision this is not
+# wired as WM_AGENT_RESUME_FLAG: there is no confirmed way to FORCE a
+# specific session id AT CREATION time (only to resume an existing,
+# already-created one by id/--last later), so wingman has no id to hand
+# this flag at relaunch time regardless of the subcommand existing -
+# relaunch mode stands in, the same settled precedent as pi/opencode's own
+# §8 decision, not re-litigated here.
+WM_AGENT_RESUME_FLAG=""
+WM_AGENT_GUARD_TRANSPORT=codex-json
+# Not yet 1: hands-on verification this stage confirmed launch-time
+# behavior, the trust dialog, and control values, but not an actual model
+# turn (no real credentials in this environment) or the codex-json
+# guard-transport shim itself (held, plan step 12b-12f, not yet built).
+WM_AGENT_VERIFIED=0
+
+# --- control values (B3) ----------------------------------------------------
+# Verified live via a real /quit + Enter that cleanly exited the process.
+WM_AGENT_EXIT_CMD="/quit"
+# Verified live: "esc to interrupt" appeared in codex's own status line
+# during a live retry.
+WM_AGENT_INTERRUPT_KEY="Escape"
+WM_AGENT_INTERRUPT_REPEAT=1
+WM_AGENT_POST_INTERRUPT_CLEAR=""
+# codex rejects the "/<skill>" form outright and uses "$<skill>" instead
+# (plan §4.3's B3 table) - attributed, not independently re-derived this
+# pass; no skill/extension invocation was exercised against the real
+# binary.
+WM_AGENT_SKILL_FORM="\$<skill>"
