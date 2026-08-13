@@ -133,9 +133,9 @@
 #                          stdin: reads (and consumes) the exit-record this
 #                          script itself wrote at its own exit point, or, if
 #                          none is present, checks whether a fresh cycle is
-#                          already live. Prints exactly one of seven outcomes on
+#                          already live. Prints exactly one of eight outcomes on
 #                          stdout - `healthy`, `fire`, `remote-control-dropped`,
-#                          `stopped`, `stale-code` (bare tokens), or
+#                          `stopped`, `stale-code`, `rolled` (bare tokens), or
 #                          `spurious <count> <hint>` / `spurious-repeated
 #                          <count> <hint>` (a consecutive-failure count and
 #                          a forensic hint) - and exits 0.
@@ -145,7 +145,11 @@
 #                          (`bin/watch-fleet` or `lib/common.sh`) changed on
 #                          disk since it armed - also never a failure, resets
 #                          the spurious-failure count exactly like `stopped`/
-#                          `fire`. Dispatched before claim-lock acquisition:
+#                          `fire`. `rolled` means the fleet-continuity referee
+#                          ended the previous window deliberately
+#                          (hooks/stop-continuity.sh) - not a failure, and it
+#                          resets the spurious-failure count exactly like
+#                          `stopped`/`fire`. Dispatched before claim-lock acquisition:
 #                          never creates the claim lock, never mutates
 #                          $PIDFILE/$BEATFILE/$OWNERLOCK (it legitimately
 #                          reads all three via the cycle_healthy check).
@@ -200,7 +204,7 @@ while [ $# -gt 0 ]; do
     --owner) OWNER="${2:-}"; shift 2 ;;
     --status|--stop|--start|--classify|--clear-standdown|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,155p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,168p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -282,8 +286,9 @@ INTERVAL="${WM_WATCH_INTERVAL:-5}"
 # (owner_lock_alive()/cycle_healthy() below) trusts identity, not beacon
 # freshness, for ordinary "is this claimed at all" liveness; this threshold's
 # only job is bounding recovery from a genuine wedge, never exclusivity - a
-# cycle stalled for anywhere under this is never stolen from. 10x the former
-# WM_WATCH_GRACE default (30s) by default.
+# cycle stalled for anywhere under this is never stolen from. 10x the 30s
+# beacon-freshness grace hooks/lib/watcher-liveness.sh still applies
+# (WM_WATCH_GRACE), which this threshold deliberately does not reuse.
 WM_WATCH_HARD_GRACE="${WM_WATCH_HARD_GRACE:-300}"
 # Silent-stall detection. STALL_IDLE seconds of BOTH pane-output silence AND
 # status-file staleness nominates a 'working' member; it is flagged stalled only if
@@ -1145,7 +1150,8 @@ fi
 # creation further down where it conceptually belongs: it is a constant for
 # this process (its own start time never changes), so there is no correctness
 # reason to compute it inside the window between the pidfile write and this
-# cycle's own "armed" line - and hooks/stop-continuity.sh:425-432 documents
+# cycle's own "armed" line - and hooks/stop-continuity.sh's own three-signal
+# claim-failure accounting comment documents
 # that exact window as the one a SIGKILL landing inside it cannot recover
 # from cleanly (a dead-owner $CLAIMLOCK left behind that a re-arm must wait
 # out CLAIM_STALE_AGE for). Every subprocess fork this claim sequence can
@@ -1502,8 +1508,9 @@ while :; do
   _reconcile_died=""
 
   # The generic per-poll outbox scan (issue #169): runs in EVERY watcher,
-  # unconditionally on $OWNER, every poll, before anything else can `exit 0`
-  # this poll - fire()'s own exit 0 is below (see the needs-attention check at
+  # unconditionally on $OWNER, every poll, ahead of every exit path in this
+  # loop except the self-ownership check just above - fire()'s own exit 0
+  # is below (see the needs-attention check at
   # the bottom of this loop) is the first; the worktree-removal self-check
   # (issue #237, Fix 2a) just below this is a second; the stale-code
   # self-check (issue #219) right after it is a third; the owner-status
@@ -1800,9 +1807,8 @@ for tid in ids:
     # the crew's permission mode, so it still catches freezes when bypass is
     # disabled) - this applies whether the member was "working" or already
     # "blocked" for an unrelated reason (a member can answer one blocker and walk
-    # straight into a fresh confirmation dialog, which would otherwise be
-    # invisible: the backstop below used to scan only "working" members, so a
-    # dialog freeze on top of a pre-existing blocker never got a second look). A
+    # straight into a fresh confirmation dialog, which the working-only scan
+    # would otherwise never see). A
     # member gone silently idle - agent errored, nothing executing - is flipped to
     # stalled by wm-state stall-check; that diagnosis only makes sense for a
     # member that claims to be "working", since a "blocked" member sitting idle
@@ -1947,12 +1953,10 @@ for r in data:
       _pid="$(wm_tmux_pane_pid "$_win")"
 
       # Stalled re-evaluation (#235): `stalled` is the one status the supervisor
-      # imposes unilaterally (see LIVE_STATES in bin/lib/wm-state.py), and until
-      # now the `continue` just below made it a one-way latch - no diagnostic
-      # ever looked at the record again, so a member that resumed activity stayed
-      # flagged until a human noticed. This re-runs the SAME detector's own
-      # evidence (recorded on the record's `stall` object at flip time) and
-      # reverts only on a sustained contradiction. Deliberately NOT a liveness
+      # imposes unilaterally (see LIVE_STATES in bin/lib/wm-state.py), so it is
+      # re-checked here against the SAME detector's own evidence (recorded on
+      # the record's `stall` object at flip time) and reverted only on a
+      # sustained contradiction. Deliberately NOT a liveness
       # probe for every source: a wedge-stalled (#202) or forward-motion-stalled
       # (#199) member has a live process tree BY CONSTRUCTION, so a uniform
       # liveness revert would delete both of those mechanisms outright.
@@ -2379,7 +2383,7 @@ for r in roster if isinstance(roster, list) else []:
   # the ordinary fire() path below writes) so outage-detected/outage-cleared
   # surface as ordinary fire reasons within the existing outcome
   # classification (healthy/fire/remote-control-dropped/stopped/stale-code/
-  # spurious/spurious-repeated) - structurally identical to a blocked/review/
+  # rolled/spurious/spurious-repeated) - structurally identical to a blocked/review/
   # done/died/stalled reason line today, just fleet-scoped (no per-member id
   # to ack) rather than routed through fire()'s needs-attention/group-
   # attention machinery.

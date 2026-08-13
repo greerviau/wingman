@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # doctor - dependency preflight for wingman.
-# Checks each dependency, prints a platform-aware report, and offers to install
-# the missing ones. Run on first launch (CLAUDE.md wires this) and any time.
+# Checks each dependency, registers wingman's user- and project-scope Claude Code
+# hooks and statusline, validates config.local.toml, and prints a platform-aware
+# report, offering to install or register anything missing.
+# Run on first launch (CLAUDE.md wires this) and any time.
 #
-# Exit 0 when all *required* deps are present, 1 otherwise.
+# Exit 0 when every required dependency is present AND config.local.toml parses,
+# 1 otherwise.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"

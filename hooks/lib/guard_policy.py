@@ -13,7 +13,7 @@ for why this module exists and the corrections applied here versus the
 plan's original sketch.
 
 Normalized input contract (GuardInput, below): the plan's own draft named
-only {tool_name, command, cwd, crew_id}. The design review found four more
+only {tool_name, command, cwd, crew_id}. The design review found five more
 fields load-bearing in the actual hook logic and missing from that tuple:
 crew_type (the whole lead/worker distinction in all three guards),
 file_path/notebook_path (no-direct-edit-guard's Edit/Write/NotebookEdit
@@ -168,12 +168,11 @@ def evaluate_no_merge_guard(gi):
 
     # cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
     # command_segments() returns None rather than a partial, truncated segment
-    # list. Computed once, up front, and passed to check_allow_merge_grant()/
-    # check_merge_paths() as `segments or []` so their own known-shape detection
-    # (and early returns) run unchanged; only after BOTH have had their chance
-    # to deny on a specific recognized shape does the fallback below deny
-    # generically on an unresolvable command that reached this hook's
-    # substring pre-gate.
+    # list. Computed once, up front, and read as `segments or []` by every
+    # check below, so their own known-shape detection (and early returns) run
+    # unchanged on an unlexable command; only after all of them have had their
+    # chance to deny on a specific recognized shape does the fallback at the
+    # end of this function deny generically.
     segments = command_segments(command)
 
     def flag_value(tokens, *names):
@@ -871,9 +870,9 @@ def evaluate_no_merge_guard(gi):
     check_crew_set_type_restriction()
     check_merge_paths()
 
-    # Both known-shape checks above have already had their chance to deny
-    # (or, for wingman's own top-level session, to no-op) on segments they
-    # could resolve. Only now, with neither having denied, does an
+    # Every known-shape check above has already had its chance to deny (or,
+    # for wingman's own top-level session, to no-op) on segments it could
+    # resolve. Only now, with none of them having denied, does an
     # unresolvable command reaching this guard's scope fail closed - and
     # only for a crew session, matching check_merge_paths()'s identical
     # `if not crew_id: return`.
@@ -886,7 +885,6 @@ def evaluate_no_merge_guard(gi):
 # =============================================================================
 
 _RUNNER_BINS = {"pytest", "rspec", "jest", "mocha"}
-_SED_BOOL_SHORT = set("nrEsuz")     # no-argument short flags
 _SED_SCRIPT_SHORT = set("ef")       # short flags supplying the script (glued or separate)
 _SED_OTHER_VALUE_SHORT = set("l")   # other value-taking short flags (line-wrap length)
 

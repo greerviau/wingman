@@ -120,7 +120,7 @@ while [ $# -gt 0 ]; do
     --constraint) CONSTRAINTS="${CONSTRAINTS:+$CONSTRAINTS
 }$2"; shift 2 ;;
     --list-types) wm_crew_types; exit 0 ;;
-    -h|--help)   sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,97p' "$0"; exit 0 ;;
     *)           wm_die "unknown arg: $1" ;;
   esac
 done
@@ -270,26 +270,14 @@ wm_agent_resolve "$AGENT"
 PERM_MODE="${WM_PERMISSION_MODE-bypassPermissions}"
 
 # --- preflight: the resolved adapter's own gates (issue #16, #241, #25) ------
-# claude's WM_AGENT_PREFLIGHT (claude_preflight, bin/lib/agents/claude.sh)
-# wraps exactly the three gates this block used to run inline: the one-time
-# workspace-trust dialog (mode-independent - it appears regardless of
-# --permission-mode, so it is not itself gated on PERM_MODE), the one-time
-# Bypass-Permissions acceptance dialog (gated on PERM_MODE inside the
-# function), and the user-scope guard-hook sync. Hard failure on any of them:
-# no tmux window, no crew record, no worktree path reservation - exactly as
-# before this relocation. An adapter with no WM_AGENT_PREFLIGHT (every
-# non-claude adapter today) simply has nothing to run here; per the plan,
-# claude's own preflights never apply to a non-claude agent regardless of this
-# field, they are not a fallback.
+# claude's WM_AGENT_PREFLIGHT covers workspace trust, Bypass-Permissions
+# acceptance, and the user-scope guard-hook sync. Any failure is hard: no tmux
+# window, no crew record, no worktree path reservation. An adapter with no
+# WM_AGENT_PREFLIGHT runs nothing here; claude's gates never apply to it.
 #
-# The exit status is checked explicitly (never a bare `&&` chain, which
-# would let this whole statement's own nonzero status pass through unnoticed
-# under this script's `set -u`-but-not-`set -e` posture): wm_agent_resolve
-# already confirmed WM_AGENT_PREFLIGHT names a real function, so a nonzero
-# return here is the function's OWN deliberate failure signal, and must stop
-# the spawn exactly as hard as claude_preflight's own internal wm_die calls
-# already do (defense in depth for a future preflight function that returns
-# failure instead of calling wm_die directly).
+# The status is checked explicitly, never a bare `&&` chain: under this
+# script's `set -u`-but-not-`set -e` posture a nonzero return would otherwise
+# pass through unnoticed.
 if [ -n "$WM_AGENT_PREFLIGHT" ]; then
   "$WM_AGENT_PREFLIGHT" "$REPO" "$PERM_MODE" spawn || wm_die "agent preflight '$WM_AGENT_PREFLIGHT' failed"
 fi
@@ -379,9 +367,8 @@ SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
 wm_compose_crew_sysprompt "$SYSPROMPT" "$ID" "$TYPE" "$REPO" "$SCOPE" \
   "$CONSTRAINTS" "$TARGET_IS_WM_REPO" "$INPUT" "$PLAYBOOK" "$INCLUDE_PR_DELIVERY"
 
-# Computed here (rather than just before delivery, as before this file's #25
-# rewrite) because a `positional`/`prompt-flag` WM_AGENT_SYSPROMPT_MODE folds
-# this straight into the launch line below - see wm_agent_emit_sysprompt.
+# Computed before the launch line because a `positional`/`prompt-flag`
+# WM_AGENT_SYSPROMPT_MODE folds it straight in - see wm_agent_emit_sysprompt.
 OPENING="$OBJECTIVE"
 [ -n "$INPUT" ] && OPENING="$OBJECTIVE (input/plan: $INPUT)"
 
@@ -442,18 +429,9 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # bypass needs, e.g. opencode's permission override, §3); empty for claude,
   # which needs neither.
   #
-  # WM_AGENT_ENV_PREFIX MUST be emitted before the literal `exec` word, not
-  # after (round-2 review of PR #350, a real, blocking bug this composition
-  # order created): `VAR=val` is only recognized by the shell as a
-  # command's own environment-assignment prefix when it is the FIRST word
-  # of the simple command. `exec VAR=val cmd` does not qualify - `exec`
-  # (a builtin) is the command name there, and everything after it
-  # (`VAR=val`, `cmd`, ...) is just its argument list, so bash tries to
-  # `exec` a program literally named `VAR=val` and fails with rc 127
-  # before `cmd` is ever reached. Verified directly (`exec FOO=bar env`
-  # fails "exec: FOO=bar: not found"; `FOO=bar exec env` correctly execs
-  # env with FOO set). `unset` above is unaffected either way - it already
-  # runs as its own preceding statement, on its own line.
+  # WM_AGENT_ENV_PREFIX goes before the literal `exec`, never after: a
+  # `VAR=val` prefix is only honoured as the FIRST word of a simple command,
+  # so `exec VAR=val cmd` makes bash try to exec a program named "VAR=val".
   wm_guard_test_fixture_agent "$WM_AGENT_BIN"
   [ -n "$WM_AGENT_ENV_UNSET" ] && echo "unset $WM_AGENT_ENV_UNSET"
   [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"

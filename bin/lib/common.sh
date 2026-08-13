@@ -192,8 +192,8 @@ quote() {
 # command, and every unattended relaunch must carry so wingman's own root
 # CLAUDE.md never loads for anyone but the orchestrator (issue #213). A pure
 # function of $WM_REPO, so it needs no crew id or objective - one source of
-# truth for bin/spawn-crew's generated launch script, bin/crew-takeover's two
-# printed --resume commands, and bin/crew-resume's generated relaunch script
+# truth for bin/spawn-crew's generated launch script, bin/crew-takeover's
+# printed --resume command, and bin/crew-resume's generated relaunch script
 # alike (all three source this file already; bin/wingman's own launch is the
 # one site that must NOT call this).
 # Excludes the repo root's own memory/rules files, and the same set again
@@ -226,8 +226,7 @@ wm_claude_md_excludes() {
 # both a fresh spawn (bin/spawn-crew) and a relaunch (bin/crew-resume's
 # relaunch mode, plan §4.8) deliver as this member's own persona/brief -
 # extracted here (issue #25) so the two call sites can never drift apart on
-# what "the crew brief" actually contains. Byte-identical to bin/spawn-crew's
-# own inline block before this extraction; a caller that wants relaunch-only
+# what "the crew brief" actually contains. A caller that wants relaunch-only
 # content (the progress note) appends it to the same file afterward, rather
 # than this function trying to grow a mode flag for it.
 wm_compose_crew_sysprompt() {
@@ -708,28 +707,11 @@ unset _wm_ct_i
 # caller, which reverts to the pre-#188 whole-pane-checksum behavior rather
 # than treating "not recognized" as any kind of refusal.
 #
-# The adjacent-rules case (round-2 review, issue #25 PR #348) is
-# deliberately its own "not recognized" branch, not folded into "recognized,
-# empty region". This DOES change two branches in
-# _wm_tmux_send_message_locked for claude too on that specific degenerate
-# render, not only for an adapter with an empty anchor (round-3 review:
-# verified directly by comparing old vs new behavior against an adjacent-
-# rules pane under claude's own ambient anchor - old: text_in_rc=0, the
-# busy-pane refusal fires (rc 6) and composer mode engages; new:
-# text_in_rc=1, the busy refusal no longer fires and the call falls
-# through to the whole-pane-checksum path instead). That degenerate render
-# has never been observed for claude, whose composer always carries its
-# own anchor row between the rules, so this is not a reachable regression
-# in practice - but it is a real behavior change on paper, not "no
-# observable difference." What motivates the fix is a different adapter:
-# one whose real, live-verified anchor genuinely IS the empty string
-# (WM_AGENT_COMPOSER_ANCHOR_EMPTY, pi), where an empty extraction from
-# adjacent rules would otherwise byte-match that anchor and produce a
-# false "confirmed" for a pane that was never actually shown to be empty -
-# no content line was ever inspected at all. Not observed against a real
-# pi pane either (still hardening, not a fix for a reproduced failure),
-# but restores this function's "never a false confirmed" invariant for
-# every adapter.
+# Two rule lines with no content line between them are "not recognized",
+# never "recognized, empty": for an adapter whose real empty-composer
+# anchor IS the empty string (WM_AGENT_COMPOSER_ANCHOR_EMPTY, pi), an empty
+# extraction would byte-match that anchor and produce a false "confirmed"
+# for a pane whose content was never inspected at all.
 wm_composer_text_in() {
   _ct_tail="$(printf '%s\n' "$1" | tail -n "$WM_COMPOSER_TAIL")"
   _ct_idxs="$(printf '%s\n' "$_ct_tail" | grep -nE "$WM_COMPOSER_RULE_RE" | cut -d: -f1)"
@@ -772,11 +754,9 @@ wm_composer_is_empty() {
 # holder as dead/reused (issue #298 round-1 MF1, and the same defect
 # independently in bin/watch-fleet's owner_lock_alive() - issue #303). Used
 # by owner_lock_alive() so a new pid+lstart identity comparison never has to
-# hand-copy the pin. wm_tmux_send_lock's own two call sites just below stay
-# on their existing inline (but equally correctly pinned) pipelines rather
-# than being routed through this helper too - issue #302 replaces that
-# function's entire pid/lstart/zombie predicate with an flock()-backed fd,
-# so consolidating it here now would only be rewritten again shortly after.
+# hand-copy the pin. It is the only remaining consumer: wm_tmux_send_lock's
+# own liveness predicate was replaced by a kernel flock() (issue #302) and
+# reads no process start time at all.
 # An empty result means unknown (no such pid, or ps itself unavailable) -
 # never treat it as a match against anything, including another empty
 # string.
@@ -1080,8 +1060,8 @@ wm_tmux_pane_ready() {
 # (via wm_tmux_pane_ready's own return) and again before every Enter (the initial
 # one and each retry, since a dialog can appear in the gap between typing and
 # submitting), and refuses - sending nothing further - the instant one matches.
-# Returns 0 on a confirmed (or best-effort, unconfirmed-but-not-refused) delivery,
-# 2 if refused because the pane looks dialog-shaped rather than a chat input.
+# See the full return-code list below for what this function actually returns;
+# refusing rather than typing into a dialog-shaped pane is rc 2.
 #
 # A fourth failure mode motivates the defensive clear below: the target's chat
 # input can already hold unsubmitted composed text (left over from a direct
@@ -1517,21 +1497,12 @@ wm_tmux_reachable() {
 
 # --- outbox helpers (issue #169) ---------------------------------------------
 # bin/crew-say, bin/crew-ask, and bin/spawn-crew each queue a message under
-# outbox/<id>/ when a delivery cannot be confirmed. Historically that queue was
-# only ever serviced by a live owner-scoped watch-fleet loop for a member still
-# in a LIVE_STATE, so a member that went stood-down/died/done left its queue
-# permanently unreachable: nothing expired it, nothing surfaced it, and
-# nothing cleaned it up. The helpers below implement the fix (see
-# docs/plans/2026-08-02-issue-169-outbox-abandonment-plan.md): a metadata
-# sidecar tree recording each queued message's sender, two related-but-
-# distinct terminal predicates, a generic sweep that surfaces an abandoned
-# message to its sender (or a caller-supplied notify channel) and durably
-# archives it, and an extraction of the existing redelivery logic so both the
-# owner-scoped loop and the whole-fleet backstop share one implementation. In
-# `wake` mode, a message whose sender is itself notice-routing-terminal (as
-# well as the recipient) is archived and logged but never announced (issue
-# #230): nobody involved could act on it, so it must not be able to fire a
-# full attention wake on its own.
+# outbox/<id>/ when a delivery cannot be confirmed. The helpers below service
+# that queue for every member, live or terminal: a sender sidecar, two terminal
+# predicates, a sweep that archives an abandoned message and notifies its
+# sender, and the shared redelivery path. A message whose sender is itself
+# notice-routing-terminal is archived and logged but never announced (issue
+# #230): nobody involved could act on it.
 
 # Recover the stable stem of an outbox/<id>/ entry across whatever claim-
 # protocol prefix it currently carries (today, only the redelivery path's own
@@ -1547,11 +1518,8 @@ wm_outbox_basename() {
 
 # True (rc 0) iff $1 must go through a pointer file rather than being typed (or
 # retyped) raw into a pane: an embedded newline, or longer than
-# WM_SAY_INLINE_MAX chars. Extracted from bin/crew-say's own send-path rule so
-# it and bin/watch-fleet's redelivery branch can never independently drift
-# again (issue #169, M5) - before this fix, the redelivery branch discriminated
-# on line count only, silently bypassing crew-say's own truncation-avoidance
-# rule for a long single-line message.
+# WM_SAY_INLINE_MAX chars. One definition shared by bin/crew-say's send path and
+# the redelivery branch, so the two cannot drift (issue #169, M5).
 wm_needs_pointer() {
   case "$1" in
     *$'\n'*) return 0 ;;

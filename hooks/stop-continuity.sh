@@ -203,8 +203,8 @@ if found:
     print(min(found))
 ' "$1" "$2" 2>"${_crt_errfile:-/dev/null}")"
   _crt_rc=$?
-  # Defense in depth (matches the killstamp path's own guard,
-  # hooks/stop-continuity.sh:271): the success path should only ever be a
+  # Defense in depth (matches the killstamp read's own `case` guard below):
+  # the success path should only ever be a
   # bare integer or empty by construction of the Python script above, but
   # this makes that a guarantee of THIS function's own contract rather than
   # an assumption its caller has to trust.
@@ -354,10 +354,10 @@ window="${WM_STOP_CONTINUITY_WINDOW:-480}"
 lifetime="${WM_STOP_CONTINUITY_LIFETIME:-$WM_CONTINUITY_LIFETIME_DEFAULT}"
 
 # 5. Self-owned, time-bounded in-flight marker. Not "pid alive" alone - "pid
-# alive AND recorded within $window plus a margin" - since this hook's own
-# total runtime is bounded by its own referee at $window, so anything older
-# than that plus a small margin (60s) cannot possibly be a live instance of
-# this hook, regardless of what the pid says.
+# alive AND recorded within $window plus a margin" - because the loop below
+# refreshes this marker every iteration (see the refresh at the top of the
+# loop), so a marker older than one window plus a small margin (60s) cannot
+# belong to a live instance of this hook, regardless of what the pid says.
 inflight_stamp="$(head -n 1 "$inflightfile" 2>/dev/null)"
 inflight_pid="$(tail -n +2 "$inflightfile" 2>/dev/null | head -n 1)"
 inflight_age=999999
@@ -580,8 +580,9 @@ case "$classify_out" in
     # needs-attention row, so nothing else will ever report it, and the
     # premise the original decision leaned on for "it'll surface anyway"
     # (a fresh cycle "re-fires... within one poll") is false regardless:
-    # fire() acks the event BEFORE writing the exit record
-    # (bin/watch-fleet:873-875), so a fresh claim never rediscovers it.
+    # fire() acks the event BEFORE writing the exit record (see fire()'s own
+    # "This ack happens BEFORE $EXITFILE is written" comment in
+    # bin/watch-fleet), so a fresh claim never rediscovers it.
     # Check the exact same predicate stop-guard.sh checks, so this can never
     # drift from what stop-guard.sh actually does.
     if [ -z "$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" needs-attention --owner "$OWNER" --suppress-on handled 2>/dev/null)" ]; then
