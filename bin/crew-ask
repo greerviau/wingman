@@ -53,6 +53,7 @@
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$(dirname "$0")/lib/agent.sh"
 
 usage() {
   sed -n '2,60p' "$0"
@@ -295,7 +296,7 @@ cmd_send() {
   } > "$_promptfile"
   _pointer="[crew-ask $_req from $_caller_label] Read $_promptfile and answer it now, before resuming your own work - it contains a direct question and the exact reply command."
 
-  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_pointer"
+  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_pointer" "$(wm_crew_agent_name "$_id")"
   _send_rc=$?
   if [ "$_send_rc" -ne 0 ]; then
     # Not confirmed delivered (dialog-shaped pane, unconfirmed submit - idle

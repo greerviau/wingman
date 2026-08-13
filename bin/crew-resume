@@ -600,7 +600,7 @@ for c in (d.get("constraints") or []):
   # beat before the CLI claims raw-mode input handling). Skip the defensive
   # Ctrl-C, which would otherwise risk killing a not-yet-raw-mode process
   # outright instead of clearing anything it hasn't composed yet.
-  WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge"
+  WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge" "$_resolved_agent_name"
   _resume_nudge_rc=$?
   # Every documented wm_tmux_send_message rc gets matched wording (bin/lib/common.sh:1034-1056
   # for the canonical list), mirroring bin/crew-say:100-107 - previously only rc 2 and rc 6

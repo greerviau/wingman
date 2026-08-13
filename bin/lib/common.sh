@@ -699,9 +699,33 @@ unset _wm_ct_i
 # itself be an empty string - not the same as "not recognized" below).
 # Returns 0 when a rule pair is found in the trailing WM_COMPOSER_TAIL lines
 # of the given text, 1 ("not recognized", nothing printed) when fewer than
-# two rule lines are found there - left entirely to the caller, which
-# reverts to the pre-#188 whole-pane-checksum behavior rather than treating
-# "not recognized" as any kind of refusal.
+# two rule lines are found there, OR when the two rule lines found are
+# adjacent with no content line at all between them - left entirely to the
+# caller, which reverts to the pre-#188 whole-pane-checksum behavior rather
+# than treating "not recognized" as any kind of refusal.
+#
+# The adjacent-rules case (round-2 review, issue #25 PR #348) is
+# deliberately its own "not recognized" branch, not folded into "recognized,
+# empty region". This DOES change two branches in
+# _wm_tmux_send_message_locked for claude too on that specific degenerate
+# render, not only for an adapter with an empty anchor (round-3 review:
+# verified directly by comparing old vs new behavior against an adjacent-
+# rules pane under claude's own ambient anchor - old: text_in_rc=0, the
+# busy-pane refusal fires (rc 6) and composer mode engages; new:
+# text_in_rc=1, the busy refusal no longer fires and the call falls
+# through to the whole-pane-checksum path instead). That degenerate render
+# has never been observed for claude, whose composer always carries its
+# own anchor row between the rules, so this is not a reachable regression
+# in practice - but it is a real behavior change on paper, not "no
+# observable difference." What motivates the fix is a different adapter:
+# one whose real, live-verified anchor genuinely IS the empty string
+# (WM_AGENT_COMPOSER_ANCHOR_EMPTY, pi), where an empty extraction from
+# adjacent rules would otherwise byte-match that anchor and produce a
+# false "confirmed" for a pane that was never actually shown to be empty -
+# no content line was ever inspected at all. Not observed against a real
+# pi pane either (still hardening, not a fix for a reproduced failure),
+# but restores this function's "never a false confirmed" invariant for
+# every adapter.
 wm_composer_text_in() {
   _ct_tail="$(printf '%s\n' "$1" | tail -n "$WM_COMPOSER_TAIL")"
   _ct_idxs="$(printf '%s\n' "$_ct_tail" | grep -nE "$WM_COMPOSER_RULE_RE" | cut -d: -f1)"
@@ -711,7 +735,8 @@ wm_composer_text_in() {
   _ct_top="$(printf '%s\n' "$_ct_idxs" | tail -n2 | head -n1)"
   _ct_start=$((_ct_top+1))
   _ct_end=$((_ct_bottom-1))
-  [ "$_ct_start" -le "$_ct_end" ] && printf '%s\n' "$_ct_tail" | sed -n "${_ct_start},${_ct_end}p"
+  [ "$_ct_start" -le "$_ct_end" ] || return 1
+  printf '%s\n' "$_ct_tail" | sed -n "${_ct_start},${_ct_end}p"
   return 0
 }
 
@@ -1130,6 +1155,33 @@ wm_tmux_pane_ready() {
 # every fd on it closes, including on an uncatchable SIGKILL of the
 # holder - there is no separate reclaim path to describe, because there is
 # nothing left that can go stale.
+
+# wm_crew_agent_name <id>
+#
+# The target crew member's own recorded WM_AGENT descriptor name (crew.json's
+# `agent` field, issue #25 §5 step 4), defaulting to "claude" when absent or
+# unreadable - the same default wm-state.py's crew-add and bin/crew-resume
+# already use for an unset field. Every wm_tmux_send_message call aimed at a
+# specific crew member's pane must supply that call's own $3 with this, or
+# every pane silently falls back to claude's own ambient composer rule/anchor
+# regardless of which adapter is actually resolved for that member (issue #25
+# stage 4 review finding, PR #348 MF1): a non-claude pane's composer can
+# byte-match claude's WM_COMPOSER_RULE_RE by coincidence (pi's rule character
+# is identical) while never matching its WM_COMPOSER_ANCHOR, so
+# wm_composer_is_empty never reports empty and every delivery is treated as
+# unconfirmed and endlessly re-sent.
+wm_crew_agent_name() {
+  _wcan_agent="$(wm_state crew-get --id "$1" 2>/dev/null | wm_py -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print(d.get("agent") or "")' 2>/dev/null)"
+  printf '%s' "${_wcan_agent:-claude}"
+  unset _wcan_agent
+}
+
 wm_tmux_send_message() {
   wm_tmux_send_lock "$1" || return $?
   # $3 (issue #25, optional): a resolved agent NAME (not a crew id - the
@@ -1137,21 +1189,35 @@ wm_tmux_send_message() {
   # e.g. bin/watch-fleet's own per-member loop), used to temporarily swap
   # WM_COMPOSER_RULE_RE/WM_COMPOSER_ANCHOR/WM_COMPOSER_TAIL/WM_CLEAR_KEYS to
   # THIS member's own descriptor values for the duration of this one send,
-  # restored unconditionally afterward. No current caller passes it:
-  # composer-anchor data stays genuinely unknown for every follow-on CLI
-  # even once its own descriptor exists (plan §8), so there is nothing yet
-  # for a caller to gain by opting in - this exists so a future caller with
-  # real per-adapter composer data can use it without another signature
-  # change, and so every composer-mode call site inside
-  # _wm_tmux_send_message_locked below inherits the swap for free (they
-  # already read these globals directly, never a parameter of their own).
+  # restored unconditionally afterward. Every non-test caller now passes it
+  # (wm_crew_agent_name, PR #348): spawn-crew, crew-say, crew-ask,
+  # crew-resume, crew-standdown, watch-fleet, and wm_outbox_try_redeliver
+  # all resolve the target's own recorded adapter and supply this rather
+  # than silently classifying every pane against claude's own ambient
+  # values regardless of which adapter is actually running there - see
+  # pi.sh's own WM_AGENT_COMPOSER_ANCHOR_EMPTY for the first adapter this
+  # now genuinely changes behavior for. Every composer-mode call site
+  # inside _wm_tmux_send_message_locked below inherits the swap for free
+  # (they already read these globals directly, never a parameter of their
+  # own).
   _wtsm_saved_rule_re="$WM_COMPOSER_RULE_RE"
   _wtsm_saved_anchor="$WM_COMPOSER_ANCHOR"
   _wtsm_saved_tail="$WM_COMPOSER_TAIL"
   _wtsm_saved_clear="${WM_CLEAR_KEYS-C-c}"
   if [ -n "${3:-}" ] && [ "${3:-}" != claude ] && [ -f "$WM_LIB/agents/$3.sh" ]; then
     wm_agent_resolve "$3"
-    if [ -n "$WM_AGENT_COMPOSER_RULE_RE" ] && [ -n "$WM_AGENT_COMPOSER_ANCHOR" ]; then
+    # An adapter whose real, live-verified empty-composer signature IS the
+    # literal empty string (pi, confirmed live - issue #25 stage 4, PR #348)
+    # cannot express that through WM_AGENT_COMPOSER_ANCHOR alone: an empty
+    # shell variable is indistinguishable from "field never populated,"
+    # which is exactly the OTHER, far more common case this same emptiness
+    # already has to mean (every adapter whose anchor is still genuinely "not
+    # yet characterized"). WM_AGENT_COMPOSER_ANCHOR_EMPTY is the explicit,
+    # affirmative escape hatch: set only once a live pane has actually
+    # confirmed the emptied composer renders as nothing at all, never
+    # inferred or guessed.
+    if [ -n "$WM_AGENT_COMPOSER_RULE_RE" ] \
+       && { [ -n "$WM_AGENT_COMPOSER_ANCHOR" ] || [ "$WM_AGENT_COMPOSER_ANCHOR_EMPTY" = 1 ]; }; then
       WM_COMPOSER_RULE_RE="$WM_AGENT_COMPOSER_RULE_RE"
       WM_COMPOSER_ANCHOR="$WM_AGENT_COMPOSER_ANCHOR"
     else
@@ -1795,11 +1861,12 @@ wm_outbox_try_redeliver() {
     # next poll.
     mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null
     wm_tmux_send_message "$_tr_target" \
-      "Queued message for you: read $_tr_obsent and act on it now - it is a direct message to you, not background material."
+      "Queued message for you: read $_tr_obsent and act on it now - it is a direct message to you, not background material." \
+      "$(wm_crew_agent_name "$_tr_id")"
     _tr_rc=$?
     [ "$_tr_rc" -ne 0 ] && mv "$_tr_obsent" "$_tr_obpath" 2>/dev/null
   else
-    wm_tmux_send_message "$_tr_target" "$_tr_obmsg"
+    wm_tmux_send_message "$_tr_target" "$_tr_obmsg" "$(wm_crew_agent_name "$_tr_id")"
     _tr_rc=$?
     [ "$_tr_rc" -eq 0 ] && { mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null || rm -f "$_tr_obpath"; }
   fi
