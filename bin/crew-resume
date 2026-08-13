@@ -515,6 +515,10 @@ for c in (d.get("constraints") or []):
     printf 'exec '
     [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"
     printf '%s' "$WM_AGENT_BIN"
+    # Repo-doc-context suppression (issue #353): see bin/spawn-crew's
+    # identical gate and comment - a fixed, descriptor-authored literal,
+    # unconditionally appended for whichever adapter declares it.
+    [ -n "$WM_AGENT_CONTEXT_SUPPRESS_FLAG" ] && printf ' %s' "$WM_AGENT_CONTEXT_SUPPRESS_FLAG"
     if [ -n "$WM_AGENT_RESUME_FLAG" ]; then
       # A true resume: the CLI's own resume flag restores full conversation
       # context, so no system-prompt re-delivery is needed at all - unchanged

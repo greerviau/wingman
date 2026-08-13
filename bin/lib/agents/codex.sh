@@ -20,12 +20,20 @@
 # ZERO repo-level auto-loaded context beyond what this descriptor's own
 # positional brief delivers (the playbook + objective, composed by
 # wm_agent_emit_sysprompt - that part is unaffected and works normally). A
-# separate effort is porting AGENTS.md for this repo; this descriptor
-# deliberately does not duplicate that work, and does not attempt to work
-# around the gap (e.g. by pointing codex at CLAUDE.md itself, which codex
-# does not recognize) - it only documents that the gap exists and why, so a
-# future reader does not have to rediscover it. Revisit once AGENTS.md
-# lands.
+# separate effort (issue #351) is porting AGENTS.md for this repo; this
+# descriptor deliberately does not duplicate that work, and does not attempt
+# to work around the gap (e.g. by pointing codex at CLAUDE.md itself, which
+# codex does not recognize) - it only documents that the gap exists and why,
+# so a future reader does not have to rediscover it.
+#
+# This gap is NOT expected to close once #351 lands, and that's deliberate
+# (issue #353): WM_AGENT_CONTEXT_SUPPRESS_FLAG below actively suppresses
+# codex's own AGENTS.md auto-load for every codex crew member, unconditionally,
+# rather than relying on #351's prose preface block alone (the same mechanical-
+# guarantee-over-prose reasoning issue #213/PR #215 already applied to
+# claudeMdExcludes for claude). A codex crew member's repo-level context
+# will keep coming solely from the positional brief, by design, both before
+# and after #351 lands - not a residual gap to revisit.
 #
 # Hands-on verified (2026-08-13) against real codex-cli v0.147.0, launched
 # in a live tmux pane with a syntactically-valid but non-functional API key
@@ -62,6 +70,10 @@
 # text (only that the dialog exists and what accepting it looks like), and
 # WM_AGENT_SLASH_SETTLE's own need (attributed below, not independently
 # re-derived - no in-session skill invocation was exercised this pass).
+# Separately (same date, issue #353): WM_AGENT_CONTEXT_SUPPRESS_FLAG's
+# suppression of AGENTS.md auto-loading was live-verified via a captured
+# outbound request body against a local stand-in endpoint, not a live model
+# turn - see that field's own comment below for the exact method and result.
 
 WM_AGENT_BIN=codex
 WM_AGENT_DISPLAY_NAME="codex"
@@ -89,6 +101,26 @@ WM_AGENT_ENV_PREFIX=""
 # non-claude crew member (codex included) would otherwise silently inherit
 # CLAUDECODE=1 from it (plan §5 step 8).
 WM_AGENT_ENV_UNSET="CLAUDECODE"
+# Repo-doc-context suppression (issue #353, see the AGENTS.md gap note
+# above): codex's own project_doc_max_bytes config value, confirmed directly
+# in codex's own source (codex-rs/core/src/agents_md.rs) to gate its whole
+# AGENTS.md-discovery walk - 0 means "load nothing" (`if max_total == 0 {
+# return Ok(None); }`), not "truncate to 0 bytes". Live-verified (2026-08-13)
+# against the real codex-cli v0.147.0 binary, not shipped on source-reading
+# confidence alone: a scratch repo with a marker-content AGENTS.md, launched
+# against a local HTTP endpoint standing in for the model provider so the
+# actual outbound request body could be captured directly (no real
+# credentials needed for this - the request is fully composed and sent
+# before codex ever sees a response). Without this flag, the marker text
+# appeared verbatim in the captured request body; with `-c
+# project_doc_max_bytes=0` added, the marker was completely absent (0
+# occurrences) and the request shrank by exactly the injected block's size -
+# direct proof against the real binary, not an inference from source alone.
+# This also sidesteps issue #352 (this repo's docs file already exceeds
+# codex's 32KB default budget, silently truncating the tail for an ordinary,
+# non-crew codex user) for crew sessions specifically: nothing loads at all
+# when fully suppressed, so the truncation question never arises here.
+WM_AGENT_CONTEXT_SUPPRESS_FLAG="-c project_doc_max_bytes=0"
 
 # --- launch capability ----------------------------------------------------
 # Verified live: --dangerously-bypass-approvals-and-sandbox correctly puts

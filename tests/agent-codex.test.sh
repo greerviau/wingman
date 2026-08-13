@@ -47,6 +47,7 @@ assert_contains "the launch script unsets CLAUDECODE before exec'ing codex" "$la
 # --- the exec line composes codex's own flags, not claude's ------------------
 exec_line="$(grep -E '(^|[[:space:]])exec ' "$launch")"
 assert_contains "codex's own binary is the exec target" "$exec_line" "$WS/stub.sh"
+assert_contains "the repo-doc-context suppression flag is present (issue #353)" "$exec_line" "-c project_doc_max_bytes=0"
 assert_contains "the bypass flag is codex's own dangerously-bypass flag" "$exec_line" "--dangerously-bypass-approvals-and-sandbox"
 assert_not_contains "no --permission-mode (claude's own bypass flag shape) leaks into a codex launch" "$exec_line" "--permission-mode"
 assert_not_contains "no --approve (pi's own bypass flag) leaks into a codex launch" "$exec_line" "--approve"
