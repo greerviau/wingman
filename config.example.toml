@@ -113,7 +113,13 @@
 # claude.ai/code and not only via tmux attach.
 # remote_control = true
 
-# The tmux session that hosts crew windows.
+# The runtime backend that owns each crew member's terminal endpoint.
+# tmux is the default and requires no extra dependency.
+# backend = "tmux"
+# Herdr is experimental and requires the herdr CLI and jq; change the value
+# above to "herdr" to select it.
+# Herdr's named session defaults to "default" and can be overridden with
+# HERDR_SESSION in the environment.
 # tmux_session = "wingman"
 
 

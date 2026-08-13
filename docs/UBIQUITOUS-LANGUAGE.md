@@ -14,7 +14,12 @@ The words wingman's docs, prose, and code use for its domain concepts. Use these
 
 - **Pilot** - the human wingman flies for. Never used in text a crew member will read (a crew member mirrors wording into PR bodies and comments, where "pilot" is meaningless to outsiders); say "the human" there instead.
 - **Wingman** - the top-level orchestrator session, started by running `claude` from this repo. Not a crew member and not a crew layer.
-- **Crew member** - an independent agent session in its own tmux window, recorded in `~/.wingman/crew.json`. Embodied by `bin/spawn-crew`.
+- **Crew member** - an independent agent session with a backend-owned terminal endpoint, recorded in `~/.wingman/crew.json`. Embodied by `bin/spawn-crew`.
+- **Runtime backend** - the adapter that owns terminal endpoint creation, capture, delivery, liveness, and close operations. `tmux` is the default; `herdr` is experimental.
+- **Terminal endpoint** - the opaque backend-specific address recorded for one crew member. Higher-level lifecycle code never parses it.
+- **Herdr workspace** - the shared Herdr container Wingman uses for one home and named Herdr session.
+- **Herdr tab** - the per-member Herdr container inside the Wingman workspace.
+- **Herdr pane** - the exact Herdr endpoint that receives one member's agent process and messages.
 - **Lead** - a crew member (`--type lead`) that runs its own crew one layer down and rolls a single status line up to its owner. `playbooks/common/lead.md`.
 - **Playbook** - the markdown file at `playbooks/<category>/<type>.md` that defines a crew type's behavior. A crew type *is* its playbook; overridable with a gitignored `<type>.local.md`.
 

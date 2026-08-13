@@ -42,12 +42,12 @@ _lines="$(printf '%s' "$info" | wm_py -c '
 import sys, json
 d = json.load(sys.stdin)
 r = d.get("resumable")
-for k in ("repo", "session_id", "window", "status", "worktree", "wip_anchor_error", "agent"):
+for k in ("repo", "session_id", "window", "status", "worktree", "wip_anchor_error", "agent", "backend"):
     print(d.get(k) or "")
 print("" if r is None else ("true" if r else "false"))')"
 {
   read -r REPO; read -r SID; read -r WINDOW; read -r STATUS; read -r WORKTREE; read -r WIP_ERROR
-  read -r RECORD_AGENT; read -r RESUMABLE
+  read -r RECORD_AGENT; read -r BACKEND; read -r RESUMABLE
 } <<EOF
 $_lines
 EOF
@@ -152,9 +152,13 @@ print_resume_hint() {
 }
 
 live=0
-if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
-  wm_tmux_windows | grep -qx "$WINDOW" && live=1
+BACKEND="${BACKEND:-tmux}"
+if [ "$BACKEND" = tmux ]; then
+  ENDPOINT="$(wm_tmux_win_target "$WINDOW")"
+else
+  ENDPOINT="$WINDOW"
 fi
+[ "$(wm_backend_endpoint_state "$BACKEND" "$ENDPOINT")" = alive ] && live=1
 
 # A dirty worktree, if this member ever had one, is auto-anchored the moment it
 # flips to died (issue #251, cmd_reconcile) at this deterministic ref name -
@@ -172,8 +176,14 @@ fi
 
 if [ "$live" = 1 ]; then
   wm_info "Take the wheel of '$ID' (live). Run in your own shell:"
-  printf '\n    tmux attach -t %s \\; select-window -t %s\n\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
-  echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
+  printf '\n    '
+  wm_backend_attach_hint "$BACKEND" "$ENDPOINT"
+  printf '\n'
+  if [ "$BACKEND" = tmux ]; then
+    echo "Watch it, type in, take over. Detach with Ctrl-b d to hand back; the crew keeps running."
+  else
+    echo "Watch the recorded Herdr pane; close nothing except the exact member endpoint."
+  fi
 elif [ -z "$SID" ]; then
   # No session id was ever recorded - genuinely nothing to resume regardless
   # of status (distinct from RESUMABLE=false below, where a session id

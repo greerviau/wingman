@@ -73,7 +73,11 @@ SCHEMA = (
      "launch crew Remote-Control-visible"),
     ("harness", "tmux_session", SCALAR, "WM_TMUX_SESSION",
      "tmux session that hosts crew windows"),
+    ("harness", "backend", SCALAR, "WM_BACKEND",
+     "runtime backend for crew terminal endpoints"),
 )
+
+BACKEND_VALUES = ("tmux", "herdr")
 
 # Tables that additionally accept arbitrary crew-type keys alongside `default`
 # (see for_type below), so unknown-key detection must not flag them.
@@ -448,7 +452,10 @@ def problems(data=None, known_types=()):
                              % (table, key, table, known))
                 continue
             try:
-                _env_value(table, key, kind, raw)
+                value = _env_value(table, key, kind, raw)
+                if table == "harness" and key == "backend" and value not in BACKEND_VALUES:
+                    raise ConfigError(
+                        "%s must be one of: %s" % ("harness.backend", ", ".join(BACKEND_VALUES)))
             except ConfigError as exc:
                 found.append(str(exc))
     return found

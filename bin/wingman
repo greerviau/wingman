@@ -59,10 +59,12 @@ export WINGMAN_RUN_ID
 # without setsid, killing the tracked server produces zero server-died
 # events; with it, one. The daemon's own HUP trap (tmux-guardian.sh) is
 # defense in depth, not a substitute for this.
-if wm_have systemd-run && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
-  systemd-run --user --scope --collect --quiet -- setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 &
-else
-  setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 < /dev/null &
+if [ -n "${TMUX_PANE:-}" ] && wm_have tmux; then
+  if wm_have systemd-run && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
+    systemd-run --user --scope --collect --quiet -- setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 &
+  else
+    setsid "$WM_LIB/tmux-guardian.sh" --daemon >/dev/null 2>&1 < /dev/null &
+  fi
 fi
 
 # Collect --add-dir args from the discovered roots.

@@ -33,7 +33,7 @@ The one place this is not a straight top-to-bottom list is a per-type entry vers
 - **`[prefs]`** - the onboarding preferences (see below). A key answered here is never asked again.
 - **`[models]` / `[effort]`** - `default` for every spawn, plus a per-crew-type entry under the bare role name (`developer`) or the category-qualified one (`software-development/developer`).
 - **`[projects]`** - `roots`, `ignore`, and a `[projects.pins]` name→path table for `bin/discover-projects`. `~` and `$VAR` are expanded.
-- **`[harness]`** - `agent`, `permission_mode`, `remote_control`, `tmux_session`: the agent-CLI-specific knobs. `agent` accepts either a scalar or a per-crew-type `[harness.agent]` table, like `[models]`/`[effort]`.
+- **`[harness]`** - `agent`, `permission_mode`, `remote_control`, `backend`, and `tmux_session`: agent-CLI and runtime-backend settings. `agent` accepts either a scalar or a per-crew-type `[harness.agent]` table, like `[models]`/`[effort]`. `backend` defaults to `tmux`; `herdr` is experimental and requires the `herdr` CLI plus `jq`.
 - **`[env]`** - a raw `WM_*` passthrough for everything above does not model (see below).
 
 ### `[env]`: the rest of the knobs
@@ -73,19 +73,23 @@ None of this is required - the underlying scripts work without the launcher - bu
 
 ## Spawning crew (the recipe)
 
-Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target project:
+Every crew member is an independent, interactive `claude` session at a backend-owned terminal endpoint, launched in the target project:
 
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
   --objective "<one-line task>" [--id <slug>] [--input <plan-path>] \
   [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--agent <name>] \
-  [--allow-merge] [--waive-review-gate] \
+  [--backend <tmux|herdr>] [--allow-merge] [--waive-review-gate] \
   [--force-during-outage] [--force-during-usage-limit] \
   [--constraint "<text>" ...]
 ```
 
-The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the tmux window, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message.
+The script resolves the project, resolves the playbook (`<type>.local.md` if present, else `<type>.md`), forces a known session id, opens the selected backend endpoint, records the member in `~/.wingman/crew.json`, and delivers the objective as the session's first message. Explicit `--backend` wins over `WM_BACKEND`, `[harness].backend`, runtime detection, and the default `tmux`; a recorded member always keeps its original backend.
 It prints the crew `id`.
+
+Backend selection uses this order: `--backend`, `WM_BACKEND`, `[harness].backend`, `$TMUX`, `HERDR_ENV=1`, then `tmux`.
+A configured or explicit backend never falls back to another backend after setup fails.
+Herdr uses `HERDR_SESSION` (default `default`) and requires the Herdr CLI, `jq`, and protocol 14 or newer.
 
 Pass `--scope global` (instead of `--repo`) to ground a crew member at the global project scope: it launches at the workspace root with every discovered repo added, so it can read and work across all of them and choose the target repo(s) itself.
 Use it for cross-repo work or when the repo is genuinely unclear.
@@ -109,7 +113,7 @@ A non-software-development member (e.g. `data-engineer`, `ml-engineer`, `experim
 
 Machine-local runtime state, created on first run, never committed:
 
-- `crew.json` - the live roster (id, type, session id, tmux window name and window id, repo, status, `parent`, `is_git`/`has_remote`).
+- `crew.json` - the live roster (id, type, session id, backend-owned endpoint and physical identity, repo, status, `parent`, `is_git`/`has_remote`). Herdr records also carry the named session, workspace, tab, and pane IDs.
   `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
   `is_git`/`has_remote` are recorded for repo scope only (`null`/absent for global scope) - see "Spawning crew" above.
 - `crew/<id>.json` - each crew member's distilled status record.

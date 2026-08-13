@@ -218,7 +218,7 @@ import sys, json
 d = json.load(sys.stdin)
 def flat(v):
     return (v or "").replace("\n", "\\n")
-for k in ("repo", "session_id", "window", "worktree", "status", "type", "scope", "agent"):
+for k in ("repo", "session_id", "window", "worktree", "status", "type", "scope", "agent", "backend", "herdr_session", "herdr_workspace_id"):
     print(d.get(k) or "")
 for k in ("is_git", "has_remote"):
     v = d.get(k)
@@ -229,7 +229,7 @@ for k in ("allow_merge", "review_gate_waived"):
     print("true" if d.get(k) else "false")')"
   {
     read -r _repo; read -r _sid; read -r _window; read -r _worktree; read -r _status; read -r _type
-    read -r _scope; read -r _agent; read -r _is_git; read -r _has_remote
+    read -r _scope; read -r _agent; read -r _backend; read -r _herdr_session; read -r _herdr_workspace_id; read -r _is_git; read -r _has_remote
     read -r _objective; read -r _input; read -r _summary; read -r _artifact; read -r _artifact_url; read -r _delivery; read -r _spawned_at
     read -r _allow_merge; read -r _review_gate_waived
   } <<EOF
@@ -290,9 +290,24 @@ for c in (d.get("constraints") or []):
   # Now that concurrent creators are excluded, a window already at this name
   # means a previous resume already relaunched it (or left a stray window) -
   # still worth skipping, but no longer the thing that closes the race.
-  if wm_tmux_windows | grep -qx "$_window"; then
-    wm_info "'$_rid': window '$_window' already exists, not relaunching"
-    RESUME_RESULT="skip: window already exists"
+  _backend="${_backend:-tmux}"
+  if [ "$_backend" = tmux ]; then
+    _old_endpoint="$(wm_tmux_win_target "$_window")"
+    _already_alive="$(wm_backend_endpoint_state tmux "$_old_endpoint")"
+  else
+    _old_endpoint="$_window"
+    _already_alive="$(wm_backend_endpoint_state "$_backend" "$_old_endpoint")"
+    [ "$_already_alive" = unknown ] || [ "$_already_alive" = unreadable ] || [ "$_already_alive" = ambiguous ] || :
+  fi
+  if [ "$_already_alive" = alive ]; then
+    wm_info "'$_rid': endpoint '$_window' already exists, not relaunching"
+    RESUME_RESULT="skip: endpoint already exists"
+    release_claim
+    return
+  fi
+  if [ "$_backend" = herdr ] && [ "$_already_alive" != missing ]; then
+    wm_warn "'$_rid': Herdr endpoint state is $_already_alive, not safely replaceable; status left 'died'"
+    RESUME_RESULT="skip: endpoint state unavailable"
     release_claim
     return
   fi
@@ -543,23 +558,42 @@ for c in (d.get("constraints") or []):
   } > "$_launch"
   chmod +x "$_launch"
 
-  # --- relaunch the window -----------------------------------------------------
-  wm_tmux_ensure_session
-  # -PF prints the replacement window's id (@N); re-registered in the roster so
-  # stray-window adoption keeps an exact identity to match on.
-  _window_id="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "$_window" "bash $(quote "$_launch")")"
-  _new_window_rc=$?
-  if [ "$_new_window_rc" -ne 0 ] || [ -z "$_window_id" ]; then
-    wm_warn "'$_rid': tmux new-window failed (exit $_new_window_rc) - no window was created; status left 'died'. Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
-    RESUME_RESULT="skip: resume failed"
-    release_claim
-    return
+  # --- relaunch the recorded backend endpoint -------------------------------
+  if [ "$_backend" = herdr ]; then
+    _container="$(HERDR_SESSION="${_herdr_session:-${HERDR_SESSION:-default}}" HERDR_WORKSPACE_ID="${_herdr_workspace_id:-}" wm_backend_create_container herdr "$_cwd")" || {
+      wm_warn "'$_rid': could not ensure its recorded Herdr session/workspace; status left 'died'"
+      RESUME_RESULT="skip: Herdr unavailable"; release_claim; return
+    }
+    _fields="$(wm_backend_create_member herdr "$_container" "wm-$_rid" "$_cwd" "$_launch")" || {
+      wm_warn "'$_rid': could not create a replacement Herdr tab; status left 'died'"
+      RESUME_RESULT="skip: Herdr endpoint creation failed"; release_claim; return
+    }
+    IFS="$(printf '\t')" read -r _new_session _new_workspace _new_tab _new_pane _new_endpoint <<EOF
+$_fields
+EOF
+    _window="$_new_endpoint"; _window_id="$_new_tab"
+    wm_state crew-set --id "$_rid" --window "$_window" --window-id "$_window_id" \
+      --backend herdr --herdr-session "$_new_session" --herdr-workspace-id "$_new_workspace" \
+      --herdr-tab-id "$_new_tab" --herdr-pane-id "$_new_pane" --silent >/dev/null 2>&1 || true
+    wm_backend_start_member herdr "$_window" "$_launch" || {
+      wm_warn "'$_rid': Herdr rejected the replacement launch command; status left 'died'"
+      RESUME_RESULT="skip: resume failed"; release_claim; return
+    }
+    _resume_endpoint="$_window"
+  else
+    wm_tmux_ensure_session
+    _window_id="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "$_window" "bash $(quote "$_launch")")"
+    _new_window_rc=$?
+    if [ "$_new_window_rc" -ne 0 ] || [ -z "$_window_id" ]; then
+      wm_warn "'$_rid': tmux new-window failed (exit $_new_window_rc) - no window was created; status left 'died'. Inspect with 'bin/crew-takeover $_rid', or discard with 'bin/crew-standdown $_rid'."
+      RESUME_RESULT="skip: resume failed"; release_claim; return
+    fi
+    wm_state crew-set --id "$_rid" --window-id "$_window_id" --silent >/dev/null 2>&1 || true
+    _resume_endpoint="$(wm_tmux_win_target "$_window")"
   fi
-  # Captured right after the window exists, well before the nudge is even
-  # sent, so the #220 verify deadline below measures from the window's true
-  # birth, not from whatever point this function happens to reach it.
+  # Captured right after the endpoint exists, so verification measures from
+  # the endpoint's true birth.
   _window_t0="$(date +%s)"
-  wm_state crew-set --id "$_rid" --window-id "$_window_id" --silent >/dev/null 2>&1 || true
   # --resume reopens the conversation but, in this unattended setup, does not
   # itself decide to keep working - it needs the same kind of opening nudge a
   # fresh spawn gets. A freshly resumed window can land back on a startup gate
@@ -597,7 +631,7 @@ for c in (d.get("constraints") or []):
   # beat before the CLI claims raw-mode input handling). Skip the defensive
   # Ctrl-C, which would otherwise risk killing a not-yet-raw-mode process
   # outright instead of clearing anything it hasn't composed yet.
-  WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_resume_nudge" "$_resolved_agent_name"
+  WM_CLEAR_KEYS="" wm_backend_send_message "$_backend" "$_resume_endpoint" "$_resume_nudge" "$_resolved_agent_name"
   _resume_nudge_rc=$?
   # Every wm_tmux_send_message rc gets its own wording, matching bin/crew-say's
   # per-rc case block (issue #173).
@@ -650,14 +684,15 @@ for c in (d.get("constraints") or []):
   # base." The cost is real: a genuinely healthy resume still waits out the
   # full window rather than exiting early, since a session observed alive for
   # a few polls is not evidence against a crash later in the window.
-  if wm_tmux_windows | grep -qx "$_window"; then _alive=1; else _alive=0; fi
+  _state="$(wm_backend_endpoint_state "$_backend" "$_resume_endpoint")"
+  if [ "$_state" = alive ]; then _alive=1; else _alive=0; fi
 
   if [ "$_alive" = 1 ]; then
     _rv_window="${WM_RESUME_VERIFY_WINDOW:-20}"
     _rv_poll="${WM_RESUME_VERIFY_POLL:-1}"
     while [ "$(( $(date +%s) - _window_t0 ))" -lt "$_rv_window" ]; do
       sleep "$_rv_poll"
-      if ! wm_tmux_windows | grep -qx "$_window"; then
+      if [ "$(wm_backend_endpoint_state "$_backend" "$_resume_endpoint")" != alive ]; then
         _alive=0
         break
       fi
