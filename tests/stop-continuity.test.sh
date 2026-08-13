@@ -714,7 +714,14 @@ h7cp=$!; wm_track "$h7cp"
 assert_true "the first (and only, per the 1s lifetime) iteration claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid7cp="$(cat "$WINGMAN_HOME/watch.pid")"
 kill -9 "$cpid7cp" 2>/dev/null
-assert_true "the hook exits" "wait_for_gone $h7cp 300"
+# 600 tries (120s), not 300 (issue #346): real GitHub Actions CI (PR #348)
+# has now been observed failing this exact assertion even at 300 tries under
+# heavy contention - a poll timeout, so widening costs nothing on the
+# passing path (a poll that finds the condition true on try 1 returns
+# immediately regardless of the budget). Applied consistently below to
+# every other site sharing this same external-kill -> --classify forensics
+# exit chain, not just this one.
+assert_true "the hook exits" "wait_for_gone $h7cp 600"
 wait "$h7cp" 2>/dev/null
 out7cp="$(cat "$WINGMAN_HOME/hook7cp.out" 2>/dev/null)"
 assert_contains "the budget-exhaustion body names the unexpected watch-cycle exit" "$out7cp" "re-arming after an unexpected watch-cycle exit"
@@ -979,8 +986,10 @@ kill -9 "$cpide" 2>/dev/null
 # startup overhead that grows under the same CPU-saturating CI parallelism.
 # The default 100-try (20s) wait_for_gone budget was generous enough for a
 # quiet local run but not always enough under real contention; widened for
-# headroom, not because the real work changed.
-assert_true "the hook notices the death and exits" "wait_for_gone $hpe 300"
+# headroom, not because the real work changed. 600 tries (120s), not 300
+# (issue #346): real CI (PR #348) has been observed failing case 7c' above,
+# the identical exit chain, even at 300 tries.
+assert_true "the hook notices the death and exits" "wait_for_gone $hpe 600"
 wait "$hpe" 2>/dev/null
 out_sre="$(cat "$WINGMAN_HOME/sre.out" 2>/dev/null)"
 assert_false "a successful-arm-then-kill is NOT misrouted to the claim-failure branch" "[ -f '$WINGMAN_HOME/stop-continuity.claimfail' ]"
@@ -1059,11 +1068,11 @@ while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
     fi
     sleep 0.1; _n=$((_n+1))
   done
-  # 300 tries (60s), not the 100-try default (issue #346): this loop's own
+  # 600 tries (120s), not the 100-try default (issue #346): this loop's own
   # kill reaches hook exit via the same external-SIGKILL -> --classify
-  # forensics chain as case 8e above, which already needed 300 tries under
-  # real CI contention for the identical reason.
-  wait_for_gone "$hp" 300 >/dev/null 2>&1
+  # forensics chain as case 8e above, which real CI (PR #348) has shown
+  # needs 600, not 300, under real contention.
+  wait_for_gone "$hp" 600 >/dev/null 2>&1
   wait "$hp" 2>/dev/null
   _trip_out="$(cat "$WINGMAN_HOME/sr$_round.out" 2>/dev/null)"
   _trip_err="$(cat "$WINGMAN_HOME/sr$_round.err" 2>/dev/null)"
@@ -1131,9 +1140,10 @@ while [ ! -f "$WINGMAN_HOME/watch-d8h.suppressed" ] && [ "$_oround" -lt 6 ]; do
     fi
     sleep 0.1; _on=$((_on+1))
   done
-  # 300 tries (60s), not the 100-try default (issue #346): same
-  # kill -> --classify forensics chain as case 8e/8b above, owner-scoped.
-  wait_for_gone "$ohp" 300 >/dev/null 2>&1
+  # 600 tries (120s), not the 100-try default (issue #346): same
+  # kill -> --classify forensics chain as case 8e/8b above, owner-scoped -
+  # real CI (PR #348) has shown this chain needs 600, not 300.
+  wait_for_gone "$ohp" 600 >/dev/null 2>&1
   wait "$ohp" 2>/dev/null
 done
 assert_true "the owner-scoped standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch-d8h.suppressed' ]"
@@ -1273,11 +1283,11 @@ _elapsed9b=$(( $(date +%s) - _start9b ))
 _remaining9b=$(( WM_STOP_CONTINUITY_WINDOW - _elapsed9b - 3 ))
 [ "$_remaining9b" -gt 0 ] && sleep "$_remaining9b"
 kill -9 "$cpid9s" 2>/dev/null
-# 300 tries (60s), not the 100-try default: this kill reaches the hook's
+# 600 tries (120s), not the 100-try default: this kill reaches the hook's
 # exit via the same external-SIGKILL-to-a-claimed-child -> --classify
-# forensics chain as cases 7c'/8e below, which already needed 300 tries
-# under real CI contention for the identical reason (issue #346).
-assert_true "the hook exits" "wait_for_gone $h9s 300"
+# forensics chain as cases 7c'/8e below, which real CI (PR #348) has shown
+# needs 600, not 300, under real contention (issue #346).
+assert_true "the hook exits" "wait_for_gone $h9s 600"
 wait "$h9s" 2>/dev/null
 out9s="$(cat "$WINGMAN_HOME/hook9s.out" 2>/dev/null)"
 assert_not_contains "an external kill near expiry is never misreported as rolled" "$out9s" "window rolled"
