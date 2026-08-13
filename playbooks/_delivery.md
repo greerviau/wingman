@@ -85,7 +85,7 @@ A developer whose delivery has no forge signal to watch (no remote, or a workflo
 
 ### Merge authorization
 
-By default you **cannot** merge this PR - a `PreToolUse` hook (`hooks/no-merge-guard.sh`) denies `gh pr merge`, a `gh api` call hitting the merge endpoint, and a direct push to the default branch, from every session.
+By default you **cannot** merge this PR - a `PreToolUse` hook (`hooks/no-merge-guard.sh`) denies `gh pr merge`, a `gh api` call hitting the merge endpoint, and a direct push to the default branch, from every crew session.
 This is deliberate: you never merge without the human's explicit, per-effort authorization, because your session acts under the human's own GitHub credentials, and an unauthorized agent merge would be indistinguishable from the human's own.
 Once the PR is green, `review` is where you stop and wait; the human merges it directly, or grants **this specific effort** merge autonomy (`allow_merge: true` on your record - set only by the human or your owner, never by you on yourself).
 

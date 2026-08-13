@@ -6,7 +6,7 @@ Wingman is a long-lived Claude Code session that orchestrates a crew of agents f
 You (the pilot) give it high-level directives - *"implement this feature,"* *"investigate this issue,"* *"what's my crew doing?"* - and it delegates the real work, tracks status, and surfaces only real decisions to you.
 It orchestrates; it never does the heavy lifting itself.
 
-Each crew member is an independent `claude` session in its own tmux window, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed.
+Each crew member is an independent agent-CLI session (`claude` by default) in its own tmux window, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed.
 
 ## Why not just subagents?
 
@@ -31,7 +31,7 @@ cd wingman
 bin/wingman          # recommended; plain `claude` also works
 ```
 
-Run `bin/doctor -y` once, up front, to install missing dependencies and register wingman's guard hooks; `bin/wingman` then discovers your sibling repos with zero config and starts the supervisor (it reconciles guard-hook registration on every launch, but does not install dependencies for you the way `bin/doctor` does).
+Run `bin/doctor -y` once, up front, to install missing dependencies and register wingman's guard hooks; `bin/wingman` then discovers your sibling repos with zero config and starts the tmux-server liveness guardian (it reconciles guard-hook registration on every launch, but does not install dependencies for you the way `bin/doctor` does).
 Then give it a directive. All you need up front is `claude` and `git`.
 
 > `bin/wingman` is a thin launcher: it pre-adds sibling repos (`--add-dir`), mints a run id so preferences are asked once per run, and wires up Remote Control disconnect detection. Plain `claude` works too, with less - see [the launcher docs](docs/configuration.md#the-wingman-launcher).
@@ -96,7 +96,7 @@ developer = "sonnet"          # per crew type
 roots = ["~/dev"]             # where to look for your repos
 ```
 
-It also holds `[effort]` (same shape as `[models]`), `[projects.pins]`/`ignore`, `[harness]` (agent, permission mode, Remote Control, tmux session), and `[env]` — a raw `WM_*` passthrough for the ~100 internal tuning knobs the typed settings don't model.
+It also holds `[effort]` (same shape as `[models]`), `[projects.pins]`/`ignore`, `[harness]` (agent, permission mode, Remote Control, tmux session), and `[env]` - a raw `WM_*` passthrough for the ~100 internal tuning knobs the typed settings don't model.
 
 An explicit flag beats the file, and the file beats wingman's defaults. `bin/config` prints every setting as resolved **with the source it came from**; `bin/config --check` (and `bin/doctor`) rejects a typo rather than ignoring it. Full details in [configuration.md](docs/configuration.md#the-settings-file---configlocaltoml).
 
@@ -133,7 +133,7 @@ The tree is domain-neutral - swap playbooks and the same machinery runs a scienc
 ## Tests
 
 `bash tests/run.sh` runs the bash E2E suites - no real `claude`/tmux fleet needed, just `bash`, `git`, `tmux`, and `uv`.
-GitHub Actions runs the same suite on every push and PR to `main`.
+GitHub Actions runs the same suite on every pull request, and on every push to `main`.
 
 ## Learn more
 

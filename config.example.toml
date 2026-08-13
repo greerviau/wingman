@@ -3,14 +3,15 @@
 # Copy this to config.local.toml (gitignored) and uncomment what you want:
 #   cp config.example.toml config.local.toml
 #
-# Everything here is optional. With no file at all wingman behaves exactly as it
-# always has: it asks the onboarding-preference questions once per run, and
-# every spawn falls through to the agent CLI's own model.
+# Everything here is optional. With no file at all, wingman asks the
+# onboarding-preference questions once per run, and every spawn falls through
+# to the agent CLI's own model.
 #
 # Precedence, most specific first:
-#   an explicit flag (--model, --effort, ...)
+#   an explicit flag (--model, --effort, --agent, ...)
+#     > a per-crew-type entry in this file ([models], [effort], [harness.agent])
 #     > the matching $WM_* environment variable
-#     > this file
+#     > this file's own `default` key (which is exported as that same variable)
 #     > wingman's built-in default
 # `bin/config` prints every resolved setting with the source it came from.
 #
@@ -144,8 +145,8 @@
 # Seconds before a stall nudge marker is treated as belonging to a concluded
 # episode and reaped, so it can never gate a later, unrelated episode. Derived
 # by default as WM_STALL_IDLE * (WM_STALL_NUDGE_TRIES + 2) (720 at defaults);
-# must stay above 2x WM_STALL_IDLE (enforced with a warning) or the flip
-# window can collapse (issue #101).
+# must stay above 2x WM_STALL_IDLE, or the flip window can collapse (PR
+# #101) - a lower value is warned about and clamped up to that floor.
 # WM_STALL_NUDGE_TTL = "720"
 
 # Seconds a member's pane must repaint continuously (never idle at a prompt)

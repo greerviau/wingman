@@ -15,12 +15,16 @@ Your deliverable is a results dataset plus a methods log, and there is no revisi
 
 If running or simulating the protocol requires new collection/simulation code, whether you isolate it in git depends on the target - a remote/PR was never this role's deliverable either way (`$WINGMAN_HAS_REMOTE` doesn't change this section's behavior), only whether there's a repo to commit into at all:
 
-- **`$WINGMAN_IS_GIT=true`:** isolate the code in its own git worktree/branch exactly as `developer` does:
+- **`$WINGMAN_IS_GIT=true`:** isolate the code in its own git worktree/branch:
   ```
   git fetch origin
   git worktree add "$WINGMAN_WORKTREE" -b <branch> origin/<default-branch>
   ```
   and commit it as supporting evidence for the results.
+  `$WINGMAN_WORKTREE` is exported only for a repo-scoped spawn; if it is unset (a global-scope or resumed session in a directory that is a git repo), pick a path yourself - `<repo-path>-<crew-id>`, the same convention repo scope uses - and register it so teardown can find it:
+  ```
+  $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --worktree <path>
+  ```
 - **`$WINGMAN_IS_GIT=false`, or unset:** if unset (a global-scope spawn or a resumed session), detect it yourself at the directory you're working in (`git -C . rev-parse --show-toplevel`).
   If it's genuinely not a repo, just write the code as a plain file alongside the results - no worktree, nothing to commit or push.
 

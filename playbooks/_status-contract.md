@@ -25,7 +25,7 @@ $WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" \
 ```
 
 `$WINGMAN_STATE` (the full `uv run ... wm-state.py` invocation), `$WINGMAN_CREW_ID`, `$WINGMAN_HOME`, and `$WINGMAN_BIN` (the `bin/` dir, for shared tools) are exported into your environment.
-Run `$WINGMAN_STATE` unquoted so it word-splits into the command.
+`$WINGMAN_STATE` holds a multi-word command, so it has to reach the shell as several words: run it unquoted (`$WINGMAN_STATE crew-set ...`) under `bash`, and as `${=WINGMAN_STATE} crew-set ...` under `zsh`, which does not word-split an unquoted expansion and otherwise fails with `no such file or directory: uv run ...`. Never wrap it in double quotes, and never wrap the whole call in `eval` - that re-splits your `--summary`/`--blocker` values on whitespace.
 Only pass the flags that changed.
 `--silent` is for one specific case - a `review` re-entry that is self-managed churn, not a new result - see "Re-entering `review` without re-announcing" below.
 
@@ -48,21 +48,9 @@ Only pass the flags that changed.
 
 ## Per-issue blocking vs whole-effort blocking (roles that own multiple units of work)
 
-The states above describe a session producing **one** deliverable, where "I need a
-decision" and "I cannot proceed" are the same fact. A role that owns several independent
-units of work concurrently - today, only `lead` (`playbooks/common/lead.md`) - is
-different: one unit hitting a genuine blocking question never by itself means the
-*session* has nothing left it can progress.
+The states above describe a session producing **one** deliverable, where "I need a decision" and "I cannot proceed" are the same fact. A role that owns several independent units of work concurrently - today, only `lead` (`playbooks/common/lead.md`) - is different: one unit hitting a genuine blocking question never by itself means the *session* has nothing left it can progress.
 
-For such a role, `blocked` keeps its meaning unchanged - this session has nothing further
-it can legally progress - but is reserved for when that is true across the whole roster,
-not merely true for one unit. A unit that needs a decision the role cannot make, while
-other units remain actionable, is **parked**, not **blocked**: recorded via `crew-set
---park "<ref>:<question>"` (a structured annotation, independent of `status`) while the
-role keeps working the rest. `playbooks/common/lead.md` defines the concrete
-park-and-continue discipline and the batched-escalation shape this feeds into; this
-contract only establishes that `parked` and `blocked` answer two different questions, and
-that a role owning multiple units always has both available to it.
+For such a role, `blocked` keeps its meaning unchanged - this session has nothing further it can legally progress - but is reserved for when that is true across the whole roster, not merely true for one unit. A unit that needs a decision the role cannot make, while other units remain actionable, is **parked**, not **blocked**: recorded via `crew-set --park "<ref>:<question>"` (a structured annotation, independent of `status`) while the role keeps working the rest. `playbooks/common/lead.md` defines the concrete park-and-continue discipline and the batched-escalation shape this feeds into; this contract only establishes that `parked` and `blocked` answer two different questions, and that a role owning multiple units always has both available to it.
 
 ## `blocked` for a human dependency
 
@@ -121,7 +109,7 @@ Once your turn ends you are idle and **cannot rouse yourself** - so if you are i
 Your status is watched by your **owner** (the party that spawned you). Its watcher is scoped to just its own reports, so nothing here changes based on who your owner is.
 
 - **Escalate up the chain, not straight to the top.** When you set `blocked`, it surfaces to your owner - not further. Your owner answers via `bin/crew-say` if it can; if the decision is above *its* pay grade, it re-raises `blocked` on *its own* line, which surfaces one level further up. Decisions travel up only as far as needed; the answer flows back down the same chain.
-- **Collaborate with peers directly.** If you have siblings under the same owner, you may `bin/crew-say` them directly for routine coordination (e.g. a developer and a reviewer, or two developers negotiating an interface) - this does **not** go through your owner, so it never bloats its context. Find your siblings with `bin/crew-list --owner <your-own-parent>` (your parent is your owner's id). Keep talking *up* to your owner only for status it should roll up or a decision to escalate. The team guardrail in `crew-say` keeps this within your team: you can reach your reports, your siblings, and your owner - not arbitrary sessions elsewhere in the tree.
+- **Collaborate with peers directly.** If you have siblings under the same owner, you may `bin/crew-say` them directly for routine coordination (e.g. a developer and a reviewer, or two developers negotiating an interface) - this does **not** go through your owner, so it never bloats its context. Find your siblings with `bin/crew-list --owner <your-own-parent>` (your parent is your owner's id). Keep talking *up* to your owner only for status it should roll up or a decision to escalate. The team guardrail in `crew-say` keeps this within your team: you can reach your reports, your siblings, and your owner - not arbitrary sessions elsewhere in the tree. A message to a peer carrying a standing constraint is refused until you resend it with `--ack-constraints`, which reprints those constraints for you to confirm your message does not relax them.
 
 ## Answering a direct question (`crew-ask`)
 
@@ -161,10 +149,10 @@ A reviewer's internal "approve" is not a GitHub review decision, and a developer
 
 The discipline above - don't assert external system state you haven't verified - applies just as much to a file you read locally.
 What your working tree shows you is a claim about "the file's current state," not verified truth, unless you've just confirmed your checkout is caught up with `origin/<default-branch>`.
-Any `$WINGMAN_IS_GIT=true` session that is `cd`'d directly into the target checkout - every software-development role except `developer` (whose own worktree-per-run step already guarantees freshness - see `playbooks/software-development/developer.md`'s "Isolate" step), and any other role grounded in a git-backed project directory - reads whatever commit that checkout happens to be pinned at, which can silently lag `origin/<default-branch>` if nobody has fetched or pulled it recently.
+Any `$WINGMAN_IS_GIT=true` session that is `cd`'d directly into the target checkout - every software-development role except `developer` (whose own worktree-per-run step already guarantees freshness - see `playbooks/_delivery.md`'s "Isolate" step, which `developer.md` defers to), and any other role grounded in a git-backed project directory - reads whatever commit that checkout happens to be pinned at, which can silently lag `origin/<default-branch>` if nobody has fetched or pulled it recently.
 
 **Before asserting "file X currently does/doesn't do Y"** - a finding, a review comment, a plan's stated current-state assumption - confirm freshness first, whenever `$WINGMAN_IS_GIT=true` and `$WINGMAN_HAS_REMOTE=true` (no `origin` to check against otherwise).
-**If either is unset** - a `--scope global` spawn, or a resumed session, where "unset means not yet known, detect it yourself, and must never be treated as `false`" (`CLAUDE.md`) - detect them yourself for the directory you're actually reading from before deciding whether this applies, exactly as `developer.md`'s own "Isolate" step and `experimentalist.md` already do for the same two variables:
+**If either is unset** - a `--scope global` spawn, or a resumed session, where "unset means not yet known, detect it yourself, and must never be treated as `false`" (`CLAUDE.md`) - detect them yourself for the directory you're actually reading from before deciding whether this applies, exactly as `playbooks/_delivery.md`'s own deliverable-shape step already does for the same two variables (and as `experimentalist.md` does for the git-ness half alone):
 
 ```
 git -C <dir> rev-parse --show-toplevel   # confirms it's a git repo at all
@@ -312,14 +300,9 @@ $WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key artifact_linking
 
 Prints the cached value and exits 0 if this run already has an answer; exits nonzero if unanswered.
 Publish only if it prints `artifact`.
-When it is unanswered, two cases, resolved differently:
+When it is unanswered for any reason - `$WINGMAN_RUN_ID` unset (not launched via `bin/wingman`), an unreadable preferences file, or a run whose onboarding never recorded this key - treat the answer as `local`: publish nothing, and report the local path only. That is the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does, and `hooks/artifact-link-guard.sh` lets the report through unchanged in exactly that case.
 
-- **`$WINGMAN_RUN_ID` is unset, or the preferences file is unreadable** (not launched via `bin/wingman`, or corrupted state): treat the answer as `local` without asking - the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does.
-- **`$WINGMAN_RUN_ID` is set but `artifact_linking` has no cached value:** ask via `AskUserQuestion` ("For markdown deliverables (plans/reports), do you want them also published as a hosted Artifact link, or just the local file path?") and cache the answer for everyone to reuse:
-
-  ```
-  $WINGMAN_STATE pref-set --run-id "$WINGMAN_RUN_ID" --key artifact_linking --value <artifact|local>
-  ```
+Never try to ask the question yourself. `AskUserQuestion` is denied for every crew session (`hooks/no-interactive-prompt-guard.sh`, see "`blocked` for a human dependency" above), and this preference belongs to the requester's own once-per-run onboarding step, not to you - so an unanswered preference is never a reason to report `blocked` either.
 
 **C - the content passes the deterministic security gate.** This is a check on whether *this repo's own internal information* is safe to host externally (secrets, infra details) - a different question from the `Artifact` tool's own built-in refusal categories (which guard against misusing the hosting mechanism itself), so do not treat those as covering this. Run:
 
