@@ -2,8 +2,8 @@
 #
 # opencode (npm opencode-ai, binary `opencode`) is the second non-claude
 # adapter (plan §8's build order: pi, then opencode, then codex, then
-# grok). Exercises the prompt-flag system-prompt path and
-# WM_AGENT_BUSY_MEANS_QUEUED - see
+# grok). Exercises the prompt-flag system-prompt path and an env-var
+# permission bypass (WM_AGENT_ENV_PREFIX) - see
 # docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md
 # §3/§4.3/§4.5/§4.6/§4.7/§5 step 8 for the full research and schema this
 # descriptor implements, and bin/lib/agents/claude.sh for the field-by-field
@@ -26,12 +26,15 @@
 # finds nothing and falls through to the whole-pane-checksum path),
 # --prompt delivering the first message correctly, --model composing
 # without error, Ctrl-C clearing without exiting, and `/exit` cleanly
-# exiting. Also confirmed BUSY_MEANS_QUEUED live end-to-end: sent a second
-# message while a first turn was still generating, watched it render with
-# an explicit "QUEUED" label directly under it (not swallowed, not
-# rejected), then watched it get processed automatically the moment the
-# first turn finished, with the model itself acknowledging the queued
-# instruction. Also confirmed live that a single Escape does not interrupt
+# exiting. Also confirmed live, end to end, that opencode genuinely does
+# queue a message sent mid-turn rather than reject or lose it: sent a
+# second message while a first turn was still generating, watched it
+# render with an explicit "QUEUED" label directly under it, then watched
+# it get processed automatically the moment the first turn finished, with
+# the model itself acknowledging the queued instruction. WM_AGENT_BUSY_
+# MEANS_QUEUED itself stays unset below despite this confirmed fact - see
+# that field's own comment for why setting it would currently be inert.
+# Also confirmed live that a single Escape does not interrupt
 # outright - the status bar changes to "esc again to interrupt", a genuine
 # confirm step - consistent with the plan's own WM_AGENT_INTERRUPT_REPEAT
 # note; no current code in this repo consumes WM_AGENT_INTERRUPT_KEY/
@@ -112,15 +115,32 @@ WM_AGENT_SYSPROMPT_MODE=prompt-flag
 WM_AGENT_SYSPROMPT_FLAG="--prompt %s"
 WM_AGENT_SUBMIT_SETTLE=""
 WM_AGENT_SLASH_SETTLE=""
-# Verified live, end to end: a second message sent while a first turn was
-# still generating rendered with an explicit "QUEUED" label beneath it (not
-# swallowed, not rejected) and was automatically processed - with the model
-# itself acknowledging the queued instruction - the instant the first turn
-# finished. An unconfirmed submit against a busy opencode pane is a real
-# accepted-and-queued outcome, not a failure needing a re-send or a
-# wm_tmux_clear_pending_composer C-c-clear of a message opencode already
-# accepted.
-WM_AGENT_BUSY_MEANS_QUEUED=1
+# Verified live, end to end, that the underlying FACT this field is meant
+# to describe is real: a second message sent while a first turn was still
+# generating rendered with an explicit "QUEUED" label beneath it (not
+# swallowed, not rejected) and was automatically processed - with the
+# model itself acknowledging the queued instruction - the instant the
+# first turn finished.
+#
+# Left UNSET here despite that (round-2 review of PR #350, must-fix):
+# WM_AGENT_BUSY_MEANS_QUEUED is not consumed by any code in this repo yet
+# (grepped bin/ and hooks/ directly - nothing reads it outside
+# WM_AGENT_FIELDS's own declaration), and even once a consumer exists, the
+# specific outcome it is documented to reinterpret - rc 5, "unconfirmed
+# AND the pane was busy" - can only ever be produced by composer mode's
+# own sticky-busy tracking inside _wm_tmux_send_message_locked
+# (bin/lib/common.sh). This descriptor's own WM_AGENT_COMPOSER_RULE_RE/
+# ANCHOR stay unset below (opencode's left-bar shape has no rule line
+# wingman's extraction can recognize at all), which keeps every send on
+# the whole-pane-checksum fallback path - and that path "can still only
+# ever return 0 or 3" (common.sh's own doc comment), never 5. Setting
+# this field to 1 here would describe a real fact about opencode with no
+# way to ever take effect, given this file's OTHER, also-correct
+# decision - two settings that silently cancel each other out rather
+# than one coherent story. Revisit together if a future change either
+# builds a real composer-mode-equivalent confirm path for opencode's own
+# shape, or teaches the fallback path its own busy-reinterpretation.
+WM_AGENT_BUSY_MEANS_QUEUED=""
 # Verified live: a single Ctrl-C clears the composer's current text without
 # exiting.
 WM_AGENT_CLEAR_KEYS="C-c"

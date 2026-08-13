@@ -441,10 +441,23 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # otherwise pass down unconditionally; prefix env vars a non-flag-shaped
   # bypass needs, e.g. opencode's permission override, §3); empty for claude,
   # which needs neither.
+  #
+  # WM_AGENT_ENV_PREFIX MUST be emitted before the literal `exec` word, not
+  # after (round-2 review of PR #350, a real, blocking bug this composition
+  # order created): `VAR=val` is only recognized by the shell as a
+  # command's own environment-assignment prefix when it is the FIRST word
+  # of the simple command. `exec VAR=val cmd` does not qualify - `exec`
+  # (a builtin) is the command name there, and everything after it
+  # (`VAR=val`, `cmd`, ...) is just its argument list, so bash tries to
+  # `exec` a program literally named `VAR=val` and fails with rc 127
+  # before `cmd` is ever reached. Verified directly (`exec FOO=bar env`
+  # fails "exec: FOO=bar: not found"; `FOO=bar exec env` correctly execs
+  # env with FOO set). `unset` above is unaffected either way - it already
+  # runs as its own preceding statement, on its own line.
   wm_guard_test_fixture_agent "$WM_AGENT_BIN"
   [ -n "$WM_AGENT_ENV_UNSET" ] && echo "unset $WM_AGENT_ENV_UNSET"
-  printf 'exec '
   [ -n "$WM_AGENT_ENV_PREFIX" ] && printf '%s ' "$WM_AGENT_ENV_PREFIX"
+  printf 'exec '
   printf '%s' "$WM_AGENT_BIN"
   # Crew run unattended, disposably, and scoped to one repo, so the default
   # bypassPermissions keeps a gated tool call from hanging forever on a prompt no
