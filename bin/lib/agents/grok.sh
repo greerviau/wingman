@@ -20,87 +20,108 @@
 # *** AGENTS.md double-injection note (issue #353's own accepted residual) ***
 # grok auto-loads a repo-root AGENTS.md for repo-level instructions - hands-on
 # confirmed live via `grok inspect --json` (`projectInstructions` lists the
-# discovered file). Unlike codex, grok has no confirmed way to fully suppress
-# this discovery (no equivalent of codex's project_doc_max_bytes=0): setting
-# GROK_CLAUDE_AGENTS_ENABLED=0 (below) is worth doing anyway, purely to avoid
-# the SAME content being injected twice under two recognized filenames (grok
-# separately auto-loads CLAUDE.md too, hands-on confirmed the same way) - but
-# it does NOT close the underlying gap the way codex's flag does. This is
-# issue #353's own explicitly accepted residual for grok, not a gap
-# introduced here; a grok crew member's repo-level context still includes
-# whatever AGENTS.md/CLAUDE.md this repo carries, on top of this descriptor's
-# own composed brief (delivered via a direct flag, WM_AGENT_SYSPROMPT_FLAG
-# below, not a positional argument) - both reach the model, for now
-# unavoidably.
+# discovered file, with no `vendor`/`compatibilityStatus` fields at all - it
+# is grok's own native format, not a compat-layer entry). GROK_CLAUDE_AGENTS_
+# ENABLED=0 (below) does NOT suppress this: directly confirmed by diffing
+# `grok inspect --json` with a local AGENTS.md present, with and without the
+# var set - that entry is byte-identical either way. This is issue #353's own
+# explicitly accepted residual for grok, not a gap introduced here; a grok
+# crew member's repo-level context still includes whatever AGENTS.md this
+# repo carries, on top of this descriptor's own composed brief (delivered via
+# a direct flag, WM_AGENT_SYSPROMPT_FLAG below) - both reach the model.
 #
-# Hands-on verified (2026-08-13) against real grok-build v1.0.0, but
-# LESS THAN the other three adapters: grok's own headless (`-p`) and
-# interactive TUI login paths both required a genuine grok.com OAuth
-# round-trip that could not be completed in this credential-less
-# environment (confirmed via --debug-file: a fake XAI_API_KEY successfully
-# resolves as model-API credentials and the CLI completes a real ACP
-# "initialize" handshake with the real xAI backend - but sending an actual
-# turn is gated behind a SEPARATE grok.com account sign-in this environment
-# has no way to satisfy, unlike codex where any string got past onboarding).
-# What COULD be verified hands-on without that gate: the full `--help` flag
-# surface (used directly below, not doc-derived), `grok inspect --json`'s
-# live confirmation that a git-worktree launch is trusted immediately with
-# no dialog (`"projectTrusted": true` on first read, no prompt shown - the
-# plan's own positive finding, independently reconfirmed) and that AGENTS.md/
-# CLAUDE.md are both discovered, `grok doctor`'s environment probe (no auth
-# needed), and - via the real ACP "initialize" response captured over
-# --debug-file - a live, protocol-level confirmation that only low/medium/
-# high reasoning-effort levels exist for the current model (xhigh/max never
-# appear in the response's own reasoningEfforts array), independently
-# reconfirming the plan's own firstmate-sourced finding a third way (source
-# reading, --help text, and now a live protocol response all agree). NOT
-# verified live: the bordered composer's exact glyphs/anchor (attributed to
-# the plan's own firstmate-sourced research, §4.6 - never independently
-# captured from a real rendered pane), whether --rules vs
-# --system-prompt-override actually composes the way each flag's --help text
-# describes, GROK_CLAUDE_AGENTS_ENABLED's real effect (tested via `grok
-# inspect --json` with and without it set - no observable difference in
-# projectInstructions either way, so unlike codex's own capture-server proof,
-# this could NOT be confirmed to work, only confirmed not to break anything;
-# inspect may simply not reflect this toggle at all, since it appears to be a
-# static discovery listing rather than a report of what actually gets
-# injected - a real open question, not silently assumed resolved), exit
-# command/interrupt key/skill form (attributed, not independently exercised
-# against a live composer).
+# What GROK_CLAUDE_AGENTS_ENABLED=0 DOES do, confirmed by the same diff
+# technique (round-2 review of this PR - the original version of this
+# comment claimed "no observable effect" from testing only the local-repo
+# case above, and that claim was wrong): it disables grok's `vendor: claude,
+# surface: agents` external-compat cell, which - separately confirmed by
+# planting a file at a fake `$HOME/.claude/CLAUDE.md` - governs whether grok
+# reads the OPERATOR'S OWN GLOBAL Claude Code instructions file at all.
+# Without this var, that entry appears in `projectInstructions` with
+# `"compatibilityStatus": "enabled"` (grok reads it); with it set to 0, the
+# same entry flips to `"compatibilityStatus": "disabled"`. This is a real,
+# meaningful protection, not a no-op - and it is the plan's own §4.5 "the
+# operator's personal Claude Code instructions leaving the machine to
+# whatever provider the non-claude CLI is configured against" privacy hazard,
+# already required to be actively prevented for opencode, now confirmed
+# closed for grok too as a side effect of this same var. Deliberately kept
+# set unconditionally (not made contingent on anything) precisely because of
+# this: a grok crew member never leaking the operator's own global
+# `~/.claude/CLAUDE.md` content to xAI's inference backend is worth keeping
+# even though it does nothing for the AGENTS.md concern this var was
+# originally added for. `wm_claude_md_excludes()` has no equivalent reach
+# here - it only ever excludes THIS repo's own root CLAUDE.md, never the
+# operator's global one, so claude crew members DO still load the operator's
+# global `~/.claude/CLAUDE.md` (Claude Code's own standard behavior,
+# unaffected by this repo's descriptor work) while grok crew members do not.
+# This is an accepted, deliberate divergence, not an oversight: it is
+# strictly a privacy IMPROVEMENT for grok specifically (never sending the
+# operator's personal instructions to a third-party provider), not a loss of
+# anything grok crew members need - the actual crew brief still arrives in
+# full via WM_AGENT_SYSPROMPT_FLAG regardless.
+#
+# Hands-on verified (2026-08-13, revised 2026-08-13 after round-2 review)
+# against real grok-build v1.0.0, but LESS THAN the other three adapters:
+# grok's own headless (`-p`) and interactive TUI login paths both required a
+# genuine grok.com OAuth round-trip that could not be completed in this
+# credential-less environment (confirmed via --debug-file: a fake
+# XAI_API_KEY successfully resolves as model-API credentials and the CLI
+# completes a real ACP "initialize" handshake with the real xAI backend -
+# but sending an actual turn is gated behind a SEPARATE grok.com account
+# sign-in this environment has no way to satisfy, unlike codex where any
+# string got past onboarding). What COULD be verified hands-on without that
+# gate: the full `--help` flag surface (used directly below, not
+# doc-derived); `grok inspect --json`'s confirmation that AGENTS.md/CLAUDE.md
+# are both discovered; `grok doctor`'s environment probe (no auth needed);
+# via the real ACP "initialize" response captured over --debug-file, a live,
+# protocol-level confirmation that only low/medium/high reasoning-effort
+# levels exist for the current model (xhigh/max never appear in the
+# response's own reasoningEfforts array), independently reconfirming the
+# plan's own firstmate-sourced finding a third way; and, confirmed via a
+# controlled `grok inspect --json` diff (planting a marker file and toggling
+# the env var), GROK_CLAUDE_AGENTS_ENABLED=0's real effect - see this file's
+# own header note above for the full finding. NOT verified live: the
+# bordered composer's exact glyphs/anchor (attributed to the plan's own
+# firstmate-sourced research, §4.6 - never independently captured from a
+# real rendered pane), whether --rules vs --system-prompt-override actually
+# composes the way each flag's --help text describes, exit command/
+# interrupt key/skill form (attributed, not independently exercised against
+# a live composer), and - genuinely unresolved, see WM_AGENT_PREFLIGHT's own
+# comment below - whether the real interactive trust dialog behaves the way
+# `grok inspect --json`'s own `projectTrusted` field suggests, since that
+# field was never cross-checked against the real dialog (auth-gated).
 #
 # GROK_CLAUDE_AGENTS_ENABLED=0's own value: confirmed to exist as a real,
 # non-fabricated config key by reading the compiled binary directly (`strings`
 # on the decompressed binary shows the full GROK_CLAUDE_{SKILLS,RULES,AGENTS,
 # MCPS,HOOKS,SESSIONS}_ENABLED family, alongside matching GROK_CURSOR_* and
-# GROK_CODEX_* families) - not fabricated, but also not proven to do what
-# issue #353 assumes (see above).
-#
-# Round-1 review raised a real alternative hypothesis worth recording: the
-# per-vendor "AGENTS" member of this toggle family more plausibly gates
-# `.claude/agents/` subagent DEFINITIONS (a distinct Claude Code concept),
-# not `AGENTS.md`-as-repo-instructions - with `GROK_CLAUDE_RULES_ENABLED`
-# the likelier candidate for the latter. Already tested, not just
-# theorized: GROK_CLAUDE_RULES_ENABLED=0 was tried via the identical `grok
-# inspect --json` technique used for AGENTS_ENABLED above, same result -
-# projectInstructions showed CLAUDE.md/AGENTS.md unchanged either way. This
-# doesn't confirm the hypothesis (inspect may not reflect either toggle at
-# all, per the note above), but it does rule out "just switch to
-# RULES_ENABLED and get a proven fix" as a mechanical substitution -
-# neither candidate has been observed to actually change anything through
-# this tool. Left as GROK_CLAUDE_AGENTS_ENABLED (issue #353's own original
-# proposal) rather than switching to an equally-unproven alternative;
-# revisit with real credentials.
+# GROK_CODEX_* families), and its real, confirmed effect (disables the
+# `vendor: claude, surface: agents` compat cell, which gates the operator's
+# global `~/.claude/CLAUDE.md`, not `.claude/agents/` subagent definitions as
+# initially hypothesized - see the header note above) is documented there in
+# full, not repeated here.
 
 WM_AGENT_BIN=grok
 WM_AGENT_DISPLAY_NAME="grok"
 
 # --- preflight and environment ------------------------------------------
-# No preflight function needed - a POSITIVE finding, not an oversight (plan
-# §3): grok's own project-picker/trust dialog appears only when launched from
-# a non-project directory. wingman always launches into a git worktree, and
-# `grok inspect --json` there hands-on confirmed "projectTrusted": true
-# immediately, with projectInstructions already populated, no dialog and no
-# prompt shown at all. Nothing for a preflight function to gate.
+# No preflight function wired up - attributed to the plan's own positive
+# finding (§3: grok's project-picker/trust dialog appears only when launched
+# from a non-project directory, which wingman's own git-worktree launch
+# always avoids), but with LOWER confidence than that phrasing implies.
+# `grok inspect --json` reported "projectTrusted": true in a git worktree,
+# matching the plan - but round-2 review of this PR prompted a direct
+# recheck of that signal's own reliability, and it also reports
+# "projectTrusted": true with NO .git directory at all and no project
+# markers of any kind (projectRoot itself reads null in that case) - meaning
+# this field may simply default to true regardless of trust state, not a
+# genuine reflection of whatever the real interactive dialog would show.
+# The real dialog was never reached live (the account-auth gate in this
+# environment blocks getting that far - see the header comment above), so
+# this is genuinely unconfirmed, not merely attributed: if a real trust
+# freeze does occur on a codex/pi-shaped first launch, the existing
+# freeze-detector + crew-takeover fallback still applies, the same
+# degradation any adapter with no WM_AGENT_PREFLIGHT gets.
 WM_AGENT_PREFLIGHT=""
 # GROK_CLAUDE_AGENTS_ENABLED=0 is an ENVIRONMENT VARIABLE, not a CLI flag -
 # it belongs here (composed as an env-var prefix before `exec`, exactly like
@@ -243,11 +264,13 @@ WM_AGENT_RESUME_PROMPT_RE=""
 WM_AGENT_RESUME_FLAG=""
 WM_AGENT_GUARD_TRANSPORT=grok-json
 # Not 1: hands-on verification this stage confirmed the --help flag surface,
-# trust-dialog absence in a worktree, AGENTS.md/CLAUDE.md discovery, and the
-# reasoning-effort domain live via a real ACP handshake - but never reached a
-# live composer, an actual model turn, or the grok-json guard-transport shim
-# itself (held, plan step 12c, not yet built), all blocked by grok's own
-# account-level auth gate in this credential-less environment.
+# AGENTS.md/CLAUDE.md discovery and GROK_CLAUDE_AGENTS_ENABLED's real effect,
+# and the reasoning-effort domain live via a real ACP handshake - but never
+# reached a live composer, an actual model turn, the real trust dialog (see
+# WM_AGENT_PREFLIGHT's own comment - genuinely unconfirmed, not just
+# attributed), or the grok-json guard-transport shim itself (held, plan step
+# 12c, not yet built), all blocked by grok's own account-level auth gate in
+# this credential-less environment.
 WM_AGENT_VERIFIED=0
 
 # --- control values (B3) ----------------------------------------------------
