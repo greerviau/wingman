@@ -209,9 +209,13 @@ quote() {
 # plugins, and unlike --setting-sources (which also works, but drops
 # wingman's own project-level hooks AND every target repo's own legitimate
 # CLAUDE.md) it touches only the files named here.
+# Also excludes AGENTS.md (root and worktree-glob): CLAUDE.md is a symlink to
+# it (issue #351), and while Claude Code doesn't discover AGENTS.md on its
+# own today, excluding it now means a future Claude Code version that starts
+# reading it natively can't silently reopen this same hazard.
 wm_claude_md_excludes() {
-  printf '{"claudeMdExcludes":["%s/CLAUDE.md","%s/CLAUDE.local.md","%s/.claude/CLAUDE.md","%s/.claude/rules/**","%s-*/CLAUDE.md","%s-*/CLAUDE.local.md","%s-*/.claude/CLAUDE.md","%s-*/.claude/rules/**"]}' \
-    "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO"
+  printf '{"claudeMdExcludes":["%s/CLAUDE.md","%s/CLAUDE.local.md","%s/.claude/CLAUDE.md","%s/.claude/rules/**","%s/AGENTS.md","%s-*/CLAUDE.md","%s-*/CLAUDE.local.md","%s-*/.claude/CLAUDE.md","%s-*/.claude/rules/**","%s-*/AGENTS.md"]}' \
+    "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO" "$WM_REPO"
 }
 
 # wm_compose_crew_sysprompt <out-file> <id> <type> <repo-or-workspace-root> \
