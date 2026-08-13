@@ -100,6 +100,43 @@ wait_for_pidfile_not() {
   [ -s "$1" ] && [ "$(cat "$1" 2>/dev/null)" != "$2" ]
 }
 
+# remaining_before_expiry <pid> <window> <margin> - seconds left before
+# <pid>'s own referee (hooks/stop-continuity.sh's `sleep "$window"`, which
+# starts essentially at <pid>'s own fork) naturally fires, minus <margin>,
+# floored at 0 (issue #346). Anchored to <pid>'s OWN process start time
+# (read from /proc/<pid>/stat, field 22), not a timestamp this script
+# captured before launching the hook - the hook's own pre-child work (a
+# crew-list check, wm_watcher_up, compute_pr_watch_needed under issue #319)
+# runs before <pid> is ever forked, so a pre-launch timestamp overstates
+# elapsed time by however long that took, silently loosening whatever
+# margin was asked for (caught in review: this is what made an earlier
+# draft's case 9b assertion unable to fail at all). Compares two MONOTONIC
+# (/proc/uptime-based) readings only, never mixing in a wall-clock
+# timestamp: `btime` (system boot time, in /proc/stat) is not continuously
+# reconciled against wall-clock adjustments after boot (NTP sync, common on
+# any VM or CI runner), so combining it with a monotonic starttime reading
+# reintroduced a comparable, unpredictable bias when tried - see this
+# comment's own history for that dead end before concluding purely
+# monotonic math was required. Linux-only (/proc); no portable fallback -
+# this file's suite runs on Linux CI and Linux dev boxes only in practice
+# despite the rest of tests/lib.sh's own bash-3.2/macOS care elsewhere.
+remaining_before_expiry() {
+  uv run --no-project --quiet python -c "
+import sys, os
+pid, window, margin = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+with open('/proc/' + pid + '/stat') as f:
+    content = f.read()
+rest = content[content.rfind(')')+2:].split()
+starttime_ticks = int(rest[19])
+clk_tck = os.sysconf('SC_CLK_TCK')
+child_start_uptime = starttime_ticks / clk_tck
+with open('/proc/uptime') as f:
+    now_uptime = float(f.read().split()[0])
+elapsed = now_uptime - child_start_uptime
+print(max(window - elapsed - margin, 0))
+" "$1" "$2" "$3"
+}
+
 # seed_inflight_marker <pid> [run_id] - writes the run-scoped in-flight
 # marker the hook itself now expects (issue #278): run id on line 1 (empty
 # by default, matching test_new_home's own unset WINGMAN_RUN_ID), pid on
@@ -1177,49 +1214,37 @@ rm -f "$WINGMAN_HOME/watch.suppressed"
 # wait_for_file returns, so claim time comes directly out of the same
 # budget the fixed sleep assumed was still fully available (the same root
 # cause issue #308 diagnosed for case 7c', below). Fixed by measuring the
-# actual elapsed time since the hook was launched and sleeping only what's
-# actually left, minus a safety margin - this lands consistently near
-# expiry regardless of how long the claim took, instead of assuming it took
-# ~0s. The window itself is also widened (8->30, 5->30) for absolute slack,
-# matching the 10-30s windows already used elsewhere in this file for
-# exactly this reason (cases 7b, 7e, 8b, 8h).
+# actual elapsed time since the child (not the hook - see
+# remaining_before_expiry's own comment for why that distinction matters)
+# started and sleeping only what's actually left, minus a safety margin -
+# this lands consistently near expiry regardless of how long the claim took,
+# instead of assuming it took ~0s. The window itself is also widened
+# (8->20, 5->20) for absolute slack against genuinely slow claims, matching
+# the 10-20s windows already used elsewhere in this file for exactly this
+# reason (cases 7b, 7e, 8b, 8h) - review of this fix flagged the first
+# draft's own 30s windows as a real, uncosted wall-clock regression
+# (+11.8% per suite run) once the epoch fix below removed the need for that
+# much padding.
 #
-# The margin below is 0.5s, not several seconds, and needs sub-second
-# precision (a `uv run --no-project --quiet python` timestamp, the same
-# idiom wm_age_path already uses for precise time math elsewhere in this
-# file - `date +%s` alone truncates to whole seconds, not tight enough for
-# case 9b just below) - NOT because tighter is "more correct" in the
-# abstract, but because review of this fix (issue #346) caught the first
-# draft's own 3-second margin making case 9b's assertion vacuous:
-# mutation-testing it (widening the gap between reap and snapshot to model
-# realistic contention) showed a 3s margin never lets the referee's own
-# remaining countdown be short enough for that gap to matter, so the
-# assertion could no longer fail no matter what the production code did.
-# Case 9 here keeps the larger 3s margin, deliberately NOT matched to 9b's
-# tight one - its own trigger (`wm_state crew-set` below, a real `uv run`
-# subprocess) has meaningfully more and more variable latency than 9b's
-# near-instant `kill -9`, and a first attempt at tightening this margin to
-# match 9b's own genuinely flaked locally (the crew-set call alone
-# occasionally took longer than a sub-second margin left, landing a real
-# "window rolled" instead of the expected fire). Case 9's own property
-# (a fire correctly prioritized over a natural rollover when temporally
-# close) was not the one review's mutation test found vacuous, so there is
-# no equivalent evidence it needs 9b's own tight margin - only that it
-# provably breaks under one.
+# Case 9 uses a 3s margin, case 9b (below) a tighter 1s - deliberately NOT
+# matched, because their own trigger latencies differ: case 9's is
+# `wm_state crew-set`, a real `uv run` subprocess with real, load-variable
+# latency, run AFTER this sleep completes; case 9b's is a near-instant
+# `kill -9`. Tightening case 9 to match 9b flaked locally (crew-set's own
+# latency alone occasionally exceeded a sub-second margin). Case 9's own
+# property (a fire correctly prioritized over a natural rollover) was not
+# what review's mutation test (see case 9b) found vacuous at 3s, so there
+# is no equivalent evidence it needs a tighter one - only that it breaks
+# under one.
 new_home
 add_crew_window d9
 wm_state crew-set --id d9 --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=30
-_start9="$(uv run --no-project --quiet python -c 'import time; print(time.time())')"
+export WM_STOP_CONTINUITY_WINDOW=20
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook9r.out" 2>&1 &
 h9r=$!; wm_track "$h9r"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
-_remaining9="$(uv run --no-project --quiet python -c "
-import time, sys
-start = float(sys.argv[1]); window = float(sys.argv[2]); margin = float(sys.argv[3])
-print(max(window - (time.time() - start) - margin, 0))
-" "$_start9" "$WM_STOP_CONTINUITY_WINDOW" "3")"
-sleep "$_remaining9"
+cpid9r="$(cat "$WINGMAN_HOME/watch.pid")"
+sleep "$(remaining_before_expiry "$cpid9r" "$WM_STOP_CONTINUITY_WINDOW" 3)"
 wm_state crew-set --id d9 --status review --summary "done" >/dev/null
 assert_true "the hook exits (via fire, not the referee's rollover)" "wait_for_gone $h9r 100"
 wait "$h9r" 2>/dev/null
@@ -1231,41 +1256,35 @@ unset WM_STOP_CONTINUITY_WINDOW
 new_home
 add_crew_window d9b
 wm_state crew-set --id d9b --status working --summary busy >/dev/null
-export WM_STOP_CONTINUITY_WINDOW=30
-_start9b="$(uv run --no-project --quiet python -c 'import time; print(time.time())')"
+export WM_STOP_CONTINUITY_WINDOW=20
 printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook9s.out" 2>&1 &
 h9s=$!; wm_track "$h9s"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid9s="$(cat "$WINGMAN_HOME/watch.pid")"
 # Kill the child directly, close to the window's own expiry (not "well
 # before" it), so the referee's own sleep could plausibly still complete
-# during the reap/cancellation gap if the snapshot fix were absent. Measured
-# from the hook's own launch (see the file-wide comment above), not a fixed
-# offset - lands 0.5s before expiry regardless of how long the claim itself
-# took under load.
+# during the reap/cancellation gap if the snapshot fix were absent.
 #
-# 0.5s, not a larger margin: review of this fix (issue #346) mutation-tested
-# the first draft's own 3-second margin by widening the gap between the
+# 1s margin: review of this fix (issue #346) mutation-tested an earlier
+# draft (a 3s margin computed from a timestamp captured before the hook
+# launched, not the child's own start) by widening the gap between the
 # child's reap and the exitfile snapshot read in hooks/stop-continuity.sh
 # (modeling how contention could plausibly delay that reap-to-snapshot step
-# in real production, not by editing this test) - and found the 3s draft
-# passed regardless, because the referee's own remaining countdown at kill
-# time was never short enough for even a multi-second widened gap to let it
-# complete. Reconstructed and verified that same mutation locally before
-# choosing this value: 0.5s reliably catches a 1-3s modeled gap widening
-# (3/3 each), a 0.7s margin - close to the pre-#346 test's own original
-# tuned value, 4.3s of a 5s window, but without this fix's load-adaptive
-# elapsed-time compensation - does not (0/3), and 0.5s held 10/10 with no
+# in real production, not by editing this test) - and found that draft
+# passed regardless: the referee's own remaining countdown at kill time was
+# never short enough for even a multi-second widened gap to let it
+# complete, because the pre-launch timestamp overstated elapsed time by
+# however long the hook's own pre-child work (a crew-list check,
+# wm_watcher_up, compute_pr_watch_needed) took - silently loosening the
+# margin regardless of what value was asked for. Fixed by anchoring to the
+# child's own actual start (remaining_before_expiry, above), which removed
+# that bias entirely. Re-verified against the same mutation after the fix:
+# 1s reliably catches a 1s modeled gap widening (3/3), and held with no
 # false "window rolled" positive against the real, unmutated hook under
-# this box's own real ambient load. A measured tradeoff between test
+# this box's own real ambient load (5/5). A measured tradeoff between test
 # sensitivity and tolerance for load-induced jitter, not an arbitrary
 # constant - re-verify against the same kind of mutation before changing it.
-_remaining9b="$(uv run --no-project --quiet python -c "
-import time, sys
-start = float(sys.argv[1]); window = float(sys.argv[2]); margin = float(sys.argv[3])
-print(max(window - (time.time() - start) - margin, 0))
-" "$_start9b" "$WM_STOP_CONTINUITY_WINDOW" "0.5")"
-sleep "$_remaining9b"
+sleep "$(remaining_before_expiry "$cpid9s" "$WM_STOP_CONTINUITY_WINDOW" 1)"
 kill -9 "$cpid9s" 2>/dev/null
 # 600 tries (120s), not the 100-try default: this kill reaches the hook's
 # exit via the same external-SIGKILL-to-a-claimed-child -> --classify
