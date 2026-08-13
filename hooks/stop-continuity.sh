@@ -123,6 +123,24 @@ above is the wrong response for this reason."
   printf '%s' "$_body"
 }
 
+# compose_pr_watch_attention_reason <reason> - the rewake body for a
+# pr_child fire (issue #319). Distinct from compose_attention_reason
+# (roster-report-shaped - "read $wakefile and run bin/crew-list..." - wrong
+# for this): a pr-watch fire is a single, specific, actionable forge event
+# about THIS session's own PR, not a roster event. Relays pr_child's own
+# reason line verbatim (see bin/pr-watch's own header comment for the full
+# event vocabulary: merged/closed/changes-requested/ci-failed/conflict/
+# comment/merge-ready/checks-passed) plus a pointer to the table that
+# already documents the remedy for each one.
+compose_pr_watch_attention_reason() {
+  printf 'Your PR watcher fired: %s
+See playbooks/_delivery.md, "Shepherding a PR", for what this reason means
+and what to do about it (merged/closed -> clean up and report done;
+changes-requested/comment -> address and reply; ci-failed -> fix; conflict
+-> rebase; checks-passed/merge-ready -> settle into review or attempt the
+merge).' "$1"
+}
+
 # rewake <body> <mode>
 # mode="auto": continuity is already handling re-arming on its own (rolled,
 # fire, remote-control-dropped) - appends the explicit "do not run /watch, do
@@ -202,7 +220,124 @@ if found:
   return 0
 }
 
-# 3+4. Fast path: no crew in flight, or a live cycle already exists. Also
+# compute_pr_watch_needed - sets pr_watch_needed (0/1) and, when 1, pr_ref
+# (the record's own `delivery` value, e.g. a full PR URL) for THIS session's
+# OWN crew record - never its reports (issue #319, AC1a). Skipped entirely
+# when $OWNER is empty: wingman's own top-level session never has a PR of
+# its own. Mirrors #199's own philosophy for watch-fleet exactly: no attempt
+# to distinguish "never armed, by choice" from "armed, then died" (both look
+# identical - no beacon); requiring a PR-shaped `delivery` (predicate #2) is
+# what keeps this out of the way of a member with no PR at all, without a
+# separate opt-out flag. Called once before the fast-path gate (seeding the
+# loop's first iteration) and once per iteration thereafter from the tail of
+# the loop (Change 7), never redundantly at each iteration's own top (Change
+# 4) - a status flip, a delivery change, or a pr-watch cycle armed
+# independently by the model can all happen mid-loop, and the tail call is
+# what stays fresh for whichever iteration follows.
+#
+# The crew-get round trip (2 subprocess spins: crew-get itself, plus the
+# python one-liner that decodes it) is skipped whenever nothing about the
+# roster could possibly have changed since THIS SAME PROCESS's own last real
+# check (PR #347 review): crew.json is the single shared roster file every
+# crew-set write touches (bin/lib/wm-state.py's cmd_crew_set), so a plain
+# `[ crew.json -nt $_cpn_sentinel ]` bash builtin - no subprocess at all -
+# is a proxy for "did OWNER's own status/delivery change" (a COARSER
+# invariant than strictly needed, since it also trips on an unrelated
+# record changing, but that only ever costs one extra real recheck, never
+# a missed one on its own).
+#
+# The sentinel is touched BEFORE the crew-get read, not after (PR #347
+# round-2 review, must-fix): touching after left a real, deterministically
+# reproduced gap - a crew.json write landing between the read returning and
+# the touch running was silently and durably lost, since the sentinel's OWN
+# timestamp would then postdate that write, making the next call's `-nt`
+# check see "not newer" and serve the stale cached value forever, until
+# some UNRELATED later write happened to land after the touch. Touching
+# first means ANY write from that instant onward - including one that
+# lands WHILE the crew-get call itself is running - makes crew.json look
+# newer than the sentinel on the NEXT check, forcing a fresh read; the only
+# residual case is a write racing strictly BEFORE the touch, which the
+# crew-get read (started immediately after) already picks up directly.
+#
+# A second, independent bound closes a narrower gap even the corrected
+# ordering does not fully cover: this file is explicitly bash-3.2-safe
+# (macOS's bundled bash), and `-nt` did not gain sub-second mtime
+# resolution until well after 3.2, so two crew.json writes landing in the
+# same wall-clock second could be indistinguishable to the mtime check
+# alone on that platform. `$SECONDS` (a plain bash builtin tracking elapsed
+# seconds since this process started, no subprocess) bounds the cache's own
+# worst-case age to $WM_PR_WATCH_NEEDED_CACHE_MAX_AGE (default 5s,
+# comfortably above even the tightest compressed test window's own
+# per-iteration cost and utterly negligible against the production ~480s
+# window) regardless of what the mtime comparison reports - so even a
+# same-second write that the mtime check alone would miss is picked up
+# within a small, bounded window rather than indefinitely.
+#
+# Gated on the in-memory `$_cpn_have_cache`, never a sentinel inherited
+# from a prior invocation: a brand-new hook process always starts with no
+# cached value, so its very first call - the pre-loop seed call above the
+# fast path - always does the real check regardless of the sentinel file's
+# own age. Only a LATER call from the SAME process's own loop (Change 7's
+# tail, once per iteration) can hit the cache, which is exactly where the
+# measurable, repeated overhead this closes actually came from - every
+# owner-scoped continuity loop elsewhere in this codebase now paid one full
+# crew-get round trip per iteration even when nothing about its own record
+# was changing turn to turn, immaterial at the production window (~480s)
+# but a measurable fraction of a compressed test window.
+#
+# Only the record-eligibility half (crew-get + the status/delivery decode)
+# is cached - never wm_pr_watch_up's own liveness check, which depends on
+# pr-watch's own pidfile/beatfile mtimes, not crew.json, and so is NOT
+# provably unchanged just because crew.json is unchanged (an independently
+# armed or died pr-watch cycle is exactly the case AC1a's own header
+# comment above already calls out). wm_pr_watch_up therefore still runs
+# fresh on every call that reaches it - bounded to the population that
+# actually has a PR-shaped delivery in the first place, not every
+# owner-scoped invocation.
+compute_pr_watch_needed() {
+  pr_watch_needed=0; pr_ref=""
+  [ -n "$OWNER" ] || return 0
+  _cpn_sentinel="$WM_HOME/stop-continuity-pwc${_okey:+-$_okey}.stamp"
+  if [ -n "${_cpn_have_cache:-}" ] && [ -f "$_cpn_sentinel" ] \
+    && ! [ "$WM_HOME/crew.json" -nt "$_cpn_sentinel" ] \
+    && [ $(( SECONDS - ${_cpn_cached_at:-0} )) -lt "${WM_PR_WATCH_NEEDED_CACHE_MAX_AGE:-5}" ]; then
+    _cpn_delivery="$_cpn_cached_delivery"
+  else
+    touch "$_cpn_sentinel" 2>/dev/null
+    _cpn_cached_at="$SECONDS"
+    _cpn_json="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-get --id "$OWNER" 2>/dev/null)"
+    _cpn_have_cache=1
+    _cpn_delivery=""
+    if [ -n "$_cpn_json" ]; then
+      _cpn_fields="$(printf '%s' "$_cpn_json" | $WM_UV python -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(d.get("status") or "")
+print(d.get("delivery") or "")
+' 2>/dev/null)"
+      _cpn_status="$(printf '%s\n' "$_cpn_fields" | sed -n 1p)"
+      _cpn_delivery_candidate="$(printf '%s\n' "$_cpn_fields" | sed -n 2p)"
+      case "$_cpn_status" in
+        working|review)
+          printf '%s' "$_cpn_delivery_candidate" | grep -Eq '/pull/[0-9]+$' \
+            && _cpn_delivery="$_cpn_delivery_candidate"
+          ;;
+      esac
+    fi
+    _cpn_cached_delivery="$_cpn_delivery"
+  fi
+  [ -n "$_cpn_delivery" ] || return 0
+  wm_pr_watch_up "$OWNER" "$WM_HOME"
+  [ "$pr_watch_up" = 1 ] && return 0
+  pr_watch_needed=1
+  pr_ref="$_cpn_delivery"
+}
+
+# 3+4. Fast path: no crew in flight (or a live cycle already exists) AND no
+# pr-watch re-arm needed for this session's own PR (issue #319). Also
 # leaves pidfile/beatfile/exitfile/runfile/wakefile/stopfile/suppressedfile/
 # claimlock/inflightfile/claimfailfile set for everything below (see
 # wm_owner_paths).
@@ -210,7 +345,8 @@ active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --o
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')"
 wm_watcher_up "$OWNER" "$WM_HOME"
-if [ "${active_crew:-0}" -eq 0 ] || [ "$watcher_up" = 1 ]; then
+compute_pr_watch_needed
+if { [ "${active_crew:-0}" -eq 0 ] || [ "$watcher_up" = 1 ]; } && [ "$pr_watch_needed" -eq 0 ]; then
   exit 0
 fi
 
@@ -470,13 +606,15 @@ esac
 # the pilot to read).
 armlog="$WM_HOME/stop-autoarm${_okey:+-$_okey}.log"
 : > "$armlog"
+pr_out="$WM_HOME/stop-continuity-prwatch${_okey:+-$_okey}.out"
 
-# child/referee are read by the trap below across the whole loop, so they are
-# declared once, outside it, and the trap installed once too - re-installing
-# it per iteration would be harmless but pointless. Left unquoted in the trap
-# body (unlike the claim itself) so an iteration boundary, where both are
-# momentarily "", expands to no argument rather than an empty-string one.
-child=""; referee=""; term_forwarded=0
+# child/referee/pr_child are read by the trap below across the whole loop, so
+# they are declared once, outside it, and the trap installed once too -
+# re-installing it per iteration would be harmless but pointless. Left
+# unquoted in the trap body (unlike the claim itself) so an iteration
+# boundary, where all three are momentarily "", expands to no argument
+# rather than an empty-string one.
+child=""; referee=""; pr_child=""; term_forwarded=0
 # Measures and stamps BEFORE forwarding the kill (issue #248) - in case the
 # harness ever escalates to an unconditional SIGKILL after some grace period
 # following the initial SIGTERM, front-loading the write minimizes the
@@ -496,7 +634,7 @@ trap 'term_forwarded=1
   if [ "$_elapsed" -ge "$window" ]; then
     printf "%s\n%s\n" "${WINGMAN_RUN_ID:-}" "$_elapsed" > "$killstampfile"
   fi
-  kill -TERM $child $referee 2>/dev/null' TERM INT
+  kill -TERM $child $referee $pr_child 2>/dev/null' TERM INT
 
 while :; do
   # Refresh the in-flight marker every iteration, not just at entry: the
@@ -512,8 +650,26 @@ while :; do
   # refuses to arm over an unclassified exit record, and this iteration's own
   # referee writes "rolled" under `set -C`. A cross-file invariant with a
   # silent failure mode if --classify ever stopped consuming it.
+  # pr_watch_needed/pr_ref are NOT recomputed here (round-1 review,
+  # non-blocking observation 2): this iteration's top always inherits an
+  # already-fresh value - either from the pre-loop compute_pr_watch_needed
+  # call (Change 1, for iteration 1) or from the PREVIOUS iteration's own
+  # Change-7 tail check (for iteration 2+), which recomputes right before
+  # deciding whether to loop back here at all. Nothing runs between that
+  # tail check and this line that could invalidate its result, so a second
+  # `crew-get`+`wm_pr_watch_up` round trip here would be pure duplicate
+  # subprocess cost, not additional freshness - see Change 7 below for where
+  # the recompute actually lives.
   WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --owner "$OWNER" >>"$armlog" 2>&1 &
   child=$!
+
+  pr_child=""
+  if [ "$pr_watch_needed" -eq 1 ]; then
+    : > "$pr_out"
+    "$REPO/bin/pr-watch" --pr "$pr_ref" >"$pr_out" 2>&1 &
+    pr_child=$!
+  fi
+
   # The referee's own stdout/stderr are explicitly redirected to /dev/null -
   # never left to inherit this hook's own stdout, which under asyncRewake (or
   # a test capturing this hook via a pipe/command substitution) is a pipe. An
@@ -526,14 +682,31 @@ while :; do
   # produced it and moved on.
   ( sleep "$window"
     ( set -C; printf 'rolled\n' > "$exitfile" ) 2>/dev/null
-    kill -TERM "$child" 2>/dev/null
+    kill -TERM "$child" ${pr_child:+"$pr_child"} 2>/dev/null
   ) >/dev/null 2>&1 &
   referee=$!
 
-  wait "$child" 2>/dev/null; child_rc=$?
+  # bash-3.2-safe: no `wait -n` (bash 4.3+ only, and this file is explicitly
+  # bash-3.2-safe throughout - macOS's bundled bash). When pr_child is
+  # active, poll BOTH with kill -0 - the same idiom this file already uses
+  # for reaping below - until EITHER is no longer alive, rather than the
+  # single blocking `wait "$child"` this file used before pr-watch was
+  # folded in. A survivor is then force-closed so one side firing ends the
+  # iteration for both, exactly as today a child that exits naturally, ahead
+  # of the window, causes the referee to be killed early rather than left to
+  # sleep out the rest of its own window.
+  if [ -n "$pr_child" ]; then
+    while kill -0 "$child" 2>/dev/null && kill -0 "$pr_child" 2>/dev/null; do sleep 0.1; done
+    kill -TERM "$child" "$pr_child" 2>/dev/null
+    wait "$child" 2>/dev/null; child_rc=$?
+    wait "$pr_child" 2>/dev/null
+  else
+    wait "$child" 2>/dev/null; child_rc=$?
+  fi
   exitfile_snapshot="$(cat "$exitfile" 2>/dev/null)"   # authoritative - see the plan's own rationale
 
   while kill -0 "$child" 2>/dev/null; do sleep 0.1; done
+  [ -n "$pr_child" ] && while kill -0 "$pr_child" 2>/dev/null; do sleep 0.1; done
   kill "$referee" 2>/dev/null; wait "$referee" 2>/dev/null
 
   if [ -n "$exitfile_snapshot" ]; then
@@ -550,7 +723,8 @@ while :; do
   # where a stale pid the OS may have already recycled would otherwise be
   # targeted.
   _reaped_child="$child"
-  child=""; referee=""
+  _reaped_pr_child="$pr_child"
+  child=""; referee=""; pr_child=""
 
   # Account for the outcome. A nonzero $child_rc with no $exitfile is NOT by
   # itself proof the child never claimed - the identical pair also results
@@ -648,6 +822,70 @@ Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
     esac
   fi
 
+  # pr_child's own accounting (issue #319, AC1b item 4/5) - simpler than
+  # child's 3-signal detection above because bin/pr-watch has no --classify
+  # analog and needs none: its own stdout is already the complete signal - a
+  # printed reason line (one of the fixed prefixes its own header documents)
+  # is a fire; nothing printed before the referee's window kill is "nothing
+  # yet." Checked and applied AFTER child's own accounting above (never
+  # instead of it). $_body is the load-bearing test for whether child's own
+  # outcome THIS iteration already has something worth keeping: it is
+  # non-empty only for the claim-failure branch above, or for
+  # classify_out fire/remote-control-dropped/spurious-repeated - never for
+  # rolled/spurious/stale-code/healthy/stopped/empty, which all leave it "".
+  # child and pr_child are two independent, concurrently-polling processes
+  # with no coordination between them - each can complete its own natural
+  # fire-and-exit within the same ~0.1-0.2s window the shared poll loop
+  # (Change 4) uses to notice either one dying, so "child's own fire already
+  # force-closed pr_child before it got a chance to also fire" is NOT a
+  # guarantee (round-1 review, must-fix 1: a fleet-wide outage/usage-limit
+  # signal landing on child at the same moment this session's own PR merges
+  # on pr_child is a genuine, reachable interleaving for the exact
+  # population this feature targets - a plain worker with pr_watch_needed=1,
+  # for whom Change 4 now spawns watch-fleet's own fleet-wide-signal
+  # detection every window regardless of active_crew, see Design decision 6
+  # below). When that happens, `_reaped_pr_child` and `_reaped_child` are
+  # both non-empty and $_body is already non-empty from child's own
+  # accounting above - overriding it here rather than composing alongside it
+  # would silently discard the roster/fleet-wide event with no trace. So:
+  # override only when $_body is still empty; otherwise append. pr_child's
+  # own stdout+stderr, captured to $pr_out fresh at spawn time (Change 4), is
+  # appended into the shared $armlog here rather than written there directly
+  # by the child process itself - avoiding two processes concurrently
+  # appending to the same file, and matching this file's own existing
+  # pattern of composing $armlog from completed output, not a live stream.
+  if [ -n "$_reaped_pr_child" ]; then
+    _pr_fire_reason="$(grep -E '^(merged|closed|changes-requested|ci-failed|conflict|comment|merge-ready|checks-passed): ' "$pr_out" 2>/dev/null | tail -n 1)"
+    cat "$pr_out" >>"$armlog" 2>/dev/null
+    if [ -n "$_pr_fire_reason" ]; then
+      _pr_body="$(compose_pr_watch_attention_reason "$_pr_fire_reason")"
+      if [ -n "$_body" ]; then
+        # child already produced a reportable body this same iteration -
+        # compose alongside it, never substitute. Keep child's own $_mode
+        # as-is: it is what decides whether the "do NOT arm a watch-fleet
+        # cycle" sentence belongs in the final text (auto - continuity IS
+        # still handling watch-fleet) or would be actively wrong
+        # (manual-remedy - continuity just demonstrated it needs the model's
+        # own manual intervention on watch-fleet's side). That call is about
+        # the watch-fleet half of the body only; pr_child also firing
+        # alongside it doesn't change which one is correct, so pr_child's
+        # own text is appended under whichever mode child's own outcome
+        # already earned.
+        _body="$_body
+
+$_pr_body"
+      else
+        # child's own outcome this iteration carries nothing to report - the
+        # only case where $_body is still empty here - so it is safe to
+        # fully take over the rewake.
+        _body="$_pr_body"
+        _mode="auto"
+      fi
+      _continue=0
+      _quiet=""
+    fi
+  fi
+
   # Checked here - after the window, not before it - same reasoning as
   # today's single-shot version: checking pre-claim blocked the claim
   # entirely and duplicated hooks/stop-guard.sh's own report.
@@ -682,7 +920,8 @@ $_unwaited_text"
   active_crew="$(WINGMAN_HOME="$WM_HOME" $WM_UV "$STATE_PY" crew-list --active --owner "$OWNER" --json 2>/dev/null | $WM_UV python -c 'import sys,json;
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')"
-  [ "${active_crew:-0}" -eq 0 ] && break
+  compute_pr_watch_needed
+  { [ "${active_crew:-0}" -eq 0 ] && [ "$pr_watch_needed" -eq 0 ]; } && break
 
   # The lifetime budget would be exceeded by another full window - break with
   # an `auto` rewake naming what actually happened (a clean rollover, or a

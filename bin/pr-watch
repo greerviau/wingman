@@ -284,7 +284,7 @@ fi
 echo $$ > "$PIDFILE"
 : > "$BEATFILE" || true
 trap 'rm -f "$PIDFILE"; exit 0' INT TERM
-wm_ok "pr-watch: armed pid=$$ (crew $WINGMAN_CREW_ID, pr $PR, polling every ${INTERVAL}s until an event fires)"
+wm_ok "$(date -u +%Y-%m-%dT%H:%M:%SZ) pr-watch: armed pid=$$ (crew $WINGMAN_CREW_ID, pr $PR, polling every ${INTERVAL}s until an event fires)"
 
 # Forensics only - prevents nothing (issue #202: a foreground and a
 # backgrounded Bash call are indistinguishable from inside this process, so

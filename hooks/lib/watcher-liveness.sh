@@ -112,6 +112,38 @@ wm_watcher_up() {
   fi
 }
 
+# wm_pr_watch_up <crew_id> <wm_home>
+# Sets pr_watch_up=1 iff a bin/pr-watch cycle is live for <crew_id>: its own
+# pidfile ($wm_home/pr-watch-<ckey>.pid) names a live pid AND its own beacon
+# ($wm_home/pr-watch-<ckey>.beat) is fresher than WM_PR_WATCH_GRACE (default
+# 90s) - reused unmodified from bin/pr-watch's own singleton-guard constant,
+# not a second, independently-tunable grace: one value is the single source
+# of truth for "how stale can a pr-watch beacon be", so this check and
+# pr-watch's own guard can never disagree about liveness (issue #319).
+# Structurally mirrors wm_watcher_up above, but does NOT piggyback on
+# wm_owner_paths - <crew_id> is a crew id, not an owner scope, and the ckey
+# sanitization is duplicated here rather than factored into a shared helper,
+# matching this file's own header comment on wm_owner_paths (duplication at
+# each call site is the accepted precedent, not something to consolidate for
+# one more caller). Does not set any path variable in the caller's scope.
+wm_pr_watch_up() {
+  _wpu_cid="$1"; _wpu_home="$2"
+  pr_watch_up=0
+  [ -n "$_wpu_cid" ] || return 0
+  _wpu_ckey="$(printf '%s' "$_wpu_cid" | tr -c 'A-Za-z0-9._-' '_')"
+  _wpu_pidfile="$_wpu_home/pr-watch-$_wpu_ckey.pid"
+  _wpu_beatfile="$_wpu_home/pr-watch-$_wpu_ckey.beat"
+  _wpu_grace="${WM_PR_WATCH_GRACE:-90}"
+  if [ -f "$_wpu_pidfile" ] && [ -f "$_wpu_beatfile" ]; then
+    _wpu_pid="$(cat "$_wpu_pidfile" 2>/dev/null)"
+    if [ -n "$_wpu_pid" ] && kill -0 "$_wpu_pid" 2>/dev/null; then
+      _wpu_beat_m="$($WM_UV python -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' "$_wpu_beatfile" 2>/dev/null)"
+      _wpu_now="$(date +%s)"
+      if [ -n "$_wpu_beat_m" ] && [ $(( _wpu_now - _wpu_beat_m )) -lt "$_wpu_grace" ]; then pr_watch_up=1; fi
+    fi
+  fi
+}
+
 # wm_run_scoped_stamp_active <stamp>
 # The comparison half of wm_run_scoped_marker_active, split out for a caller
 # that must read a marker's stamp BEFORE the marker itself is overwritten
