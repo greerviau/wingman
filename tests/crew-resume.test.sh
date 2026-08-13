@@ -287,7 +287,7 @@ wm_state crew-set --id r3 --status died >/dev/null
 tmux new-window -d -t "$WM_TMUX_SESSION:" -n wm-r3 'sleep 600'
 before_pid="$(tmux list-panes -t "$WM_TMUX_SESSION:wm-r3" -F '#{pane_pid}' 2>/dev/null)"
 out3="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" r3 2>&1)"
-assert_contains "a pre-existing window is skipped, not duplicated" "$out3" "window already exists"
+assert_contains "a pre-existing endpoint is skipped, not duplicated" "$out3" "endpoint already exists"
 after_pid="$(tmux list-panes -t "$WM_TMUX_SESSION:wm-r3" -F '#{pane_pid}' 2>/dev/null)"
 assert_eq "the original window's pane is untouched" "$after_pid" "$before_pid"
 assert_eq "status stays died (guard 2 never resumes)" "$(field_of r3 status)" "died"
