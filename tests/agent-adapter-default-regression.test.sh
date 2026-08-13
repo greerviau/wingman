@@ -52,8 +52,8 @@ sysprompt="$WINGMAN_HOME/crew/$id.sysprompt.md"
 # itself (every other test in this suite follows the same convention, to
 # keep a test fixture's own environment from picking up common.sh's other
 # side effects).
-excludes_json="$(printf '{"claudeMdExcludes":["%s/CLAUDE.md","%s/CLAUDE.local.md","%s/.claude/CLAUDE.md","%s/.claude/rules/**","%s-*/CLAUDE.md","%s-*/CLAUDE.local.md","%s-*/.claude/CLAUDE.md","%s-*/.claude/rules/**"]}' \
-  "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO")"
+excludes_json="$(printf '{"claudeMdExcludes":["%s/CLAUDE.md","%s/CLAUDE.local.md","%s/.claude/CLAUDE.md","%s/.claude/rules/**","%s/AGENTS.md","%s-*/CLAUDE.md","%s-*/CLAUDE.local.md","%s-*/.claude/CLAUDE.md","%s-*/.claude/rules/**","%s-*/AGENTS.md"]}' \
+  "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO" "$TEST_REPO")"
 
 expected="exec $WS/stub.sh --permission-mode 'bypassPermissions' --session-id '$sid' --name '$id' --remote-control 'wm-$id' --add-dir '$WINGMAN_HOME' --add-dir '$TEST_REPO' --settings '$excludes_json' --append-system-prompt \"\$(cat '$sysprompt')\""
 actual="$(grep '^exec ' "$launch")"
