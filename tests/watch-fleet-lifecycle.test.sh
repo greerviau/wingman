@@ -387,7 +387,7 @@ deadclassify="$(wm_timeout 10 "$WF" --owner dead1 --classify 2>/dev/null)"
 assert_eq "the died-owner self-stop classifies as a deliberate stop" "$deadclassify" "stopped"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
-# --- Fix 2b: died-but-RESUMABLE does NOT self-stop (issue #254 interaction) --
+# --- Fix 2b: died-but-RESUMABLE does NOT self-stop (PR #254 interaction) -----
 # A died member's session transcript surviving on disk is exactly the case
 # #254's own takeover path exists for - self-stopping the watcher here would
 # strand that recovery path's own wake channel. A real tmux window keeps the

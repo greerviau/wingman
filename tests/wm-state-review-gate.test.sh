@@ -96,11 +96,11 @@ assert_eq "an unrelated crew-set call does not clear review_gate_waived" \
 # ============================================================================
 list="$(wm_state crew-list)"
 assert_contains "crew-list shows the WAIVED marker for a waived effort" \
-  "$list" "review gate: WAIVED for this effort (issue #132)"
+  "$list" "review gate: WAIVED for this effort"
 
 tree="$(wm_state crew-list --tree)"
 assert_contains "crew-list --tree shows the WAIVED marker too" \
-  "$tree" "review gate: WAIVED for this effort (issue #132)"
+  "$tree" "review gate: WAIVED for this effort"
 
 board="$(cat "$WINGMAN_HOME/board.md")"
 assert_contains "board.md marks a waived effort's id cell (review-waived)" \

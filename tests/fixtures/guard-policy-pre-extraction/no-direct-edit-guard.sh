@@ -100,7 +100,7 @@ PARSE_FAIL_REASON = (
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
     "payload - so it is denied rather than "
-    "partially checked (issue #56). If this command embeds a heredoc to "
+    "partially checked. If this command embeds a heredoc to "
     "build up an argument (for example a PR body), quote its delimiter "
     "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "
     "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
@@ -132,7 +132,7 @@ if tool in ("Edit", "Write", "NotebookEdit"):
             "Spawn a developer crew member to make this change instead: "
             "bin/spawn-crew --type developer --repo <name> --objective \"<the "
             "change>\" (or --input <plan-path> if an analyst already produced a "
-            "plan). See issue #17." % tool
+            "plan)." % tool
         )
 
 if tool == "Bash":
@@ -178,7 +178,7 @@ if tool == "Bash":
             "Running the test suite directly is not yours to do here - you are "
             "acting as an orchestrator. Hand the change and its verification to "
             "a developer crew member via bin/spawn-crew instead of invoking the "
-            "test runner yourself. See issue #17."
+            "test runner yourself."
         )
 
     # Bash file-writing commands (issue #171): sed -i, output redirection
@@ -192,8 +192,8 @@ if tool == "Bash":
     FILE_WRITE_DENY = (
         "This Bash command writes directly to %s inside a git repo (%s) - not "
         "yours to do here as an orchestrator, for the same reason a direct "
-        "Edit/Write call is denied (issue #17). This mechanically extends that "
-        "same guard to shell-level writes (issue #171): sed -i, output "
+        "Edit/Write call is denied. This same guard covers shell-level "
+        "writes: sed -i, output "
         "redirection (>, >>, &>, tee), and cp/mv are just as much \"heavy "
         "work\" as an Edit/Write call, and are now recognized the same way, "
         "no size exception. Spawn a developer crew member to make this change "

@@ -437,7 +437,7 @@ def no_evidence_reason(pr_number, pr_url, issues):
     target = pr_url or ("PR #%s" % pr_number if pr_number else "this PR")
     parts = [
         "No verifiable evidence of a genuinely separate approving review was "
-        "found for %s (issue #132) - allow_merge alone no longer permits a "
+        "found for %s - allow_merge alone no longer permits a "
         "merge." % target
     ]
     if issues:
@@ -455,8 +455,8 @@ def no_evidence_reason(pr_number, pr_url, issues):
     parts.append(
         "Note: review_gate_waived clears only THIS hook'"'"'s own evidence "
         "check - if the repository'"'"'s branch ruleset separately requires an "
-        "approving review, the merge will still fail at GitHub regardless "
-        "(issue #190). Run $WINGMAN_BIN/lib/merge-block-diagnose.sh --pr "
+        "approving review, the merge will still fail at GitHub regardless. "
+        "Run $WINGMAN_BIN/lib/merge-block-diagnose.sh --pr "
         "<this PR URL> before escalating to find out whether one grant or "
         "two is actually needed."
     )
@@ -465,15 +465,15 @@ def no_evidence_reason(pr_number, pr_url, issues):
 
 def unresolved_pr_reason(detail):
     return (
-        "Could not verify review evidence for this merge attempt (issue "
-        "#132): %s Denied out of caution rather than allowed unchecked - this "
+        "Could not verify review evidence for this merge attempt: %s "
+        "Denied out of caution rather than allowed unchecked - this "
         "is a security-relevant gate, not a best-effort attribution comment. "
         "Retry once resolvable, or ask the requester/lead to grant "
         "review_gate_waived for this effort if no review round is actually "
         "wanted. Note: review_gate_waived clears only THIS hook'"'"'s own "
         "evidence check - if the repository'"'"'s branch ruleset separately "
         "requires an approving review, the merge will still fail at GitHub "
-        "regardless (issue #190). Run $WINGMAN_BIN/lib/merge-block-diagnose.sh "
+        "regardless. Run $WINGMAN_BIN/lib/merge-block-diagnose.sh "
         "--pr <this PR URL> before escalating to find out whether one grant "
         "or two is actually needed." % detail
     )
@@ -533,7 +533,7 @@ def verify_reviewer_approval(pr_json):
     for login, commit_oid in stale_shape1:
         issues.append(
             "%s'"'"'s APPROVED review was submitted against commit %s, but the "
-            "PR'"'"'s current head is now %s - stale evidence (issue #138)"
+            "PR'"'"'s current head is now %s - stale evidence"
             % (login, (commit_oid or "unknown")[:12], (head_ref_oid or "unknown")[:12]))
 
     # Shape 2: comment-fallback marker verdict. Only the LATEST verdict per
@@ -611,14 +611,14 @@ def verify_reviewer_approval(pr_json):
                     "crew `%s` posted VERDICT: approve but the comment "
                     "carries no wingman-review-proof marker, required "
                     "because this reviewer'"'"'s roster record has a "
-                    "review-token commitment on file (issue #135)" % rid)
+                    "review-token commitment on file" % rid)
                 continue
             if hashlib.sha256(bytes.fromhex(pm.group(1).lower())).hexdigest() != commitment:
                 issues.append(
                     "crew `%s` posted VERDICT: approve but its wingman-"
                     "review-proof marker does not match the commitment "
                     "recorded for this reviewer at spawn time - treating as "
-                    "a forged approve (issue #135)" % rid)
+                    "a forged approve" % rid)
                 continue
         # issue #138: even a genuine, verified proof can be a byte-for-byte
         # repost of OLD evidence - require the reviewer'"'"'s LATEST commit-bound
@@ -635,7 +635,7 @@ def verify_reviewer_approval(pr_json):
                 "crew `%s` posted VERDICT: approve but its latest signed "
                 "commit (%s) does not match the PR'"'"'s current head (%s) - "
                 "stale evidence, likely because new commits landed after it "
-                "was signed (issue #138)"
+                "was signed"
                 % (rid, commit_sha[:12], (head_ref_oid or "unknown")[:12]))
             continue
         return True, ""
@@ -784,7 +784,7 @@ PARSE_FAIL_REASON = (
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
     "payload - so it is denied rather than "
-    "partially checked (issue #56). If this command embeds a heredoc to "
+    "partially checked. If this command embeds a heredoc to "
     "build up an argument (for example a PR body), quote its delimiter "
     "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "
     "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
@@ -794,7 +794,7 @@ PARSE_FAIL_REASON = (
 
 def merge_reason():
     return (
-        "Merging a PR is not yours to do from a crew session (issue #46): crew "
+        "Merging a PR is not yours to do from a crew session: crew "
         "never merge without the pilot'"'"'s explicit, per-effort authorization. "
         "Leave this PR open - report --status review and let the pilot merge it "
         "(see playbooks/software-development/developer.md, \"Merge "
@@ -930,8 +930,8 @@ def check_merge_paths():
                             "command) is not a valid, accessible git "
                             "checkout, so whether it targets the default "
                             "branch cannot be verified. Denied out of "
-                            "caution rather than silently allowed (issue "
-                            "#117). Push from (or git -C into) a real "
+                            "caution rather than silently allowed. Push "
+                            "from (or git -C into) a real "
                             "checkout of this repository."
                         )
                 elif ":" in refspec:
@@ -946,7 +946,7 @@ def check_merge_paths():
                             "git_push", argv, exec_cwd, command,
                             "Pushing directly to the default branch (%s) from a crew "
                             "session is a merge-equivalent and is not yours to do "
-                            "(issue #46) - same rule as gh pr merge. Push your own "
+                            "- same rule as gh pr merge. Push your own "
                             "branch and open/update a PR instead; leave landing it on "
                             "%s to the pilot." % (dest, dest)
                         )
@@ -986,7 +986,7 @@ def _check_no_self_grant(flag_token, label):
             continue  # a lead granting one of its OWN workers - allowed
         deny(
             "Granting %s is not yours to set from a crew session, including "
-            "on yourself (issue #46) - it must come from the pilot via "
+            "on yourself - it must come from the pilot via "
             "wingman'"'"'s top-level session, or a lead relaying the pilot'"'"'s "
             "decision to one of its own workers. Report --status blocked if "
             "you believe this PR needs it, and let the pilot/lead grant it "
@@ -1001,7 +1001,7 @@ def check_allow_merge_grant():
 def check_review_gate_waiver_grant():
     _check_no_self_grant(
         "--review-gate-waived",
-        "the review-gate waiver (--review-gate-waived, issue #132)")
+        "the review-gate waiver (--review-gate-waived)")
 
 
 def check_regenerate_review_token_grant():
@@ -1017,7 +1017,7 @@ def check_regenerate_review_token_grant():
     # this").
     _check_no_self_grant(
         "--regenerate-review-token",
-        "review-token regeneration (issue #135)")
+        "review-token regeneration")
 
 
 def check_crew_add_restriction():
@@ -1045,7 +1045,7 @@ def check_crew_add_restriction():
             continue  # a lead spawning one of its OWN new workers - allowed
         deny(
             "Creating or replacing a crew roster record (wm-state crew-add) "
-            "is not yours to do from a crew session (issue #132) - it is "
+            "is not yours to do from a crew session - it is "
             "called only by bin/spawn-crew, by wingman'"'"'s own top-level "
             "session or a lead spawning one of its own workers. A worker "
             "session can never call crew-add on itself (crew-add replaces "
@@ -1084,7 +1084,7 @@ def check_crew_set_delivery_restriction():
         deny(
             "Setting --delivery on a crew id other than your own "
             "($WINGMAN_CREW_ID) is not yours to do from a crew session "
-            "(issue #132) - every legitimate delivery report is self-"
+            "- every legitimate delivery report is self-"
             "targeted, and this hook now trusts `delivery` as one of the "
             "review-evidence gate'"'"'s roster fields. Report --status blocked "
             "if you believe you genuinely need this."
@@ -1115,9 +1115,9 @@ def check_crew_set_type_restriction():
         deny(
             "Setting --type on a crew id other than your own "
             "($WINGMAN_CREW_ID) is not yours to do from a crew session "
-            "(issue #136) - every legitimate type assignment happens once, "
+            "- every legitimate type assignment happens once, "
             "at crew-add time, and this hook now trusts `type` as one of "
-            "the review-evidence gate'"'"'s roster fields (see issue #132). "
+            "the review-evidence gate'"'"'s roster fields. "
             "Report --status blocked if you believe you genuinely need this."
         )
 

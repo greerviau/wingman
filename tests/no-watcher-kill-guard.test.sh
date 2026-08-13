@@ -95,7 +95,7 @@ assert_eq "the armed cycle's pidfile names the backgrounded process" "$pid" "$wp
 # --- scenario 1: direct pid kill, every signal spelling, is denied ----------
 out="$(run_hook "kill $pid")"
 assert_contains "kill <pid> is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "denial cites issue #64" "$out" "issue #64"
+assert_contains "denial names the liveness rationale" "$out" "its liveness is the only channel"
 assert_contains "denial points at bin/watch-fleet --stop instead" "$out" "bin/watch-fleet --stop"
 
 out="$(run_hook "kill -9 $pid")"
@@ -385,7 +385,7 @@ pid="$(cat "$WINGMAN_HOME/watch.pid")"
 
 out="$(run_hook "kill \$(cat $WINGMAN_HOME/watch.pid)")"
 assert_contains "kill \$(cat watch.pid) - the exact round-4 repro - fails closed" "$out" '"permissionDecision": "deny"'
-assert_contains "the round-4 denial cites issue #64 round 4" "$out" "round 4"
+assert_contains "the round-4 denial names the conservative refusal" "$out" "Denied conservatively rather than risk"
 
 out="$(run_hook "WATCHPID=$pid; kill \$WATCHPID")"
 assert_contains "a variable-indirected kill target fails closed" "$out" '"permissionDecision": "deny"'
@@ -423,7 +423,7 @@ tmux kill-session -t "=$WM_TMUX_SESSION" 2>/dev/null
 # ============================================================================
 out="$(run_hook "kill 'oops")"
 assert_contains "an unresolvable command mentioning kill is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "the parse-failure denial cites issue #56" "$out" "issue #56"
+assert_contains "the parse-failure denial names the fail-closed rule" "$out" "denied rather than partially checked"
 
 # An unrelated malformed command (no "kill" substring) never even reaches
 # command_segments() - the cheap pre-gate exits 0 before any parsing runs.

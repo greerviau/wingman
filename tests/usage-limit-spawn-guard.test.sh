@@ -57,7 +57,7 @@ set_usage_state approaching five_hour
 
 out="$(run_hook "bin/spawn-crew --type developer --repo x --objective y")"
 assert_contains "state approaching: spawn-crew is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "denial cites issue #24" "$out" "issue #24"
+assert_contains "denial names the approaching cap" "$out" "usage-limit window is approaching its cap"
 assert_contains "denial names the window" "$out" "5-hour"
 assert_contains "denial tells the caller already-running crew are untouched" "$out" "NOT affected by this pause"
 assert_contains "denial notes in-flight work can still hit the hard limit" "$out" "hard limit"

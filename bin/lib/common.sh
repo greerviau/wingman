@@ -791,7 +791,7 @@ wm_ps_lstart() {
 # identical lock instead of racing it.
 #
 # Backed by a kernel flock() on a reserved file descriptor (issue #302),
-# replacing the earlier mkdir+pid-stamp reclaim scheme (issue #298/#301
+# replacing the earlier mkdir+pid-stamp reclaim scheme (issue #298 / PR #301
 # round-trip). The lock is released by the KERNEL the instant every fd
 # referencing its open file description closes - including on an uncatchable
 # SIGKILL of the holder - with no reliance on a contender's own polling or

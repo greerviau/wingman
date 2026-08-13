@@ -602,7 +602,7 @@ def main():
         sys.stderr.write(
             "error: live mode needs a full PR URL (https://github.com/<owner>/<repo>/pull/<n>) "
             "or --repo <owner>/name alongside --pr <number> - refusing to guess the repo from "
-            "the working directory (issue #190 round-1 finding N1)\n")
+            "the working directory.\n")
         sys.exit(2)
 
     pr, pr_err = gather_pr(args)

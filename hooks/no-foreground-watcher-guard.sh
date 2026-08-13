@@ -187,8 +187,8 @@ def deny(reason):
 VERIFY_FAIL_REASON = (
     "This command mentions watch-fleet/pr-watch but could not be verified "
     "safe - an unexpected tool_input shape, or an internal error while "
-    "checking it - so it is denied rather than partially checked (issue "
-    "#202), since silence is this hook family'"'"'s own allow signal and a "
+    "checking it - so it is denied rather than partially checked"
+    ", since silence is this hook family'"'"'s own allow signal and a "
     "failure is not silence. If this is a legitimate arming call, reissue it "
     "as a plain bin/watch-fleet or bin/pr-watch invocation with "
     "run_in_background: true, on its own, not bundled onto another command."
@@ -208,7 +208,7 @@ try:
         "This command could not be fully parsed - an unterminated quote, an "
         "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
         "terminator line was never found, including inside a `bash -c`/`eval` "
-        "payload - so it is denied rather than partially checked (issue #56), "
+        "payload - so it is denied rather than partially checked, "
         "since this command mentions watch-fleet/pr-watch and could not be "
         "verified safe. Reformat it into well-formed shell syntax and retry."
     )
@@ -217,8 +217,8 @@ try:
         "bin/watch-fleet blocks until an event fires - that is the entire "
         "wake mechanism - so running it any way other than as a "
         "harness-tracked background task wedges this session indefinitely "
-        "(issue #202: a delegate did exactly this and sat wedged for 5h27m, "
-        "invisible to the stall detector). Re-issue this as a Bash call with "
+        "- a session that does this sits wedged indefinitely, invisible to "
+        "the stall detector. Re-issue this as a Bash call with "
         "run_in_background: true, on its own, not bundled onto another "
         "command. Never foreground, and never detached (nohup, setsid, a "
         "trailing &) - a detached watcher'"'"'s exit cannot wake anyone, so "
@@ -355,7 +355,7 @@ try:
                     _count_clause = " (%s deaths in a row)" % _count_match.group(1) if _count_match else ""
                     STANDDOWN_DENIAL_REASON = (
                         "A spurious-repeated failure-budget standdown is in force "
-                        "for this session" + _count_clause + " (issue #198): the "
+                        "for this session" + _count_clause + ": the "
                         "watcher has died repeatedly with no successful cycle in "
                         "between, and the failure budget is deliberately refusing "
                         "further arms until a human intervenes. Arming now would "
@@ -396,7 +396,7 @@ if [ "$PY_RC" -ne 0 ]; then
   # denies itself rather than let a discarded stderr and an `exit 0` fall
   # through to a silent allow.
   cat <<'JSON'
-{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "This command mentions watch-fleet/pr-watch but the check for it failed to run (a dead interpreter, or an internal error) - denied rather than partially checked (issue #202), since silence is this hook family's own allow signal and a failure is not silence. If this is a legitimate arming call, reissue it as a plain bin/watch-fleet or bin/pr-watch invocation with run_in_background: true, on its own, not bundled onto another command."}}
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "This command mentions watch-fleet/pr-watch but the check for it failed to run (a dead interpreter, or an internal error) - denied rather than partially checked, since silence is this hook family's own allow signal and a failure is not silence. If this is a legitimate arming call, reissue it as a plain bin/watch-fleet or bin/pr-watch invocation with run_in_background: true, on its own, not bundled onto another command."}}
 JSON
   exit 0
 fi

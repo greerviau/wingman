@@ -554,7 +554,7 @@ beat_age() {
 # bin/lib/common.sh's wm_tmux_send_lock used for its own, structurally
 # identical pid+lstart identity check (issue #298), pulled from that
 # function's history since its own scheme was since replaced by a kernel
-# flock() with no identity heuristics left at all (issue #302/#311).
+# flock() with no identity heuristics left at all (issue #302 / PR #311).
 owner_lock_alive() {
   [ -d "$OWNERLOCK" ] || return 1
   _ola_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
@@ -632,7 +632,7 @@ YOUR action: report the paragraph above to the pilot, together with the pilot re
   _srr_clear="Once the cause of the repeated deaths is understood, lift the standdown with 'bin/watch-fleet --clear-standdown' (or restart wingman, which clears it with the run); fleet continuity re-arms automatically on the next Stop event."
   case "$_srr_hint" in
     stale-claim-lock)
-      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent. $_srr_clear" ;;
+      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent. $_srr_clear" ;;
     *)
       _srr_remedy="$_srr_clear" ;;
   esac
@@ -1178,7 +1178,7 @@ if [ -f "$EXITFILE" ]; then
     fire|remote-control-dropped)
       rm -f "$PIDFILE" "$RUNFILE"
       release_claim
-      wm_die "watcher: refusing to arm - an unclassified '$_claim_exit' record is still pending (issue #197: this record was never classified before something tried to arm a fresh cycle). Run 'bin/watch-fleet --classify${OWNER:+ --owner $OWNER}' first, act on its result, THEN arm."
+      wm_die "watcher: refusing to arm - an unclassified '$_claim_exit' record is still pending - it was never classified before something tried to arm a fresh cycle. Run 'bin/watch-fleet --classify${OWNER:+ --owner $OWNER}' first, act on its result, THEN arm."
       ;;
     *)
       spurlog dropped-wake "$_claim_exit"
@@ -1281,7 +1281,7 @@ wm_ok "$(date -u +%Y-%m-%dT%H:%M:%SZ) watcher: armed pid=$$ (interval ${INTERVAL
 # (nohup/setsid/a trailing &), and if you cannot arm it as a background
 # task, arm nothing: no watcher at all is strictly better than a foreground
 # one.
-wm_warn "watch-fleet: if you are seeing this line in a FOREGROUND tool result, this session is already wedged (issue #202) - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
+wm_warn "watch-fleet: if you are seeing this line in a FOREGROUND tool result, this session is already wedged - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
 
 # The prompt-shape detector (prompt_shape_in) and its WM_PERM_PROMPT_RE/
 # WM_PERM_OPTION_RE/WM_PERM_MARK_RE/WM_PERM_MIN_OPTS/WM_PERM_TAIL/WM_PERM_ADJ/
@@ -1446,7 +1446,7 @@ fire() {
   printf 'This record is not yet classified. If you are not already responding to a\n'
   printf '`bin/watch-fleet --classify` result, run that FIRST - never arm a bare cycle\n'
   printf 'while this one is unclassified; a bare arm now refuses rather than silently\n'
-  printf 'discarding it (issue #197), but only --classify actually reports it. Read\n'
+  printf 'discarding it, but only --classify actually reports it. Read\n'
   printf '%s for the full roster (or run bin/crew-list), then report a compact\n' "$WAKEFILE"
   printf 'roster status to the pilot: who is on what, what is blocked, what is stalled,\n'
   printf 'what is ready for review. Then arm one fresh watch-fleet cycle before you stop.\n'
@@ -2008,7 +2008,7 @@ for r in data:
         # the generic "no one at its terminal" framing of an ordinary
         # permission/trust gate.
         if printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL" | grep -qE "$WM_RESUME_PROMPT_RE"; then
-          _blocker="frozen on the resume-from-summary prompt (issue #30) after an auto-recovery attempt - needs one keypress via bin/crew-takeover $_id"
+          _blocker="frozen on the resume-from-summary prompt after an auto-recovery attempt - needs one keypress via bin/crew-takeover $_id"
         else
           _blocker="frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass"
         fi
@@ -2392,7 +2392,7 @@ for r in roster if isinstance(roster, list) else []:
     case "$_outage_transition" in
       outage-detected)
         {
-          echo "# API outage detected (issue #23)"
+          echo "# API outage detected"
           echo
           echo "Anthropic API-error signals (529/5xx/rate-limit/connection signatures) have"
           echo "crossed the fleet-wide mass threshold - treat this as a likely outage, not"
@@ -2422,7 +2422,7 @@ except Exception:
 print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-outage"))
 ' 2>/dev/null)"
         {
-          echo "# API outage cleared (issue #23)"
+          echo "# API outage cleared"
           echo
           echo "The fleet-wide API-error signal has been quiet for ${WM_OUTAGE_QUIET}s. New"
           echo "spawns are unpaused."
@@ -2553,7 +2553,7 @@ print("%s\t%s\t%s" % (window_label, pct_text, resets_at if resets_at is not None
 $_usage_info
 EOF_USAGE
         {
-          echo "# Usage-limit quota approaching (issue #24)"
+          echo "# Usage-limit quota approaching"
           echo
           echo "The $_usage_window_label usage window is at $_usage_pct_text, resets at"
           echo "epoch $_usage_resets_at."
@@ -2578,7 +2578,7 @@ EOF_USAGE
         ;;
       usage-limit-reset)
         {
-          echo "# Usage-limit window reset (issue #24)"
+          echo "# Usage-limit window reset"
           echo
           echo "The usage window has reset on its own. New spawns are unpaused again -"
           echo "nothing further to do."

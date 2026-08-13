@@ -89,7 +89,7 @@ assert_eq "roster mirrors stalled" "$(roster_status_of loop1)" "stalled"
 
 loop1_json="$(cat "$WINGMAN_HOME/crew/loop1.json")"
 assert_contains "reason names the hand-rolled polling loop signature" "$loop1_json" "hand-rolled foreground polling loop"
-assert_contains "reason names issue #268" "$loop1_json" "issue #268"
+assert_contains "reason names the missing timeout" "$loop1_json" "no independent timeout"
 assert_contains "reason names the takeover/standdown remedy" "$loop1_json" "crew-takeover loop1"
 assert_not_contains "reason does NOT use the watch-fleet/pr-watch wedge wording" "$loop1_json" "blocking watcher"
 assert_eq "stall.source records 'loop', not 'wedge'" "$(stall_field loop1 source)" "loop"

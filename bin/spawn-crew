@@ -215,7 +215,7 @@ wm_resolve_playbook "$TYPE"
 # check for the repo it eventually `cd`s into (see playbooks/software-development/developer.md).
 CATEGORY="$(basename "$(dirname "$PLAYBOOK")")"
 if [ "$SCOPE" = repo ] && [ "$CATEGORY" = software-development ] && [ "$IS_GIT" -eq 0 ]; then
-  wm_die "'$TYPE' is a software-development crew type and requires a git checkout; '$REPO' is not one (or is not the repo's root - see the subdirectory rule in docs/plans/2026-07-13-conditional-git-branch-pr-workflow.md)"
+  wm_die "'$TYPE' is a software-development crew type and requires a git checkout; '$REPO' is not one, or is a subdirectory rather than the repository root. Pass --repo pointing at the top level of the checkout (the directory holding .git), or spawn with --scope global if the target is not a git repository at all."
 fi
 
 # A role's playbook is written against the shared delivery apparatus
@@ -644,10 +644,10 @@ if [ "$SCOPE" = global ]; then
 else
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 fi
-[ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort (issue #46)"
-[ "$WAIVE_REVIEW_GATE" = 1 ] && wm_ok "'$ID' spawned with the review gate waived for this effort (issue #132)"
-[ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage (issue #23)"
-[ "$FORCE_DURING_USAGE_LIMIT" = 1 ] && wm_ok "'$ID' spawned with --force-during-usage-limit (issue #24)"
-[ -n "$CONSTRAINTS" ] && wm_ok "'$ID' spawned with $(printf '%s\n' "$CONSTRAINTS" | grep -c .) standing constraint(s) from the human (issue #192)"
+[ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort"
+[ "$WAIVE_REVIEW_GATE" = 1 ] && wm_ok "'$ID' spawned with the review gate waived for this effort"
+[ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage"
+[ "$FORCE_DURING_USAGE_LIMIT" = 1 ] && wm_ok "'$ID' spawned with --force-during-usage-limit"
+[ -n "$CONSTRAINTS" ] && wm_ok "'$ID' spawned with $(printf '%s\n' "$CONSTRAINTS" | grep -c .) standing constraint(s) from the human"
 printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
 echo "$ID"

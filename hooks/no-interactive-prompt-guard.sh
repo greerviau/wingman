@@ -79,7 +79,7 @@ print(json.dumps({
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
         "permissionDecisionReason": (
-            "%s is not yours to call from a crew session (issue #155): it "
+            "%s is not yours to call from a crew session: it "
             "waits for a human to respond interactively, and nobody watches "
             "a crew session'"'"'s pane in real time to answer it - only the "
             "top-level wingman session is actually watched. Escalate "

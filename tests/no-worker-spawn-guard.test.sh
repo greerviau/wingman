@@ -39,7 +39,7 @@ assert_eq "qualified-type lead (common/lead): spawning a reviewer is allowed (no
 export WINGMAN_CREW_TYPE=lead
 out="$(run_hook "bin/spawn-crew --type lead --repo x --objective y")"
 assert_contains "lead: spawning a further lead is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "lead-spawns-lead denial cites issue #212" "$out" "issue #212"
+assert_contains "lead-spawns-lead denial names the depth cap" "$out" "A lead may not spawn a further lead"
 
 out="$(run_hook "bin/spawn-crew --type common/lead --repo x --objective y")"
 assert_contains "lead: spawning a qualified-type further lead (common/lead) is denied" "$out" '"permissionDecision": "deny"'
@@ -50,7 +50,7 @@ for wtype in developer architect reviewer software-analyst research; do
 
   out="$(run_hook "bin/spawn-crew --type reviewer --repo x --objective y")"
   assert_contains "$wtype: spawning a reviewer is denied" "$out" '"permissionDecision": "deny"'
-  assert_contains "$wtype: denial cites issue #212" "$out" "issue #212"
+  assert_contains "$wtype: denial names the restriction" "$out" "Spawning crew is not yours to do from a"
   assert_contains "$wtype: denial points at --status blocked" "$out" "--status blocked"
 
   # $WINGMAN_BIN/spawn-crew form (a lead's own objective-composition idiom) -

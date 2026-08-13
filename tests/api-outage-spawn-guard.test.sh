@@ -47,7 +47,7 @@ set_outage_state active
 
 out="$(run_hook "bin/spawn-crew --type developer --repo x --objective y")"
 assert_contains "state active: spawn-crew is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "denial cites issue #23" "$out" "issue #23"
+assert_contains "denial names the spawn pause" "$out" "new spawns are paused while it is ongoing"
 assert_contains "denial tells the caller already-running crew are untouched" "$out" "NOT affected by this pause"
 assert_contains "denial names the --force-during-outage escape hatch" "$out" "--force-during-outage"
 

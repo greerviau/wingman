@@ -195,7 +195,7 @@ if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$GUARD_HOOK" --check >/dev/null 2>&1; then
   wm_ok "delegation guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "delegation guard hook (issue #17) not registered in $GUARD_SETTINGS"
+  wm_warn "delegation guard hook not registered in $GUARD_SETTINGS"
   printf '    blocks direct Edit/Write/test-runner calls at wingman'"'"'s top-level\n'
   printf '    session and any lead, machine-wide\n'
   do_it=0
@@ -307,7 +307,7 @@ EOF
 if [ "$merge_hooks_missing" = 0 ]; then
   wm_ok "merge-authorization contract hooks registered ($GUARD_SETTINGS)"
 else
-  wm_warn "merge-authorization contract hooks (issue #46) not registered in $GUARD_SETTINGS"
+  wm_warn "merge-authorization contract hooks not registered in $GUARD_SETTINGS"
   printf '    denies crew-session merges by default and attributes any authorized one,\n'
   printf '    for crew sessions in any repo, machine-wide\n'
   do_it=0
@@ -365,7 +365,7 @@ EOF
 if [ "$pr_open_marker_hooks_missing" = 0 ]; then
   wm_ok "PR-open attribution marker hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "PR-open attribution marker hook (issue #50) not registered in $GUARD_SETTINGS"
+  wm_warn "PR-open attribution marker hook not registered in $GUARD_SETTINGS"
   printf '    marks every PR a crew member opens with the same attribution marker,\n'
   printf '    for crew sessions in any repo, machine-wide\n'
   do_it=0
@@ -411,7 +411,7 @@ if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$WATCHER_KILL_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
   wm_ok "watcher-protection guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "watcher-protection guard hook (issue #64) not registered in $GUARD_SETTINGS"
+  wm_warn "watcher-protection guard hook not registered in $GUARD_SETTINGS"
   printf '    denies killing a live watch-fleet cycle from any session, machine-wide\n'
   do_it=0
   if [ "$AUTO_YES" = 1 ]; then
@@ -447,7 +447,7 @@ if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$FOREGROUND_WATCHER_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
   wm_ok "foreground-watcher guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "foreground-watcher guard hook (issue #202) not registered in $GUARD_SETTINGS"
+  wm_warn "foreground-watcher guard hook not registered in $GUARD_SETTINGS"
   printf '    denies a foreground or detached watch-fleet/pr-watch arm from any session, machine-wide\n'
   do_it=0
   if [ "$AUTO_YES" = 1 ]; then
@@ -485,7 +485,7 @@ if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$FOREGROUND_POLL_LOOP_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
   wm_ok "foreground-poll-loop guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "foreground-poll-loop guard hook (issue #268) not registered in $GUARD_SETTINGS"
+  wm_warn "foreground-poll-loop guard hook not registered in $GUARD_SETTINGS"
   printf '    denies a foreground while/until+sleep polling loop from any session, machine-wide\n'
   do_it=0
   if [ "$AUTO_YES" = 1 ]; then
@@ -523,7 +523,7 @@ if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$INTERACTIVE_PROMPT_HOOK" --event PreToolUse --matcher "$INTERACTIVE_PROMPT_MATCHER" --check >/dev/null 2>&1; then
   wm_ok "interactive-prompt guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "interactive-prompt guard hook (issue #155) not registered in $GUARD_SETTINGS"
+  wm_warn "interactive-prompt guard hook not registered in $GUARD_SETTINGS"
   printf '    denies AskUserQuestion/EnterPlanMode/ExitPlanMode from every crew session,\n'
   printf '    for crew sessions in any repo, machine-wide\n'
   do_it=0
@@ -570,7 +570,7 @@ EOF
 if [ "$outage_hooks_missing" = 0 ]; then
   wm_ok "outage-detection guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "outage-detection guard hook (issue #23) not registered in $GUARD_SETTINGS"
+  wm_warn "outage-detection guard hook not registered in $GUARD_SETTINGS"
   printf '    pauses new bin/spawn-crew calls while a fleet-wide API outage is active,\n'
   printf '    for crew sessions in any repo, machine-wide\n'
   do_it=0
@@ -628,7 +628,7 @@ usage_guard_registered() {
 if usage_statusline_registered && usage_guard_registered; then
   wm_ok "usage-limit detection (statusline + spawn guard) registered ($GUARD_SETTINGS)"
 else
-  wm_warn "usage-limit detection (issue #24) not fully registered in $GUARD_SETTINGS"
+  wm_warn "usage-limit detection not fully registered in $GUARD_SETTINGS"
   printf '    captures the CLI'"'"'s own proactive usage-quota signal and pauses new\n'
   printf '    bin/spawn-crew calls while a usage-limit window is approaching, machine-wide\n'
   do_it=0
@@ -670,7 +670,7 @@ if uv run --no-project --quiet "$WM_LIB/install-user-hook.py" \
     --settings "$GUARD_SETTINGS" --hook "$WORKER_SPAWN_GUARD_HOOK" --event PreToolUse --matcher Bash --check >/dev/null 2>&1; then
   wm_ok "worker-spawn depth-cap guard hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "worker-spawn depth-cap guard hook (issue #212) not registered in $GUARD_SETTINGS"
+  wm_warn "worker-spawn depth-cap guard hook not registered in $GUARD_SETTINGS"
   printf '    restricts bin/spawn-crew to orchestrator-type callers (wingman/lead),\n'
   printf '    for crew sessions in any repo, machine-wide\n'
   do_it=0
@@ -736,7 +736,7 @@ fi
 if [ "$continuity_hooks_ok" = 1 ]; then
   wm_ok "fleet-continuity Stop hooks registered ($PROJECT_SETTINGS)"
 else
-  wm_warn "fleet-continuity Stop hooks (issue #185) not registered/executable in $PROJECT_SETTINGS"
+  wm_warn "fleet-continuity Stop hooks not registered/executable in $PROJECT_SETTINGS"
   printf '    expected a Stop entry referencing hooks/stop-guard.sh and one referencing\n'
   printf '    hooks/stop-continuity.sh with "asyncRewake": true and "timeout" >= %s, both\n' "$WM_CONTINUITY_TIMEOUT_MIN"
   printf '    scripts executable - this file is version-controlled, so the remedy is\n'
@@ -775,8 +775,8 @@ fi
 if [ "$continuity_crew_hooks_ok" = 1 ]; then
   wm_ok "fleet-continuity Stop hooks (crew) registered ($GUARD_SETTINGS)"
 else
-  wm_warn "fleet-continuity Stop hooks (crew, issue #199) not registered/executable in $GUARD_SETTINGS"
-  printf '    extends the #185 fleet-continuity constraint to crew sessions in any repo,\n'
+  wm_warn "fleet-continuity Stop hooks (crew) not registered/executable in $GUARD_SETTINGS"
+  printf '    extends the project-scope fleet-continuity constraint to crew sessions in any repo,\n'
   printf '    machine-wide (a lead'"'"'s own session gets the same no-idle-blind guarantee)\n'
   do_it=0
   if [ "$AUTO_YES" = 1 ]; then
@@ -820,7 +820,7 @@ fi
 if [ "$denial_report_guard_ok" = 1 ]; then
   wm_ok "denial-report Stop hook registered ($GUARD_SETTINGS)"
 else
-  wm_warn "denial-report Stop hook (issue #214) not registered/executable in $GUARD_SETTINGS"
+  wm_warn "denial-report Stop hook not registered/executable in $GUARD_SETTINGS"
   printf '    surfaces a denied tool call (toolDenialKind: user-rejected) a crew session\n'
   printf '    would otherwise silently absorb, machine-wide (any repo a lead/worker runs in)\n'
   do_it=0

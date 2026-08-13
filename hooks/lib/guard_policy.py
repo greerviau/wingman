@@ -128,7 +128,7 @@ _PARSE_FAIL_REASON_GENERIC = (
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
     "payload - so it is denied rather than "
-    "partially checked (issue #56). If this command embeds a heredoc to "
+    "partially checked. If this command embeds a heredoc to "
     "build up an argument (for example a PR body), quote its delimiter "
     "(<<'EOF' rather than <<EOF) unless bash must expand "
     "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
@@ -139,7 +139,7 @@ _PARSE_FAIL_REASON_SPAWN = (
     "This command could not be fully parsed - an unterminated quote, an "
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
-    "payload - so it is denied rather than partially checked (issue #56), "
+    "payload - so it is denied rather than partially checked, "
     "since this command mentions spawn-crew and could not be verified "
     "safe. Reformat it into well-formed shell syntax and retry."
 )
@@ -325,7 +325,7 @@ def evaluate_no_merge_guard(gi):
         target = pr_url or ("PR #%s" % pr_number if pr_number else "this PR")
         parts = [
             "No verifiable evidence of a genuinely separate approving review was "
-            "found for %s (issue #132) - allow_merge alone no longer permits a "
+            "found for %s - allow_merge alone no longer permits a "
             "merge." % target
         ]
         if issues:
@@ -343,8 +343,8 @@ def evaluate_no_merge_guard(gi):
         parts.append(
             "Note: review_gate_waived clears only THIS hook's own evidence "
             "check - if the repository's branch ruleset separately requires an "
-            "approving review, the merge will still fail at GitHub regardless "
-            "(issue #190). Run $WINGMAN_BIN/lib/merge-block-diagnose.sh --pr "
+            "approving review, the merge will still fail at GitHub regardless. "
+            "Run $WINGMAN_BIN/lib/merge-block-diagnose.sh --pr "
             "<this PR URL> before escalating to find out whether one grant or "
             "two is actually needed."
         )
@@ -352,15 +352,15 @@ def evaluate_no_merge_guard(gi):
 
     def unresolved_pr_reason(detail):
         return (
-            "Could not verify review evidence for this merge attempt (issue "
-            "#132): %s Denied out of caution rather than allowed unchecked - this "
+            "Could not verify review evidence for this merge attempt: %s "
+            "Denied out of caution rather than allowed unchecked - this "
             "is a security-relevant gate, not a best-effort attribution comment. "
             "Retry once resolvable, or ask the requester/lead to grant "
             "review_gate_waived for this effort if no review round is actually "
             "wanted. Note: review_gate_waived clears only THIS hook's own "
             "evidence check - if the repository's branch ruleset separately "
             "requires an approving review, the merge will still fail at GitHub "
-            "regardless (issue #190). Run $WINGMAN_BIN/lib/merge-block-diagnose.sh "
+            "regardless. Run $WINGMAN_BIN/lib/merge-block-diagnose.sh "
             "--pr <this PR URL> before escalating to find out whether one grant "
             "or two is actually needed." % detail
         )
@@ -404,7 +404,7 @@ def evaluate_no_merge_guard(gi):
         for login, commit_oid in stale_shape1:
             issues.append(
                 "%s's APPROVED review was submitted against commit %s, but the "
-                "PR's current head is now %s - stale evidence (issue #138)"
+                "PR's current head is now %s - stale evidence"
                 % (login, (commit_oid or "unknown")[:12], (head_ref_oid or "unknown")[:12]))
 
         # Shape 2: comment-fallback marker verdict. Only the LATEST verdict
@@ -470,14 +470,14 @@ def evaluate_no_merge_guard(gi):
                         "crew `%s` posted VERDICT: approve but the comment "
                         "carries no wingman-review-proof marker, required "
                         "because this reviewer's roster record has a "
-                        "review-token commitment on file (issue #135)" % rid)
+                        "review-token commitment on file" % rid)
                     continue
                 if hashlib.sha256(bytes.fromhex(pm.group(1).lower())).hexdigest() != commitment:
                     issues.append(
                         "crew `%s` posted VERDICT: approve but its wingman-"
                         "review-proof marker does not match the commitment "
                         "recorded for this reviewer at spawn time - treating as "
-                        "a forged approve (issue #135)" % rid)
+                        "a forged approve" % rid)
                     continue
             # issue #138: even a genuine, verified proof can be a byte-for-
             # byte repost of OLD evidence - require the reviewer's LATEST
@@ -488,7 +488,7 @@ def evaluate_no_merge_guard(gi):
                     "crew `%s` posted VERDICT: approve but its latest signed "
                     "commit (%s) does not match the PR's current head (%s) - "
                     "stale evidence, likely because new commits landed after it "
-                    "was signed (issue #138)"
+                    "was signed"
                     % (rid, commit_sha[:12], (head_ref_oid or "unknown")[:12]))
                 continue
             return True, ""
@@ -620,7 +620,7 @@ def evaluate_no_merge_guard(gi):
 
     def merge_reason():
         return (
-            "Merging a PR is not yours to do from a crew session (issue #46): crew "
+            "Merging a PR is not yours to do from a crew session: crew "
             "never merge without the pilot's explicit, per-effort authorization. "
             "Leave this PR open - report --status review and let the pilot merge it "
             "(see playbooks/software-development/developer.md, \"Merge "
@@ -719,8 +719,8 @@ def evaluate_no_merge_guard(gi):
                                 "command) is not a valid, accessible git "
                                 "checkout, so whether it targets the default "
                                 "branch cannot be verified. Denied out of "
-                                "caution rather than silently allowed (issue "
-                                "#117). Push from (or git -C into) a real "
+                                "caution rather than silently allowed. Push "
+                                "from (or git -C into) a real "
                                 "checkout of this repository."
                             )
                     elif ":" in refspec:
@@ -735,7 +735,7 @@ def evaluate_no_merge_guard(gi):
                                 "git_push", argv, exec_cwd, command,
                                 "Pushing directly to the default branch (%s) from a crew "
                                 "session is a merge-equivalent and is not yours to do "
-                                "(issue #46) - same rule as gh pr merge. Push your own "
+                                "- same rule as gh pr merge. Push your own "
                                 "branch and open/update a PR instead; leave landing it on "
                                 "%s to the pilot." % (dest, dest)
                             )
@@ -768,7 +768,7 @@ def evaluate_no_merge_guard(gi):
                 continue  # a lead granting one of its OWN workers - allowed
             deny(
                 "Granting %s is not yours to set from a crew session, including "
-                "on yourself (issue #46) - it must come from the pilot via "
+                "on yourself - it must come from the pilot via "
                 "wingman's top-level session, or a lead relaying the pilot's "
                 "decision to one of its own workers. Report --status blocked if "
                 "you believe this PR needs it, and let the pilot/lead grant it "
@@ -781,14 +781,14 @@ def evaluate_no_merge_guard(gi):
     def check_review_gate_waiver_grant():
         _check_no_self_grant(
             "--review-gate-waived",
-            "the review-gate waiver (--review-gate-waived, issue #132)")
+            "the review-gate waiver (--review-gate-waived)")
 
     def check_regenerate_review_token_grant():
         # issue #135: --regenerate-review-token must never be settable by a
         # crew session on itself.
         _check_no_self_grant(
             "--regenerate-review-token",
-            "review-token regeneration (issue #135)")
+            "review-token regeneration")
 
     def check_crew_add_restriction():
         # PR #134 review, findings 1+2: `wm-state crew-add` dedups by id and
@@ -805,7 +805,7 @@ def evaluate_no_merge_guard(gi):
                 continue  # a lead spawning one of its OWN new workers - allowed
             deny(
                 "Creating or replacing a crew roster record (wm-state crew-add) "
-                "is not yours to do from a crew session (issue #132) - it is "
+                "is not yours to do from a crew session - it is "
                 "called only by bin/spawn-crew, by wingman's own top-level "
                 "session or a lead spawning one of its own workers. A worker "
                 "session can never call crew-add on itself (crew-add replaces "
@@ -834,7 +834,7 @@ def evaluate_no_merge_guard(gi):
             deny(
                 "Setting --delivery on a crew id other than your own "
                 "($WINGMAN_CREW_ID) is not yours to do from a crew session "
-                "(issue #132) - every legitimate delivery report is self-"
+                "- every legitimate delivery report is self-"
                 "targeted, and this hook now trusts `delivery` as one of the "
                 "review-evidence gate's roster fields. Report --status blocked "
                 "if you believe you genuinely need this."
@@ -857,9 +857,9 @@ def evaluate_no_merge_guard(gi):
             deny(
                 "Setting --type on a crew id other than your own "
                 "($WINGMAN_CREW_ID) is not yours to do from a crew session "
-                "(issue #136) - every legitimate type assignment happens once, "
+                "- every legitimate type assignment happens once, "
                 "at crew-add time, and this hook now trusts `type` as one of "
-                "the review-evidence gate's roster fields (see issue #132). "
+                "the review-evidence gate's roster fields. "
                 "Report --status blocked if you believe you genuinely need this."
             )
 
@@ -1086,7 +1086,7 @@ def evaluate_no_direct_edit_guard(gi):
                 "Spawn a developer crew member to make this change instead: "
                 "bin/spawn-crew --type developer --repo <name> --objective \"<the "
                 "change>\" (or --input <plan-path> if an analyst already produced a "
-                "plan). See issue #17." % gi.tool_name
+                "plan)." % gi.tool_name
             )
         return
 
@@ -1103,14 +1103,14 @@ def evaluate_no_direct_edit_guard(gi):
             "Running the test suite directly is not yours to do here - you are "
             "acting as an orchestrator. Hand the change and its verification to "
             "a developer crew member via bin/spawn-crew instead of invoking the "
-            "test runner yourself. See issue #17."
+            "test runner yourself."
         )
 
     FILE_WRITE_DENY = (
         "This Bash command writes directly to %s inside a git repo (%s) - not "
         "yours to do here as an orchestrator, for the same reason a direct "
-        "Edit/Write call is denied (issue #17). This mechanically extends that "
-        "same guard to shell-level writes (issue #171): sed -i, output "
+        "Edit/Write call is denied. This same guard covers shell-level "
+        "writes: sed -i, output "
         "redirection (>, >>, &>, tee), and cp/mv are just as much \"heavy "
         "work\" as an Edit/Write call, and are now recognized the same way, "
         "no size exception. Spawn a developer crew member to make this change "
@@ -1199,8 +1199,8 @@ def evaluate_no_worker_spawn_guard(gi):
 
         if not caller_is_lead:
             deny(
-                "Spawning crew is not yours to do from a %s session (issue "
-                "#212) - bin/spawn-crew is restricted to orchestrator-type "
+                "Spawning crew is not yours to do from a %s session - "
+                "bin/spawn-crew is restricted to orchestrator-type "
                 "callers (wingman's own top-level session, or a lead) by "
                 "CLAUDE.md's depth cap (pilot -> wingman -> lead -> worker). "
                 "If this work genuinely needs another crew member (e.g. a "
@@ -1212,7 +1212,7 @@ def evaluate_no_worker_spawn_guard(gi):
         target_types = _all_flag_values(argv, "--type")
         if any(t.rsplit("/", 1)[-1] == "lead" for t in target_types):
             deny(
-                "A lead may not spawn a further lead (issue #212) - CLAUDE.md's "
+                "A lead may not spawn a further lead - CLAUDE.md's "
                 "depth cap is \"a lead spawns workers but not further leads.\" "
                 "Spawn a software-analyst/architect/developer/reviewer worker "
                 "instead; deeper management nesting is a future opt-in (see "

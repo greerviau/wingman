@@ -75,7 +75,7 @@ def build_message(state):
     )
 
     return (
-        "The %s usage-limit window is approaching its cap (issue #24) - used "
+        "The %s usage-limit window is approaching its cap - used "
         "%s, resets at epoch %s. New spawns are paused while this is "
         "unresolved so the fleet stops growing into a known, foreseeable "
         "wall. %s Already-running crew are NOT affected by this pause - only "

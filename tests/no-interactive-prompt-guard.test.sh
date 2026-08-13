@@ -37,7 +37,7 @@ out="$(run_hook AskUserQuestion)"
 assert_contains "developer: AskUserQuestion is denied" "$out" '"permissionDecision": "deny"'
 assert_contains "developer: denial names the tool" "$out" "AskUserQuestion is not yours to call"
 assert_contains "developer: denial names the blocked escalation" "$out" "--status blocked"
-assert_contains "developer: denial cites the issue" "$out" "issue #155"
+assert_contains "developer: denial names the crew-session scope" "$out" "is not yours to call from a crew session"
 
 out="$(run_hook EnterPlanMode)"
 assert_contains "developer: EnterPlanMode is denied" "$out" '"permissionDecision": "deny"'

@@ -596,7 +596,7 @@ for c in (d.get("constraints") or []):
   fi
   # issue #135: a resumed reviewer's review-signing token was just
   # regenerated above, invalidating any pre-crash comment-fallback proof.
-  [ "${_type##*/}" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume (issue #135) - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
+  [ "${_type##*/}" = reviewer ] && _resume_nudge="$_resume_nudge Your review-signing token was regenerated on resume - if you had already posted a comment-fallback verdict on a PR, re-post it now so its proof matches the new token before a merge can rely on it."
   # #221: tell the resumed session itself, not just the operator console
   # (the wm_info line above only reaches whoever ran crew-resume). Left
   # unannounced, a resumed developer either hits confusing failures on every

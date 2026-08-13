@@ -61,7 +61,7 @@ export WINGMAN_CREW_TYPE=developer
 
 out="$(run_hook "gh pr merge 46")"
 assert_contains "crew, no grant: gh pr merge 46 is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "crew, no grant: denial cites issue #46" "$out" "issue #46"
+assert_contains "crew, no grant: denial names the crew-session rule" "$out" "Merging a PR is not yours to do from a crew session"
 assert_contains "crew, no grant: denial tells the member to leave it for the pilot" "$out" "let the pilot merge it"
 
 out="$(run_hook "gh pr merge")"
@@ -363,7 +363,7 @@ unset WINGMAN_CREW_TYPE
 # A crew member granting itself autonomy - denied, regardless of type.
 out="$(run_hook '$WINGMAN_STATE crew-set --id dev1 --allow-merge true')"
 assert_contains "a developer cannot grant itself merge autonomy" "$out" '"permissionDecision": "deny"'
-assert_contains "self-grant denial cites issue #46" "$out" "issue #46"
+assert_contains "self-grant denial names where the grant must come from" "$out" "it must come from the pilot"
 
 # issue #168: the identical self-grant, but wrapped in bash -c - the lifted
 # segment must be caught exactly like the unwrapped form.
@@ -533,7 +533,7 @@ cat > "$GH_REVIEWS_JSON" <<JSON
 JSON
 out="$(run_hook "gh pr merge 46")"
 assert_contains "review gate: no reviews at all is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "review gate: denial cites issue #132" "$out" "issue #132"
+assert_contains "review gate: denial names the insufficiency of allow_merge" "$out" "allow_merge alone no longer permits a merge"
 assert_not_contains "review gate: denial is the NEW reason, not the old merge_reason()" \
   "$out" "let the pilot merge it"
 
@@ -738,7 +738,7 @@ JSON
 out="$(run_hook "gh api -X PUT repos/acme/widgets/pulls/46/merge")"
 assert_contains "review gate: REST merge endpoint with no reviews is denied" \
   "$out" '"permissionDecision": "deny"'
-assert_contains "review gate: REST merge denial cites issue #132" "$out" "issue #132"
+assert_contains "review gate: REST merge denial names the insufficiency of allow_merge" "$out" "allow_merge alone no longer permits a merge"
 
 cat > "$GH_REVIEWS_JSON" <<JSON
 {"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
@@ -763,7 +763,7 @@ JSON
 out="$(run_hook "$GRAPHQL_MERGE")"
 assert_contains "review gate: graphql mergePullRequest with no reviews is denied" \
   "$out" '"permissionDecision": "deny"'
-assert_contains "review gate: graphql merge denial cites issue #132" "$out" "issue #132"
+assert_contains "review gate: graphql merge denial names the insufficiency of allow_merge" "$out" "allow_merge alone no longer permits a merge"
 
 cat > "$GH_REVIEWS_JSON" <<JSON
 {"number": 46, "url": "https://github.com/acme/widgets/pull/46", "headRefOid": "$HEAD_SHA_FRESH", "reviews": [
@@ -779,7 +779,7 @@ rm -f "$GH_NODE_JSON"
 out="$(run_hook "$GRAPHQL_MERGE")"
 assert_contains "review gate: an unresolvable graphql node id fails closed (denied)" \
   "$out" '"permissionDecision": "deny"'
-assert_contains "review gate: node-resolution-failure denial cites issue #132" "$out" "issue #132"
+assert_contains "review gate: node-resolution-failure denial names the unverifiable evidence" "$out" "Could not verify review evidence for this merge attempt"
 cat > "$GH_NODE_JSON" <<'JSON'
 {"data": {"node": {"number": 46, "repository": {"owner": {"login": "acme"}, "name": "widgets"}}}}
 JSON
@@ -802,7 +802,7 @@ export WINGMAN_CREW_TYPE=developer
 
 out="$(run_hook '$WINGMAN_STATE crew-set --id devA --review-gate-waived true')"
 assert_contains "a developer cannot waive its own review gate" "$out" '"permissionDecision": "deny"'
-assert_contains "review-gate self-grant denial cites issue #132" "$out" "issue #132"
+assert_contains "review-gate self-grant denial names the waiver" "$out" "the review-gate waiver (--review-gate-waived)"
 
 out="$(run_hook '$WINGMAN_STATE crew-set --id someone-else --review-gate-waived true')"
 assert_contains "a non-lead crew member cannot waive the review gate for anyone" \
@@ -834,7 +834,7 @@ export WINGMAN_CREW_TYPE=developer
 # --- finding 1: self-waive via crew-add (re-adding one's own record) -------
 out="$(run_hook '$WINGMAN_STATE crew-add --id devA --type developer --repo /tmp --window w --session-id s --allow-merge --waive-review-gate')"
 assert_contains "a developer cannot re-add its own record via crew-add" "$out" '"permissionDecision": "deny"'
-assert_contains "self-add denial cites issue #132" "$out" "issue #132"
+assert_contains "self-add denial names the crew-add restriction" "$out" "Creating or replacing a crew roster record"
 assert_contains "self-add denial names crew-add specifically" "$out" "crew-add"
 
 # The identical attempt via the documented self-report idiom
@@ -846,14 +846,14 @@ assert_contains "self-add via the \$WINGMAN_CREW_ID idiom is denied identically"
 # --- finding 2: minting a sockpuppet reviewer via crew-add ------------------
 out="$(run_hook '$WINGMAN_STATE crew-add --id fake-reviewer --type reviewer --repo /tmp --window w2 --session-id s2')"
 assert_contains "a developer cannot mint a NEW crew-add record at all" "$out" '"permissionDecision": "deny"'
-assert_contains "sockpuppet-mint denial cites issue #132" "$out" "issue #132"
+assert_contains "sockpuppet-mint denial names the crew-add restriction" "$out" "Creating or replacing a crew roster record"
 
 # --- finding 2, other half: repointing an EXISTING id's delivery -----------
 wm_state crew-add --id rev-real --type reviewer --repo "$TEST_REPO" \
   --window wrr --session-id srr >/dev/null
 out="$(run_hook '$WINGMAN_STATE crew-set --id rev-real --delivery https://github.com/acme/widgets/pull/999')"
 assert_contains "a developer cannot repoint another id's --delivery" "$out" '"permissionDecision": "deny"'
-assert_contains "delivery-repoint denial cites issue #132" "$out" "issue #132"
+assert_contains "delivery-repoint denial names the self-targeting rule" "$out" "every legitimate delivery report is self-targeted"
 
 # --- ordinary self-report of one's OWN delivery is unaffected --------------
 out="$(run_hook '$WINGMAN_STATE crew-set --id devA --delivery https://github.com/acme/widgets/pull/46')"
@@ -913,7 +913,7 @@ wm_state crew-add --id rev-real2 --type reviewer --repo "$TEST_REPO" \
   --window wrr2 --session-id srr2 >/dev/null
 out="$(run_hook '$WINGMAN_STATE crew-set --id rev-real2 --type developer')"
 assert_contains "a developer cannot repoint another id's --type" "$out" '"permissionDecision": "deny"'
-assert_contains "type-repoint denial cites issue #136" "$out" "issue #136"
+assert_contains "type-repoint denial names the crew-add-time rule" "$out" "every legitimate type assignment happens once"
 
 # --- ordinary self-report of one's OWN type is unaffected -------------------
 out="$(run_hook '$WINGMAN_STATE crew-set --id devA --type developer')"
@@ -1184,7 +1184,7 @@ assert_contains "issue #135 (round 2 regression): a clear-then-reset still trigg
 out="$(run_hook '$WINGMAN_STATE crew-add --id fake-reviewer-tok --type reviewer --repo /tmp --window w9 --session-id s9 --review-token deadbeef')"
 assert_contains "issue #135: crew-add --review-token is still blocked by the existing crew-add restriction" \
   "$out" '"permissionDecision": "deny"'
-assert_contains "...denial cites issue #132 (the existing blanket crew-add denial)" "$out" "issue #132"
+assert_contains "...denial names the existing blanket crew-add restriction" "$out" "Creating or replacing a crew roster record"
 
 unset WINGMAN_CREW_ID WINGMAN_CREW_TYPE
 
@@ -1198,7 +1198,7 @@ export WINGMAN_CREW_TYPE=developer
 
 out="$(run_hook '$WINGMAN_STATE crew-set --id dev-tok --regenerate-review-token deadbeef')"
 assert_contains "a developer cannot regenerate its own review token" "$out" '"permissionDecision": "deny"'
-assert_contains "self-grant denial cites issue #135" "$out" "issue #135"
+assert_contains "self-grant denial names the token regeneration" "$out" "review-token regeneration"
 
 out="$(run_hook '$WINGMAN_STATE crew-set --id "$WINGMAN_CREW_ID" --regenerate-review-token deadbeef')"
 assert_contains "self-grant via the \$WINGMAN_CREW_ID idiom is denied identically" "$out" '"permissionDecision": "deny"'
@@ -1315,7 +1315,7 @@ out="$(run_hook "gh pr merge 500")"
 assert_contains "issue #138: shape 1, a stale APPROVED review is denied" \
   "$out" '"permissionDecision": "deny"'
 assert_contains "issue #138: shape-1 stale denial names stale evidence / issue #138" \
-  "$out" "stale evidence (issue #138)"
+  "$out" "stale evidence"
 
 # --- test 3: shape 1, an APPROVED review with NO commit field at all is
 # denied - defensive; absence is never treated as license to skip the check.

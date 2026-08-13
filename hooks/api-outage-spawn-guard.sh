@@ -85,8 +85,8 @@ def build_message(state):
         pass
 
     return (
-        "A fleet-wide Anthropic API outage has been detected (active since %s, "
-        "issue #23) - new spawns are paused while it is ongoing so this session "
+        "A fleet-wide Anthropic API outage has been detected (active since %s) "
+        "- new spawns are paused while it is ongoing so this session "
         "does not add more load into a live burst (roughly %d crew member(s) "
         "currently live). Already-running crew are NOT affected by this pause - "
         "only new spawns are held. Wait: your own watcher already wakes on the "

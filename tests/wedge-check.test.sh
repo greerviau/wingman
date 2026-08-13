@@ -89,7 +89,7 @@ inc1_json="$(cat "$WINGMAN_HOME/crew/inc1.json")"
 assert_contains "reason names the FOREGROUND wedge signature" "$inc1_json" "FOREGROUND"
 assert_contains "reason names the matched descendant" "$inc1_json" "sleep 600"
 assert_contains "reason names the takeover/standdown remedy" "$inc1_json" "crew-takeover inc1"
-assert_contains "reason names issue #202" "$inc1_json" "issue #202"
+assert_contains "reason names the foregrounded watcher" "$inc1_json" "started in the FOREGROUND of"
 assert_contains "the blocker TEXT survives in the new summary" "$inc1_json" "should we use approach A or B?"
 assert_contains "the last summary is carried too" "$inc1_json" "thanks - resuming"
 assert_not_contains "the blocker FIELD itself is cleared" "$inc1_json" '"blocker"'

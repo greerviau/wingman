@@ -148,7 +148,7 @@ seed_inflight_marker() {
 # A fresh isolated home, PLUS a real tmux session for it - bin/watch-fleet's
 # own reconcile step flips any LIVE_STATES crew member with no matching live
 # tmux window to 'died' the moment it completes even one poll iteration
-# (issues #209/#217; it no longer skips just because the crew session itself
+# (issue #209 / PR #217; it no longer skips just because the crew session itself
 # is absent), so every test here that lets a real watch-fleet cycle run for
 # more than an instant needs one, exactly like tests/watch-fleet-classify.test.sh.
 new_home() {

@@ -1645,7 +1645,7 @@ def cmd_reconcile(args):
                 cid = w[len("wm-"):]  # strip only the leading prefix - ids contain hyphens
                 blocker = (
                     "auto-adopted: this window was live with no matching crew.json "
-                    "record for over %ss (issue #79) - verify its real state with "
+                    "record for over %ss - verify its real state with "
                     "bin/crew-takeover %s before trusting it, or bin/crew-standdown %s "
                     "if it's stale" % (grace, cid, cid)
                 )
@@ -2520,7 +2520,7 @@ def _wedge_reason(threshold, desc_args, desc_pid, desc_elapsed, cid):
         "own record has not been written, and `%s` (pid %d) has been "
         "running as a descendant of its pane for %s. That is the "
         "signature of a blocking watcher started in the FOREGROUND of "
-        "its own session (issue #202) - a correctly backgrounded one "
+        "its own session - a correctly backgrounded one "
         "leaves the session idle at its prompt. It will not resume on "
         "its own: inspect with `bin/crew-takeover %s`, or stand it down "
         "with `bin/crew-standdown %s`."
@@ -2550,7 +2550,7 @@ def _loop_wedge_reason(threshold, desc_args, desc_pid, desc_elapsed, cid):
         "running as a descendant of its pane for %s. That is the "
         "signature of a hand-rolled foreground polling loop (a "
         "while/until construct with a sleep in its body) with no "
-        "independent timeout (issue #268) - its exit condition never "
+        "independent timeout - its exit condition never "
         "became true, and it cannot be woken by anything except an "
         "external kill. It will not resume on its own: inspect with "
         "`bin/crew-takeover %s`, or stand it down with "
@@ -2873,7 +2873,7 @@ def cmd_group_attention(args):
                           "same root cause as a correlated api-outage "
                           "stall (an Anthropic-side burst, not a tmux/host crash), so resuming "
                           "now risks immediate re-death. Once the outage clears, `%s` runs "
-                          "automatically for these (pre-authorized auto-recovery, issue #23)."
+                          "automatically for these (pre-authorized auto-recovery)."
                           % (len(outage_death_rows), names, resumable_count,
                              len(outage_death_rows), resume_cmd))
             if any(remote_control_by_id.get(i, True) for i in outage_death_ids):
@@ -4415,11 +4415,11 @@ def render_roster_text(rows):
         if r.get("wip_ref_sha"):
             lines.append("      wip-ref: refs/wip/%s (%s)" % (_sanitize_id(r.get("id", "")), r["wip_ref_sha"]))
         if r.get("allow_merge"):
-            lines.append("      merge: AUTHORIZED for this effort (issue #46)")
+            lines.append("      merge: AUTHORIZED for this effort")
         if r.get("review_gate_waived"):
-            lines.append("      review gate: WAIVED for this effort (issue #132)")
+            lines.append("      review gate: WAIVED for this effort")
         if r.get("constraints"):
-            lines.append("      constraints (from the pilot - do not relax without a fresh pilot instruction, issue #192):")
+            lines.append("      constraints (from the pilot - do not relax without a fresh pilot instruction):")
             for c in r["constraints"]:
                 lines.append("        - %s" % c.get("text", ""))
     return "\n".join(lines)
@@ -4450,11 +4450,11 @@ def render_tree_text(rows):
         if r.get("wip_ref_sha"):
             lines.append("%s    wip-ref: refs/wip/%s (%s)" % (indent, _sanitize_id(r.get("id", "")), r["wip_ref_sha"]))
         if r.get("allow_merge"):
-            lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
+            lines.append("%s    merge: AUTHORIZED for this effort" % indent)
         if r.get("review_gate_waived"):
-            lines.append("%s    review gate: WAIVED for this effort (issue #132)" % indent)
+            lines.append("%s    review gate: WAIVED for this effort" % indent)
         if r.get("constraints"):
-            lines.append("%s    constraints (from the pilot - do not relax without a fresh pilot instruction, issue #192):" % indent)
+            lines.append("%s    constraints (from the pilot - do not relax without a fresh pilot instruction):" % indent)
             for c in r["constraints"]:
                 lines.append("%s        - %s" % (indent, c.get("text", "")))
     return "\n".join(lines)
