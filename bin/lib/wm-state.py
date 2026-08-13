@@ -924,9 +924,9 @@ def cmd_crew_set(args):
         # yields byte-identical output (#203). blocker_note/blocker_composed are
         # composition inputs only - deliberately not in DISPLAY_ONLY_LIVE_FIELDS, so
         # merged()/crew-get/crew-list never surface them; the visible `blocker` field
-        # already carries their effect. See docs/plans/2026-08-03-issue-203-per-issue-
-        # blocking-plan.md for why a naive "compose into blocker and read it back"
-        # approach is non-idempotent and leaks stale parked items across escalations.
+        # already carries their effect. See issue #203 for why a naive "compose into
+        # blocker and read it back" approach is non-idempotent and leaks stale parked
+        # items across escalations.
         if args.blocker is not None:
             live["blocker_note"] = args.blocker or None
         if live.get("status") == "blocked":
@@ -1645,7 +1645,7 @@ def cmd_reconcile(args):
                 cid = w[len("wm-"):]  # strip only the leading prefix - ids contain hyphens
                 blocker = (
                     "auto-adopted: this window was live with no matching crew.json "
-                    "record for over %ss (issue #79) - verify its real state with "
+                    "record for over %ss - verify its real state with "
                     "bin/crew-takeover %s before trusting it, or bin/crew-standdown %s "
                     "if it's stale" % (grace, cid, cid)
                 )
@@ -2354,8 +2354,7 @@ def _wedge_check_common(args, source, proc_re_env, proc_re_default, reason_fn):
     hold together - pane continuity alone would flip any legitimately long
     foreground task, and the descendant duration alone would flip a lead
     whose own correctly-armed background watcher is simply blocking on a
-    quiet crew (see docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-
-    plan.md, section 2.6): only the combination is specific to a wedge.
+    quiet crew (see issue #202): only the combination is specific to a wedge.
     `source` ("wedge" or "loop") is what the caller's own detector is named
     in the record's provenance; `reason_fn(threshold, desc_args, desc_pid,
     desc_elapsed, cid)` composes that detector's own reason text.
@@ -2520,7 +2519,7 @@ def _wedge_reason(threshold, desc_args, desc_pid, desc_elapsed, cid):
         "own record has not been written, and `%s` (pid %d) has been "
         "running as a descendant of its pane for %s. That is the "
         "signature of a blocking watcher started in the FOREGROUND of "
-        "its own session (issue #202) - a correctly backgrounded one "
+        "its own session - a correctly backgrounded one "
         "leaves the session idle at its prompt. It will not resume on "
         "its own: inspect with `bin/crew-takeover %s`, or stand it down "
         "with `bin/crew-standdown %s`."
@@ -2550,7 +2549,7 @@ def _loop_wedge_reason(threshold, desc_args, desc_pid, desc_elapsed, cid):
         "running as a descendant of its pane for %s. That is the "
         "signature of a hand-rolled foreground polling loop (a "
         "while/until construct with a sleep in its body) with no "
-        "independent timeout (issue #268) - its exit condition never "
+        "independent timeout - its exit condition never "
         "became true, and it cannot be woken by anything except an "
         "external kill. It will not resume on its own: inspect with "
         "`bin/crew-takeover %s`, or stand it down with "
@@ -2873,7 +2872,7 @@ def cmd_group_attention(args):
                           "same root cause as a correlated api-outage "
                           "stall (an Anthropic-side burst, not a tmux/host crash), so resuming "
                           "now risks immediate re-death. Once the outage clears, `%s` runs "
-                          "automatically for these (pre-authorized auto-recovery, issue #23)."
+                          "automatically for these (pre-authorized auto-recovery)."
                           % (len(outage_death_rows), names, resumable_count,
                              len(outage_death_rows), resume_cmd))
             if any(remote_control_by_id.get(i, True) for i in outage_death_ids):
@@ -3253,8 +3252,7 @@ def _child_tuples(children):
     `announced` freezes on its first-ever crew-set call (issue #264), making
     a continuously-`working` delegate's genuine summary churn invisible
     (issue #305). The fix adds the delegate's own CONTENT to the tuple
-    ALONGSIDE `announced`, rather than replacing it - see
-    docs/plans/2026-08-08-issue-305-forward-motion-false-stall-plan.md for
+    ALONGSIDE `announced`, rather than replacing it - see issue #305 for
     why dropping `announced` reintroduces a different false positive: a
     non-silent `blocked`/`done` crew-set call always advances `announced`
     unconditionally (see cmd_crew_set), so a delegate that round-trips
@@ -4310,9 +4308,8 @@ def _stall_annotation(r):
     quiet crew for a while (WM_LONG_SHELL_WARN's default 1200s ceiling is far
     shorter than a routine parked wait). This is EVIDENCE, not a wedge
     indicator: it is exactly the duration signal that, alone, cannot
-    discriminate a wedge from a healthy backgrounded watcher (see
-    docs/plans/2026-08-03-issue-202-foreground-watcher-wedge-plan.md, section
-    2.6, conclusion 2) - the actual wedge indicator is the 'stalled' flip
+    discriminate a wedge from a healthy backgrounded watcher (see issue
+    #202) - the actual wedge indicator is the 'stalled' flip
     wm_state wedge-check performs, which additionally requires continuous
     pane liveness. Read this annotation as "something has been running a
     while", never as "this member is wedged". Returns "" when neither half
@@ -4415,11 +4412,11 @@ def render_roster_text(rows):
         if r.get("wip_ref_sha"):
             lines.append("      wip-ref: refs/wip/%s (%s)" % (_sanitize_id(r.get("id", "")), r["wip_ref_sha"]))
         if r.get("allow_merge"):
-            lines.append("      merge: AUTHORIZED for this effort (issue #46)")
+            lines.append("      merge: AUTHORIZED for this effort")
         if r.get("review_gate_waived"):
-            lines.append("      review gate: WAIVED for this effort (issue #132)")
+            lines.append("      review gate: WAIVED for this effort")
         if r.get("constraints"):
-            lines.append("      constraints (from the pilot - do not relax without a fresh pilot instruction, issue #192):")
+            lines.append("      constraints (from the pilot - do not relax without a fresh pilot instruction):")
             for c in r["constraints"]:
                 lines.append("        - %s" % c.get("text", ""))
     return "\n".join(lines)
@@ -4450,11 +4447,11 @@ def render_tree_text(rows):
         if r.get("wip_ref_sha"):
             lines.append("%s    wip-ref: refs/wip/%s (%s)" % (indent, _sanitize_id(r.get("id", "")), r["wip_ref_sha"]))
         if r.get("allow_merge"):
-            lines.append("%s    merge: AUTHORIZED for this effort (issue #46)" % indent)
+            lines.append("%s    merge: AUTHORIZED for this effort" % indent)
         if r.get("review_gate_waived"):
-            lines.append("%s    review gate: WAIVED for this effort (issue #132)" % indent)
+            lines.append("%s    review gate: WAIVED for this effort" % indent)
         if r.get("constraints"):
-            lines.append("%s    constraints (from the pilot - do not relax without a fresh pilot instruction, issue #192):" % indent)
+            lines.append("%s    constraints (from the pilot - do not relax without a fresh pilot instruction):" % indent)
             for c in r["constraints"]:
                 lines.append("%s        - %s" % (indent, c.get("text", "")))
     return "\n".join(lines)

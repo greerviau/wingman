@@ -139,7 +139,7 @@ out="$(printf '%s\n' "$input" | wm_state group-attention --owner "")"
 assert_contains "an outage-tagged death batch collapses into api-outage-death" "$out" "correlated:api-outage-death"
 assert_false "it never collapses into plain mass-death" "printf '%s\n' \"$out\" | grep -q correlated:mass-death"
 assert_contains "the synthetic note says do NOT resume yet" "$out" "Do NOT resume yet"
-assert_contains "the synthetic note points at the pre-authorized auto-recovery" "$out" "issue #23"
+assert_contains "the synthetic note points at the pre-authorized auto-recovery" "$out" "pre-authorized auto-recovery"
 assert_contains "the collapsed row names g1" "$out" "g1"
 assert_contains "the collapsed row names g2" "$out" "g2"
 

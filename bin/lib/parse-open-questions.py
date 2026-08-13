@@ -6,7 +6,7 @@
 """parse-open-questions: extract and validate a crew deliverable's structured
 open-questions block.
 
-Design: docs/plans/2026-07-14-structured-open-questions-convention.md. A crew
+A crew
 member (typically a `software-analyst`) may embed one fenced ```wingman-questions
 code block under its deliverable's "Open Questions" heading, containing a small
 JSON schema of closed-set (`choice`) and open-ended (`open`) decisions for the

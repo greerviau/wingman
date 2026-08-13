@@ -36,8 +36,8 @@ PARSE_FAIL_REASON = (
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
     "payload - so it is denied rather than "
-    "partially checked (issue #56, the same posture hooks/no-merge-guard.sh "
-    "takes on this shape). Reformat it into well-formed shell syntax and "
+    "partially checked, the same posture hooks/no-merge-guard.sh "
+    "takes on this shape. Reformat it into well-formed shell syntax and "
     "retry."
 )
 

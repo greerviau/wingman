@@ -171,7 +171,7 @@ JSON
 out3b="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_STALE_TIMEOUT" \
         WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "a stale (< min) registered timeout: doctor warns" "$out3b" "fleet-continuity Stop hooks (issue #185) not registered"
+assert_contains "a stale (< min) registered timeout: doctor warns" "$out3b" "fleet-continuity Stop hooks not registered"
 
 # NH3 (round-2 review of the #231 plan): the manifest/doctor equality test
 # below covers sites 2/3 but nothing in the suite ever reads the REAL
@@ -207,7 +207,7 @@ before_missing="$(cat "$PROJ_SETTINGS_MISSING")"
 out4="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_MISSING" \
         WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "a missing Stop entry: doctor warns" "$out4" "fleet-continuity Stop hooks (issue #185) not registered"
+assert_contains "a missing Stop entry: doctor warns" "$out4" "fleet-continuity Stop hooks not registered"
 assert_eq "a missing entry never rewrites the settings file" "$(cat "$PROJ_SETTINGS_MISSING")" "$before_missing"
 
 # A script present in settings.json but not executable on disk - warns.
@@ -217,7 +217,7 @@ chmod -x "$PROJ_CONTINUITY_SH_NOEXEC"
 out5="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS4" WM_PROJECT_SETTINGS="$PROJ_SETTINGS_OK" \
         WM_STOP_GUARD_SCRIPT="$PROJ_GUARD_SH" WM_STOP_CONTINUITY_SCRIPT="$PROJ_CONTINUITY_SH_NOEXEC" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "a non-executable script: doctor warns" "$out5" "fleet-continuity Stop hooks (issue #185) not registered"
+assert_contains "a non-executable script: doctor warns" "$out5" "fleet-continuity Stop hooks not registered"
 
 # --- fleet-continuity Stop hooks (issue #199), crew sessions, user scope ----
 # Unlike the project-scope pair above, this pair IS installable (GUARD_SETTINGS
@@ -234,7 +234,7 @@ SETTINGS5="$WORK/crew-continuity-settings.json"
 out6="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS5" \
         WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "fresh: doctor warns the crew Stop hooks are not registered" "$out6" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+assert_contains "fresh: doctor warns the crew Stop hooks are not registered" "$out6" "fleet-continuity Stop hooks (crew) not registered"
 assert_contains "fresh: doctor registers the crew Stop hooks" "$out6" "registered fleet-continuity Stop hooks (crew)"
 crew_guard_cmd="$(uv run --no-project --quiet python -c "
 import json
@@ -275,7 +275,7 @@ JSON
 out_stale="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS_STALE" \
         WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "a stale (timeout 600) crew continuity entry: doctor reports it as not registered" "$out_stale" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+assert_contains "a stale (timeout 600) crew continuity entry: doctor reports it as not registered" "$out_stale" "fleet-continuity Stop hooks (crew) not registered"
 stale_corrected_entry="$(uv run --no-project --quiet python -c "
 import json
 d = json.load(open('$SETTINGS_STALE'))
@@ -312,7 +312,7 @@ SETTINGS6="$WORK/crew-continuity-settings-noexec.json"
 out8="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS6" \
         WM_STOP_GUARD_CREW_SCRIPT="$CREW_GUARD_SH" WM_STOP_CONTINUITY_CREW_SCRIPT="$CREW_CONTINUITY_SH_NOEXEC" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "a non-executable crew script: doctor warns" "$out8" "fleet-continuity Stop hooks (crew, issue #199) not registered"
+assert_contains "a non-executable crew script: doctor warns" "$out8" "fleet-continuity Stop hooks (crew) not registered"
 
 # --- denial-report backstop Stop hook (issue #214), user scope -------------
 # hooks/denial-report-guard.sh is a single hook, not a pair - registered/
@@ -326,7 +326,7 @@ SETTINGS9="$WORK/denial-guard-settings.json"
 out9="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS9" \
         WM_DENIAL_REPORT_GUARD_SCRIPT="$DENIAL_GUARD_SH" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "fresh: doctor warns the denial-report Stop hook is not registered" "$out9" "denial-report Stop hook (issue #214) not registered"
+assert_contains "fresh: doctor warns the denial-report Stop hook is not registered" "$out9" "denial-report Stop hook not registered"
 assert_contains "fresh: doctor registers the denial-report Stop hook" "$out9" "registered denial-report Stop hook"
 denial_guard_cmd="$(uv run --no-project --quiet python -c "
 import json
@@ -350,7 +350,7 @@ SETTINGS10="$WORK/denial-guard-settings-noexec.json"
 out11="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS10" \
         WM_DENIAL_REPORT_GUARD_SCRIPT="$DENIAL_GUARD_SH_NOEXEC" \
         "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "a non-executable denial-report script: doctor warns" "$out11" "denial-report Stop hook (issue #214) not registered"
+assert_contains "a non-executable denial-report script: doctor warns" "$out11" "denial-report Stop hook not registered"
 
 # --- Worker-spawn depth-cap guard hook (issue #212), user scope -------------
 # hooks/no-worker-spawn-guard.sh is registered by its own real, checked-in
@@ -359,7 +359,7 @@ assert_contains "a non-executable denial-report script: doctor warns" "$out11" "
 # real developer machine.
 SETTINGS9="$WORK/worker-spawn-guard-settings.json"
 out9="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS9" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "fresh: doctor warns the worker-spawn guard hook is not registered" "$out9" "worker-spawn depth-cap guard hook (issue #212) not registered"
+assert_contains "fresh: doctor warns the worker-spawn guard hook is not registered" "$out9" "worker-spawn depth-cap guard hook not registered"
 assert_contains "fresh: doctor registers the worker-spawn guard hook" "$out9" "registered worker-spawn depth-cap guard hook"
 worker_spawn_guard_cmd="$(uv run --no-project --quiet python -c "
 import json
@@ -388,7 +388,7 @@ assert_eq "re-running does not duplicate the hook entry" "$worker_spawn_guard_co
 # path exactly like the worker-spawn guard above.
 SETTINGS11="$WORK/foreground-watcher-guard-settings.json"
 out11="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS11" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "fresh: doctor warns the foreground-watcher guard hook is not registered" "$out11" "foreground-watcher guard hook (issue #202) not registered"
+assert_contains "fresh: doctor warns the foreground-watcher guard hook is not registered" "$out11" "foreground-watcher guard hook not registered"
 assert_contains "fresh: doctor registers the foreground-watcher guard hook" "$out11" "registered foreground-watcher guard hook"
 foreground_watcher_guard_cmd="$(uv run --no-project --quiet python -c "
 import json
@@ -415,7 +415,7 @@ assert_eq "re-running does not duplicate the hook entry" "$foreground_watcher_gu
 # checked-in path exactly like the foreground-watcher guard above.
 SETTINGS13="$WORK/foreground-poll-loop-guard-settings.json"
 out13="$(WM_CLAUDE_USER_SETTINGS="$SETTINGS13" "$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
-assert_contains "fresh: doctor warns the foreground-poll-loop guard hook is not registered" "$out13" "foreground-poll-loop guard hook (issue #268) not registered"
+assert_contains "fresh: doctor warns the foreground-poll-loop guard hook is not registered" "$out13" "foreground-poll-loop guard hook not registered"
 assert_contains "fresh: doctor registers the foreground-poll-loop guard hook" "$out13" "registered foreground-poll-loop guard hook"
 foreground_poll_loop_guard_cmd="$(uv run --no-project --quiet python -c "
 import json

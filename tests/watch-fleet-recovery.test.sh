@@ -461,8 +461,8 @@ tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-rp1 'printf "We recommend resumin
 wm_age_status rp1
 out_rp="$(wm_timeout 45 env WM_STALL_IDLE=3 WM_STALL_ROOT_GRACE=2 WM_STALL_PROBE_GAP=2 WM_WATCH_INTERVAL=2 "$WF" 2>/dev/null)"
 assert_contains "resume-prompt freeze fires as blocked" "$out_rp" "blocked: rp1"
-assert_contains "the blocker names issue #30 and the resume-from-summary prompt" \
-  "$(wm_state crew-get --id rp1)" "resume-from-summary prompt (issue #30)"
+assert_contains "the blocker names the resume-from-summary prompt" \
+  "$(wm_state crew-get --id rp1)" "resume-from-summary prompt"
 assert_false "the blocker does NOT use the generic permission/trust wording" \
   "wm_state crew-get --id rp1 | grep -q 'permission/trust prompt'"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null

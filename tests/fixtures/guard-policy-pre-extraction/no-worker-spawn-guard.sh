@@ -111,7 +111,7 @@ PARSE_FAIL_REASON = (
     "This command could not be fully parsed - an unterminated quote, an "
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
-    "payload - so it is denied rather than partially checked (issue #56), "
+    "payload - so it is denied rather than partially checked, "
     "since this command mentions spawn-crew and could not be verified "
     "safe. Reformat it into well-formed shell syntax and retry."
 )
@@ -165,8 +165,8 @@ for seg in segments:
 
     if not caller_is_lead:
         deny(
-            "Spawning crew is not yours to do from a %s session (issue "
-            "#212) - bin/spawn-crew is restricted to orchestrator-type "
+            "Spawning crew is not yours to do from a %s session - "
+            "bin/spawn-crew is restricted to orchestrator-type "
             "callers (wingman'"'"'s own top-level session, or a lead) by "
             "CLAUDE.md'"'"'s depth cap (pilot -> wingman -> lead -> worker). "
             "If this work genuinely needs another crew member (e.g. a "
@@ -178,7 +178,7 @@ for seg in segments:
     target_types = all_flag_values(argv, "--type")
     if any(t.rsplit("/", 1)[-1] == "lead" for t in target_types):
         deny(
-            "A lead may not spawn a further lead (issue #212) - CLAUDE.md'"'"'s "
+            "A lead may not spawn a further lead - CLAUDE.md'"'"'s "
             "depth cap is \"a lead spawns workers but not further leads.\" "
             "Spawn a software-analyst/architect/developer/reviewer worker "
             "instead; deeper management nesting is a future opt-in (see "

@@ -133,9 +133,9 @@
 #                          stdin: reads (and consumes) the exit-record this
 #                          script itself wrote at its own exit point, or, if
 #                          none is present, checks whether a fresh cycle is
-#                          already live. Prints exactly one of seven outcomes on
+#                          already live. Prints exactly one of eight outcomes on
 #                          stdout - `healthy`, `fire`, `remote-control-dropped`,
-#                          `stopped`, `stale-code` (bare tokens), or
+#                          `stopped`, `stale-code`, `rolled` (bare tokens), or
 #                          `spurious <count> <hint>` / `spurious-repeated
 #                          <count> <hint>` (a consecutive-failure count and
 #                          a forensic hint) - and exits 0.
@@ -145,7 +145,11 @@
 #                          (`bin/watch-fleet` or `lib/common.sh`) changed on
 #                          disk since it armed - also never a failure, resets
 #                          the spurious-failure count exactly like `stopped`/
-#                          `fire`. Dispatched before claim-lock acquisition:
+#                          `fire`. `rolled` means the fleet-continuity referee
+#                          ended the previous window deliberately
+#                          (hooks/stop-continuity.sh) - not a failure, and it
+#                          resets the spurious-failure count exactly like
+#                          `stopped`/`fire`. Dispatched before claim-lock acquisition:
 #                          never creates the claim lock, never mutates
 #                          $PIDFILE/$BEATFILE/$OWNERLOCK (it legitimately
 #                          reads all three via the cycle_healthy check).
@@ -200,7 +204,7 @@ while [ $# -gt 0 ]; do
     --owner) OWNER="${2:-}"; shift 2 ;;
     --status|--stop|--start|--classify|--clear-standdown|arm|__loop) MODE="$1"; shift ;;
     "") shift ;;
-    -h|--help) sed -n '2,155p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,168p' "$0"; exit 0 ;;
     *) wm_die "unknown arg: $1" ;;
   esac
 done
@@ -282,8 +286,9 @@ INTERVAL="${WM_WATCH_INTERVAL:-5}"
 # (owner_lock_alive()/cycle_healthy() below) trusts identity, not beacon
 # freshness, for ordinary "is this claimed at all" liveness; this threshold's
 # only job is bounding recovery from a genuine wedge, never exclusivity - a
-# cycle stalled for anywhere under this is never stolen from. 10x the former
-# WM_WATCH_GRACE default (30s) by default.
+# cycle stalled for anywhere under this is never stolen from. 10x the 30s
+# beacon-freshness grace hooks/lib/watcher-liveness.sh still applies
+# (WM_WATCH_GRACE), which this threshold deliberately does not reuse.
 WM_WATCH_HARD_GRACE="${WM_WATCH_HARD_GRACE:-300}"
 # Silent-stall detection. STALL_IDLE seconds of BOTH pane-output silence AND
 # status-file staleness nominates a 'working' member; it is flagged stalled only if
@@ -554,7 +559,7 @@ beat_age() {
 # bin/lib/common.sh's wm_tmux_send_lock used for its own, structurally
 # identical pid+lstart identity check (issue #298), pulled from that
 # function's history since its own scheme was since replaced by a kernel
-# flock() with no identity heuristics left at all (issue #302/#311).
+# flock() with no identity heuristics left at all (issue #302 / PR #311).
 owner_lock_alive() {
   [ -d "$OWNERLOCK" ] || return 1
   _ola_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
@@ -632,7 +637,7 @@ YOUR action: report the paragraph above to the pilot, together with the pilot re
   _srr_clear="Once the cause of the repeated deaths is understood, lift the standdown with 'bin/watch-fleet --clear-standdown' (or restart wingman, which clears it with the run); fleet continuity re-arms automatically on the next Stop event."
   case "$_srr_hint" in
     stale-claim-lock)
-      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless (issue #74) - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent. $_srr_clear" ;;
+      _srr_remedy="A claim-lock directory ($CLAIMLOCK) is blocking every arm attempt. watch-fleet already self-clears a lock left behind by a killed process once it is old enough and provably ownerless - so a lock that is still here and still causing repeated failures was deliberately left alone: either it is too young to trust as abandoned, or its stamped owner pid is alive and has not yet crossed the hard-stale-age threshold. Recovering means finding that live process, not deleting the directory out from under it: read $CLAIMLOCK/owner for its pid and check whether that process is a genuinely wedged watch-fleet arm (the lock is meant to be held for well under a second) - if so, it needs attention (or killing) before re-arming will succeed. Removing the lock while its owner is still alive risks two watchers racing to write \$PIDFILE at once, which is exactly what this lock exists to prevent. $_srr_clear" ;;
     *)
       _srr_remedy="$_srr_clear" ;;
   esac
@@ -1145,7 +1150,8 @@ fi
 # creation further down where it conceptually belongs: it is a constant for
 # this process (its own start time never changes), so there is no correctness
 # reason to compute it inside the window between the pidfile write and this
-# cycle's own "armed" line - and hooks/stop-continuity.sh:425-432 documents
+# cycle's own "armed" line - and hooks/stop-continuity.sh's own three-signal
+# claim-failure accounting comment documents
 # that exact window as the one a SIGKILL landing inside it cannot recover
 # from cleanly (a dead-owner $CLAIMLOCK left behind that a re-arm must wait
 # out CLAIM_STALE_AGE for). Every subprocess fork this claim sequence can
@@ -1178,7 +1184,7 @@ if [ -f "$EXITFILE" ]; then
     fire|remote-control-dropped)
       rm -f "$PIDFILE" "$RUNFILE"
       release_claim
-      wm_die "watcher: refusing to arm - an unclassified '$_claim_exit' record is still pending (issue #197: this record was never classified before something tried to arm a fresh cycle). Run 'bin/watch-fleet --classify${OWNER:+ --owner $OWNER}' first, act on its result, THEN arm."
+      wm_die "watcher: refusing to arm - an unclassified '$_claim_exit' record is still pending - it was never classified before something tried to arm a fresh cycle. Run 'bin/watch-fleet --classify${OWNER:+ --owner $OWNER}' first, act on its result, THEN arm."
       ;;
     *)
       spurlog dropped-wake "$_claim_exit"
@@ -1281,7 +1287,7 @@ wm_ok "$(date -u +%Y-%m-%dT%H:%M:%SZ) watcher: armed pid=$$ (interval ${INTERVAL
 # (nohup/setsid/a trailing &), and if you cannot arm it as a background
 # task, arm nothing: no watcher at all is strictly better than a foreground
 # one.
-wm_warn "watch-fleet: if you are seeing this line in a FOREGROUND tool result, this session is already wedged (issue #202) - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
+wm_warn "watch-fleet: if you are seeing this line in a FOREGROUND tool result, this session is already wedged - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
 
 # The prompt-shape detector (prompt_shape_in) and its WM_PERM_PROMPT_RE/
 # WM_PERM_OPTION_RE/WM_PERM_MARK_RE/WM_PERM_MIN_OPTS/WM_PERM_TAIL/WM_PERM_ADJ/
@@ -1446,7 +1452,7 @@ fire() {
   printf 'This record is not yet classified. If you are not already responding to a\n'
   printf '`bin/watch-fleet --classify` result, run that FIRST - never arm a bare cycle\n'
   printf 'while this one is unclassified; a bare arm now refuses rather than silently\n'
-  printf 'discarding it (issue #197), but only --classify actually reports it. Read\n'
+  printf 'discarding it, but only --classify actually reports it. Read\n'
   printf '%s for the full roster (or run bin/crew-list), then report a compact\n' "$WAKEFILE"
   printf 'roster status to the pilot: who is on what, what is blocked, what is stalled,\n'
   printf 'what is ready for review. Then arm one fresh watch-fleet cycle before you stop.\n'
@@ -1502,8 +1508,9 @@ while :; do
   _reconcile_died=""
 
   # The generic per-poll outbox scan (issue #169): runs in EVERY watcher,
-  # unconditionally on $OWNER, every poll, before anything else can `exit 0`
-  # this poll - fire()'s own exit 0 is below (see the needs-attention check at
+  # unconditionally on $OWNER, every poll, ahead of every exit path in this
+  # loop except the self-ownership check just above - fire()'s own exit 0
+  # is below (see the needs-attention check at
   # the bottom of this loop) is the first; the worktree-removal self-check
   # (issue #237, Fix 2a) just below this is a second; the stale-code
   # self-check (issue #219) right after it is a third; the owner-status
@@ -1800,9 +1807,8 @@ for tid in ids:
     # the crew's permission mode, so it still catches freezes when bypass is
     # disabled) - this applies whether the member was "working" or already
     # "blocked" for an unrelated reason (a member can answer one blocker and walk
-    # straight into a fresh confirmation dialog, which would otherwise be
-    # invisible: the backstop below used to scan only "working" members, so a
-    # dialog freeze on top of a pre-existing blocker never got a second look). A
+    # straight into a fresh confirmation dialog, which the working-only scan
+    # would otherwise never see). A
     # member gone silently idle - agent errored, nothing executing - is flipped to
     # stalled by wm-state stall-check; that diagnosis only makes sense for a
     # member that claims to be "working", since a "blocked" member sitting idle
@@ -1947,12 +1953,10 @@ for r in data:
       _pid="$(wm_tmux_pane_pid "$_win")"
 
       # Stalled re-evaluation (#235): `stalled` is the one status the supervisor
-      # imposes unilaterally (see LIVE_STATES in bin/lib/wm-state.py), and until
-      # now the `continue` just below made it a one-way latch - no diagnostic
-      # ever looked at the record again, so a member that resumed activity stayed
-      # flagged until a human noticed. This re-runs the SAME detector's own
-      # evidence (recorded on the record's `stall` object at flip time) and
-      # reverts only on a sustained contradiction. Deliberately NOT a liveness
+      # imposes unilaterally (see LIVE_STATES in bin/lib/wm-state.py), so it is
+      # re-checked here against the SAME detector's own evidence (recorded on
+      # the record's `stall` object at flip time) and reverted only on a
+      # sustained contradiction. Deliberately NOT a liveness
       # probe for every source: a wedge-stalled (#202) or forward-motion-stalled
       # (#199) member has a live process tree BY CONSTRUCTION, so a uniform
       # liveness revert would delete both of those mechanisms outright.
@@ -2008,7 +2012,7 @@ for r in data:
         # the generic "no one at its terminal" framing of an ordinary
         # permission/trust gate.
         if printf '%s\n' "$PANE_TEXT" | tail -n "$WM_PERM_TAIL" | grep -qE "$WM_RESUME_PROMPT_RE"; then
-          _blocker="frozen on the resume-from-summary prompt (issue #30) after an auto-recovery attempt - needs one keypress via bin/crew-takeover $_id"
+          _blocker="frozen on the resume-from-summary prompt after an auto-recovery attempt - needs one keypress via bin/crew-takeover $_id"
         else
           _blocker="frozen on a permission/trust prompt with no one at its terminal; approve it via bin/crew-takeover $_id, or relaunch the crew with bypass"
         fi
@@ -2379,7 +2383,7 @@ for r in roster if isinstance(roster, list) else []:
   # the ordinary fire() path below writes) so outage-detected/outage-cleared
   # surface as ordinary fire reasons within the existing outcome
   # classification (healthy/fire/remote-control-dropped/stopped/stale-code/
-  # spurious/spurious-repeated) - structurally identical to a blocked/review/
+  # rolled/spurious/spurious-repeated) - structurally identical to a blocked/review/
   # done/died/stalled reason line today, just fleet-scoped (no per-member id
   # to ack) rather than routed through fire()'s needs-attention/group-
   # attention machinery.
@@ -2392,7 +2396,7 @@ for r in roster if isinstance(roster, list) else []:
     case "$_outage_transition" in
       outage-detected)
         {
-          echo "# API outage detected (issue #23)"
+          echo "# API outage detected"
           echo
           echo "Anthropic API-error signals (529/5xx/rate-limit/connection signatures) have"
           echo "crossed the fleet-wide mass threshold - treat this as a likely outage, not"
@@ -2422,7 +2426,7 @@ except Exception:
 print(" ".join(r.get("id", "") for r in data if r.get("death_cause") == "api-outage"))
 ' 2>/dev/null)"
         {
-          echo "# API outage cleared (issue #23)"
+          echo "# API outage cleared"
           echo
           echo "The fleet-wide API-error signal has been quiet for ${WM_OUTAGE_QUIET}s. New"
           echo "spawns are unpaused."
@@ -2553,7 +2557,7 @@ print("%s\t%s\t%s" % (window_label, pct_text, resets_at if resets_at is not None
 $_usage_info
 EOF_USAGE
         {
-          echo "# Usage-limit quota approaching (issue #24)"
+          echo "# Usage-limit quota approaching"
           echo
           echo "The $_usage_window_label usage window is at $_usage_pct_text, resets at"
           echo "epoch $_usage_resets_at."
@@ -2578,7 +2582,7 @@ EOF_USAGE
         ;;
       usage-limit-reset)
         {
-          echo "# Usage-limit window reset (issue #24)"
+          echo "# Usage-limit window reset"
           echo
           echo "The usage window has reset on its own. New spawns are unpaused again -"
           echo "nothing further to do."

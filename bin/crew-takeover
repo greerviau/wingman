@@ -125,7 +125,7 @@ print_resume_hint() {
     echo "Or let wingman do it for you: bin/crew-resume $ID"
     if [ "$RESOLVED_AGENT_NAME" = claude ]; then
       echo "On a large/old transcript, Claude Code may show a 'resume from summary?' menu that"
-      echo "expects an interactive answer (issue #30); 'Resume full session as-is' is always the"
+      echo "expects an interactive answer; 'Resume full session as-is' is always the"
       echo "safe choice. To skip that prompt outright, export these first:"
       printf '\n    export CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=999999999 CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=999999999\n\n'
     fi
@@ -198,7 +198,7 @@ else
 fi
 
 if [ -n "$WIP_SHA" ]; then
-  wm_info "Its uncommitted worktree changes at time of death were also auto-anchored (issue #251, tracked and untracked files alike). Recover them into a fresh location - this never touches any existing working tree, including \$REPO's own:"
+  wm_info "Its uncommitted worktree changes at time of death were also auto-anchored (tracked and untracked files alike). Recover them into a fresh location - this never touches any existing working tree, including \$REPO's own:"
   printf '\n    git -C %s worktree add /tmp/%s-wip-recovery %s\n\n' "$(quote "$REPO")" "$_wip_id" "$WIP_SHA"
   echo "Then inspect that new directory and copy out what you need; remove it with 'git -C $REPO worktree remove' when done."
   echo "(safe to retry - this only reads the ref, it does not delete refs/wip/$_wip_id)"

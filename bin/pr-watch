@@ -294,7 +294,7 @@ wm_ok "$(date -u +%Y-%m-%dT%H:%M:%SZ) pr-watch: armed pid=$$ (crew $WINGMAN_CREW
 # eventual reason line) never sees it. If you are reading this line in a
 # FOREGROUND tool result, this session is already wedged: this script blocks
 # until an event fires, so nothing after this line will ever run.
-wm_warn "pr-watch: if you are seeing this line in a FOREGROUND tool result, this session is already wedged (issue #202) - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
+wm_warn "pr-watch: if you are seeing this line in a FOREGROUND tool result, this session is already wedged - re-arm as a harness-tracked background task (run_in_background: true) instead. This line is forensics only and prevents nothing."
 
 # Top-of-loop check: an event already pending the instant a fresh cycle is armed
 # fires immediately (at-least-once across the crew's re-arms), mirroring watch-fleet.

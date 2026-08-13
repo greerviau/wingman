@@ -44,7 +44,7 @@ out="$(run_hook Edit)"
 assert_contains "top-level: Edit is denied" "$out" '"permissionDecision": "deny"'
 assert_contains "top-level: Edit denial names the tool" "$out" "Direct Edit calls"
 assert_contains "top-level: Edit denial redirects to spawn-crew" "$out" "bin/spawn-crew"
-assert_contains "top-level: Edit denial cites the issue" "$out" "issue #17"
+assert_contains "top-level: Edit denial names the developer-spawn remedy" "$out" "Spawn a developer crew member to make this change"
 
 out="$(run_hook Write)"
 assert_contains "top-level: Write is denied" "$out" '"permissionDecision": "deny"'
@@ -207,7 +207,7 @@ assert_eq "top-level: Write outside any git repo is allowed (no output)" "$out" 
 
 out="$(run_hook Bash "sed -i s/a/b/ $TEST_REPO/bin/watch-fleet")"
 assert_contains "top-level: sed -i is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "top-level: sed -i denial cites the issue" "$out" "issue #171"
+assert_contains "top-level: sed -i denial names the shell-level-write rule" "$out" "This same guard covers shell-level writes"
 assert_contains "top-level: sed -i denial names the mechanism" "$out" "sed -i"
 
 out="$(run_hook Bash "sed -i.bak s/a/b/ $TEST_REPO/bin/watch-fleet")"
@@ -246,7 +246,7 @@ assert_eq "top-level: sed --posix -i outside any git repo is allowed (no output)
 
 out="$(run_hook Bash "echo x > $TEST_REPO/bin/watch-fleet")"
 assert_contains "top-level: echo > (output redirect) is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "top-level: echo > denial cites the issue" "$out" "issue #171"
+assert_contains "top-level: echo > denial names the shell-level-write rule" "$out" "This same guard covers shell-level writes"
 
 out="$(run_hook Bash "echo x>$TEST_REPO/bin/watch-fleet")"
 assert_contains "top-level: echo x>file (glued, no space) is denied" "$out" '"permissionDecision": "deny"'

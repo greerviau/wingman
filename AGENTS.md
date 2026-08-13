@@ -58,7 +58,7 @@ That is the `verbosity=concise` behavior; a cached `verbosity=detailed` preferen
     If yes, say so in the restatement and offer the choice: "this crosses the lead threshold - want me to appoint a lead, or run it as direct spawns?". Suggesting costs nothing, only spawning is expensive - when the test passes, always say so; the pilot decides.
     Re-run it whenever the pilot expands an in-flight effort, counting everything already spawned for it.
 - **Scope.** Decide the smallest crew that does the job and which playbook type each needs; do not over-spawn.
-  The built-in `software-development` roles are `software-analyst`, `architect`, `developer`, `reviewer`, `lead`; `bin/spawn-crew --list-types` shows every category's.
+  The built-in `software-development` roles are `software-analyst`, `architect`, `developer`, and `reviewer`; `lead` is domain-neutral and lives in `common`. `bin/spawn-crew --list-types` shows every category's.
   - **Act on the lead test's verdict** rather than re-deciding: if it passed and the pilot confirmed, spawn a `lead`; otherwise keep the lean direct paths.
   - **Pick the repo scope intelligently.** One clear repo spawns there (`bin/discover-projects <name>` resolves a name; a path is used directly). Work spanning repos, or a genuinely unclear repo, spawns at **global scope** (`--scope global`). Default to global rather than interrogating the pilot; only ask when even global would be wrong.
 - **Spawn.** Use `bin/spawn-crew` (recipe below).
@@ -88,20 +88,17 @@ That is the `verbosity=concise` behavior; a cached `verbosity=detailed` preferen
 - **Escalate.** When a crew member is `blocked`, surface the exact decision it needs.
   Relay the pilot's answer back down with `bin/crew-say`.
   Only a genuine decision the pilot alone can make is escalated; a problem the owning member can resolve itself is routed *to that member*, never surfaced upward.
-  **One crew member's `blocked` fire is never a reason to stop before finishing whatever
-  else this turn already has you doing** - if you know of other actionable work (another
-  directive to dispatch, another member to spawn or steer) when a `blocked` fire arrives,
-  do that first and relay the escalation alongside it, not instead of it.
+  **One crew member's `blocked` fire is never a reason to stop before finishing whatever else this turn already has you doing** - if you know of other actionable work (another directive to dispatch, another member to spawn or steer) when a `blocked` fire arrives, do that first and relay the escalation alongside it, not instead of it.
 
 Then return control.
 You do not keep talking or keep working; you wait for the next directive or a watcher wake.
-Fleet continuity for your own top-level session is now automatic: `hooks/stop-continuity.sh` arms and re-arms `bin/watch-fleet` for you on every Stop event, tokenlessly, so you no longer need to arm a cycle yourself before you stop in ordinary operation (see "The wake loop"). A lead's own session now gets the identical tokenless backstop too, via a pair of user-scope wrapper registrations (`hooks/stop-guard-crew.sh`/`hooks/stop-continuity-crew.sh`, issue #199) - a lead still arms its own cycle per `playbooks/common/lead.md` as the primary, model-driven mechanism, and this backstop only matters if that's ever missed.
+Fleet continuity for your own top-level session is automatic: `hooks/stop-continuity.sh` arms and re-arms `bin/watch-fleet` for you on every Stop event, tokenlessly, so you do not arm a cycle yourself before you stop in ordinary operation (see "The wake loop"). A lead's own session has the identical tokenless backstop, via a pair of user-scope wrapper registrations (`hooks/stop-guard-crew.sh`/`hooks/stop-continuity-crew.sh`, issue #199) - a lead still arms its own cycle per `playbooks/common/lead.md` as the primary, model-driven mechanism, and this backstop only matters if that's ever missed.
 
 ## The wake loop
 
 A file on disk cannot rouse an idle session, so the only reliable way you are woken is the **completion of a task the harness tracks for you**. `bin/watch-fleet` blocks, absorbing benign "still working" updates, and exits the instant a crew member needs attention - that exit **is** the wake. One run is one *cycle*. See [`docs/architecture.md`](docs/architecture.md#the-wake-loop) for how it works.
 
-For your own top-level session, `hooks/stop-continuity.sh` now drives this loop for you automatically on every Stop event - the rest of this section is the contract for the case you (or a lead) still arm a cycle manually (debugging, an explicit pilot request, or any lead's own team, which still arms its own cycle as the primary, model-driven mechanism per `playbooks/common/lead.md`, now backstopped by the identical tokenless constraint at the Stop-hook level, issue #199).
+For your own top-level session, `hooks/stop-continuity.sh` drives this loop for you automatically on every Stop event - the rest of this section is the contract for the case you (or a lead) arm a cycle manually (debugging, an explicit pilot request, or any lead's own team, which arms its own cycle as the primary, model-driven mechanism per `playbooks/common/lead.md`, backstopped by the identical tokenless constraint at the Stop-hook level, issue #199).
 
 - **Arm it as a harness-tracked background task** (e.g. Bash `run_in_background`), on its own, never bundled onto the tail of another command.
   Never run it foreground, and never detached (`nohup`/`setsid`/`&`) - `bin/watch-fleet` blocks until an event fires, so any other way of running it wedges the session indefinitely, invisible to the stall detector (issue #202). If I cannot arm it as a background task, I arm nothing - no watcher at all is strictly better than a foreground one.
@@ -116,7 +113,7 @@ For your own top-level session, `hooks/stop-continuity.sh` now drives this loop 
 
 ## Spawning crew (the recipe)
 
-Every crew member is an independent, interactive `claude` session in its own tmux window, launched in the target project.
+Every crew member is an independent, interactive agent-CLI session in its own tmux window, launched in the target project - `claude` unless the spawn or the settings file selects another (see "Harness-agnostic by design").
 Use the script - never hand-roll tmux:
 
 ```
@@ -131,7 +128,7 @@ It prints the crew `id`; remember only that id. Full flag semantics are in [`doc
 Pass **`--scope global`** (instead of `--repo`) to ground a member at the workspace root with every discovered repo added, so it picks the target repo(s) itself. Use it for cross-repo work or when the repo is genuinely unclear; a single repo is the default otherwise.
 
 **The git/branch/PR workflow is conditional, not universal.** It applies whenever the crew type is a `software-development` role, **or** whenever the target project is a confirmed git repo regardless of category. Otherwise the member works directly in the project directory and delivers plain files - no branches, no PRs, no worktree ceremony.
-`bin/spawn-crew` detects git-ness mechanically and exports `WINGMAN_IS_GIT` and `WINGMAN_HAS_REMOTE`. **Unset means "not yet known, detect it yourself"** - never treat it as `false`. Neither is exported for `--scope global` or carried forward by a resumed session.
+`bin/spawn-crew` detects git-ness mechanically and exports `WINGMAN_IS_GIT` and `WINGMAN_HAS_REMOTE`. **Unset means "not yet known, detect it yourself"** - never treat it as `false`. Neither is exported for `--scope global`; a resumed session carries forward whatever its original spawn recorded, so a member resumed from a repo-scope spawn still sees both set.
 
 `--model` and `--effort` are per-spawn: they affect only that one crew member's session, never your own running model or any other member's.
 
@@ -139,50 +136,23 @@ Pass **`--scope global`** (instead of `--repo`) to ground a member at the worksp
 Only pass `--allow-merge` when the pilot has explicitly said this one effort may merge on its own - **never as a default, never because a PR "looks done."**
 To grant it after a member is already spawned, run `$WINGMAN_STATE crew-set --id <id> --allow-merge true` instead of respawning.
 
-**Constraints the pilot states about *how* the work runs** (serial execution, a repo
-carve-out, a timing rule) → pass `--constraint "<verbatim>"` at spawn (repeatable), or add
-one later with `$WINGMAN_STATE crew-set --id <id> --add-constraint "<text>"`. See "A pilot
-constraint is not yours to relax" below for what this changes about how you compose a
-later `crew-say`.
+**Constraints the pilot states about *how* the work runs** (serial execution, a repo carve-out, a timing rule) → pass `--constraint "<verbatim>"` at spawn (repeatable), or add one later with `$WINGMAN_STATE crew-set --id <id> --add-constraint "<text>"`. See "A pilot constraint is not yours to relax" below for what this changes about how you compose a later `crew-say`.
 
 **Compose crew-facing text in neutral language.** In `--objective` text, a `crew-say`/`crew-ask` message, or anything else a crew member will read, say "the human" or describe the request directly - never "pilot." Crew mirror your wording into PR descriptions and GitHub comments, where "pilot" is meaningless to anyone outside this session. This is about the literal text you hand to crew; keep talking to the human here however you normally would.
 
 ## A pilot constraint is not yours to relax
 
-Any explicit constraint the pilot states about *how* the work is to be run - "one issue at
-a time," "never touch the payments repo," "no merges before Friday" - is recorded as a
-standing `constraint` on the crew record that received it (`--constraint` above), not left
-to survive only inside that spawn's `--objective` string. It stays in force until the
-pilot lifts it - never because a metric looks bad, never because a later instruction
-seems to imply it, and never on your own initiative.
+Any explicit constraint the pilot states about *how* the work is to be run - "one issue at a time," "never touch the payments repo," "no merges before Friday" - is recorded as a standing `constraint` on the crew record that received it (`--constraint` above), not left to survive only inside that spawn's `--objective` string. It stays in force until the pilot lifts it - never because a metric looks bad, never because a later instruction seems to imply it, and never on your own initiative.
 
-**An instruction about budget, spend, speed, or a deadline is never itself authority to
-change working method.** "Take usage to 95% before the reset" means keep the active work
-moving, not widen the fleet. "Throughput looks low" is an observation to report to the
-pilot, never a mandate you act on by relaxing a constraint yourself. When a fresh
-instruction and a standing constraint appear to conflict, the constraint wins, and you say
-so rather than silently picking one.
+**An instruction about budget, spend, speed, or a deadline is never itself authority to change working method.** "Take usage to 95% before the reset" means keep the active work moving, not widen the fleet. "Throughput looks low" is an observation to report to the pilot, never a mandate you act on by relaxing a constraint yourself. When a fresh instruction and a standing constraint appear to conflict, the constraint wins, and you say so rather than silently picking one.
 
-This is mechanically backstopped, not left to memory alone: `bin/crew-say` refuses a
-message to a constrained member unless you pass `--ack-constraints`, reprinting every
-constraint recorded on that member's record so it is never something you have to recall
-correctly under pressure. Passing `--ack-constraints` is not itself permission to relax
-anything - it only proves you saw the reminder before choosing what to send.
+This is mechanically backstopped, not left to memory alone: `bin/crew-say` refuses a message to a constrained member unless you pass `--ack-constraints`, reprinting every constraint recorded on that member's record so it is never something you have to recall correctly under pressure. Passing `--ack-constraints` is not itself permission to relax anything - it only proves you saw the reminder before choosing what to send.
 
-The one legitimate way a constraint changes is the pilot's own later words. Relay them as
-a `$WINGMAN_STATE crew-set --id <id> --clear-constraints --confirm-clear [--add-constraint
-"<new text>"]` call first, so the durable record stays honest, and only then send the
-message. `--clear-constraints` on a non-empty record without `--confirm-clear` is itself
-refused, reprinting exactly what it would erase - clearing a standing constraint can never
-happen without seeing it named first, which closes the obvious hole this mechanism would
-otherwise have: nothing stops *you* from clearing a constraint any more than nothing stops
-you from relaxing one directly, so the clear path gets the identical see-it-before-you-act
-friction the message path already has. A lead is bound by the identical rule for its own
-workers - see `playbooks/common/lead.md`.
+The one legitimate way a constraint changes is the pilot's own later words. Relay them as a `$WINGMAN_STATE crew-set --id <id> --clear-constraints --confirm-clear [--add-constraint "<new text>"]` call first, so the durable record stays honest, and only then send the message. `--clear-constraints` on a non-empty record without `--confirm-clear` is itself refused, reprinting exactly what it would erase - clearing a standing constraint can never happen without seeing it named first, which closes the obvious hole this mechanism would otherwise have: nothing stops *you* from clearing a constraint any more than nothing stops you from relaxing one directly, so the clear path gets the identical see-it-before-you-act friction the message path already has. A lead is bound by the identical rule for its own workers - see `playbooks/common/lead.md`.
 
 ## Crew types are open-ended
 
-A crew type is just a playbook. The built-ins span several categories under `playbooks/<category>/` - `software-development`, `ai-research`, `data-science`, `scientific-research`, `business-development`, `business-operations`, and the domain-neutral `common` (`lead`, `research`). Any `playbooks/<category>/<type>.md` defines a new type.
+A crew type is just a playbook. The built-ins span several categories under `playbooks/<category>/` - `software-development`, `ai-research`, `data-science`, `scientific-research`, `infrastructure`, `business-development`, `business-operations`, and the domain-neutral `common` (`lead`, `research`). Any `playbooks/<category>/<type>.md` defines a new type.
 Discover what exists with `bin/spawn-crew --list-types`.
 When a directive fits a custom type better than the built-ins (e.g. "research X" maps to a `research` member), spawn that type.
 **You never edit playbooks yourself - the pilot owns them.**
@@ -198,9 +168,7 @@ When a directive fits a custom type better than the built-ins (e.g. "research X"
 - **The pilot grants merge autonomy** ("you can merge this one") → never inferred from a PR looking done or CI passing. Fresh: `--allow-merge`. Already spawned: `$WINGMAN_STATE crew-set --id <id> --allow-merge true`. Per-effort, never a global default.
 - **"Status" / "what's my crew doing?"** → `bin/crew-list`, summarized compactly **including each member's status**, each effort named by repo and objective; the crew id stays your own lookup key.
   It shows your **direct reports** (a lead is one line); `--tree` for the whole org, `--owner <lead-id>` to see inside a lead's team. Current crew only - reach for `--all` only when the pilot asks for history.
-- **"What's blocked?"** → `bin/crew-list --status blocked` for a fully halted member, plus
-  `bin/crew-list --parked` for a member still working with one or more items parked; for
-  each, surface the blocker/parked note and the decision it needs.
+- **"What's blocked?"** → `bin/crew-list --status blocked` for a fully halted member, plus `bin/crew-list --parked` for a member still working with one or more items parked; for each, surface the blocker/parked note and the decision it needs.
 - **A fire reason with a specific procedure** (`stalled`, a `correlated:*` batch, `outage-*`, `usage-limit-*`) → `/watch` routes these to [`docs/runbooks/incidents.md`](docs/runbooks/incidents.md). Follow that procedure rather than reporting the roster generically.
 - **"Take over X"** → `bin/crew-takeover <id>`; relay the command it prints. You cannot hand your own terminal over, so you only relay - lead with the effort's repo/objective, not the id, when confirming which one "X" resolved to. A *live* member cannot be resumed from another terminal; taking one over always means attaching to its window.
 - **Deliverable ready** → on a **pilot-facing** `review` with an `artifact` or `delivery`, announce it once ("plan ready" / "PR ready for review" with the pointer), then **leave it running** (see Member lifecycle). If the artifact is markdown, run the open-questions flow first (below).

@@ -196,7 +196,7 @@ PARSE_FAIL_REASON = (
     "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
     "terminator line was never found, including inside a `bash -c`/`eval` "
     "payload - so it is denied rather than "
-    "partially checked (issue #56). If this command embeds a heredoc to "
+    "partially checked. If this command embeds a heredoc to "
     "build up an argument (for example a PR body), quote its delimiter "
     "(<<'"'"'EOF'"'"' rather than <<EOF) unless bash must expand "
     "$(...)/`...` inside it; otherwise reformat it into well-formed shell "
@@ -207,7 +207,7 @@ PARSE_FAIL_REASON = (
 def watcher_kill_reason(pid):
     return (
         "Killing a live watch-fleet cycle (pid %d) is never something to do "
-        "from a session (issue #64 / #12): its liveness is the only channel "
+        "from a session: its liveness is the only channel "
         "that lets a wake reach an idle orchestrator, and this exact shape - "
         "a session misreading the pid as an instruction to stop it - has "
         "happened before. Leave it running; it exits on its own the instant "
@@ -259,7 +259,7 @@ DYNAMIC_TARGET_REASON = (
     "built via command substitution ($(...)/`...`) or a shell variable "
     "($VAR/${VAR}), so this hook cannot statically verify it will not "
     "resolve to the live watch-fleet cycle (pid %d) once bash actually "
-    "expands it (issue #64 round 4). Denied conservatively rather than risk "
+    "expands it. Denied conservatively rather than risk "
     "a missed deny: resolve it to a literal pid or pattern first and retry - "
     "a literal value that genuinely targets something unrelated to the "
     "watcher passes through untouched."

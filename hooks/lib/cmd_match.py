@@ -155,8 +155,8 @@ being mistaken for a write to a file named the following digit; a bash
 either, a documented, deliberate false-negative-only gap. Input redirection
 (`<`, `<<`, `<<<`) is not a write and is not covered by this recognition.
 
-Residual gaps, deliberately out of scope (see docs/plans/2026-07-13-issue-56-
-cmd-match-fail-closed.md): arithmetic expansion (`$((...))`) is not extracted
+Residual gaps, deliberately out of scope (see issue #56): arithmetic
+expansion (`$((...))`) is not extracted
 the way command/process substitution is; a substitution in COMMAND POSITION
 (`$(which gh) pr merge ...`) resolves to this module's inert placeholder
 rather than a real command name, so a guard matching on argv[0] does not catch
@@ -211,9 +211,9 @@ class _LexFail(Exception):
 
 
 def _parse_heredoc_word(s, k, n):
-    """Parse a heredoc delimiter word starting at s[k] (just past `<<`/`<<-`
-    and any intervening whitespace already skipped by the caller... actually
-    this also skips that whitespace itself). Returns (word, end, quoted):
+    """Parse a heredoc delimiter word starting at s[k] (just past `<<`/`<<-`;
+    any intervening whitespace is skipped here, not by the caller). Returns
+    (word, end, quoted):
     `word` is the dequoted delimiter text (None if no word could be parsed at
     all - a malformed redirect), `end` is the index just past the word as
     written (quotes/backslashes included, for keeping the raw token text in
@@ -755,9 +755,11 @@ def wrapper_payloads(tokens):
 
 def resolve_command(tokens):
     """Resolve the command one segment actually invokes: skip leading VAR=val
-    assignments, unwrap `env`/`sudo`, wrapper shells (`bash -c ...`), and
-    `uv run [flags]`, and return (basename, argv) where argv[0] is the resolved
-    command token and argv[1:] its arguments. ("", []) when nothing resolves."""
+    assignments, unwrap `env`/`sudo`, a wrapper shell's script-path form
+    (`bash script.sh`), and `uv run [flags]`, and return (basename, argv) where
+    argv[0] is the resolved command token and argv[1:] its arguments. A wrapper
+    shell carrying a `-c` payload resolves to the SHELL, not the payload (see
+    the comment below). ("", []) when nothing resolves."""
     tokens = _strip_prefixes(tokens)
     if not tokens:
         return ("", [])

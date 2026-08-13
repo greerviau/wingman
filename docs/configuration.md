@@ -9,7 +9,7 @@ Part of the [architecture reference](architecture.md); for day-to-day use see th
 It is gitignored, so a `git pull` updates the shipped defaults without touching it; [`config.example.toml`](../config.example.toml) is the documented template (`cp config.example.toml config.local.toml`).
 Everything in it is optional - with no file at all, wingman behaves exactly as it does with no configuration: it asks the onboarding-preference questions once per run, and every spawn falls through to the agent CLI's own model.
 
-`bin/lib/wm_config.py` is its single reader. Two consumers use it: `bin/lib/common.sh` exports the environment-backed settings so every `bin/` script picks them up, and `bin/lib/wm-state.py` layers the `[prefs]` table underneath its own per-run answer store.
+`bin/lib/wm_config.py` is its single reader. Three consumers use it: `bin/lib/common.sh` exports the environment-backed settings so every `bin/` script picks them up, `bin/lib/wm-state.py` layers the `[prefs]` table underneath its own per-run answer store, and `bin/config` drives it directly to report and validate the resolved settings.
 
 ### Precedence
 
@@ -25,7 +25,7 @@ Most specific wins:
 
 The one place this is not a straight top-to-bottom list is a per-type entry versus `$WM_MODEL`: the entry wins, because `[models].default` is exactly what `$WM_MODEL` carries by the time a spawn reads it, so specificity - not layer - has to decide for a per-type entry to mean anything.
 
-`bin/config` prints every setting as actually resolved, with the source each value came from (`env` / `config.local.toml` / `run` / `default`), which is the answer to "why is this spawn using that model?".
+`bin/config` prints every setting as actually resolved, with the source each value came from (`env` / `config.local.toml` / `run` / `unanswered` / `default`), which is the answer to "why is this spawn using that model?".
 `bin/config --check` validates the file, and `bin/doctor` runs the same check: an unknown key would otherwise fail silently, since a setting wingman does not recognize simply never applies.
 
 ### What it holds
@@ -33,7 +33,7 @@ The one place this is not a straight top-to-bottom list is a per-type entry vers
 - **`[prefs]`** - the onboarding preferences (see below). A key answered here is never asked again.
 - **`[models]` / `[effort]`** - `default` for every spawn, plus a per-crew-type entry under the bare role name (`developer`) or the category-qualified one (`software-development/developer`).
 - **`[projects]`** - `roots`, `ignore`, and a `[projects.pins]` name→path table for `bin/discover-projects`. `~` and `$VAR` are expanded.
-- **`[harness]`** - `agent`, `permission_mode`, `remote_control`, `tmux_session`: the agent-CLI-specific knobs, previously environment-only.
+- **`[harness]`** - `agent`, `permission_mode`, `remote_control`, `tmux_session`: the agent-CLI-specific knobs. `agent` accepts either a scalar or a per-crew-type `[harness.agent]` table, like `[models]`/`[effort]`.
 - **`[env]`** - a raw `WM_*` passthrough for everything above does not model (see below).
 
 ### `[env]`: the rest of the knobs
@@ -77,8 +77,10 @@ Every crew member is an independent, interactive `claude` session in its own tmu
 
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \
-  --objective "<one-line task>" [--input <plan-path>] \
-  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--allow-merge] \
+  --objective "<one-line task>" [--id <slug>] [--input <plan-path>] \
+  [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] [--agent <name>] \
+  [--allow-merge] [--waive-review-gate] \
+  [--force-during-outage] [--force-during-usage-limit] \
   [--constraint "<text>" ...]
 ```
 
@@ -88,19 +90,13 @@ It prints the crew `id`.
 Pass `--scope global` (instead of `--repo`) to ground a crew member at the global project scope: it launches at the workspace root with every discovered repo added, so it can read and work across all of them and choose the target repo(s) itself.
 Use it for cross-repo work or when the repo is genuinely unclear.
 
-**Wingman's own root `CLAUDE.md` is mechanically excluded from every crew session's context.** The generated launch always carries `--settings` with a `claudeMdExcludes` entry naming wingman's own repo root (and its `<repo>-*` worktree-sibling glob), unconditionally, regardless of `--scope` or target - so the orchestrator persona never auto-loads for a crew member, even one working on wingman's own files. The same payload is re-emitted by `bin/crew-takeover`'s printed resume command and `bin/crew-resume`'s relaunch script, so it survives past a member's first process (see `docs/guards.md`).
+**Wingman's own root `CLAUDE.md` is mechanically excluded from every `claude`-descriptor crew session's context.** For an `--agent claude` launch (the default), the generated launch carries `--settings` with a `claudeMdExcludes` entry naming wingman's own repo root (and its `<repo>-*` worktree-sibling glob), regardless of `--scope` or target - so the orchestrator persona never auto-loads for a crew member, even one working on wingman's own files. The same payload is re-emitted by `bin/crew-takeover`'s printed resume command and `bin/crew-resume`'s relaunch script, so it survives past a member's first process (see `docs/guards.md`). `--settings` is a claude-specific mechanism with no equivalent in the adapter contract, so another descriptor suppresses repo docs through its own `WM_AGENT_CONTEXT_SUPPRESS_FLAG` instead - populated for `codex`, still open for `pi` and `opencode`.
 
 **Merge authorization.** `--allow-merge` is per-spawn and never a default: a crew member cannot merge its own PR unless the human explicitly granted it for that one effort (see [guards.md](guards.md)'s `hooks/no-merge-guard.sh`). It is visible in `bin/crew-list`/`board.md` as `allow_merge`. To grant it to a member that is already running, use `$WINGMAN_STATE crew-set --id <id> --allow-merge true` rather than respawning; it takes effect on the next merge attempt.
 
-**Pilot-stated constraints.** `--constraint "<text>"` is per-spawn and repeatable: a
-verbatim record of something the pilot said about *how* this effort must be carried out.
-It is visible in `bin/crew-list`/`board.md` as `constraints`, and `bin/crew-say` refuses a
-later follow-up to that member unless `--ack-constraints` is also passed (see
-[guards.md](guards.md)). To add one to a member that is already running, use
-`$WINGMAN_STATE crew-set --id <id> --add-constraint "<text>"`; to record that the pilot
-lifted one, `--clear-constraints --confirm-clear` (the confirmation is mandatory whenever
-the record is non-empty - a bare `--clear-constraints` is refused and reprints what it
-would erase, so the record this whole mechanism depends on can never be silently emptied).
+**Pilot-stated constraints.** `--constraint "<text>"` is per-spawn and repeatable: a verbatim record of something the pilot said about *how* this effort must be carried out.
+It is visible in `bin/crew-list`/`board.md` as `constraints`, and `bin/crew-say` refuses a later follow-up to that member unless `--ack-constraints` is also passed (see [guards.md](guards.md)).
+To add one to a member that is already running, use `$WINGMAN_STATE crew-set --id <id> --add-constraint "<text>"`; to record that the pilot lifted one, `--clear-constraints --confirm-clear` (the confirmation is mandatory whenever the record is non-empty - a bare `--clear-constraints` is refused and reprints what it would erase, so the record this whole mechanism depends on can never be silently emptied).
 
 **Model and effort selection.** Most specific wins: an explicit `--model`/`--effort` on the spawn, then the settings file's `[models]`/`[effort]` entry for *that crew type*, then `$WM_MODEL`/`$WM_EFFORT` (where the file's own `default` lands), then the agent CLI's own default. See [the settings file](#the-settings-file---configlocaltoml) for the full chain. `--model`/`--effort` are per-spawn - they affect only that one session, never wingman's own model or any other member's.
 
@@ -117,6 +113,7 @@ Machine-local runtime state, created on first run, never committed:
   `parent` is the id of the crew that spawned the member (`""` for a member wingman spawned directly); it is what scopes each layer to its own direct reports.
   `is_git`/`has_remote` are recorded for repo scope only (`null`/absent for global scope) - see "Spawning crew" above.
 - `crew/<id>.json` - each crew member's distilled status record.
+- `preferences.json` - the cached onboarding-preference answers, keyed by wingman run id, with the settings file's own `[prefs]` table layered underneath at read time.
 - `board.md` - the human-readable render of the roster, its Active section indented as a tree so a reader sees the org.
 - `watch.pid` / `watch.beat` - wingman's (owner `""`) watcher cycle's pid and liveness beacon.
   A lead's watcher keys its own files by owner (`watch-<owner>.pid` / `watch-<owner>.beat`), so per-owner watchers coexist.
@@ -131,6 +128,9 @@ Machine-local runtime state, created on first run, never committed:
   A new `announced` (a genuine state change) re-surfaces.
 - `handled.json` - the last `announced` stamp fully HANDLED by the Stop hook for each crew id, set only when a stop is allowed to proceed - distinct from `acked.json` so a surfaced-but-unhandled event still re-blocks instead of being permanently suppressed by a premature ack.
 - `pr/<id>.json` - a developer member's `pr-watch` cursor: what PR events it has already surfaced (CI signature, conversation high-water mark, whether it has settled green), so a red build or a handled comment does not re-fire.
+- `usage/<session-id>.json` - one live session's most recent `rate_limits` capture, written by `bin/lib/usage-statusline.py` on every statusline invocation and aggregated per poll by wingman's own watcher - see [fleet resilience](fleet-resilience.md#fleet-wide-usage-limit-quota-detection).
+- `outbox/<id>/` - messages queued for a crew member whose pane could not take a delivery, retried on later passes and swept by `bin/crew-prune`.
+- `ask/` - the `bin/crew-ask` request and captured-answer store, retained for `WM_ASK_RETENTION_HOURS` and pruned by `bin/crew-prune`.
 - `projects.json` - the discovered-projects cache.
 - `crew-archive.jsonl` - append-only history of records removed by `bin/crew-prune` (one JSON object per line).
   Pruning removes fully-closed (`stood-down`) records from `crew.json` and deletes their `crew/<id>.json`, archiving each here first so the roster stays lean without losing the record of who ran.

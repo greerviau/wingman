@@ -37,7 +37,7 @@ do
   export WINGMAN_BIN="$TEST_REPO/bin"
   out="$(run_hook "$cmd" omit)"
   assert_contains "denied (no run_in_background): $cmd" "$out" '"permissionDecision": "deny"'
-  assert_contains "denial cites issue #202: $cmd" "$out" "issue #202"
+  assert_contains "denial names the wedge: $cmd" "$out" "wedges this session indefinitely"
 done
 
 out="$(run_hook 'bin/watch-fleet' false)"
@@ -108,7 +108,7 @@ assert_eq "&& is not treated as a bare &" "$out" ""
 # --- parse-fail-closed on an unresolvable command mentioning watch-fleet -----
 out="$(run_hook 'bin/watch-fleet --owner "unterminated' omit)"
 assert_contains "unterminated quote around a watch-fleet mention is denied" "$out" '"permissionDecision": "deny"'
-assert_contains "parse-fail denial cites issue #56" "$out" "issue #56"
+assert_contains "parse-fail denial names the fail-closed rule" "$out" "denied rather than partially checked"
 
 # --- non-Bash payloads exit 0 silently ----------------------------------------
 out="$(uv run --no-project --quiet python -c '
@@ -136,7 +136,7 @@ import json
 print(json.dumps({"tool_name": "Bash", "tool_input": {"command": ["bin/watch-fleet"], "run_in_background": True}}))
 ' | bash "$HOOK")"
 assert_contains "non-string command mentioning watch-fleet is denied, not allowed" "$out" '"permissionDecision": "deny"'
-assert_contains "non-string-command denial cites issue #202" "$out" "issue #202"
+assert_contains "non-string-command denial names the fail-closed rule" "$out" "denied rather than partially checked"
 
 # (2) the python decision body raises (a stubbed, broken cmd_match.py ahead of
 # the real one on PYTHONPATH - the hook resolves PYTHONPATH from its OWN
@@ -158,7 +158,7 @@ import json
 print(json.dumps({"tool_name": "Bash", "tool_input": {"command": "bin/watch-fleet", "run_in_background": True}}))
 ' | bash "$BROKEN_DIR/no-foreground-watcher-guard.sh")"
 assert_contains "an internal error in the decision body denies, not allows" "$out" '"permissionDecision": "deny"'
-assert_contains "internal-error denial cites issue #202" "$out" "issue #202"
+assert_contains "internal-error denial names the fail-closed rule" "$out" "denied rather than partially checked"
 
 # (3) the python interpreter itself is unusable (dead/broken $WM_UV): a
 # relevant payload denies via the WRAPPER's own exit-status check.
@@ -201,7 +201,7 @@ assert_eq "full-envelope background fixture is allowed (no output)" "$out" ""
 # hooks/lib/cmd_match.py's resolve_command() cannot silently regress it.
 out="$(run_hook 'bash /abs/path/to/bin/pr-watch --pr https://github.com/owner/repo/pull/240' omit)"
 assert_contains "denied (interpreter-prefix form, no run_in_background): bash .../pr-watch --pr <url>" "$out" '"permissionDecision": "deny"'
-assert_contains "denial cites issue #202" "$out" "issue #202"
+assert_contains "denial names the wedge" "$out" "wedges this session indefinitely"
 
 out="$(run_hook 'bash /abs/path/to/bin/pr-watch --pr https://github.com/owner/repo/pull/240' true)"
 assert_eq "allowed (interpreter-prefix form, run_in_background: true): bash .../pr-watch --pr <url>" "$out" ""
@@ -218,7 +218,7 @@ printf '%s\n%s\n' "$WINGMAN_RUN_ID" "the watcher for this session has died 3 tim
 
 out="$(run_hook 'bin/watch-fleet' true)"
 assert_contains "denied while a run-scoped standdown holds" "$out" '"permissionDecision": "deny"'
-assert_contains "denial cites issue #198" "$out" "issue #198"
+assert_contains "denial names the standdown in force" "$out" "A spurious-repeated failure-budget standdown is in force"
 assert_contains "denial names --clear-standdown as the way out" "$out" "--clear-standdown"
 
 # Absence is a definite answer: no marker at all allows normally.

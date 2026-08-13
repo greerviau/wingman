@@ -9,8 +9,7 @@
 # earlier adapter), a slash-autocomplete popup that needs WM_AGENT_SLASH_
 # SETTLE, and a genuinely different interrupt/clear-key split (C-c interrupts
 # a turn; nothing clears the composer) from every earlier adapter - see
-# docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md
-# §3/§4.3/§4.6/§4.7/§5 step 8 for the full research and schema this
+# issue #25 for the full research and schema this
 # descriptor implements, and bin/lib/agents/claude.sh for the field-by-field
 # schema reference this file follows.
 #

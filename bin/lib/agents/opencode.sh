@@ -4,8 +4,7 @@
 # adapter (plan §8's build order: pi, then opencode, then codex, then
 # grok). Exercises the prompt-flag system-prompt path and an env-var
 # permission bypass (WM_AGENT_ENV_PREFIX) - see
-# docs/plans/2026-08-11-issue-25-multi-cli-agent-adapter-implementation-plan.md
-# §3/§4.3/§4.5/§4.6/§4.7/§5 step 8 for the full research and schema this
+# issue #25 for the full research and schema this
 # descriptor implements, and bin/lib/agents/claude.sh for the field-by-field
 # schema reference this file follows.
 #

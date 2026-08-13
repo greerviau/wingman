@@ -171,8 +171,8 @@ def deny(reason):
 VERIFY_FAIL_REASON = (
     "This command mentions a while/until loop and sleep but could not be "
     "verified safe - an unexpected tool_input shape, or an internal error "
-    "while checking it - so it is denied rather than partially checked "
-    "(issue #268), since silence is this hook family'"'"'s own allow signal "
+    "while checking it - so it is denied rather than partially checked"
+    ", since silence is this hook family'"'"'s own allow signal "
     "and a failure is not silence. If this is a legitimate polling wait, "
     "reissue the identical command with run_in_background: true."
 )
@@ -191,7 +191,7 @@ try:
         "This command could not be fully parsed - an unterminated quote, an "
         "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
         "terminator line was never found, including inside a `bash -c`/`eval` "
-        "payload - so it is denied rather than partially checked (issue #56), "
+        "payload - so it is denied rather than partially checked, "
         "since this command mentions a while/until loop and sleep and could "
         "not be verified safe. Reformat it into well-formed shell syntax and "
         "retry."
@@ -200,7 +200,7 @@ try:
     DENIAL_REASON_TEMPLATE = (
         "This command runs an unbounded %s loop with a sleep in its body in "
         "the FOREGROUND of a Bash tool call - a hand-rolled polling wait with "
-        "no independent timeout (issue #268). Two crew sessions hard-"
+        "no independent timeout. Two crew sessions hard-"
         "deadlocked exactly this way and cost roughly four hours combined: "
         "one ran `until ! pgrep -f \"tests/run.sh\" ...; do sleep 5; done` "
         "and never noticed that `pgrep -f` matches its OWN command line (a "
@@ -286,7 +286,7 @@ if [ "$PY_RC" -ne 0 ]; then
   # this wrapper denies itself rather than let a discarded stderr and an
   # `exit 0` fall through to a silent allow.
   cat <<'JSON'
-{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "This command mentions a while/until loop and sleep but the check for it failed to run (a dead interpreter, or an internal error) - denied rather than partially checked (issue #268), since silence is this hook family's own allow signal and a failure is not silence. If this is a legitimate polling wait, reissue the identical command with run_in_background: true."}}
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "This command mentions a while/until loop and sleep but the check for it failed to run (a dead interpreter, or an internal error) - denied rather than partially checked, since silence is this hook family's own allow signal and a failure is not silence. If this is a legitimate polling wait, reissue the identical command with run_in_background: true."}}
 JSON
   exit 0
 fi
