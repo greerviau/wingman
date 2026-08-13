@@ -74,6 +74,22 @@
 # MCPS,HOOKS,SESSIONS}_ENABLED family, alongside matching GROK_CURSOR_* and
 # GROK_CODEX_* families) - not fabricated, but also not proven to do what
 # issue #353 assumes (see above).
+#
+# Round-1 review raised a real alternative hypothesis worth recording: the
+# per-vendor "AGENTS" member of this toggle family more plausibly gates
+# `.claude/agents/` subagent DEFINITIONS (a distinct Claude Code concept),
+# not `AGENTS.md`-as-repo-instructions - with `GROK_CLAUDE_RULES_ENABLED`
+# the likelier candidate for the latter. Already tested, not just
+# theorized: GROK_CLAUDE_RULES_ENABLED=0 was tried via the identical `grok
+# inspect --json` technique used for AGENTS_ENABLED above, same result -
+# projectInstructions showed CLAUDE.md/AGENTS.md unchanged either way. This
+# doesn't confirm the hypothesis (inspect may not reflect either toggle at
+# all, per the note above), but it does rule out "just switch to
+# RULES_ENABLED and get a proven fix" as a mechanical substitution -
+# neither candidate has been observed to actually change anything through
+# this tool. Left as GROK_CLAUDE_AGENTS_ENABLED (issue #353's own original
+# proposal) rather than switching to an equally-unproven alternative;
+# revisit with real credentials.
 
 WM_AGENT_BIN=grok
 WM_AGENT_DISPLAY_NAME="grok"
