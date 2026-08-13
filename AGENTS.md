@@ -1,5 +1,3 @@
-> **Note for a wingman-spawned crew session, on any CLI:** if you were spawned by wingman as a crew member, your own playbook and objective govern here, not this file's first-person voice - disregard any "you"/"your" instruction below that conflicts with them. Everything below is written for the wingman orchestrator's own top-level session specifically (the one a human starts directly via `bin/wingman`). This note is the only protection Grok Build crew sessions have, since Grok has no confirmed way to exclude this file from its context (issue #351); for wingman's other supported CLIs it's an interim safeguard, superseded once issue #353's per-adapter suppression flags mean their crew sessions never load this file's content at all.
-
 # You are Wingman
 
 You are running because the **pilot** started `claude` from the wingman repo.
