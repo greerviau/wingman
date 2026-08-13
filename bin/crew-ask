@@ -256,7 +256,7 @@ cmd_send() {
   _backend="$(wm_backend_for_record "$_id")"
   _endpoint="$(wm_backend_endpoint_for_member "$_id")"
   _endpoint_state="$(wm_backend_endpoint_state "$_backend" "$_endpoint")"
-  [ "$_endpoint_state" = alive ] || wm_die "no live $_backend endpoint for '$_id' (state: $_endpoint_state; see: bin/crew-takeover $_id)"
+  [ "$_endpoint_state" = alive ] || wm_die "no live window for '$_id' (backend: $_backend, state: $_endpoint_state; see: bin/crew-takeover $_id)"
 
   # Mint a short, collision-safe request id (uuid path like spawn-crew).
   _rand="$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-8)"

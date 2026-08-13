@@ -92,7 +92,7 @@ fi
 BACKEND="$(wm_backend_for_record "$ID")"
 ENDPOINT="$(wm_backend_endpoint_for_member "$ID")"
 _ENDPOINT_STATE="$(wm_backend_endpoint_state "$BACKEND" "$ENDPOINT")"
-[ "$_ENDPOINT_STATE" = alive ] || wm_die "no live $BACKEND endpoint for '$ID' (state: $_ENDPOINT_STATE; see: bin/crew-takeover $ID)"
+[ "$_ENDPOINT_STATE" = alive ] || wm_die "no live window for '$ID' (backend: $BACKEND, state: $_ENDPOINT_STATE; see: bin/crew-takeover $ID)"
 
 # Pointer, not payload: a multi-line message, or one past WM_SAY_INLINE_MAX
 # chars, is written to a file and only a single-line pointer is typed into the

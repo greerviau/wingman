@@ -44,7 +44,15 @@ wm_backend_endpoint_for_member() {
   local id=$1 backend window
   backend="$(wm_backend_for_record "$id")"
   window="$(wm_backend_record_field "$id" window)"
-  if [ "$backend" = tmux ]; then wm_tmux_win_target "$window"; else printf '%s\n' "$window"; fi
+  # Legacy fixtures and records may omit the compatibility display field; tmux
+  # can recover its historical endpoint from the stable member id. Herdr never
+  # guesses an endpoint because its pane identity is opaque and non-derivable.
+  if [ "$backend" = tmux ]; then
+    [ -n "$window" ] || window="wm-$id"
+    wm_tmux_win_target "$window"
+  else
+    printf '%s\n' "$window"
+  fi
 }
 wm_backend_create_container() {
   local backend=$1 cwd=$2
