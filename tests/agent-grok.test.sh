@@ -68,6 +68,17 @@ assert_not_contains "no --prompt (opencode's own flag) leaks into a grok launch"
 # rides behind --rules rather than as a bare positional argument.
 assert_contains "the composed brief is delivered via --rules, grok's own direct flag" "$exec_line" "--rules "
 assert_not_contains "no --system-prompt-override (grok's OTHER sysprompt flag, not the one this descriptor uses) leaks in" "$exec_line" "--system-prompt-override"
+# Round-1 review must-fix: a bare "--rules %s" template composes the
+# sysprompt FILE PATH literally (wm_agent_emit_sysprompt's flag branch
+# substitutes the path, not the file's content) - every grok crew member
+# would launch with no playbook and no status contract at all, the exact
+# bug this assertion pair exists to catch. Checking only "--rules " is
+# present (the original, insufficient assertion) is satisfied by the
+# broken shape too - both checks below must actually distinguish it.
+assert_contains "--rules wraps the sysprompt file in a real \$(cat ...) content expansion, not a bare path" \
+  "$exec_line" "--rules \"\$(cat '"
+assert_not_contains "the composed line never ends with a bare .sysprompt.md path right after --rules (the literal-path bug's own signature)" \
+  "$exec_line" "--rules '"
 
 # --- WM_AGENT_ENV_PREFIX must precede the literal `exec` word ---------------
 # The exact bug class round-2 review of PR #350 caught for opencode: `VAR=val`

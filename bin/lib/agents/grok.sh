@@ -163,8 +163,18 @@ WM_AGENT_EFFORT_VALUES="low medium high"
 # (auth-gated, see header) - this is a documented choice from --help's own
 # wording and consistency with the rest of this schema, not a behaviorally
 # confirmed one.
+#
+# The %s substitutes a FILE PATH, not file content (wm_agent_emit_sysprompt's
+# own flag branch passes the sysprompt file's path straight through) - the
+# template itself must expand it, exactly like claude.sh/pi.sh's own
+# '--append-system-prompt "$(cat %s)"'. A bare "--rules %s" (this file's own
+# original, broken value) would compose --rules '<path>/<id>.sysprompt.md' -
+# the literal path string as the rules text, not its contents, leaving every
+# grok crew member with no playbook and no status contract at all (round-1
+# review of this PR, a real launch-breaking bug, reproduced end-to-end
+# against the real bin/spawn-crew composition path - not a hypothetical).
 WM_AGENT_SYSPROMPT_MODE=flag
-WM_AGENT_SYSPROMPT_FLAG="--rules %s"
+WM_AGENT_SYSPROMPT_FLAG='--rules "$(cat %s)"'
 WM_AGENT_SUBMIT_SETTLE=""
 # grok's own slash-autocomplete popup eats the first Enter for an
 # argument-taking skill command, requiring a genuine second Enter after the
