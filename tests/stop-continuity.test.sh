@@ -721,9 +721,17 @@ echo "  SKIP - case 219a quarantined pending issue #263 (mid-window re-claim del
 # check ever fires - producing a genuine "fire" classification
 # (compose_attention_reason's roster-report text) instead of the
 # "unexpected watch-cycle exit" wording this test asserts on. Confirmed
-# directly from CI's own log, not inferred: the captured body was the real
-# "Crew need your attention..." roster text, not a wait_for_gone timeout
-# artifact. That is exactly the "mid-window re-claim" mechanism issue #263
+# directly from CI's own log, not inferred, and precisely: the hook did
+# NOT exit within the (then 600-try) budget - `FAIL - the hook exits` is
+# genuinely in that run's log, this is a real timeout, not a false
+# assertion - but the SUBSEQUENT unconditional `wait` (which every case in
+# this file uses right after its own wait_for_gone, regardless of that
+# poll's own pass/fail) still captured the hook's eventual real output once
+# it did exit, and that output was the real "Crew need your attention..."
+# roster text - not truncated or malformed. Both facts hold at once: a
+# genuine poll-budget timeout, and a genuine fire classification once the
+# process actually finished. That is exactly the "mid-window re-claim"
+# mechanism issue #263
 # already names for cases 7c/219a above - this case shares it, just via a
 # path #308's original fix didn't anticipate. Quarantined rather than
 # reworked here for the same reason 7c/219a are: this is a genuine defect
@@ -1043,11 +1051,12 @@ while [ ! -f "$WINGMAN_HOME/watch.suppressed" ] && [ "$_round" -lt 6 ]; do
     fi
     sleep 0.1; _n=$((_n+1))
   done
-  # 600 tries (120s), not the 100-try default (issue #346): this loop's own
-  # kill reaches hook exit via the same external-SIGKILL -> --classify
-  # forensics chain as case 8e above, which real CI (PR #348) has shown
-  # needs 600, not 300, under real contention.
-  wait_for_gone "$hp" 600 >/dev/null 2>&1
+  # No wait_for_gone here (review, round 2): a poll immediately followed by
+  # an unconditional `wait` on the same pid is inert - `wait` blocks until
+  # the process actually exits regardless of how many times a preceding
+  # poll already tried, so a tries budget on that poll cannot change this
+  # loop's own outcome either way. The unconditional wait below is what
+  # actually gates this.
   wait "$hp" 2>/dev/null
   _trip_out="$(cat "$WINGMAN_HOME/sr$_round.out" 2>/dev/null)"
   _trip_err="$(cat "$WINGMAN_HOME/sr$_round.err" 2>/dev/null)"
@@ -1115,10 +1124,9 @@ while [ ! -f "$WINGMAN_HOME/watch-d8h.suppressed" ] && [ "$_oround" -lt 6 ]; do
     fi
     sleep 0.1; _on=$((_on+1))
   done
-  # 600 tries (120s), not the 100-try default (issue #346): same
-  # kill -> --classify forensics chain as case 8e/8b above, owner-scoped -
-  # real CI (PR #348) has shown this chain needs 600, not 300.
-  wait_for_gone "$ohp" 600 >/dev/null 2>&1
+  # No wait_for_gone here - same reasoning as case 8b's identical loop
+  # above (review, round 2): a poll immediately followed by an unconditional
+  # wait on the same pid cannot change this loop's own outcome.
   wait "$ohp" 2>/dev/null
 done
 assert_true "the owner-scoped standdown trips within a bounded number of genuine deaths" "[ -f '$WINGMAN_HOME/watch-d8h.suppressed' ]"
@@ -1226,16 +1234,34 @@ rm -f "$WINGMAN_HOME/watch.suppressed"
 # (+11.8% per suite run) once the epoch fix below removed the need for that
 # much padding.
 #
-# Case 9 uses a 3s margin, case 9b (below) a tighter 1s - deliberately NOT
+# Case 9 uses a 10s margin, case 9b (below) a tighter 1s - deliberately NOT
 # matched, because their own trigger latencies differ: case 9's is
-# `wm_state crew-set`, a real `uv run` subprocess with real, load-variable
-# latency, run AFTER this sleep completes; case 9b's is a near-instant
-# `kill -9`. Tightening case 9 to match 9b flaked locally (crew-set's own
-# latency alone occasionally exceeded a sub-second margin). Case 9's own
-# property (a fire correctly prioritized over a natural rollover) was not
-# what review's mutation test (see case 9b) found vacuous at 3s, so there
-# is no equivalent evidence it needs a tighter one - only that it breaks
-# under one.
+# `wm_state crew-set` (below), which does not itself complete the property
+# under test - `bin/watch-fleet`'s own poll loop must then also notice the
+# flip, ack it, and write $EXITFILE, each step its own `uv run` subprocess -
+# where case 9b's is a single near-instant `kill -9`. A second review round
+# caught this directly: an earlier 3s margin (chosen by analogy to 9b's
+# original draft, never independently measured for case 9's own chain)
+# flaked ~36% of runs against completely unmutated production code -
+# NOT a mutation, a real regression this change introduced. Instrumented
+# the real crew-set -> watch-fleet-notices -> ack -> $EXITFILE-write chain
+# directly (not guessed): ~2.4-2.7s on this box at rest, ~4.6-5.2s with
+# 8 added CPU-bound processes competing for its 8 cores - so 10s is a
+# real, measured value with a safety factor of roughly 2x the worst
+# directly-observed sample, not a number picked by widening until the
+# flake stopped (the anti-pattern this whole file's stabilization exists
+# to end). Mutation-tested afterward to confirm 10s is still sensitive,
+# not just stable: `bin/watch-fleet`'s own fire() writes $EXITFILE
+# unconditionally, specifically so it always wins a race against the
+# referee's own noclobber "rolled" write (see fire()'s own comment,
+# "the highest-priority writer... must never lose") - PROVIDED fire()
+# reaches that write before the referee's subsequent `kill -TERM $child`
+# can land. Widening the gap between fire()'s own ack step and its
+# $EXITFILE write (modeling contention in that same production code path,
+# not editing this test) reliably catches at a 8-9s widened gap (3/3) -
+# reachable in principle under real CI contention - while 10s held clean
+# against the real, unmutated hook (5/5, no false positive). Re-verify
+# against the same kind of mutation before changing this value.
 new_home
 add_crew_window d9
 wm_state crew-set --id d9 --status working --summary busy >/dev/null
@@ -1244,7 +1270,16 @@ printf '{}' | bash "$HOOK" >"$WINGMAN_HOME/hook9r.out" 2>&1 &
 h9r=$!; wm_track "$h9r"
 assert_true "a cycle claims" "wait_for_file '$WINGMAN_HOME/watch.pid'"
 cpid9r="$(cat "$WINGMAN_HOME/watch.pid")"
-sleep "$(remaining_before_expiry "$cpid9r" "$WM_STOP_CONTINUITY_WINDOW" 3)"
+_r9="$(remaining_before_expiry "$cpid9r" "$WM_STOP_CONTINUITY_WINDOW" 10)"
+# A failed /proc read or uv invocation inside remaining_before_expiry prints
+# nothing and, under this file's `set -u` (not `set -e`), a `sleep ""`
+# right after would error and be silently skipped rather than abort - the
+# kill/flip below would then fire almost immediately after claim instead of
+# near expiry, making the assertion below unable to fail no matter what the
+# production code does (review, round 2). Guarded explicitly rather than
+# trusted implicitly.
+assert_true "remaining_before_expiry returned a real duration, not a silent failure" "case \"\$_r9\" in ''|*[!0-9.]*) false ;; *) true ;; esac"
+sleep "$_r9"
 wm_state crew-set --id d9 --status review --summary "done" >/dev/null
 assert_true "the hook exits (via fire, not the referee's rollover)" "wait_for_gone $h9r 100"
 wait "$h9r" 2>/dev/null
@@ -1267,29 +1302,43 @@ cpid9s="$(cat "$WINGMAN_HOME/watch.pid")"
 #
 # 1s margin: review of this fix (issue #346) mutation-tested an earlier
 # draft (a 3s margin computed from a timestamp captured before the hook
-# launched, not the child's own start) by widening the gap between the
-# child's reap and the exitfile snapshot read in hooks/stop-continuity.sh
-# (modeling how contention could plausibly delay that reap-to-snapshot step
-# in real production, not by editing this test) - and found that draft
-# passed regardless: the referee's own remaining countdown at kill time was
-# never short enough for even a multi-second widened gap to let it
-# complete, because the pre-launch timestamp overstated elapsed time by
-# however long the hook's own pre-child work (a crew-list check,
-# wm_watcher_up, compute_pr_watch_needed) took - silently loosening the
-# margin regardless of what value was asked for. Fixed by anchoring to the
-# child's own actual start (remaining_before_expiry, above), which removed
-# that bias entirely. Re-verified against the same mutation after the fix:
-# 1s reliably catches a 1s modeled gap widening (3/3), and held with no
-# false "window rolled" positive against the real, unmutated hook under
-# this box's own real ambient load (5/5). A measured tradeoff between test
+# launched, not the child's own start) precisely: moved exitfile_snapshot's
+# read in hooks/stop-continuity.sh from immediately after `wait "$child"`
+# to after the referee is explicitly cancelled (`kill "$referee"; wait
+# "$referee"`), with a widened gap inserted BEFORE that cancellation step
+# (giving the referee strictly more real time to complete its own
+# sleep+write on its own, before this code ever tries to stop it -
+# inserting the delay after cancellation instead has no effect, since a
+# referee already sent SIGTERM cannot write regardless of how long you
+# then wait; this file's own git history has an earlier, wrong
+# reconstruction of this mutation that gave a false pass for exactly that
+# reason). That draft passed regardless at both a 1s and a 2s gap: the
+# referee's own remaining countdown at kill time was never short enough
+# for the widened gap to matter, because the pre-launch timestamp
+# overstated elapsed time by however long the hook's own pre-child work
+# (a crew-list check, wm_watcher_up, compute_pr_watch_needed) took -
+# silently loosening the margin regardless of what value was asked for.
+# Fixed by anchoring to the child's own actual start (remaining_before_
+# expiry, above), which removed that bias entirely. Re-verified against
+# the identical mutation, same gap values, after the fix: 1s reliably
+# catches both a 1s and a 2s modeled gap widening (3/3 each), matching
+# origin/main's own original detection pattern, and held with no false
+# "window rolled" positive against the real, unmutated hook under this
+# box's own real ambient load (5/5). A measured tradeoff between test
 # sensitivity and tolerance for load-induced jitter, not an arbitrary
 # constant - re-verify against the same kind of mutation before changing it.
-sleep "$(remaining_before_expiry "$cpid9s" "$WM_STOP_CONTINUITY_WINDOW" 1)"
+_r9b="$(remaining_before_expiry "$cpid9s" "$WM_STOP_CONTINUITY_WINDOW" 1)"
+# See case 9's own identical guard above for why this assertion exists.
+assert_true "remaining_before_expiry returned a real duration, not a silent failure" "case \"\$_r9b\" in ''|*[!0-9.]*) false ;; *) true ;; esac"
+sleep "$_r9b"
 kill -9 "$cpid9s" 2>/dev/null
-# 600 tries (120s), not the 100-try default: this kill reaches the hook's
-# exit via the same external-SIGKILL-to-a-claimed-child -> --classify
-# forensics chain as cases 7c'/8e below, which real CI (PR #348) has shown
-# needs 600, not 300, under real contention (issue #346).
+# 600 tries (120s), not the 100-try default, for headroom: this kill
+# reaches the hook's exit via the same external-SIGKILL-to-a-claimed-child
+# -> --classify forensics chain as cases 7c'/8e below. Note this budget
+# widening did NOT, by itself, fix 7c'/8e - those cases are quarantined
+# under issue #263 for a separate reason (see that quarantine's own
+# comment) - so treat this 600 as headroom against a slow forensics chain,
+# not as an empirically-derived "this exact number was needed" claim.
 assert_true "the hook exits" "wait_for_gone $h9s 600"
 wait "$h9s" 2>/dev/null
 out9s="$(cat "$WINGMAN_HOME/hook9s.out" 2>/dev/null)"
