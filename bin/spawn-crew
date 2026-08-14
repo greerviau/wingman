@@ -7,7 +7,7 @@
 #              --objective "<what to do>" \
 #              [--id <slug>] [--input <plan-or-report-path>] \
 #              [--model <alias|id>] [--effort <low|medium|high|xhigh|max>] \
-#              [--agent <name>] \
+#              [--agent <name>] [--backend <tmux|herdr>] \
 #              [--allow-merge] [--waive-review-gate] [--force-during-outage] \
 #              [--force-during-usage-limit] [--constraint "<text>" ...]
 #
@@ -100,7 +100,7 @@ set -u
 . "$(dirname "$0")/lib/common.sh"
 . "$(dirname "$0")/lib/agent.sh"
 
-TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; AGENT=""; SCOPE="repo"; ALLOW_MERGE=0; WAIVE_REVIEW_GATE=0; FORCE_DURING_OUTAGE=0; FORCE_DURING_USAGE_LIMIT=0
+TYPE=""; REPO_ARG=""; OBJECTIVE=""; ID=""; INPUT=""; MODEL=""; EFFORT=""; AGENT=""; BACKEND=""; SCOPE="repo"; ALLOW_MERGE=0; WAIVE_REVIEW_GATE=0; FORCE_DURING_OUTAGE=0; FORCE_DURING_USAGE_LIMIT=0
 CONSTRAINTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -113,6 +113,7 @@ while [ $# -gt 0 ]; do
     --model)     MODEL="$2"; shift 2 ;;
     --effort)    EFFORT="$2"; shift 2 ;;
     --agent)     AGENT="$2"; shift 2 ;;
+    --backend)   BACKEND="$2"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift 1 ;;
     --waive-review-gate) WAIVE_REVIEW_GATE=1; shift 1 ;;
     --force-during-outage) FORCE_DURING_OUTAGE=1; shift 1 ;;
@@ -257,6 +258,10 @@ esac
 [ -n "$AGENT" ] || AGENT="${WM_AGENT:-}"
 [ -n "$AGENT" ] || AGENT="claude"
 wm_agent_resolve "$AGENT"
+
+# Resolve the terminal backend once for this spawn. Herdr dependency and
+# protocol checks happen before a worktree or endpoint is created.
+BACKEND="$(wm_backend_select "$BACKEND")" || exit 1
 
 # Permission posture for the (unattended) crew session. Default bypassPermissions;
 # explicit empty (WM_PERMISSION_MODE=) disables it and falls back to prompting.
@@ -510,24 +515,27 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
 } > "$LAUNCH"
 chmod +x "$LAUNCH"
 
-# --- launch the tmux window --------------------------------------------------
-wm_tmux_ensure_session
-# The target is session-scoped via the trailing colon. `new-window` takes a
-# target-*window*, so a bare "$WM_TMUX_SESSION" is resolved window-first: when
-# the caller's current session holds a window of that same name (e.g. the pilot
-# runs wingman in a tmux window named "wingman"), tmux binds the target to that
-# window's index and fails with "create window failed: index N in use". The
-# trailing colon forces session-scope resolution, so tmux inserts at the next
-# free index in our session regardless of window names elsewhere. The "="
-# prefix (WM_TMUX_TARGET) makes the session part exact-match, so the window
-# can only ever land in the crew session wm_tmux_ensure_session just
-# guaranteed - never in a prefix-matched neighbour like "wingman-main".
-# -PF prints the new window's id (@N); recorded in the roster so stray-window
-# adoption can match this exact window, not just its name.
-WINDOW_ID="$(wm_tmux new-window -d -PF '#{window_id}' -t "$WM_TMUX_TARGET:" -n "$WINDOW" "bash $(quote "$LAUNCH")")"
-_new_window_rc=$?
-if [ "$_new_window_rc" -ne 0 ] || [ -z "$WINDOW_ID" ]; then
-  wm_die "tmux new-window failed for '$ID' (window '$WINDOW', exit $_new_window_rc) - no window was created, nothing to record or attach to"
+# --- create the backend endpoint --------------------------------------------
+# The endpoint is created before crew-add so the roster can record its exact
+# opaque target. Herdr starts the fixed launch command only after that record is
+# durable; a failed selected backend never falls back to tmux.
+CONTAINER="$(wm_backend_create_container "$BACKEND" "$REPO")" ||
+  wm_die "could not create $BACKEND runtime container for '$ID'"
+HERDR_SESSION_FIELD=""; HERDR_WORKSPACE_ID=""; HERDR_TAB_ID=""; HERDR_PANE_ID=""
+if [ "$BACKEND" = tmux ]; then
+  WINDOW_ID="$(wm_backend_create_member "$BACKEND" "$CONTAINER" "$WINDOW" "$REPO" "$LAUNCH")"
+  [ -n "$WINDOW_ID" ] || wm_die "tmux endpoint creation failed for '$ID'"
+  ENDPOINT="$(wm_tmux_win_target "$WINDOW")"
+else
+  _endpoint_fields="$(wm_backend_create_member "$BACKEND" "$CONTAINER" "$WINDOW" "$REPO" "$LAUNCH")" ||
+    wm_die "Herdr endpoint creation failed for '$ID'"
+  IFS="$(printf '\t')" read -r HERDR_SESSION_FIELD HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID WINDOW <<EOF
+$_endpoint_fields
+EOF
+  WINDOW_ID="$HERDR_TAB_ID"
+  ENDPOINT="$WINDOW"
+  [ -n "$HERDR_SESSION_FIELD" ] && [ -n "$HERDR_WORKSPACE_ID" ] && [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] && [ -n "$ENDPOINT" ] ||
+    wm_die "Herdr endpoint metadata was incomplete for '$ID'"
 fi
 
 # --- record in the roster ----------------------------------------------------
@@ -537,7 +545,9 @@ fi
 ADD_ARGS=(--id "$ID" --type "$TYPE" --objective "$OBJECTIVE" --input "$INPUT" \
   --repo "$REPO" --scope "$SCOPE" --parent "${WINGMAN_CREW_ID:-}" \
   --window "$WINDOW" --window-id "$WINDOW_ID" --session-id "$SID" --worktree "$WORKTREE" \
-  --agent "$AGENT")
+  --backend "$BACKEND" --herdr-session "$HERDR_SESSION_FIELD" \
+  --herdr-workspace-id "$HERDR_WORKSPACE_ID" --herdr-tab-id "$HERDR_TAB_ID" \
+  --herdr-pane-id "$HERDR_PANE_ID" --agent "$AGENT")
 [ "$ALLOW_MERGE" = 1 ] && ADD_ARGS+=(--allow-merge)
 [ "$WAIVE_REVIEW_GATE" = 1 ] && ADD_ARGS+=(--waive-review-gate)
 [ -n "$REVIEW_TOKEN" ] && ADD_ARGS+=(--review-token "$REVIEW_TOKEN")
@@ -561,7 +571,7 @@ fi
 # (issue #96).
 [ -n "$REMOTE_CONTROL" ] && ADD_ARGS+=(--remote-control)
 if ! ADD_ERR="$(wm_state crew-add "${ADD_ARGS[@]}" 2>&1 >/dev/null)"; then
-  wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
+  wm_backend_close "$BACKEND" "$ENDPOINT" 2>/dev/null || true
   wm_die "crew-add failed for '$ID' - window $WINDOW was torn down, nothing to attach to: $ADD_ERR"
 fi
 # Verify-after-write: confirm the record is actually retrievable, not just that
@@ -569,8 +579,12 @@ fi
 # design, since a caller here can't tell a genuinely lost write from one that
 # merely raced and lost.
 if ! wm_state crew-get --id "$ID" >/dev/null 2>&1; then
-  wm_tmux kill-window -t "$(wm_tmux_win_target "$WINDOW")" 2>/dev/null || true
+  wm_backend_close "$BACKEND" "$ENDPOINT" 2>/dev/null || true
   wm_die "crew-add reported success for '$ID' but the record is not readable back - window $WINDOW was torn down"
+fi
+if [ "$BACKEND" = herdr ] && ! wm_backend_start_member "$BACKEND" "$ENDPOINT" "$LAUNCH"; then
+  wm_warn "Herdr launch command was not accepted for '$ID'; endpoint remains recorded for inspection"
+  exit 1
 fi
 
 # --- deliver the opening objective as the first user message -----------------
@@ -593,7 +607,7 @@ sleep "${WM_SPAWN_DELAY:-2}"
 # still honor the tty's default SIGINT disposition and the keystroke would
 # kill the freshly spawned process outright instead of clearing anything -
 # skip it here, where it has nothing to do anyway.
-WM_CLEAR_KEYS="" wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$OPENING" "$AGENT"
+WM_CLEAR_KEYS="" wm_backend_send_message "$BACKEND" "$ENDPOINT" "$OPENING" "$AGENT"
 _opening_rc=$?
 # A fresh window can be sitting on the one-time Bypass-Permissions/workspace-trust
 # gate (the two interactive dialogs no flag can bypass) rather than an idle chat
@@ -622,10 +636,10 @@ if [ "$SCOPE" = global ]; then
 else
   wm_ok "spawned $TYPE crew '$ID' in window $WINDOW (repo: $(basename "$REPO"), session $SID)"
 fi
-[ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort"
-[ "$WAIVE_REVIEW_GATE" = 1 ] && wm_ok "'$ID' spawned with the review gate waived for this effort"
-[ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage"
-[ "$FORCE_DURING_USAGE_LIMIT" = 1 ] && wm_ok "'$ID' spawned with --force-during-usage-limit"
-[ -n "$CONSTRAINTS" ] && wm_ok "'$ID' spawned with $(printf '%s\n' "$CONSTRAINTS" | grep -c .) standing constraint(s) from the human"
-printf 'attach with: tmux attach -t %s \\; select-window -t %s\n' "$WM_TMUX_TARGET" "$(wm_tmux_win_target "$WINDOW")"
+[ "$ALLOW_MERGE" = 1 ] && wm_ok "'$ID' spawned with merge autonomy for this effort (issue #46)"
+[ "$WAIVE_REVIEW_GATE" = 1 ] && wm_ok "'$ID' spawned with the review gate waived for this effort (issue #132)"
+[ "$FORCE_DURING_OUTAGE" = 1 ] && wm_ok "'$ID' spawned with --force-during-outage (issue #23)"
+[ "$FORCE_DURING_USAGE_LIMIT" = 1 ] && wm_ok "'$ID' spawned with --force-during-usage-limit (issue #24)"
+[ -n "$CONSTRAINTS" ] && wm_ok "'$ID' spawned with $(printf '%s\n' "$CONSTRAINTS" | grep -c .) standing constraint(s) from the human (issue #192)"
+printf 'attach with: '; wm_backend_attach_hint "$BACKEND" "$ENDPOINT"
 echo "$ID"

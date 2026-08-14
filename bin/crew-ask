@@ -171,22 +171,14 @@ cmd_await() {
     return 1
   }
 
-  # The delegate is gone iff its roster status is a terminal one, or (when a tmux
-  # session exists to check against) its window is absent. When no session exists
-  # to check, absence is "can't tell" - never fire undeliverable on that alone.
+  # A terminal status is conclusive. Otherwise only an authoritative backend
+  # endpoint read can declare the delegate gone; unreadable is not missing.
   delegate_gone() {
-    _dg_st="$(wm_state crew-get --id "$_to" 2>/dev/null | wm_py -c '
-import sys, json
-try:
-    print(json.load(sys.stdin).get("status") or "")
-except Exception:
-    pass
-' 2>/dev/null)"
+    _dg_st="$(wm_state crew-get --id "$_to" 2>/dev/null | wm_py -c 'import sys,json; print(json.load(sys.stdin).get("status") or "")' 2>/dev/null)"
     case "$_dg_st" in died|stood-down) return 0 ;; esac
-    if wm_tmux has-session -t "$WM_TMUX_TARGET" 2>/dev/null; then
-      wm_tmux_windows | grep -qx "wm-$_to" || return 0
-    fi
-    return 1
+    _dg_backend="$(wm_backend_for_record "$_to")"
+    _dg_endpoint="$(wm_backend_endpoint_for_member "$_to")"
+    [ "$(wm_backend_endpoint_state "$_dg_backend" "$_dg_endpoint")" = missing ]
   }
 
   if [ "$_once" = 1 ]; then
@@ -261,9 +253,10 @@ cmd_send() {
   fi
 
   # Refuse fast for a dead delegate: no point minting a request nobody can answer.
-  _window="wm-$_id"
-  wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null \
-    | grep -qx "$_window" || wm_die "no live window for '$_id' (see: bin/crew-takeover $_id)"
+  _backend="$(wm_backend_for_record "$_id")"
+  _endpoint="$(wm_backend_endpoint_for_member "$_id")"
+  _endpoint_state="$(wm_backend_endpoint_state "$_backend" "$_endpoint")"
+  [ "$_endpoint_state" = alive ] || wm_die "no live window for '$_id' (backend: $_backend, state: $_endpoint_state; see: bin/crew-takeover $_id)"
 
   # Mint a short, collision-safe request id (uuid path like spawn-crew).
   _rand="$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-8)"
@@ -296,7 +289,7 @@ cmd_send() {
   } > "$_promptfile"
   _pointer="[crew-ask $_req from $_caller_label] Read $_promptfile and answer it now, before resuming your own work - it contains a direct question and the exact reply command."
 
-  wm_tmux_send_message "$(wm_tmux_win_target "$_window")" "$_pointer" "$(wm_crew_agent_name "$_id")"
+  wm_backend_send_message "$_backend" "$_endpoint" "$_pointer" "$(wm_crew_agent_name "$_id")"
   _send_rc=$?
   if [ "$_send_rc" -ne 0 ]; then
     # Not confirmed delivered (dialog-shaped pane, unconfirmed submit - idle

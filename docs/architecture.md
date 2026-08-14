@@ -17,7 +17,7 @@ Wingman is a long-lived orchestrator session that delegates real work to a crew 
 ```mermaid
 flowchart TB
     pilot([Pilot]) <-->|"directives / reports"| wingman[Wingman<br/>orchestrator session]
-    wingman -->|"bin/spawn-crew"| crew[Crew members<br/>independent agent sessions,<br/>each in its own tmux window]
+    wingman -->|"bin/spawn-crew"| crew[Crew members<br/>independent agent sessions,<br/>each at a backend-owned endpoint]
     crew -->|"crew-set status"| state[("~/.wingman/<br/>crew.json · board.md · status files")]
     crew <-->|"crew-say / crew-ask<br/>(peer + owner messaging)"| crew
     watcher[["watch-fleet<br/>(the wake loop)"]] -->|"reads state + pane liveness"| state
@@ -42,11 +42,13 @@ Wingman wires this up in both directions:
 
 ## Harness-agnostic by design
 
-The **crew** coordination layer - tmux windows, the JSON status files, the watcher loop, and the board - does not depend on any one agent harness.
-A crew member is just an agent CLI running in a tmux window that keeps its status file current.
+The **crew** coordination layer - backend-owned terminal endpoints, the JSON status files, the watcher loop, and the board - does not depend on any one agent harness.
+A crew member is an agent CLI running at a recorded endpoint that keeps its status file current.
+The runtime backend boundary owns endpoint creation, capture, delivery, liveness, inventory, and close operations.
+tmux is the byte-compatible default backend; Herdr is an experimental alternative selected explicitly or by the documented runtime auto-detection.
 
 The launch recipe is per-CLI **descriptor**-driven (`bin/lib/agent.sh`, `bin/lib/agents/<name>.sh`): `bin/spawn-crew` resolves which descriptor to use (an explicit `--agent`, then `config.local.toml`'s `[harness.agent]` table, then `$WM_AGENT`, then the built-in default `claude`) and composes every launch flag from that descriptor's fields, rather than hardcoding one CLI's flag shape. Swapping harnesses means adding a descriptor and pointing selection at it - both isolated in `bin/lib/agents/`, never leaking into the crew coordination layer itself. `claude`, `pi`, `opencode`, `codex`, and `grok` are the descriptors this repo ships.
-Wingman deliberately avoids a harness's native background-agent/attach/resume features to run or take over *crew*, because that would wed the crew layer to one harness. tmux attach is the takeover path precisely because it is neutral - it reaches whatever agent CLI is in the window.
+Wingman deliberately avoids a harness's native background-agent/attach/resume features to run or take over *crew*, because that would wed the crew layer to one harness. The selected backend supplies takeover guidance precisely because it is neutral - it reaches whatever agent CLI is at the endpoint.
 
 The one thing that is legitimately harness-specific is **how the watcher wakes wingman** (see below) - a private loop between wingman and its own supervisor, not part of the crew layer.
 Swapping harnesses means swapping that one arming primitive, exactly as it means swapping which agent descriptor `bin/spawn-crew` resolves; both are isolated, neither leaks into the crew coordination layer.

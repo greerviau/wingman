@@ -672,6 +672,13 @@ def cmd_crew_add(args):
         "parent": getattr(args, "parent", "") or "",
         "window": args.window,
         "window_id": getattr(args, "window_id", "") or "",
+        # The runtime backend is captured at spawn. Missing means tmux for
+        # records created before backend selection existed.
+        "backend": getattr(args, "backend", "") or "",
+        "herdr_session": getattr(args, "herdr_session", "") or "",
+        "herdr_workspace_id": getattr(args, "herdr_workspace_id", "") or "",
+        "herdr_tab_id": getattr(args, "herdr_tab_id", "") or "",
+        "herdr_pane_id": getattr(args, "herdr_pane_id", "") or "",
         "session_id": args.session_id,
         # The resolved agent CLI descriptor this member launched with (issue
         # #25) - see the --agent argument's own comment above for why this is
@@ -1183,8 +1190,14 @@ def cmd_crew_set(args):
                 # window_id is likewise roster-only: crew-resume re-registers the id
                 # of the replacement window it creates, so stray-window adoption
                 # (wm_tmux_adopt_strays) keeps an exact identity to match on.
+                if getattr(args, "window", None) is not None:
+                    r["window"] = args.window
                 if getattr(args, "window_id", None) is not None:
                     r["window_id"] = args.window_id
+                for endpoint_field in ("backend", "herdr_session", "herdr_workspace_id",
+                                        "herdr_tab_id", "herdr_pane_id"):
+                    if getattr(args, endpoint_field, None) is not None:
+                        r[endpoint_field] = getattr(args, endpoint_field)
                 # Roster-only (issue #251): a successful resume clears the WIP-anchor
                 # pointer/error from the death it just recovered from.
                 if getattr(args, "clear_wip_anchor", False):
@@ -1535,12 +1548,31 @@ def cmd_reconcile(args):
     owner = getattr(args, "owner", None)
     apierr_re = getattr(args, "apierr_re", None) or DEFAULT_APIERR_RE
     live_windows = set(w for w in (args.windows or "").split(",") if w)
+    inventory_entries = []
+    inventory_backends = set()
+    if getattr(args, "inventory", ""):
+        for line in args.inventory.splitlines():
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(item, dict) and item.get("backend"):
+                inventory_entries.append(item)
+                inventory_backends.add(item["backend"])
+        inventory_backends.update(b for b in (getattr(args, "inventory_backends", "") or "").split(",") if b)
+    inventory_endpoints = set((item.get("backend"), item.get("endpoint")) for item in inventory_entries)
     with with_locked(crew_json_path()):
         roster = load_roster()
         changed = []
         for r in roster:
             m = merged(r)
-            if m.get("status") in LIVE_STATES and r.get("window") not in live_windows:
+            backend = r.get("backend") or "tmux"
+            if inventory_backends:
+                endpoint = r.get("window") or ""
+                missing_endpoint = backend in inventory_backends and (backend, endpoint) not in inventory_endpoints
+            else:
+                missing_endpoint = r.get("window") not in live_windows
+            if m.get("status") in LIVE_STATES and missing_endpoint:
                 r["status"] = "died"
                 r["updated"] = now()
                 if _apierr_match(read_text(pane_tail_path(r["id"])), apierr_re):
@@ -1563,7 +1595,7 @@ def cmd_reconcile(args):
                 changed.append(r["id"])
 
         # Dead-owner re-adopt, wingman's watcher only (owner == "").
-        if owner == "":
+        if owner == "" and not inventory_backends:
             by_id = dict((r.get("id"), r) for r in roster)
             orphans_by_owner = {}
             for r in roster:
@@ -1612,7 +1644,7 @@ def cmd_reconcile(args):
         # genuinely lost (review finding MF-1). Only a window that stays unmatched
         # past --grace-seconds is adopted, as a roster-only `blocked` record (SF-2:
         # never a status file, so a delayed crew-add can still seed one cleanly).
-        if owner == "":
+        if owner == "" and not inventory_backends:
             known_windows = set(r.get("window") for r in roster if r.get("window"))
             candidates = read_json(orphan_candidates_path(), {})
             if not isinstance(candidates, dict):
@@ -4407,6 +4439,8 @@ def render_roster_text(rows):
                 lines.append("      parked[%s]: %s" % (p.get("ref", "?"), p.get("note", "")))
         if r.get("delivery"):
             lines.append("      delivery: %s" % r["delivery"])
+        if r.get("backend") == "herdr":
+            lines.append("      backend: herdr")
         if r.get("artifact_url"):
             lines.append("      artifact-url: %s" % r["artifact_url"])
         if r.get("wip_ref_sha"):
@@ -4482,7 +4516,7 @@ def render_board():
             )
             out.append("| %s | %s%s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 r.get("type", ""), marker, id_cell, r.get("status", "") + _stall_annotation(r),
-                r.get("window", ""), repo_cell,
+                (("%s:%s" % (r.get("backend") or "tmux", r.get("window", ""))) if r.get("backend") == "herdr" else r.get("window", "")), repo_cell,
                 _cell(r.get("summary")), _cell(r.get("blocker")), _cell(parked_cell), _cell(r.get("delivery")),
                 _cell(r.get("artifact_url")),
             ))
@@ -4576,6 +4610,11 @@ def _args_crew_add(a):
     # when the tmux server does, so this is an optional precision key, never
     # the primary identity (the window name is).
     a.add_argument("--window-id", default="", dest="window_id")
+    a.add_argument("--backend", default="", choices=("tmux", "herdr"))
+    a.add_argument("--herdr-session", default="", dest="herdr_session")
+    a.add_argument("--herdr-workspace-id", default="", dest="herdr_workspace_id")
+    a.add_argument("--herdr-tab-id", default="", dest="herdr_tab_id")
+    a.add_argument("--herdr-pane-id", default="", dest="herdr_pane_id")
     # Git/PR-workflow determinant (repo scope only; bin/spawn-crew never passes
     # these for --scope global, leaving the roster field None/absent - "unknown,
     # detect yourself" rather than a false that would be wrong the instant the
@@ -4658,8 +4697,14 @@ def _args_crew_set(a):
     # Mirrors --worktree's narrow self-registration shape exactly: touches only
     # this field plus `updated`, untouched by status/announced/dedup logic.
     a.add_argument("--remote-control-connected", default=None, choices=("true", "false"), dest="remote_control_connected")
-    # Re-register the window id after crew-resume replaces the window. Roster-only.
+    # Re-register the endpoint after crew-resume replaces it. Roster-only.
+    a.add_argument("--window", default=None)
     a.add_argument("--window-id", default=None, dest="window_id")
+    a.add_argument("--backend", default=None, choices=("tmux", "herdr"))
+    a.add_argument("--herdr-session", default=None, dest="herdr_session")
+    a.add_argument("--herdr-workspace-id", default=None, dest="herdr_workspace_id")
+    a.add_argument("--herdr-tab-id", default=None, dest="herdr_tab_id")
+    a.add_argument("--herdr-pane-id", default=None, dest="herdr_pane_id")
     # Roster-only (issue #251, review round 1, nice-to-have 3): a successful
     # bin/crew-resume clears a died member's WIP-anchor pointer/error, since
     # both describe a death that is now over - a live `working` member should
@@ -4757,6 +4802,8 @@ def _args_render_board(a):
 
 def _args_reconcile(a):
     a.add_argument("--windows", default="")
+    a.add_argument("--inventory", default="", help="newline-delimited backend inventory JSON")
+    a.add_argument("--inventory-backends", default="", dest="inventory_backends")
     # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
     # omit or pass a lead id to keep reconcile to the global death-flip only.
     a.add_argument("--owner", default=None)

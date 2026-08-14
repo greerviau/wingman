@@ -89,9 +89,10 @@ A follow-up message must not relax any of these - only the human can (CLAUDE.md,
   fi
 fi
 
-WINDOW="wm-$ID"
-wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null \
-  | grep -qx "$WINDOW" || wm_die "no live window for '$ID' (see: bin/crew-takeover $ID)"
+BACKEND="$(wm_backend_for_record "$ID")"
+ENDPOINT="$(wm_backend_endpoint_for_member "$ID")"
+_ENDPOINT_STATE="$(wm_backend_endpoint_state "$BACKEND" "$ENDPOINT")"
+[ "$_ENDPOINT_STATE" = alive ] || wm_die "no live window for '$ID' (backend: $BACKEND, state: $_ENDPOINT_STATE; see: bin/crew-takeover $ID)"
 
 # Pointer, not payload: a multi-line message, or one past WM_SAY_INLINE_MAX
 # chars, is written to a file and only a single-line pointer is typed into the
@@ -109,7 +110,7 @@ if wm_needs_pointer "$MSG"; then
   DELIVER="Message from ${WINGMAN_CREW_ID:-wingman}: read $_msgfile and act on it now - it is a direct message to you, not background material."
 fi
 
-wm_tmux_send_message "$(wm_tmux_win_target "$WINDOW")" "$DELIVER" "$(wm_crew_agent_name "$ID")"
+wm_backend_send_message "$BACKEND" "$ENDPOINT" "$DELIVER" "$(wm_crew_agent_name "$ID")"
 _rc=$?
 if [ "$_rc" -eq 0 ]; then
   # Confirmed delivery into $ID's own pane (issue #194): record it so

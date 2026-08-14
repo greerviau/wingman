@@ -1792,6 +1792,32 @@ for tid in ids:
     _reconcile_died="$(wm_state reconcile --windows "$(wm_tmux_prefix_windows_csv)" --owner "$OWNER" 2>/dev/null)"
   fi
 
+  # Herdr uses the same poll backstop as tmux. Inventory and endpoint reads are
+  # passive: an unreadable Herdr API defers reconciliation rather than marking
+  # the mixed fleet dead.
+  if wm_state crew-list --all --json 2>/dev/null | grep -q '"backend": "herdr"' \
+     && wm_backend_reachable herdr "${HERDR_SESSION:-default}" 2>/dev/null; then
+    if _herdr_inventory="$(wm_backend_live_inventory herdr "${HERDR_SESSION:-default}" 2>/dev/null)"; then
+      _reconcile_died="$(wm_state reconcile --inventory "$_herdr_inventory" --inventory-backends herdr --owner "$OWNER" 2>/dev/null) $_reconcile_died"
+    else
+      _herdr_inventory=""
+    fi
+    while IFS="$(printf '\t')" read -r _hid _hstatus _hagent _htarget; do
+      [ -n "$_hid" ] || continue
+      [ "$(wm_backend_endpoint_state herdr "$_htarget")" = alive ] || continue
+      wm_backend_pane_snapshot "$_hid" herdr "$_htarget"
+      printf '%s\n' "$PANE_TEXT" | tail -n "${WM_APIERR_TAIL:-80}" > "$WM_HOME/pane-tail-$(printf '%s' "$_hid" | tr -c 'A-Za-z0-9._-' '_').txt"
+      wm_outbox_try_redeliver "$_hid" "$_htarget" "$PANE_STABLE" herdr
+    done < <(wm_state crew-list --owner "$OWNER" --json 2>/dev/null | wm_py -c '
+import json,sys
+try: rows=json.load(sys.stdin)
+except Exception: rows=[]
+for r in rows:
+    if (r.get("backend") or "tmux") == "herdr" and r.get("status") in ("working","blocked","review","stalled"):
+        print("%s\t%s\t%s\t%s" % (r.get("id",""), r.get("status",""), r.get("agent") or "claude", r.get("window") or ""))
+')
+  fi
+
   # Pane capture / messaging below needs the crew session ITSELF, not just a
   # reachable server - a member's window is addressed inside it specifically
   # (wm_tmux_win_target). If the crew session doesn't (yet) exist - e.g. the

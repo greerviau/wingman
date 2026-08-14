@@ -1803,7 +1803,7 @@ wm_outbox_sweep_abandoned() {
 # queue, independent of pane state), so it wins over pane-unstable when both
 # apply.
 wm_outbox_try_redeliver() {
-  _tr_id="$1"; _tr_target="$2"; _tr_pane_stable="$3"
+  _tr_id="$1"; _tr_target="$2"; _tr_pane_stable="$3"; _tr_backend="${4:-tmux}"
   _tr_obdir="$WM_HOME/outbox/$_tr_id"
   [ -d "$_tr_obdir" ] || return 0
   _tr_obfile="$(ls "$_tr_obdir" 2>/dev/null | grep -v '^sent-' | sort | head -1)"
@@ -1832,13 +1832,13 @@ wm_outbox_try_redeliver() {
     # actually live at; a failed send renames it back into the queue for the
     # next poll.
     mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null
-    wm_tmux_send_message "$_tr_target" \
+    wm_backend_send_message "$_tr_backend" "$_tr_target" \
       "Queued message for you: read $_tr_obsent and act on it now - it is a direct message to you, not background material." \
       "$(wm_crew_agent_name "$_tr_id")"
     _tr_rc=$?
     [ "$_tr_rc" -ne 0 ] && mv "$_tr_obsent" "$_tr_obpath" 2>/dev/null
   else
-    wm_tmux_send_message "$_tr_target" "$_tr_obmsg" "$(wm_crew_agent_name "$_tr_id")"
+    wm_backend_send_message "$_tr_backend" "$_tr_target" "$_tr_obmsg" "$(wm_crew_agent_name "$_tr_id")"
     _tr_rc=$?
     [ "$_tr_rc" -eq 0 ] && { mv "$_tr_obpath" "$_tr_obsent" 2>/dev/null || rm -f "$_tr_obpath"; }
   fi
@@ -1860,3 +1860,20 @@ wm_outbox_try_redeliver() {
   fi
   printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tr_id" "$_tr_outcome" >> "$WM_HOME/outbox-retry.log"
 }
+
+# Capture/hash one backend-owned endpoint. The watcher keeps this state shape
+# backend-neutral while adapters own endpoint syntax and CLI details.
+wm_backend_pane_snapshot() {
+  local id=$1 backend=$2 target=$3 ns=${4:-}
+  PANE_TEXT="$(wm_backend_capture "$backend" "$target" "${WM_APIERR_TAIL:-80}")"
+  local hashfile hash previous
+  hashfile="$WM_HOME/pane-$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_')${ns:+-$ns}.hash"
+  hash="$(printf '%s' "$PANE_TEXT" | cksum)"
+  previous="$(cat "$hashfile" 2>/dev/null)"
+  printf '%s\n' "$hash" > "$hashfile"
+  [ -n "$previous" ] && [ "$hash" = "$previous" ] && PANE_STABLE=1 || PANE_STABLE=0
+}
+
+# Runtime backend dispatcher. It is sourced after the tmux helpers so the
+# default adapter can delegate without changing their byte-level behavior.
+. "$WM_LIB/backend.sh"

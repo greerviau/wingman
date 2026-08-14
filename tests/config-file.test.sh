@@ -217,6 +217,7 @@ agent = "$WS/stub.sh"
 permission_mode = "acceptEdits"
 remote_control = false
 tmux_session = "cfg-session"
+backend = "tmux"
 EOF
 # A subshell, so the unsets scope to this one call: env-exports emits nothing for
 # a variable the environment already carries, and this test's own harness exports
@@ -227,6 +228,7 @@ assert_contains "[projects].roots expands ~" "$exports" "$HOME/from-tilde"
 assert_contains "[projects].pins exports the name|path shape" "$exports" "pinned-name|$WS/repoB"
 assert_contains "[harness].permission_mode exports" "$exports" "WM_PERMISSION_MODE=acceptEdits"
 assert_contains "[harness].tmux_session exports" "$exports" "WM_TMUX_SESSION=cfg-session"
+assert_contains "[harness].backend exports" "$exports" "WM_BACKEND=tmux"
 assert_contains "remote_control = false exports as empty, not '1'" "$exports" "WM_REMOTE_CONTROL=''"
 assert_contains "env-exports records which variables it set" "$exports" "WM_CONFIG_APPLIED="
 
@@ -302,6 +304,14 @@ EOF
 assert_false "an unknown setting key fails --check" "'$CONFIG' --check"
 assert_contains "the unknown setting is named" \
   "$("$CONFIG" --check 2>&1)" "unknown setting harness.agnt"
+
+wm_write_config <<'EOF'
+[harness]
+backend = "invalid"
+EOF
+assert_false "an invalid harness backend fails --check" "'$CONFIG' --check"
+assert_contains "the invalid backend names accepted values" \
+  "$("$CONFIG" --check 2>&1)" "harness.backend must be one of: tmux, herdr"
 
 wm_write_config <<'EOF'
 [nonsense]

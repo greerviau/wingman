@@ -56,7 +56,7 @@ for cid in $AFFECTED; do
   # One roster read per id, extended (issue #96) to also pull the Remote
   # Control fields alongside the existing worktree/repo read for the fallback
   # below - no separate lookup for either purpose.
-  { read -r WT; read -r RP; read -r RC; read -r RCC; read -r TY; } <<EOF
+  { read -r WT; read -r RP; read -r RC; read -r RCC; read -r TY; read -r BACKEND; read -r WINDOW; } <<EOF
 $(wm_state crew-get --id "$cid" 2>/dev/null | wm_py -c '
 import sys, json
 try:
@@ -67,7 +67,9 @@ print(d.get("worktree") or "")
 print(d.get("repo") or "")
 print("true" if d.get("remote_control", True) else "false")
 print("true" if d.get("remote_control_connected", True) else "false")
-print(d.get("type") or "")')
+print(d.get("type") or "")
+print(d.get("backend") or "tmux")
+print(d.get("window") or "")')
 EOF
 
   # A lead working directly in a shared repo checkout (no worktree of its own -
@@ -80,8 +82,10 @@ EOF
     "$(dirname "$0")/lib/untracked-docs-check.sh" "$RP" || true
   fi
 
-  if wm_tmux list-windows -t "$WM_TMUX_TARGET" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
-    _target="$(wm_tmux_win_target "$WINDOW")"
+  BACKEND="${BACKEND:-tmux}"
+  if [ "$BACKEND" = tmux ]; then _target="$(wm_tmux_win_target "$WINDOW")"; else _target="$WINDOW"; fi
+  _endpoint_state="$(wm_backend_endpoint_state "$BACKEND" "$_target")"
+  if [ "$_endpoint_state" = alive ]; then
     # Deregister from Remote Control before the window disappears (issue #96):
     # `/remote-control` is a blind stateful toggle, not an idempotent
     # disconnect, so it is only safe to send when the roster's own
@@ -110,14 +114,14 @@ EOF
       # "empty" and this call routinely exhausts to rc 5 even though the
       # submit itself always succeeds.
       _target_agent="$(wm_crew_agent_name "$cid")"
-      wm_tmux_send_message "$_target" "/remote-control" "$_target_agent"
+      wm_backend_send_message "$BACKEND" "$_target" "/remote-control" "$_target_agent"
       _rc_disc=$?
       if [ "$_rc_disc" -eq 6 ]; then
         # Busy with a composer already holding text - nothing was typed
         # (issue #214). One bounded retry gives the current turn a chance to
         # end before this member is killed with no disconnect attempt at all.
         sleep "${WM_RC_DISCONNECT_RETRY_WAIT:-3}"
-        wm_tmux_send_message "$_target" "/remote-control" "$_target_agent"
+        wm_backend_send_message "$BACKEND" "$_target" "/remote-control" "$_target_agent"
         _rc_disc=$?
         [ "$_rc_disc" -eq 6 ] && wm_warn "'$cid's /remote-control disconnect could not be typed after one retry - the pane was still mid-turn with a pending composer. Its Remote Control registration may be left dangling after this standdown."
       fi
@@ -130,8 +134,11 @@ EOF
         sleep "${WM_RC_DISCONNECT_SETTLE:-2}"
       fi
     fi
-    wm_tmux kill-window -t "$_target" 2>/dev/null || true
-    closed=$((closed+1))
+    if ! wm_backend_close "$BACKEND" "$_target" 2>/dev/null; then
+      wm_warn "could not close exact $BACKEND endpoint for '$cid'; durable state remains"
+    else
+      closed=$((closed+1))
+    fi
   fi
 
   # Worktree-removal fallback (only fires when a non-graceful exit left the tree
