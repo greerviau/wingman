@@ -168,6 +168,21 @@ TERMINAL_STATES = ("done", "died", "stood-down")
 # someone disposes of it.
 ATTENTION_STATES = ("blocked", "review", "done", "died", "stalled")
 
+# A canonical GitHub PR URL, used by cmd_terminal_nudge_check's pr-probe
+# candidacy filter and by bin/lib/pr-state-probe.sh's own re-validation. This
+# is the third hand-maintained copy of this pattern in the repo -
+# bin/lib/merge-block-diagnose.py's own PR_URL_RE is the second, replicated
+# rather than shared for the same reason that file's own comment on
+# delivery_matches_pr gives: a bare script is not an importable module.
+# Deliberately capture-group-free and anchored, unlike
+# merge-block-diagnose.py's version: that one resolves a delivery against an
+# ALREADY-KNOWN PR, while this one hands a self-contained address to `gh pr
+# view` with no repo context available in the watcher's cwd, so only the
+# canonical absolute URL form qualifies. A delivery recorded as a bare
+# number, `#12`, or a non-GitHub URL is never a probe candidate. Keep all
+# three copies in lockstep by hand; a divergence is a bug.
+PR_URL_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+/?$")
+
 # The API/connectivity-error pane signature (issue #23), duplicated here from
 # bin/watch-fleet's own WM_APIERR_RE default (never imported - the shell and
 # this file have no shared config loader; kept in sync with the portable-ERE
@@ -376,6 +391,10 @@ def wedge_anchor_path():
 
 def roster_terminal_path():
     return os.path.join(home(), "roster-terminal.json")
+
+
+def terminal_nudged_path():
+    return os.path.join(home(), "terminal-nudged.json")
 
 
 def pr_watch_beat_path(cid):
@@ -3803,6 +3822,281 @@ def cmd_roster_terminal_check(args):
             write_json(roster_terminal_path(), store)
 
 
+def _same_deliverable(a, b):
+    """True iff two recorded paths name the same deliverable file.
+
+    A producer records its artifact however it wrote it (usually repo-relative,
+    e.g. docs/plans/x.md); a consumer's --input is whatever the spawner typed,
+    which is frequently an absolute path, and frequently one rooted in a
+    different checkout of the same repo (a developer's isolated worktree).
+    Exact string equality would miss almost every real pairing, so a full
+    path-component suffix match counts as equal in either direction. A bare
+    basename with no separator of its own is required to match exactly, since
+    a suffix match on a bare filename is too weak to trust."""
+    a = str(a or "").strip()
+    b = str(b or "").strip()
+    if not a or not b:
+        return False
+    a = os.path.normpath(os.path.expanduser(a))
+    b = os.path.normpath(os.path.expanduser(b))
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if os.sep in shorter:
+        return longer.endswith(os.sep + shorter)
+    return False
+
+
+def _terminal_nudge_cols(m):
+    """(backend, window, agent) for a roster row, each defaulted exactly the
+    way bin/lib/backend.sh's own wm_backend_endpoint_from_fields expects -
+    carried forward as row columns so the shell send path re-derives none of
+    them (see cmd_terminal_nudge_check's own docstring for why that matters)."""
+    backend = m.get("backend") or "tmux"
+    window = m.get("window") or ("wm-%s" % m.get("id"))
+    agent = m.get("agent") or "claude"
+    return backend, window, agent
+
+
+def cmd_terminal_nudge_check(args):
+    """Candidate selector for the consumption nudge (Class A/D1) and the
+    forge-terminal nudge (Class C) - the same question asked twice ("is one
+    of my reports parked on a terminal condition it has not been told
+    about?"), over overlapping candidate rows, resolved by the same action
+    (one bounded wake into that member's own session, never a status write),
+    recorded in one store (terminal-nudged.json).
+
+    Never writes a member's status, `announced`, acked.json, or
+    handled.json, and never calls render_board() - this command's only
+    output is the TSV rows on stdout plus its own store.
+
+    Output: tab-separated rows, FIXED AT EIGHT COLUMNS for every row kind,
+    with no column ever emitted empty (an otherwise-empty value is written
+    as "-", since a run of consecutive tabs collapses under IFS field
+    splitting in the shell reader - see bin/watch-fleet's own call site):
+
+      <kind>\\t<id>\\t<key>\\t<extra>\\t<artifact>\\t<backend>\\t<window>\\t<agent>
+
+    consumed row: kind=consumed, id=the producer, key=the consumer's id,
+    extra=the consumer's type (or "-"), artifact=the producer's own
+    artifact path, backend/window/agent=the PRODUCER's own (see
+    _terminal_nudge_cols) - the producer is who gets messaged.
+
+    pr-probe row: kind=pr-probe, id=the member, key=the PR URL, extra="-",
+    artifact="-", backend/window/agent=the MEMBER's own.
+
+    --owner scopes the PRODUCER/MEMBER side exactly like cmd_needs_attention
+    (None = unscoped). The CONSUMER scan for consumed rows deliberately runs
+    over the full roster, not the owner-scoped slice: a plan produced by an
+    orchestrator-owned architect and handed to a lead-owned developer is
+    otherwise invisible to both cycles. Only the consumer scan is widened -
+    the producer is still only ever nudged by its own owner's cycle.
+
+    Consumed-row algorithm, for each `p` in the owner-scoped rows with
+    status == 'review' and a non-empty `artifact`:
+      - Skip if `p` has a non-empty `delivery` of any shape - such a member
+        has a delivery-shaped terminal condition of its own (the PR
+        landing, or the requester accepting the branch), and consumption of
+        a file it wrote is not that.
+      - consumers = every OTHER, non-`died` roster member whose `input`
+        names the same deliverable as `p`'s `artifact` (_same_deliverable).
+        Empty -> no row. Otherwise the consumer with the greatest
+        `spawned_at` wins; ties (and a missing `spawned_at`, which sorts as
+        the empty string) are broken by ascending id, so the choice is
+        total and deterministic.
+      - Skip if this exact (producer, consumer) pair was already marked
+        delivered. A *different* later consumer of the same artifact
+        re-qualifies - the first consumer may have been a reviewer critique
+        round, the second a real build-on.
+      - Skip if an attempt record exists for this same consumer and either
+        `tries >= --max-tries` or less than `--retry-secs` has elapsed -
+        the delivery cap, identical in spirit to the stall path's own
+        nudge cap, kept in this feature's own store rather than on the
+        roster record (a consumption nudge is not a liveness signal).
+      - Emit the row. No store write here - only terminal-nudge-mark writes
+        this half of the store, so an undelivered nudge is retried on a
+        later tick within its own cap.
+
+    pr-probe-row algorithm, for each `m` in the owner-scoped rows with
+    status == 'review':
+      - `delivery` must match PR_URL_RE (a bare number, `#12`, or a
+        non-GitHub URL is never a candidate).
+      - Skip if a live bin/pr-watch beacon is already polling this member
+        on its own behalf (_review_has_live_waker) - never duplicate that
+        query under a second trigger path.
+      - Skip if this exact delivery was already marked delivered.
+      - Skip if an attempt record exists for this same delivery under the
+        same cap as the consumed path.
+      - Skip if this delivery was already probed within --pr-poll-secs -
+        the forge-query throttle, distinct from the delivery cap above.
+      - Emit the row, AND stamp `pr_probe` at emit time (unlike the
+        consumed rows) - this throttles the NETWORK CALL bin/watch-fleet is
+        about to make, not the delivery, so a `gh` failure must not license
+        re-querying on every subsequent tick.
+
+    --retry-secs/--max-tries are deliberately never passed by bin/watch-
+    fleet, which relies on their defaults; they exist as flags purely so
+    the state-layer tests can drive a short retry window instead of
+    sleeping for real minutes."""
+    ensure_home()
+    owner = getattr(args, "owner", None)
+    pr_poll_secs = args.pr_poll_secs
+    waker_grace = args.waker_grace
+    retry_secs = args.retry_secs
+    max_tries = args.max_tries
+
+    def _entry(d, key):
+        e = d.get(key)
+        return e if isinstance(e, dict) else {}
+
+    def _col(v):
+        return v if v else "-"
+
+    with with_locked(terminal_nudged_path()):
+        store = read_json(terminal_nudged_path(), {})
+        if not isinstance(store, dict):
+            store = {}
+        changed = False
+        stamp = now()
+        stamp_dt = _parse_updated(stamp)
+
+        rows = [merged(r) for r in load_roster()]
+        scoped = [r for r in rows if owner is None or parent_of(r) == owner]
+
+        # --- consumed rows -----------------------------------------------
+        for p in scoped:
+            if p.get("status") != "review":
+                continue
+            artifact = p.get("artifact") or ""
+            if not artifact:
+                continue
+            if p.get("delivery"):
+                continue
+            pid = p["id"]
+
+            consumers = [c for c in rows
+                         if c.get("id") != pid and c.get("status") != "died"
+                         and _same_deliverable(c.get("input"), artifact)]
+            if not consumers:
+                continue
+            max_spawned = max((c.get("spawned_at") or "") for c in consumers)
+            tied = [c for c in consumers if (c.get("spawned_at") or "") == max_spawned]
+            winner = min(tied, key=lambda c: c.get("id") or "")
+
+            entry = _entry(store, pid)
+            consumed_nudge = _entry(entry, "consumed_nudge")
+            if consumed_nudge.get("consumer") == winner["id"]:
+                continue
+            attempt = _entry(entry, "consumed_attempt")
+            if attempt.get("consumer") == winner["id"]:
+                if attempt.get("tries", 0) >= max_tries:
+                    continue
+                attempt_dt = _parse_updated(attempt.get("at"))
+                if attempt_dt is not None and stamp_dt is not None \
+                        and (stamp_dt - attempt_dt).total_seconds() < retry_secs:
+                    continue
+
+            backend, window, agent = _terminal_nudge_cols(p)
+            print("\t".join([
+                "consumed", pid, winner["id"], _col(winner.get("type")), artifact,
+                backend, window, agent,
+            ]))
+
+        # --- pr-probe rows -------------------------------------------------
+        for m in scoped:
+            if m.get("status") != "review":
+                continue
+            url = (m.get("delivery") or "").strip()
+            if not PR_URL_RE.match(url):
+                continue
+            mid = m["id"]
+            if _review_has_live_waker(mid, waker_grace):
+                continue
+
+            entry = _entry(store, mid)
+            pr_nudge = _entry(entry, "pr_nudge")
+            if pr_nudge.get("delivery") == url:
+                continue
+            attempt = _entry(entry, "pr_attempt")
+            if attempt.get("delivery") == url:
+                if attempt.get("tries", 0) >= max_tries:
+                    continue
+                attempt_dt = _parse_updated(attempt.get("at"))
+                if attempt_dt is not None and stamp_dt is not None \
+                        and (stamp_dt - attempt_dt).total_seconds() < retry_secs:
+                    continue
+            pr_probe = _entry(entry, "pr_probe")
+            if pr_probe.get("delivery") == url:
+                probe_dt = _parse_updated(pr_probe.get("at"))
+                if probe_dt is not None and stamp_dt is not None \
+                        and (stamp_dt - probe_dt).total_seconds() < pr_poll_secs:
+                    continue
+
+            backend, window, agent = _terminal_nudge_cols(m)
+            print("\t".join(["pr-probe", mid, url, "-", "-", backend, window, agent]))
+
+            entry = dict(entry)
+            entry["pr_probe"] = {"delivery": url, "at": stamp}
+            store[mid] = entry
+            changed = True
+
+        if changed:
+            write_json(terminal_nudged_path(), store)
+
+
+def cmd_terminal_nudge_mark(args):
+    """Record the delivery outcome of one nudge selected by
+    cmd_terminal_nudge_check - the only writer of terminal-nudged.json's
+    `consumed_nudge`/`pr_nudge`/`consumed_attempt`/`pr_attempt` entries.
+
+    --outcome delivered writes the permanent nudge record for this
+    (id, key) pair - `consumed_nudge = {"consumer": key, "at": now()}` for
+    --kind consumed, or `pr_nudge = {"delivery": key, "state": --state or
+    "", "at": now()}` for --kind pr - and deletes the matching attempt
+    entry, since a delivered nudge has nothing left to retry. Idempotent
+    for a repeated `delivered` call.
+
+    --outcome attempted writes/bumps the matching attempt entry's `tries`
+    for this exact key, restarting the count at 1 if the prior attempt
+    entry (if any) was for a DIFFERENT key - an attempt is a retry budget
+    per candidate pairing, not a lifetime counter for the id."""
+    ensure_home()
+    cid = args.id
+    kind = args.kind
+    key = args.key
+    outcome = args.outcome
+    state = getattr(args, "state", None)
+
+    if kind == "consumed":
+        nudge_field, attempt_field, key_field = "consumed_nudge", "consumed_attempt", "consumer"
+    else:
+        nudge_field, attempt_field, key_field = "pr_nudge", "pr_attempt", "delivery"
+
+    with with_locked(terminal_nudged_path()):
+        store = read_json(terminal_nudged_path(), {})
+        if not isinstance(store, dict):
+            store = {}
+        entry = store.get(cid)
+        if not isinstance(entry, dict):
+            entry = {}
+        entry = dict(entry)
+
+        if outcome == "delivered":
+            payload = {key_field: key, "at": now()}
+            if kind == "pr":
+                payload["state"] = state or ""
+            entry[nudge_field] = payload
+            entry.pop(attempt_field, None)
+        else:
+            prior = entry.get(attempt_field)
+            prior_tries = prior.get("tries", 0) if isinstance(prior, dict) and prior.get(key_field) == key else 0
+            entry[attempt_field] = {key_field: key, "tries": prior_tries + 1, "at": now()}
+
+        store[cid] = entry
+        write_json(terminal_nudged_path(), store)
+    print(cid)
+
+
 def _valid_stall(stall):
     """Whole-object validation gating cmd_stall_recheck (issue #235) - guard
     #1 of the governing fail-closed invariant. True iff `stall` is a dict,
@@ -5207,6 +5501,31 @@ def _args_roster_terminal_check(a):
     a.set_defaults(fn=cmd_roster_terminal_check)
 
 
+def _args_terminal_nudge_check(a):
+    # Candidate selector shared by the consumption nudge (Class A/D1) and the
+    # forge-terminal nudge (Class C) - see cmd_terminal_nudge_check's own
+    # docstring. --retry-secs/--max-tries are never passed by bin/watch-fleet
+    # (which relies on their defaults); they exist so the state-layer tests
+    # can drive a short retry window instead of sleeping for real minutes.
+    a.add_argument("--owner", default=None)
+    a.add_argument("--pr-poll-secs", type=int, default=600, dest="pr_poll_secs")
+    a.add_argument("--waker-grace", type=int, default=120, dest="waker_grace")
+    a.add_argument("--retry-secs", type=int, default=900, dest="retry_secs")
+    a.add_argument("--max-tries", type=int, default=3, dest="max_tries")
+    a.set_defaults(fn=cmd_terminal_nudge_check)
+
+
+def _args_terminal_nudge_mark(a):
+    # Records the delivery outcome of one nudge selected by
+    # terminal-nudge-check - see cmd_terminal_nudge_mark's own docstring.
+    a.add_argument("--id", required=True)
+    a.add_argument("--kind", required=True, choices=("consumed", "pr"))
+    a.add_argument("--key", required=True)
+    a.add_argument("--state", default=None)
+    a.add_argument("--outcome", required=True, choices=("delivered", "attempted"))
+    a.set_defaults(fn=cmd_terminal_nudge_mark)
+
+
 def _args_stall_recheck(a):
     # The stalled re-evaluation (issue #235): re-runs the SAME detector's own
     # evidence recorded on a 'stalled' record's `stall` object at flip time
@@ -5340,6 +5659,8 @@ _SUBCOMMAND_ARGS = {
     "review-resurface-check": _args_review_resurface_check,
     "forward-motion-check": _args_forward_motion_check,
     "roster-terminal-check": _args_roster_terminal_check,
+    "terminal-nudge-check": _args_terminal_nudge_check,
+    "terminal-nudge-mark": _args_terminal_nudge_mark,
     "stall-recheck": _args_stall_recheck,
     "ack": _args_ack,
     "mark-handled": _args_mark_handled,
@@ -5372,9 +5693,9 @@ def build_parser(only=None):
     the invoked subcommand can't be determined up front (see main()).
     With `only` set to a known subcommand name, builds ONLY that one
     subcommand's parser - skipping both the add_parser() and add_argument()
-    calls for the other 38, which are never needed to parse or dispatch a
+    calls for the other 40, which are never needed to parse or dispatch a
     single already-known subcommand (see issue #326). `sub.metavar` is
-    pinned to the full 39-name list explicitly in this branch: left alone,
+    pinned to the full 41-name list explicitly in this branch: left alone,
     argparse auto-derives the "cmd" positional's metavar from however many
     choices are actually registered, so with only one subparser built it
     would shrink to "{<only>}" - changing the usage: banner on any error the
