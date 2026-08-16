@@ -40,10 +40,13 @@ wm_backend_for_record() {
   backend="$(wm_backend_record_field "$1" backend)"
   printf '%s\n' "${backend:-tmux}"
 }
-wm_backend_endpoint_for_member() {
-  local id=$1 backend window
-  backend="$(wm_backend_for_record "$id")"
-  window="$(wm_backend_record_field "$id" window)"
+# Endpoint from already-known fields, for a caller that has just read this
+# member's record for other reasons (bin/watch-fleet's terminal-condition
+# checks). wm_backend_endpoint_for_member is this same function preceded by
+# two record reads; keeping one implementation means the two can never
+# disagree about how an endpoint is formed.
+wm_backend_endpoint_from_fields() {
+  local backend=$1 id=$2 window=$3
   # Legacy fixtures and records may omit the compatibility display field; tmux
   # can recover its historical endpoint from the stable member id. Herdr never
   # guesses an endpoint because its pane identity is opaque and non-derivable.
@@ -53,6 +56,12 @@ wm_backend_endpoint_for_member() {
   else
     printf '%s\n' "$window"
   fi
+}
+wm_backend_endpoint_for_member() {
+  local id=$1 backend window
+  backend="$(wm_backend_for_record "$id")"
+  window="$(wm_backend_record_field "$id" window)"
+  wm_backend_endpoint_from_fields "$backend" "$id" "$window"
 }
 wm_backend_create_container() {
   local backend=$1 cwd=$2
