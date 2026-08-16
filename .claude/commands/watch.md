@@ -13,6 +13,8 @@ allowed-tools: Bash(bin/watch-fleet:*), Bash($WINGMAN_BIN/watch-fleet:*), Bash(b
      Every other reason needs no extra read. (The last five are produced by wingman's own top-level cycle only, so a lead never sees them.)
      Then proceed to step 2.
 
+     A reason line beginning `roster-terminal:` or `roster-unreaped:` is about **you**, not about any crew member: no report of yours is live any more and nothing has changed since. There is nothing to report to anyone. Read the owner-scoped wake file, do what its first section says (close out un-reaped `done` reports, or deal with `died` ones), then make the judgment it asks for against your own playbook's terminal condition and act on it in this turn - report `done` with your closing handoff, or spawn the phase that is missing. Then proceed to step 2.
+
      Under `direct_spawn_visibility=summary-only`, the roster report is itself an instance of wingman's Report step, not a separate mandate: a wake caused solely by an absorbable round of a direct revise loop produces no roster report at all - just proceed to step 2 and end the turn silently.
    - `remote-control-dropped` - **wingman's own top-level session's** Remote Control connection dropped.
      This outcome is only ever produced for the owner `""` cycle: `self_pane_check()` in `bin/watch-fleet` gates on `[ -z "$OWNER" ] || return 1` before it ever reads `$WM_HOME/self-pane`, so a lead's own cycle (non-empty `$WINGMAN_CREW_ID`) can never see this outcome - if you are a lead, this case does not apply to you and needs no action.
