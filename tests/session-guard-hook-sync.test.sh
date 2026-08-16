@@ -23,6 +23,13 @@
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
+# bin/wingman resolves its agent through wm_agent_resolve(), so it also
+# honors tests/lib.sh's default WM_AGENT_BIN_OVERRIDE (the stub-agent.sh
+# safety net), overriding this file's PATH-based claude stubs below. Unset
+# here for the bare bin/wingman calls; the spawn-crew/crew-resume calls set
+# their own WM_AGENT_BIN_OVERRIDE as a per-command prefix, which still wins.
+unset WM_AGENT_BIN_OVERRIDE
+
 WINGMAN="$TEST_REPO/bin/wingman"
 SPAWN="$TEST_REPO/bin/spawn-crew"
 CRESUME="$TEST_REPO/bin/crew-resume"
