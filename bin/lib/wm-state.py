@@ -374,6 +374,10 @@ def wedge_anchor_path():
     return os.path.join(home(), "wedge-anchor.json")
 
 
+def roster_terminal_path():
+    return os.path.join(home(), "roster-terminal.json")
+
+
 def pr_watch_beat_path(cid):
     return os.path.join(home(), "pr-watch-%s.beat" % _sanitize_id(cid))
 
@@ -3639,6 +3643,166 @@ def cmd_forward_motion_check(args):
         print("stalled %s" % rid)
 
 
+def _roster_terminal_signature(candidate, reports):
+    """Hash of the candidate's own (summary, blocker, artifact, delivery,
+    parked) plus each direct report's own (id, status). The candidate's own
+    half deliberately mirrors _forward_motion_signature's tuple field for
+    field - a lead that parks or unparks an item resets this clock exactly
+    as it resets that one - and deliberately excludes the candidate's own
+    `status`: cmd_roster_terminal_check's own candidacy rule already pins it
+    to 'working', so it could never contribute a change. A dedicated helper
+    rather than a parameter on _forward_motion_signature: the two answer
+    different questions over different child populations (every LIVE_STATES
+    report vs. every direct report, live or not), and coupling them would
+    make each harder to change on its own."""
+    import hashlib
+    own = (candidate.get("summary"), candidate.get("blocker"),
+           candidate.get("artifact"), candidate.get("delivery"),
+           tuple(sorted((p.get("ref"), p.get("note")) for p in candidate.get("parked") or [])))
+    reports_sig = sorted((r.get("id"), r.get("status")) for r in reports)
+    payload = json.dumps([own, reports_sig], sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def cmd_roster_terminal_check(args):
+    """Wake a `lead` whose own roster has fully closed out, so it can make
+    the judgment only it can make: is the effort actually done, or is a
+    phase simply not spawned yet. MUST be invoked by the CANDIDATE'S OWN
+    cycle (--self <own-id>), never a parent's - the opposite placement from
+    cmd_forward_motion_check, and for the opposite reason: the evidence this
+    needs (the candidate's own direct reports) is exactly what a lead's own
+    owner-scoped watch-fleet cycle already reads, and the action - waking
+    the candidate itself to make a self-judgment - is only correct when the
+    cycle that exits IS the cycle scoped to that candidate. A session always
+    arms bin/watch-fleet scoped to its own crew id, so the session a cycle's
+    exit wakes is always the session that cycle was scoped to; that is a
+    pre-existing property of how the wake loop is armed, not something this
+    check introduces, but it is what makes --self and "you" (in the wake
+    payload) the same party.
+
+    Candidate, every clause required:
+      1. --self is non-empty. The top-level orchestrator's cycle runs with
+         no crew record at all; its own close-out is out of scope here.
+      2. merged() finds a record for that id.
+      3. Its status == 'working'. A lead parked in 'review' is structurally
+         waiting on the human already, is already announced to its own
+         owner, and is already covered by the bounded review-resurface
+         reminder - waking it here too would be churn against a member
+         behaving correctly. 'blocked'/'stalled' are excluded for the same
+         reason: each is already surfaced upward as an open item.
+      4. It has at least one direct report on the roster. A lead that has
+         not spawned anything yet is mid-decomposition, not finished.
+      5. No report's merged status is in LIVE_STATES. Any live report means
+         work is genuinely in flight. This is the exact complement of
+         cmd_forward_motion_check's own candidacy rule (`if not children:
+         continue` there requires at least one LIVE_STATES report) - the
+         two checks can never both fire for the same candidate on the same
+         poll.
+
+    Given a candidate, the reason kind depends on what its non-live reports
+    actually are:
+      - >=1 report in 'done' -> 'roster-unreaped'. Each of those earned an
+        immediate, unconditional close-out under lead.md's own rule and did
+        not get one - and nothing else will ever raise it again, since
+        needs-attention announces a 'done' exactly once and then acks it.
+      - otherwise (every report 'stood-down'/'died') -> 'roster-terminal',
+        the closed-out-roster condition itself.
+
+    'died' counts as closed-out for candidacy but is NOT evidence of
+    completion: cmd_reconcile writes 'died' when a member's window simply
+    disappears (a crashed developer holding an open PR; every report at
+    once after a host/tmux restart that resumed the lead but not its team).
+    The two counts (stood-down, died) are reported separately so the caller
+    can choose a materially different wake payload whenever `died` is
+    non-zero, rather than ever implying a dead report finished its work.
+
+    Anchor/reset persistence, in roster-terminal.json: {"<self-id>":
+    {"signature": <str>, "at": <iso>}}. See _roster_terminal_signature for
+    what the signature covers. Unlike cmd_review_resurface_check's own
+    first-encounter behavior (anchor to the member's existing `announced`),
+    first encounter here anchors to NOW - the same choice
+    cmd_forward_motion_check makes and for the same reason: there is no
+    meaningful "this roster has already been closed out since X" to inherit,
+    so a lead seen for the first time (the moment this ships, or right
+    after a re-arm) always gets a full fresh window before anything fires.
+    Because report statuses are part of the signature, a `done` report the
+    lead then closes out changes the signature and restarts the clock, so
+    'roster-unreaped' and 'roster-terminal' can never fire back to back off
+    a stale anchor.
+
+    Firing: once now - at >= --window-secs, print one reason line and
+    rewrite at = now - the same "rewrite on fire" shape
+    cmd_review_resurface_check uses, making this one reminder per window
+    rather than a one-way latch.
+
+    Output, one line, only when it fires:
+      roster-terminal <self-id> <n-stood-down> <n-died> <human-duration>
+      roster-unreaped <self-id> <n-done> <human-duration>
+
+    Writes ONLY roster-terminal.json - never any status file, never
+    render_board(), never acked.json/handled.json. That last point is not
+    incidental: the candidate here is the CYCLE'S OWN OWNER, and fire()'s
+    ack loop keys a single global acked.json store on (id, updated) - had
+    this reason been routed through that path, a lead's own cycle could ack
+    its own (id, announced) pair and silently suppress a genuine
+    review/blocked announcement of ITS OWN in its parent's cycle. That is
+    why this reason gets its own call site and exit path in bin/watch-fleet
+    rather than being merged into needs-attention's rows."""
+    ensure_home()
+    self_id = (args.self_id or "").strip()
+    window_secs = args.window_secs
+    if not self_id:
+        return
+
+    rows = [merged(r) for r in load_roster()]
+    candidate = next((r for r in rows if r.get("id") == self_id), None)
+    if candidate is None or candidate.get("status") != "working":
+        return
+
+    reports = [r for r in rows if parent_of(r) == self_id]
+    if not reports:
+        return
+    if any(r.get("status") in LIVE_STATES for r in reports):
+        return
+
+    n_done = sum(1 for r in reports if r.get("status") == "done")
+    n_stood_down = sum(1 for r in reports if r.get("status") == "stood-down")
+    n_died = sum(1 for r in reports if r.get("status") == "died")
+    kind = "roster-unreaped" if n_done else "roster-terminal"
+    signature = _roster_terminal_signature(candidate, reports)
+
+    with with_locked(roster_terminal_path()):
+        store = read_json(roster_terminal_path(), {})
+        if not isinstance(store, dict):
+            store = {}
+        changed = False
+        stamp = now()
+        stamp_dt = _parse_updated(stamp)
+
+        entry = store.get(self_id)
+        if isinstance(entry, dict) and entry.get("signature") == signature:
+            anchor = entry.get("at")
+        else:
+            anchor = stamp
+            store[self_id] = {"signature": signature, "at": stamp}
+            changed = True
+
+        anchor_dt = _parse_updated(anchor)
+        if anchor_dt is not None and stamp_dt is not None:
+            elapsed = (stamp_dt - anchor_dt).total_seconds()
+            if elapsed >= window_secs:
+                store[self_id] = {"signature": signature, "at": stamp}
+                changed = True
+                if kind == "roster-unreaped":
+                    print("roster-unreaped %s %d %s" % (self_id, n_done, _human_duration(window_secs)))
+                else:
+                    print("roster-terminal %s %d %d %s" % (
+                        self_id, n_stood_down, n_died, _human_duration(window_secs)))
+
+        if changed:
+            write_json(roster_terminal_path(), store)
+
+
 def _valid_stall(stall):
     """Whole-object validation gating cmd_stall_recheck (issue #235) - guard
     #1 of the governing fail-closed invariant. True iff `stall` is a dict,
@@ -5031,6 +5195,18 @@ def _args_forward_motion_check(a):
     a.set_defaults(fn=cmd_forward_motion_check)
 
 
+def _args_roster_terminal_check(a):
+    # Class D2's own detector: wakes a `lead` whose roster has fully closed
+    # out (no direct report left in LIVE_STATES) to re-evaluate its own
+    # terminal condition. Called every bin/watch-fleet iteration BY THE
+    # CANDIDATE'S OWN cycle (--self <own-id>) - the opposite placement from
+    # forward-motion-check above, and for the opposite reason: see
+    # cmd_roster_terminal_check's own docstring.
+    a.add_argument("--self", required=True, dest="self_id")
+    a.add_argument("--window-secs", type=int, default=900, dest="window_secs")  # 15 min default
+    a.set_defaults(fn=cmd_roster_terminal_check)
+
+
 def _args_stall_recheck(a):
     # The stalled re-evaluation (issue #235): re-runs the SAME detector's own
     # evidence recorded on a 'stalled' record's `stall` object at flip time
@@ -5163,6 +5339,7 @@ _SUBCOMMAND_ARGS = {
     "usage-decide": _args_usage_decide,
     "review-resurface-check": _args_review_resurface_check,
     "forward-motion-check": _args_forward_motion_check,
+    "roster-terminal-check": _args_roster_terminal_check,
     "stall-recheck": _args_stall_recheck,
     "ack": _args_ack,
     "mark-handled": _args_mark_handled,
@@ -5195,9 +5372,9 @@ def build_parser(only=None):
     the invoked subcommand can't be determined up front (see main()).
     With `only` set to a known subcommand name, builds ONLY that one
     subcommand's parser - skipping both the add_parser() and add_argument()
-    calls for the other 37, which are never needed to parse or dispatch a
+    calls for the other 38, which are never needed to parse or dispatch a
     single already-known subcommand (see issue #326). `sub.metavar` is
-    pinned to the full 38-name list explicitly in this branch: left alone,
+    pinned to the full 39-name list explicitly in this branch: left alone,
     argparse auto-derives the "cmd" positional's metavar from however many
     choices are actually registered, so with only one subparser built it
     would shrink to "{<only>}" - changing the usage: banner on any error the
