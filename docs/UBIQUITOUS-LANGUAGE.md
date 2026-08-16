@@ -27,9 +27,12 @@ The words wingman's docs, prose, and code use for its domain concepts. Use these
 
 - **Cycle** - one run of `bin/watch-fleet`: it blocks, then exits on the first attention event.
 - **Fire** - a cycle exiting because something needs attention. The exit itself is the wake; the reason line says why.
-- **Fire reason** - the single-line cause a fire reports (`blocked:`, `review:`, `done:`, `died:`, `stalled:`, `outage-detected`, `usage-limit-approaching`, …).
+- **Fire reason** - the single-line cause a fire reports (`blocked:`, `review:`, `done:`, `died:`, `stalled:`, `outage-detected`, `usage-limit-approaching`, `roster-terminal:`, `roster-unreaped:`, …).
 - **Arm** - to start one cycle as a harness-tracked background task, so its exit re-invokes the session that armed it. A detached process cannot wake anyone and is never an arm.
 - **Attention state** - a member status that ends a cycle: `blocked`, `review`, `done`, `died`, `stalled`.
+- **Consumption nudge** - a supervisor-sent message telling a `review` producer with no `delivery` of its own that its `artifact` was handed to another member as that member's `--input`. Never a status write - only a wake into the producer's own session, so the disposition judgment and any close-out stay the producer's to make.
+- **Forge-terminal nudge** - a supervisor-sent message telling a `review` member with a canonical PR-URL `delivery` and no live `bin/pr-watch` beacon that the forge itself now reports the PR `MERGED`/`CLOSED`. Reads only the PR's `state` field, never review/comment/check-suite evidence.
+- **Roster wake** - the reason a `lead`'s own cycle exits once its roster has held no live report for `WM_ROSTER_TERMINAL_SECS` with nothing else changing: `roster-terminal` for a genuinely closed-out roster (`stood-down`/`died` reports only), `roster-unreaped` for one that still carries a `done` report the lead never closed out.
 
 ## Reporting
 
