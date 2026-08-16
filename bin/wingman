@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # wingman - optional convenience launcher.
-# cd into the wingman repo and start claude with the discovered project roots
-# added via --add-dir, so wingman's own occasional light cross-project reads
-# don't prompt. Discovery and spawning work with or without this launcher.
+# cd into the wingman repo and start the resolved orchestrator agent (claude
+# by default) with the discovered project roots added via --add-dir, so
+# wingman's own occasional light cross-project reads don't prompt. Discovery
+# and spawning work with or without this launcher.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
+. "$WM_LIB/agent.sh"
 
 # Ensure state home + a fresh-enough project cache exist.
 wm_state init >/dev/null
@@ -23,14 +25,26 @@ if wm_have uuidgen; then WINGMAN_RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')
 fi
 export WINGMAN_RUN_ID
 
-# Register this session's own pane (ask 2, wingman-side): if running inside tmux
-# ($TMUX_PANE set - the common case the existing crew tooling already assumes
-# elsewhere), record it so bin/watch-fleet can read-only watch it for a dropped
-# Remote Control connection and wake wingman the moment it happens, without ever
-# injecting keystrokes into this pane (see watch-fleet's self_pane_check). A
-# plain terminal or GUI tab with no tmux underneath simply has no pane to
-# register; best-effort, never fatal.
-[ -n "${TMUX_PANE:-}" ] && printf '%s\n' "$TMUX_PANE" > "$WM_HOME/self-pane" 2>/dev/null
+# Orchestrator CLI selection, separate from crew's $WM_AGENT/[harness.agent]
+# so changing crew's default never changes the orchestrator's. Defaults to claude.
+_orch_agent="${WM_ORCH_AGENT:-claude}"
+# wm_agent_resolve's own wm_die would otherwise leave no durable trace under
+# systemd (bin/wingman's stderr goes to a pane destroyed moments later).
+if [ ! -f "$WM_LIB/agents/$_orch_agent.sh" ]; then
+  _oaf_msg="unknown orchestrator agent '$_orch_agent' (from \$WM_ORCH_AGENT) - no descriptor at bin/lib/agents/$_orch_agent.sh."
+  wm_launch_failure "orchestrator agent" "$_oaf_msg"
+  wm_die "$_oaf_msg
+Fix \$WM_ORCH_AGENT (or unset it to use claude), then start wingman again. This failure was also recorded in $WM_HOME/last-launch-failure."
+fi
+wm_agent_resolve "$_orch_agent"
+
+# Registers this pane for watch-fleet's Remote-Control drop watch (see
+# self_pane_check) only when the resolved adapter sets WM_AGENT_REMOTE_CONTROL_FLAG; clears any stale pane/hash/fired files from a prior adapter otherwise.
+if [ -n "${TMUX_PANE:-}" ] && [ -n "$WM_AGENT_REMOTE_CONTROL_FLAG" ]; then
+  printf '%s\n' "$TMUX_PANE" > "$WM_HOME/self-pane" 2>/dev/null
+else
+  rm -f "$WM_HOME/self-pane" "$WM_HOME/self-pane.hash" "$WM_HOME/self-pane.fired"
+fi
 
 # Start the tmux-server liveness guardian (issue #218): the shared tmux
 # server behind $TMUX_PANE above has twice died with its whole cgroup scope
@@ -88,21 +102,32 @@ export WINGMAN_REPO="$WM_REPO"
 
 cd "$WM_REPO" || wm_die "cannot cd into wingman repo: $WM_REPO"
 
-# --- reconcile user-scope guard hooks (issue #241) ---------------------------
-# A merged guard hook is only active once it is registered in user-level
-# settings.json, and until now that registration only ever happened when a
-# human remembered to run bin/doctor. Fail closed, deliberately, with no
-# override: a session that could not wire its guards is the exact condition
-# that produced the incident this fixes (see the plan). The failure sink
-# makes the refusal observable even under systemd, where bin/wingman's own
-# stderr never reaches anyone (see wm_launch_failure's own comment).
-if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
-    --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
-  wm_launch_failure "guard-hook sync" "$_sync_err"
-  wm_die "could not wire wingman's user-level guard hooks: $_sync_err
+# --- reconcile guard hooks for the resolved orchestrator adapter -------------
+# A merged guard hook is only active once it is registered through the
+# resolved orchestrator adapter's own guard-hook dispatch mechanism
+# (WM_AGENT_GUARD_TRANSPORT). Fail-closed and pre-exec: the orchestrator's
+# own guards must bind before ITS first tool call, not merely before it
+# spawns its first crew member. The failure sink makes the refusal
+# observable even under systemd, where bin/wingman's own stderr never
+# reaches anyone (see wm_launch_failure's own comment).
+case "$WM_AGENT_GUARD_TRANSPORT" in
+  claude-json)
+    if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
+        --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
+      wm_launch_failure "guard-hook sync" "$_sync_err"
+      wm_die "could not wire wingman's user-level guard hooks: $_sync_err
 Fix the reported problem, or run 'bin/doctor -y', then start wingman again. This failure was also recorded in $WM_HOME/last-launch-failure."
-fi
-rm -f "$WM_HOME/last-launch-failure"   # the sync succeeded; the file means "last attempt refused"
+    fi
+    rm -f "$WM_HOME/last-launch-failure"   # the sync succeeded; the file means "last attempt refused"
+    ;;
+  *)
+    # No orchestrator-side install/verify exists for any transport but
+    # claude-json, so an unimplemented one refuses to start rather than run with no guard enforcement.
+    _got_msg="the resolved orchestrator agent '$WM_AGENT_DISPLAY_NAME' (WM_ORCH_AGENT=${WM_ORCH_AGENT:-claude}) uses guard transport '$WM_AGENT_GUARD_TRANSPORT', which has no orchestrator-side guard install/verify implementation yet. Only claude-json is supported for bin/wingman's own launch today. Unset WM_ORCH_AGENT (or set it to claude) to run the orchestrator on Claude Code."
+    wm_launch_failure "guard transport" "$_got_msg"
+    wm_die "$_got_msg"
+    ;;
+esac
 
 # --- checkout-freshness advisory (issue #241) ---------------------------------
 # Registration drift (above) is now impossible; deployment drift - this
@@ -119,4 +144,4 @@ case "$_gfc_out" in
 esac
 
 # shellcheck disable=SC2086
-exec claude $adddirs "$@"
+exec $WM_AGENT_BIN $adddirs "$@"
