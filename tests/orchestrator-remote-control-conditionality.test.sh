@@ -42,6 +42,8 @@ assert_eq "claude orchestrator: a healthy launch exits 0" "$rc_a" "0"
 assert_true "claude orchestrator: the self-pane file was written" "[ -f '$WINGMAN_HOME/self-pane' ]"
 assert_eq "claude orchestrator: it carries the tmux pane" \
   "$(cat "$WINGMAN_HOME/self-pane" 2>/dev/null)" "%wm-test-pane-a"
+assert_not_contains "claude orchestrator: no guard-transport refusal leaked into a healthy run" \
+  "$out_a" "has no orchestrator-side guard install/verify implementation"
 
 # --- a stubbed adapter with no Remote-Control-equivalent flag: skipped ------
 STUB_DESC="$TEST_REPO/bin/lib/agents/__test-orch-no-rc-stub.sh"
@@ -63,6 +65,40 @@ out_b="$(TMUX_PANE="%wm-test-pane-b" PATH="$STUBDIR_B:$PATH" WM_ORCH_AGENT=__tes
 wm_stop_guardian
 assert_eq "no-remote-control orchestrator: a healthy launch still exits 0" "$rc_b" "0"
 assert_false "no-remote-control orchestrator: no self-pane file was written" "[ -f '$WINGMAN_HOME/self-pane' ]"
+assert_not_contains "no-remote-control orchestrator: no guard-transport refusal leaked into a healthy run" \
+  "$out_b" "has no orchestrator-side guard install/verify implementation"
+
+# --- switching from claude to a no-RC adapter clears a PRIOR run's stale
+# self-pane/.hash/.fired, rather than leaving self_pane_check to read a dead
+# pointer as live -----------------------------------------------------------
+test_new_home
+MIRROR_C="$(wm_mktemp_dir)/mirror-c"
+mk_mirror "$MIRROR_C"
+STUBDIR_C1="$(wm_mktemp_dir)"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBDIR_C1/claude"; chmod +x "$STUBDIR_C1/claude"
+unset WM_AGENT_BIN_OVERRIDE
+unset WM_ORCH_AGENT
+TMUX_PANE="%wm-test-pane-c1" PATH="$STUBDIR_C1:$PATH" "$MIRROR_C/bin/wingman" >/dev/null 2>&1
+wm_stop_guardian
+assert_true "staleness setup: the first (claude) launch wrote a self-pane" "[ -f '$WINGMAN_HOME/self-pane' ]"
+# Simulates watch-fleet's own self_pane_check having already touched these on
+# a prior cycle (bin/watch-fleet:489,494) - both must be cleared too, not
+# just self-pane itself.
+printf 'stale-hash' > "$WINGMAN_HOME/self-pane.hash"
+printf 'stale-fired' > "$WINGMAN_HOME/self-pane.fired"
+
+STUBDIR_C2="$(wm_mktemp_dir)"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBDIR_C2/__test-orch-no-rc-stub-bin"
+chmod +x "$STUBDIR_C2/__test-orch-no-rc-stub-bin"
+unset WM_AGENT_BIN_OVERRIDE
+out_c="$(TMUX_PANE="%wm-test-pane-c2" PATH="$STUBDIR_C2:$PATH" WM_ORCH_AGENT=__test-orch-no-rc-stub "$MIRROR_C/bin/wingman" 2>&1)"; rc_c=$?
+wm_stop_guardian
+assert_eq "staleness: the second (no-RC) launch still exits 0" "$rc_c" "0"
+assert_false "staleness: the stale self-pane is cleared" "[ -f '$WINGMAN_HOME/self-pane' ]"
+assert_false "staleness: the stale self-pane.hash is cleared" "[ -f '$WINGMAN_HOME/self-pane.hash' ]"
+assert_false "staleness: the stale self-pane.fired is cleared" "[ -f '$WINGMAN_HOME/self-pane.fired' ]"
+assert_not_contains "staleness: no guard-transport refusal leaked into a healthy run" \
+  "$out_c" "has no orchestrator-side guard install/verify implementation"
 
 rm -f "$STUB_DESC"
 

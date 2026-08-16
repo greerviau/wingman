@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # wingman - optional convenience launcher.
-# cd into the wingman repo and start claude with the discovered project roots
-# added via --add-dir, so wingman's own occasional light cross-project reads
-# don't prompt. Discovery and spawning work with or without this launcher.
+# cd into the wingman repo and start the resolved orchestrator agent (claude
+# by default) with the discovered project roots added via --add-dir, so
+# wingman's own occasional light cross-project reads don't prompt. Discovery
+# and spawning work with or without this launcher.
 # bash-3.2-safe.
 set -u
 . "$(dirname "$0")/lib/common.sh"
@@ -26,12 +27,24 @@ export WINGMAN_RUN_ID
 
 # Orchestrator CLI selection, separate from crew's $WM_AGENT/[harness.agent]
 # so changing crew's default never changes the orchestrator's. Defaults to claude.
-wm_agent_resolve "${WM_ORCH_AGENT:-claude}"
+_orch_agent="${WM_ORCH_AGENT:-claude}"
+# wm_agent_resolve's own wm_die would otherwise leave no durable trace under
+# systemd (bin/wingman's stderr goes to a pane destroyed moments later).
+if [ ! -f "$WM_LIB/agents/$_orch_agent.sh" ]; then
+  _oaf_msg="unknown orchestrator agent '$_orch_agent' (from \$WM_ORCH_AGENT) - no descriptor at bin/lib/agents/$_orch_agent.sh."
+  wm_launch_failure "orchestrator agent" "$_oaf_msg"
+  wm_die "$_oaf_msg
+Fix \$WM_ORCH_AGENT (or unset it to use claude), then start wingman again. This failure was also recorded in $WM_HOME/last-launch-failure."
+fi
+wm_agent_resolve "$_orch_agent"
 
 # Registers this pane for watch-fleet's Remote-Control drop watch (see
-# self_pane_check), only when the resolved adapter sets WM_AGENT_REMOTE_CONTROL_FLAG (claude.sh only).
-[ -n "${TMUX_PANE:-}" ] && [ -n "$WM_AGENT_REMOTE_CONTROL_FLAG" ] && \
+# self_pane_check) only when the resolved adapter sets WM_AGENT_REMOTE_CONTROL_FLAG; clears any stale pane/hash/fired files from a prior adapter otherwise.
+if [ -n "${TMUX_PANE:-}" ] && [ -n "$WM_AGENT_REMOTE_CONTROL_FLAG" ]; then
   printf '%s\n' "$TMUX_PANE" > "$WM_HOME/self-pane" 2>/dev/null
+else
+  rm -f "$WM_HOME/self-pane" "$WM_HOME/self-pane.hash" "$WM_HOME/self-pane.fired"
+fi
 
 # Start the tmux-server liveness guardian (issue #218): the shared tmux
 # server behind $TMUX_PANE above has twice died with its whole cgroup scope
