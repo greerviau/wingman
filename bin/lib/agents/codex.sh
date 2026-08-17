@@ -73,6 +73,22 @@
 # suppression of AGENTS.md auto-loading was live-verified via a captured
 # outbound request body against a local stand-in endpoint, not a live model
 # turn - see that field's own comment below for the exact method and result.
+#
+# Separately (2026-08-17, the portable crew command vocabulary): both
+# symlink-following AND the $HOME/.agents/skills discovery path are
+# hands-on verified live against real codex-cli v0.147.0, with $HOME
+# overridden to a scratch directory containing a real symlink set built by
+# bin/lib/sync-user-skills.py (pointed at this repo's own canonical
+# .agents/skills/ tree), launched from an unrelated cwd. Two independent
+# checks: `codex debug prompt-input` (no live credentials needed) rendered
+# the model-visible prompt input with all seven wingman-<verb> names and
+# their real descriptions, each resolved through the symlink to the real
+# file; and, in a live interactive TUI pane (a syntactically-valid but
+# non-functional API key, same technique as the rest of this file's own
+# verification), typing "$wingman-sta" autocompleted to "wingman-status
+# [Skill] Show the current crew roster (who is on what, what is blocked,
+# what is ready)" - confirming the "$<skill>" invocation form end to end,
+# not merely that the file is discovered.
 
 WM_AGENT_BIN=codex
 WM_AGENT_DISPLAY_NAME="codex"
@@ -83,18 +99,28 @@ WM_AGENT_DISPLAY_NAME="codex"
 # "2. No, quit") - confirmed by walking through it directly - and there is
 # no CLI flag or documented config key to pre-accept it (unlike claude's
 # own workspace-trust, which claude_preflight below already automates via
-# claude-gate-check.py). No automation is wired up here yet: a codex crew
-# member's first launch in a given worktree will freeze on this dialog and
-# rely on the freeze detector + crew-takeover, exactly the documented
-# degradation for an adapter with no preflight function (bin/lib/agent.sh's
-# own WM_AGENT_PREFLIGHT doc comment). Confirmed live that trust DOES
-# persist per worktree path once accepted once (a second launch in the
-# same directory skips straight to the TUI), so this is a one-time cost
-# per worktree, not per-launch - still worth automating properly in a
-# follow-up (find and pre-populate whatever on-disk trust record codex
-# itself consults - not yet located this pass) rather than left as a
-# standing freeze risk indefinitely.
-WM_AGENT_PREFLIGHT=""
+# claude-gate-check.py). No automation is wired up here for THAT dialog: a
+# codex crew member's first launch in a given worktree will freeze on it
+# and rely on the freeze detector + crew-takeover, exactly the documented
+# degradation for a gate with no automation (bin/lib/agent.sh's own
+# WM_AGENT_PREFLIGHT doc comment). Confirmed live that trust DOES persist
+# per worktree path once accepted once (a second launch in the same
+# directory skips straight to the TUI), so this is a one-time cost per
+# worktree, not per-launch - still worth automating properly in a follow-up
+# (find and pre-populate whatever on-disk trust record codex itself
+# consults - not yet located this pass) rather than left as a standing
+# freeze risk indefinitely.
+#
+# WM_AGENT_PREFLIGHT IS wired up below, for a different gate: the portable
+# crew command vocabulary. codex has no per-launch flag for an arbitrary
+# skills directory - unlike pi's --skill, there is no key or CLI flag to
+# ADD a discovery path, only to disable one already found - so
+# $HOME/.agents/skills is codex's only
+# cwd-independent route, reconciled here on every spawn/resume exactly like
+# claude_preflight's own guard-hook sync below - a codex crew member never
+# launches into a half-installed vocabulary, and a moved/renamed repo
+# self-heals on the next spawn.
+WM_AGENT_PREFLIGHT=codex_preflight
 WM_AGENT_ENV_PREFIX=""
 # The orchestrator that execs every crew member is always Claude Code, so a
 # non-claude crew member (codex included) would otherwise silently inherit
@@ -238,3 +264,38 @@ WM_AGENT_POST_INTERRUPT_CLEAR=""
 # pass; no skill/extension invocation was exercised against the real
 # binary.
 WM_AGENT_SKILL_FORM="\$<skill>"
+
+# codex_preflight <repo> <perm_mode> [<action>]
+#
+# Reconciles $HOME/.agents/skills against this repo's own canonical
+# .agents/skills/ tree (bin/lib/sync-user-skills.py) - codex's only
+# cwd-independent skill-discovery location, also read by opencode and pi
+# as one of their own discovery locations, so this single reconcile serves
+# all three.
+# <repo>/<perm_mode> are unused here (this gate has nothing to do with the
+# target repo or the permission mode) but accepted for a uniform call
+# signature with every other WM_AGENT_PREFLIGHT function.
+#
+# WM_CODEX_USER_SKILLS_DIR overrides the target directory (test isolation,
+# mirrors claude_preflight's WM_CLAUDE_USER_SETTINGS/WM_CLAUDE_USER_CONFIG
+# convention) - a test suite run must never write into a real developer's
+# actual $HOME/.agents/skills.
+#
+# Mode defaults to symlink, matching grok_preflight's own convention;
+# switch WM_CODEX_SKILLS_SYNC_MODE=copy if hands-on verification ever shows
+# codex stops following a symlinked skill folder (its own docs currently
+# confirm it does - see the file header - so this is not expected to be
+# needed, but the switch exists for symmetry with grok and so bin/doctor's
+# own reconcile can read the identical variable rather than guessing).
+codex_preflight() {
+  _cop_action="${3:-spawn}"
+  if ! _cop_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" \
+      --target "${WM_CODEX_USER_SKILLS_DIR:-$HOME/.agents/skills}" --repo "$WM_REPO" \
+      --mode "${WM_CODEX_SKILLS_SYNC_MODE:-symlink}" 2>&1)"; then
+    wm_launch_failure "codex skills sync ($_cop_action)" "$_cop_err"
+    wm_die "could not reconcile codex's user-level skills directory (\$HOME/.agents/skills): $_cop_err
+Fix the reported problem, or run 'bin/doctor -y', then retry this $_cop_action."
+  fi
+  unset _cop_action _cop_err
+  return 0
+}

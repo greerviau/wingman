@@ -220,7 +220,7 @@ wm_claude_md_excludes() {
 
 # wm_compose_crew_sysprompt <out-file> <id> <type> <repo-or-workspace-root> \
 #   <scope> <constraints-newline-separated> <target-is-wm-repo:0|1> \
-#   <input-path-or-empty> <playbook-path> <include-pr-delivery:0|1>
+#   <input-path-or-empty> <playbook-path> <include-pr-delivery:0|1> <agent-name>
 #
 # Writes the crew-facing assignment header + playbook + status contract that
 # both a fresh spawn (bin/spawn-crew) and a relaunch (bin/crew-resume's
@@ -229,10 +229,23 @@ wm_claude_md_excludes() {
 # what "the crew brief" actually contains. A caller that wants relaunch-only
 # content (the progress note) appends it to the same file afterward, rather
 # than this function trying to grow a mode flag for it.
+#
+# <agent-name> is the RESOLVED descriptor name (e.g. "claude", "pi") - not read from
+# $WM_AGENT_BIN, which a test's WM_AGENT_BIN_OVERRIDE can point at a stub
+# binary while the resolved descriptor is still genuinely "claude". It is
+# what lets the vocabulary block below render claude's own bare-filename
+# form ("/status") instead of the "wingman-status" every other adapter
+# actually needs, without this function re-deriving the resolved adapter
+# itself. $WM_AGENT_SKILL_FORM is read as the ambient global
+# wm_agent_resolve already set in the caller's own process (both call sites
+# resolve the adapter before composing this brief) - not passed
+# positionally, since only the ONE field this block needs is worth reading
+# this way; every other WM_AGENT_* value stays out of this function's
+# concern entirely.
 wm_compose_crew_sysprompt() {
   _wcs_out="$1"; _wcs_id="$2"; _wcs_type="$3"; _wcs_repo="$4"; _wcs_scope="$5"
   _wcs_constraints="$6"; _wcs_target_is_wm_repo="$7"; _wcs_input="$8"
-  _wcs_playbook="$9"; _wcs_include_pr_delivery="${10}"
+  _wcs_playbook="$9"; _wcs_include_pr_delivery="${10}"; _wcs_agent="${11}"
   {
     printf '# Your assignment\n\n'
     if [ "$_wcs_scope" = global ]; then
@@ -255,6 +268,30 @@ wm_compose_crew_sysprompt() {
     if [ -n "$_wcs_input" ]; then
       printf 'Input handoff: read the plan/spec at `%s` and follow it.\n\n' "$_wcs_input"
     fi
+    # The portable crew command vocabulary. Without this block a crew
+    # member has no way to learn that seven skills describing $WINGMAN_BIN's
+    # own scripts are loaded alongside it, or how its own CLI invokes one -
+    # on the four non-claude adapters they would be reachable only by the
+    # model spontaneously matching a skill's description. Rendered once,
+    # adapter-agnostically, from $WM_AGENT_SKILL_FORM (set by
+    # wm_agent_resolve in the caller's own process before this function
+    # runs).
+    if [ -n "${WM_AGENT_SKILL_FORM:-}" ]; then
+      if [ "$_wcs_agent" = claude ]; then
+        # claude's own command files keep their bare filenames (the
+        # linchpin of the whole design: Claude Code ignores a command
+        # file's `name` frontmatter and resolves by filename instead) -
+        # "/status", not "/wingman-status" - even though the underlying
+        # skill's own `name` frontmatter is wingman-status like everywhere
+        # else.
+        _wcs_skill_example="/status"
+      else
+        _wcs_skill_example="${WM_AGENT_SKILL_FORM/<skill>/wingman-status}"
+      fi
+      printf '**The crew command vocabulary.** Seven of wingman'"'"'s crew commands - `ask`, `blocked`, `prune`, `say`, `status`, `takeover`, `watch` - are also loaded as skills named `wingman-<verb>`, e.g. `%s` invokes the same body as running `$WINGMAN_BIN/crew-list` (the `status` command) directly. Deliberately absent: `spawn` and `standdown` are never exported as skills on any adapter, so do not go looking for a `wingman-spawn` or `wingman-standdown` skill here. Invoking a skill is never required - running `$WINGMAN_BIN/<script>` directly, as the playbook below already directs, remains the documented path everywhere, including for the two withheld verbs.\n\n' "$_wcs_skill_example"
+    else
+      printf '**The crew command vocabulary.** The same seven crew commands - `ask`, `blocked`, `prune`, `say`, `status`, `takeover`, `watch` - are loaded as skills named `wingman-<verb>`, reachable through your own CLI'"'"'s `skill` tool (this adapter has no typed slash form for them). Deliberately absent: `spawn` and `standdown` are never exported as skills on any adapter. Invoking a skill is never required - running `$WINGMAN_BIN/<script>` directly, as the playbook below already directs, remains the documented path everywhere, including for the two withheld verbs.\n\n'
+    fi
     printf -- '---\n\n'
     cat "$_wcs_playbook"
     if [ "$_wcs_include_pr_delivery" -eq 1 ]; then
@@ -265,7 +302,8 @@ wm_compose_crew_sysprompt() {
     cat "$WM_PLAYBOOKS/_status-contract.md"
   } > "$_wcs_out"
   unset _wcs_out _wcs_id _wcs_type _wcs_repo _wcs_scope _wcs_constraints \
-    _wcs_target_is_wm_repo _wcs_input _wcs_playbook _wcs_include_pr_delivery _wcs_cline
+    _wcs_target_is_wm_repo _wcs_input _wcs_playbook _wcs_include_pr_delivery \
+    _wcs_agent _wcs_skill_example _wcs_cline
 }
 
 # Escape find(1) -name glob metacharacters (\, *, ?, [, ]) so a crew type

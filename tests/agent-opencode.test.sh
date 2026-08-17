@@ -45,6 +45,8 @@ assert_contains "the launch script unsets CLAUDECODE before exec'ing opencode" "
 # first token - matches it as a standalone word wherever it falls instead.
 exec_line="$(grep -E '(^|[[:space:]])exec ' "$launch")"
 assert_contains "the OPENCODE_CONFIG_CONTENT env-var bypass prefixes the exec line" "$exec_line" "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}'"
+assert_contains "the portable crew command vocabulary is loaded via OPENCODE_CONFIG_DIR, pointed at the repo's own .agents/ directory" \
+  "$exec_line" "OPENCODE_CONFIG_DIR='$TEST_REPO/.agents'"
 assert_contains "opencode's own binary is the exec target" "$exec_line" "$WS/stub.sh"
 assert_not_contains "no --permission-mode (claude's own bypass flag shape) leaks into an opencode launch" "$exec_line" "--permission-mode"
 assert_not_contains "no --session-id is emitted (opencode has no confirmed force-session-id-at-creation flag, plan §3)" "$exec_line" "--session-id"
@@ -54,6 +56,13 @@ assert_not_contains "no --effort/--variant leaks in (opencode has no effort flag
 assert_not_contains "no --add-dir/--settings (claude-only CLAUDE.md-exclusion mechanism) leaks into an opencode launch" "$exec_line" "--add-dir"
 assert_not_contains "no OPENCODE_DISABLE_PROJECT_CONFIG (rejected: silently disables all project-local opencode config, not just AGENTS.md) leaks into an opencode launch" "$exec_line" "OPENCODE_DISABLE_PROJECT_CONFIG"
 assert_contains "the system prompt is delivered via --prompt, opencode's own flag" "$exec_line" "--prompt "
+
+# --- the portable crew command vocabulary block: opencode's own
+#     empty-WM_AGENT_SKILL_FORM branch (no typed slash form exists) --------
+opencode_sysprompt_body="$(cat "$WINGMAN_HOME/crew/$id.sysprompt.md")"
+assert_contains "the crew command vocabulary block is present" "$opencode_sysprompt_body" "The crew command vocabulary."
+assert_contains "opencode's own rendering points at its skill tool, not a typed form" "$opencode_sysprompt_body" "reachable through your own CLI's \`skill\` tool"
+assert_not_contains "no e.g. slash-form example (opencode has none)" "$opencode_sysprompt_body" "e.g. \`"
 
 # --- WM_AGENT_ENV_PREFIX must precede the literal `exec` word ---------------
 # Round-2 review of PR #350: a real, blocking bug. `VAR=val` is only
@@ -67,8 +76,8 @@ assert_contains "the system prompt is delivered via --prompt, opencode's own fla
 # catch this - both the broken and fixed shapes put the env-prefix before
 # the binary path; only ordering relative to the literal "exec" word does.
 assert_true "the env-prefix precedes the literal 'exec' word, not the reverse" \
-  "printf '%s' \"\$exec_line\" | grep -qE '^OPENCODE_CONFIG_CONTENT=.*exec '"
-assert_not_contains "the composed line never starts with the broken 'exec VAR=val' shape" "$exec_line" "exec OPENCODE_CONFIG_CONTENT="
+  "printf '%s' \"\$exec_line\" | grep -qE '^OPENCODE_CONFIG_DIR=.*exec '"
+assert_not_contains "the composed line never starts with the broken 'exec VAR=val' shape" "$exec_line" "exec OPENCODE_CONFIG_DIR="
 
 # --- the composed launch script must actually be executable -----------------
 # Textual shape alone is not proof (round-2 review): the reviewer caught

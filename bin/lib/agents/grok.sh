@@ -99,18 +99,42 @@
 # global `~/.claude/CLAUDE.md`, not `.claude/agents/` subagent definitions as
 # initially hypothesized - see the header note above) is documented there in
 # full, not repeated here.
+#
+# Separately (2026-08-17, the portable crew command vocabulary): both
+# symlink-following AND the ~/.grok/skills discovery path are hands-on
+# verified live against real grok-build v1.0.4, with $HOME overridden to a
+# scratch directory containing a real symlink set built by
+# bin/lib/sync-user-skills.py (pointed at this repo's own canonical
+# .agents/skills/ tree), launched from an unrelated cwd - the SAME gate
+# this file's header already documents as blocking most other live checks
+# was reached again here (grok.com account sign-in required, no real
+# credentials in this environment), so the "$wingman-sta" typed-invocation
+# check itself stays attributed rather than independently confirmed, same
+# as every other grok control value in this file - but `grok inspect --json`
+# needs no auth at all and settled the two things that mattered: its
+# `skills` array listed all seven wingman-<verb> entries, each with
+# `"source": {"type": "user", "path": ".../.grok/skills/wingman-<verb>/
+# SKILL.md"}` resolved THROUGH the symlink (byte-exact description, and
+# "userInvocable": true, confirming the documented "/<skill>" slash form is
+# real) - conclusive proof grok follows a symlinked skill directory, the
+# one fact its own docs never state either way. Separately, `externalCompat.
+# cells` was inspected directly for a `{"vendor": "claude", "surface":
+# "commands"}` entry: none exists (only skills/rules/agents/mcps/hooks/
+# sessions appear for vendor "claude") - independently reconfirming, live,
+# the plan's own §3.4 finding that grok's Claude-compat layer does not read
+# `.claude/commands/` at all, so nothing about this design depends on it.
 
 WM_AGENT_BIN=grok
 WM_AGENT_DISPLAY_NAME="grok"
 
 # --- preflight and environment ------------------------------------------
-# No preflight function wired up - attributed to the plan's own positive
-# finding (§3: grok's project-picker/trust dialog appears only when launched
-# from a non-project directory, which wingman's own git-worktree launch
-# always avoids), but with LOWER confidence than that phrasing implies.
-# `grok inspect --json` reported "projectTrusted": true in a git worktree,
-# matching the plan - but round-2 review of this PR prompted a direct
-# recheck of that signal's own reliability, and it also reports
+# No trust-dialog automation wired up - attributed to the plan's own
+# positive finding (§3: grok's project-picker/trust dialog appears only when
+# launched from a non-project directory, which wingman's own git-worktree
+# launch always avoids), but with LOWER confidence than that phrasing
+# implies. `grok inspect --json` reported "projectTrusted": true in a git
+# worktree, matching the plan - but round-2 review of this PR prompted a
+# direct recheck of that signal's own reliability, and it also reports
 # "projectTrusted": true with NO .git directory at all and no project
 # markers of any kind (projectRoot itself reads null in that case) - meaning
 # this field may simply default to true regardless of trust state, not a
@@ -120,8 +144,19 @@ WM_AGENT_DISPLAY_NAME="grok"
 # this is genuinely unconfirmed, not merely attributed: if a real trust
 # freeze does occur on a codex/pi-shaped first launch, the existing
 # freeze-detector + crew-takeover fallback still applies, the same
-# degradation any adapter with no WM_AGENT_PREFLIGHT gets.
-WM_AGENT_PREFLIGHT=""
+# degradation any gate with no automation gets.
+#
+# WM_AGENT_PREFLIGHT IS wired up below, for a different gate: the portable
+# crew command vocabulary. grok has no documented per-launch flag for an
+# arbitrary skills directory, so ~/.grok/skills is the reconciled route, on
+# every spawn/resume, exactly like claude_preflight's own guard-hook sync.
+# Symlink-following is UNDOCUMENTED for grok (unlike codex, whose own docs
+# confirm it) - this was a genuinely open question, hands-on verified
+# rather than assumed (see the header comment above for the result);
+# grok_preflight defaults to symlink mode but is ready to switch to copy
+# mode (see grok_preflight's own comment) without a second round of design
+# if the symlink turns out not to be followed.
+WM_AGENT_PREFLIGHT=grok_preflight
 # GROK_CLAUDE_AGENTS_ENABLED=0 is an ENVIRONMENT VARIABLE, not a CLI flag -
 # it belongs here (composed as an env-var prefix before `exec`, exactly like
 # opencode's own OPENCODE_DISABLE_PROJECT_CONFIG=true), never in
@@ -281,3 +316,35 @@ WM_AGENT_INTERRUPT_KEY="C-c"
 WM_AGENT_INTERRUPT_REPEAT=1
 WM_AGENT_POST_INTERRUPT_CLEAR=""
 WM_AGENT_SKILL_FORM="/<skill>"
+
+# grok_preflight <repo> <perm_mode> [<action>]
+#
+# Reconciles ~/.grok/skills against this repo's own canonical
+# .agents/skills/ tree (bin/lib/sync-user-skills.py) - grok's own dedicated
+# user-level skills directory, preferred over editing `[skills] paths` in
+# ~/.grok/config.toml (harder to make idempotent and to reverse than named
+# symlinks). <repo>/<perm_mode> are unused (this gate has nothing to do
+# with the target repo or the permission mode) but accepted for a uniform
+# call signature with every other WM_AGENT_PREFLIGHT function.
+#
+# Mode defaults to symlink; switch WM_GROK_SKILLS_SYNC_MODE=copy if hands-on
+# verification shows grok does not follow a symlinked skill directory -
+# grok's own docs, unlike codex's, say nothing about symlinks either way,
+# so this is a gated assumption, not a confirmed one.
+#
+# WM_GROK_USER_SKILLS_DIR overrides the target directory (test isolation,
+# mirrors claude_preflight's WM_CLAUDE_USER_SETTINGS/WM_CLAUDE_USER_CONFIG
+# convention) - a test suite run must never write into a real developer's
+# actual ~/.grok/skills.
+grok_preflight() {
+  _grp_action="${3:-spawn}"
+  if ! _grp_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" \
+      --target "${WM_GROK_USER_SKILLS_DIR:-$HOME/.grok/skills}" --repo "$WM_REPO" \
+      --mode "${WM_GROK_SKILLS_SYNC_MODE:-symlink}" 2>&1)"; then
+    wm_launch_failure "grok skills sync ($_grp_action)" "$_grp_err"
+    wm_die "could not reconcile grok's user-level skills directory (~/.grok/skills): $_grp_err
+Fix the reported problem, or run 'bin/doctor -y', then retry this $_grp_action."
+  fi
+  unset _grp_action _grp_err
+  return 0
+}

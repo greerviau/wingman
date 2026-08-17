@@ -130,5 +130,22 @@ assert_eq "grok's descriptor sets SLASH_SETTLE to dodge its own slash-autocomple
 # what carries the "positive fact, not a gap" distinction the plan requires.
 assert_eq "grok's descriptor leaves CLEAR_KEYS empty (C-c is its interrupt key, not a composer clear)" "$WM_AGENT_CLEAR_KEYS" ""
 assert_eq "grok's descriptor is not yet marked fully verified (no real model turn was possible - account auth gate)" "$WM_AGENT_VERIFIED" "0"
+assert_eq "grok's descriptor declares its skills-sync preflight" "$WM_AGENT_PREFLIGHT" "grok_preflight"
+
+# --- the portable crew command vocabulary: grok_preflight actually
+#     reconciles WM_GROK_USER_SKILLS_DIR (test isolation override), never a
+#     real developer's actual ~/.grok/skills -------------------------------
+GROK_SKILLS_DIR="$(wm_mktemp_dir)/grok-skills"
+WM_GROK_USER_SKILLS_DIR="$GROK_SKILLS_DIR" grok_preflight "$WS/repoA" bypassPermissions spawn
+assert_true "grok_preflight installs the seven wingman-<verb> symlinks into the overridden target" \
+  "[ -L '$GROK_SKILLS_DIR/wingman-status' ]"
+resolved_grok_skill="$(uv run --no-project --quiet python -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$GROK_SKILLS_DIR/wingman-status")"
+assert_eq "grok_preflight points the symlink at this repo's own canonical tree" "$resolved_grok_skill" "$TEST_REPO/.agents/skills/wingman-status"
+
+# --- the portable crew command vocabulary block, grok's own
+#     /wingman-<verb> rendering -----------------------------------------------
+grok_sysprompt_body="$(cat "$WINGMAN_HOME/crew/$id.sysprompt.md")"
+assert_contains "the crew command vocabulary block is present" "$grok_sysprompt_body" "The crew command vocabulary."
+assert_contains "grok's own example renders the /wingman-status form" "$grok_sysprompt_body" "e.g. \`/wingman-status\` invokes"
 
 test_summary

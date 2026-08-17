@@ -370,7 +370,7 @@ REVIEW_TOKEN=""
 wm_state init >/dev/null
 SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
 wm_compose_crew_sysprompt "$SYSPROMPT" "$ID" "$TYPE" "$REPO" "$SCOPE" \
-  "$CONSTRAINTS" "$TARGET_IS_WM_REPO" "$INPUT" "$PLAYBOOK" "$INCLUDE_PR_DELIVERY"
+  "$CONSTRAINTS" "$TARGET_IS_WM_REPO" "$INPUT" "$PLAYBOOK" "$INCLUDE_PR_DELIVERY" "$AGENT"
 
 # Computed before the launch line because a `positional`/`prompt-flag`
 # WM_AGENT_SYSPROMPT_MODE folds it straight in - see wm_agent_emit_sysprompt.
@@ -468,6 +468,14 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # legibly in the agent CLI's own session picker / terminal title instead of
   # an auto-generated one, where the adapter has an equivalent flag.
   wm_agent_emit_flag "$WM_AGENT_NAME_FLAG" "$ID"
+  # The portable crew command vocabulary (plan step 6): for an adapter with a
+  # per-launch skills-directory flag (pi's own --skill), point it at wingman's
+  # own canonical .agents/skills/ tree directly - independent of cwd and of
+  # this crew member's own worktree, always the same seven skills. Empty for
+  # every other adapter (claude reaches the tree via --add-dir below; codex,
+  # grok, and opencode have no per-launch route and are served by the
+  # preflight-time installer instead, WM_AGENT_PREFLIGHT).
+  wm_agent_emit_flag "$WM_AGENT_SKILLS_FLAG" "$WM_REPO/.agents/skills"
   [ -n "$MODEL" ]  && wm_agent_emit_flag "$WM_AGENT_MODEL_FLAG"  "$MODEL"
   [ -n "$EFFORT" ] && wm_agent_emit_flag "$WM_AGENT_EFFORT_FLAG" "$EFFORT"
   # Remote-Control-visible by default (WM_REMOTE_CONTROL, mirroring

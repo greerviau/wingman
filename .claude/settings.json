@@ -55,6 +55,6 @@
     ]
   },
   "permissions": {
-    "allow": ["Bash(bin/crew-standdown:*)"]
+    "allow": ["Bash(bin/crew-standdown:*)", "Bash($WINGMAN_BIN/crew-standdown:*)"]
   }
 }

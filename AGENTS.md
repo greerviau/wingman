@@ -159,6 +159,8 @@ When a directive fits a custom type better than the built-ins (e.g. "research X"
 
 ## Command vocabulary (pilot → you)
 
+Seven of these commands - `ask`, `blocked`, `prune`, `say`, `status`, `takeover`, `watch` - are canonically defined once, at `.agents/skills/wingman-<verb>/SKILL.md`, and `.claude/commands/<verb>.md` is a symlink to that same file: one body, portable to every agent CLI wingman's crew can run on, not a claude-only mechanism. `spawn` and `standdown` stay claude-only regular files instead - both drive a script a `PreToolUse` hook fences on this transport and no other, so exporting either as a model-invocable skill elsewhere would hand out a capability with no guardrail behind it; `lead` and `prefs` stay claude-only too, for the unrelated reason that both are structurally orchestrator-only. None of this changes how you invoke them: you still type `/status`, `/watch`, and so on exactly as below.
+
 - **"Implement feature X"** → lead test first; on the direct path, spawn a **software-analyst** for a plan.
   On its **pilot-facing** `review`, relay the artifact. On approval, spawn a **developer** with `--input <plan-path>` and stand down the analyst (approval is its disposition). Feedback instead goes to the same analyst with `/say` - do not spawn a new one.
 - **"Investigate issue Y"** → lead test first; on the direct path, a **software-analyst** in *report mode* (no developer handoff). For a bug, its brief tells it to reproduce end-to-end before hypothesizing. It leaves a report; you relay the path.

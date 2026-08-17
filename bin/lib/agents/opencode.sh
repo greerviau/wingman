@@ -48,6 +48,19 @@
 # which model answers, only that it doesn't error), and tool-call
 # permission-prompt behavior beyond the blanket OPENCODE_CONFIG_CONTENT
 # allow already covering it.
+#
+# Separately (2026-08-17, the portable crew command vocabulary): the
+# OPENCODE_CONFIG_DIR route (WM_AGENT_ENV_PREFIX below) is hands-on
+# verified live against real opencode v1.18.18, settling a genuinely open
+# question decisively - two independent checks, both from an unrelated cwd:
+# `opencode debug skill` listed all seven wingman-<verb> skills additively
+# alongside opencode's own built-in skill, each `location` pointing at the
+# real file under this repo's own .agents/skills/; and a genuine
+# non-interactive model turn (`opencode run`, the free "Big Pickle" default
+# model, no paid credentials needed) asked to name every skill starting
+# with "wingman-" replied with the exact seven names, comma-separated -
+# proof the model itself can see and could invoke them, not merely that the
+# CLI's own debug tooling discovers the files.
 
 WM_AGENT_BIN=opencode
 WM_AGENT_DISPLAY_NAME="opencode"
@@ -57,17 +70,42 @@ WM_AGENT_DISPLAY_NAME="opencode"
 # run in this session (see the file header) - if a future launch (a
 # different opencode version, a different environment) does hit one, this
 # needs revisiting, the same way pi's own env-unset comment reasons.
+#
+# Also, deliberately, no home-directory skills install (unlike codex/grok's
+# own preflight-time installer, bin/lib/sync-user-skills.py): the
+# per-launch OPENCODE_CONFIG_DIR route below (WM_AGENT_ENV_PREFIX) is
+# strictly better once it is known to work - it composes with the existing
+# WM_AGENT_ENV_PREFIX and leaves the operator's home directory untouched
+# entirely, and hands-on verification (see the file header) confirms it does.
 WM_AGENT_PREFLIGHT=""
-# Env-var prefix, not a flag (plan §3, corrected from an earlier --auto
-# claim): sets a full wildcard permission allow. Verified live: no
-# permission dialog appeared with this set, across every launch in this
-# session's verification pass. The double-quotes inside are escaped so the
-# assignment below evaluates (once this descriptor is sourced) to the
+# Two env vars, composed together:
+#
+# OPENCODE_CONFIG_CONTENT sets a full wildcard permission allow - verified
+# live: no permission dialog appeared with this set, across every launch in
+# this session's verification pass. The double-quotes inside are escaped so
+# the assignment below evaluates (once this descriptor is sourced) to the
 # literal shell text OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' -
 # a single-quoted JSON value bin/spawn-crew's own composed launch script
 # later re-parses as an ordinary env-var assignment ahead of the exec
 # target, exactly like the plan's own example invocation.
-WM_AGENT_ENV_PREFIX="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}'"
+#
+# OPENCODE_CONFIG_DIR is opencode's own "load this directory just like
+# .opencode/" escape hatch (opencode's own built-in customize-opencode
+# skill, read directly via `opencode debug skill`) - pointed at this repo's
+# own .agents/ directory (the PARENT of .agents/skills/, not skills/
+# itself: OPENCODE_CONFIG_DIR expects a `skills/<name>/SKILL.md` structure
+# underneath it, and .agents/ already has exactly that shape). Hands-on
+# verified live against real opencode v1.18.18 (`opencode debug skill` from
+# an unrelated cwd, both baseline and with OPENCODE_CONFIG_DIR set): all
+# seven wingman-<verb> skills appear, additively alongside opencode's own
+# built-in skill, each with `location` pointing at the real file under this
+# repo's own .agents/skills/ - no copy, no symlink, no home-directory
+# install of any kind. $WM_REPO is already resolved (common.sh runs before
+# any descriptor is sourced) and quoted once, here, at descriptor-source
+# time - not left as a literal $WM_REPO for the launch script's own shell to
+# re-expand, since nothing guarantees that variable is set in the launched
+# process's environment.
+WM_AGENT_ENV_PREFIX="OPENCODE_CONFIG_DIR=$(quote "$WM_REPO/.agents") OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}'"
 # The orchestrator that execs every crew member is always Claude Code, so a
 # non-claude crew member (opencode included) would otherwise silently
 # inherit CLAUDECODE=1 from it (plan §5 step 8).
