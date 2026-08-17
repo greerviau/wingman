@@ -55,7 +55,7 @@ assert_not_contains "no --add-dir/--settings (claude-only CLAUDE.md-exclusion me
 assert_contains "the system prompt is delivered via --append-system-prompt with the file's content substituted" \
   "$exec_line" "--append-system-prompt \"\$(cat '$sysprompt')\""
 
-# --- the portable crew command vocabulary: pi's own --skill flag (plan §4.4) -
+# --- the portable crew command vocabulary: pi's own --skill flag -----------
 assert_contains "the crew command vocabulary is loaded via --skill, pointed at the canonical .agents/skills/ tree" \
   "$exec_line" "--skill '$TEST_REPO/.agents/skills'"
 
@@ -82,5 +82,11 @@ assert_eq "pi's descriptor sets its own repo-doc-context suppression flag" "$WM_
 assert_eq "pi's descriptor sets its own skills-directory launch flag" "$WM_AGENT_SKILLS_FLAG" "--skill %s"
 assert_eq "pi's descriptor's skill invocation form is corrected to /skill:<skill>" "$WM_AGENT_SKILL_FORM" "/skill:<skill>"
 assert_eq "pi's descriptor has no preflight - the --skill flag is a complete route on its own" "$WM_AGENT_PREFLIGHT" ""
+
+# --- the portable crew command vocabulary block, pi's own
+#     /skill:<skill> rendering ------------------------------------------------
+sysprompt_body="$(cat "$sysprompt")"
+assert_contains "the crew command vocabulary block is present" "$sysprompt_body" "The crew command vocabulary."
+assert_contains "pi's own example renders the /skill:wingman-status form" "$sysprompt_body" "e.g. \`/skill:wingman-status\` invokes"
 
 test_summary

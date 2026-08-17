@@ -218,7 +218,7 @@ WM_AGENT_POST_INTERRUPT_CLEAR=""
 # pi's own --skill <path> launch-time flag (pi --help) loads a skills
 # directory in addition to its two always-scanned global locations
 # (~/.pi/agent/skills/, ~/.agents/skills/) - repeatable and additive even
-# with --no-skills (plan §3.2), and confirmed live to accept a directory
+# with --no-skills, and confirmed live to accept a directory
 # wholly outside the working tree, independent of cwd and of project trust
 # (--skill <path> with --no-approve). Pointed at wingman's own canonical
 # .agents/skills/ tree (bin/spawn-crew/bin/crew-resume), so a pi crew member

@@ -370,7 +370,7 @@ REVIEW_TOKEN=""
 wm_state init >/dev/null
 SYSPROMPT="$WM_HOME/crew/$ID.sysprompt.md"
 wm_compose_crew_sysprompt "$SYSPROMPT" "$ID" "$TYPE" "$REPO" "$SCOPE" \
-  "$CONSTRAINTS" "$TARGET_IS_WM_REPO" "$INPUT" "$PLAYBOOK" "$INCLUDE_PR_DELIVERY"
+  "$CONSTRAINTS" "$TARGET_IS_WM_REPO" "$INPUT" "$PLAYBOOK" "$INCLUDE_PR_DELIVERY" "$AGENT"
 
 # Computed before the launch line because a `positional`/`prompt-flag`
 # WM_AGENT_SYSPROMPT_MODE folds it straight in - see wm_agent_emit_sysprompt.

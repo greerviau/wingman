@@ -414,7 +414,7 @@ for c in (d.get("constraints") or []):
       # silently erase the only durable record of that handoff the first
       # time a no-resume-flag member is relaunched.
       wm_compose_crew_sysprompt "$_rl_sysprompt_path" "$_rid" "$_type" "$_repo" "$_scope" \
-        "$_constraints" "$_rl_target_is_wm_repo" "$_input" "$PLAYBOOK" "$_rl_include_pr_delivery"
+        "$_constraints" "$_rl_target_is_wm_repo" "$_input" "$PLAYBOOK" "$_rl_include_pr_delivery" "$_resolved_agent_name"
       wm_crew_relaunch_note "$_cwd" "$_artifact" "$_artifact_url" "$_delivery" \
         "$_allow_merge" "$_review_gate_waived" "$_constraints" "$_spawned_at" "$_summary" \
         "$_objective" "$_input"

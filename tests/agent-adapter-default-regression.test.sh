@@ -65,4 +65,17 @@ assert_eq "the composed exec line for the default (no --agent, no \$WM_AGENT) ca
 # a regression); this file only pins the LAUNCH LINE regression step 3
 # itself requires.
 
+# --- the portable crew command vocabulary block: claude's own bare-filename
+#     rendering ---------------------------------------------------------------
+# claude is the one adapter whose command files keep their bare filenames
+# (the whole design's linchpin - Claude Code ignores a command file's `name`
+# frontmatter and resolves by filename instead) - the brief must render
+# "/status", never "/wingman-status", even though the skill's own `name`
+# frontmatter is wingman-status like every other adapter's.
+sysprompt_body="$(cat "$sysprompt")"
+assert_contains "the crew command vocabulary block is present" "$sysprompt_body" "The crew command vocabulary."
+assert_contains "claude's own example renders the bare filename form" "$sysprompt_body" "e.g. \`/status\` invokes"
+assert_not_contains "never the wingman-prefixed form on claude" "$sysprompt_body" "e.g. \`/wingman-status\`"
+assert_contains "spawn/standdown are named as deliberately absent" "$sysprompt_body" "\`spawn\` and \`standdown\` are never exported as skills"
+
 test_summary
