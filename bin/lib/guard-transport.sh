@@ -173,11 +173,64 @@ _wm_gt_sync_claude() {
   return 0
 }
 
+# --- pi-extension -------------------------------------------------------
+#
+# Install: none. bin/lib/agents/pi/wingman-guard-extension.js ships in the
+# repo and is delivered by WM_AGENT_GUARD_LAUNCH_FLAGS (-e <abs path>
+# --no-extensions, pi.sh) - nothing written outside the repo, nothing
+# reconciled, nothing to drift. Verify: the extension file exists; loading
+# it under --offline (no network, no credentials needed) makes its
+# registered --wingman-guard-active flag observable exactly once in
+# `pi --help`'s own "Extension CLI Flags:" section (pi silently tolerates a
+# broken/missing extension - exit status alone proves nothing, plan §3.2);
+# plus the shared self-test, invoking the identical dispatcher command line
+# the extension's own handler calls internally.
+_WM_GT_PI_GUARDS="direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop"
+
+_wm_gt_sync_pi() {
+  _wgsp_repo="$1"
+  _wgsp_ext="$_wgsp_repo/bin/lib/agents/pi/wingman-guard-extension.js"
+  _wgsp_bin="${WM_AGENT_BIN:-pi}"
+
+  if [ ! -f "$_wgsp_ext" ]; then
+    printf 'the pi guard extension is missing at %s' "$_wgsp_ext"
+    unset _wgsp_repo _wgsp_ext _wgsp_bin
+    return 1
+  fi
+  if ! wm_have "$_wgsp_bin"; then
+    printf 'the pi binary (%s) is not on PATH, so the guard extension cannot be verified' "$_wgsp_bin"
+    unset _wgsp_repo _wgsp_ext _wgsp_bin
+    return 1
+  fi
+
+  _wgsp_help="$(timeout 20 "$_wgsp_bin" --offline -e "$_wgsp_ext" --no-extensions --help 2>&1)"
+  _wgsp_flag_count=$(printf '%s' "$_wgsp_help" | grep -c -- --wingman-guard-active)
+  if [ "$_wgsp_flag_count" -ne 1 ]; then
+    printf 'the pi guard extension did not register its own --wingman-guard-active flag (expected exactly 1 occurrence in `%s --offline -e %s --no-extensions --help`, saw %s) - the extension likely failed to load. Output:\n%s' \
+      "$_wgsp_bin" "$_wgsp_ext" "$_wgsp_flag_count" "$_wgsp_help"
+    unset _wgsp_repo _wgsp_ext _wgsp_bin _wgsp_help _wgsp_flag_count
+    return 1
+  fi
+
+  if ! _wgsp_st_out="$(wm_guard_transport_selftest pi \
+      $WM_UV "$_wgsp_repo/hooks/lib/guard_dispatch.py" --dialect pi --guards "$_WM_GT_PI_GUARDS" 2>&1)"; then
+    printf '%s' "$_wgsp_st_out"
+    unset _wgsp_repo _wgsp_ext _wgsp_bin _wgsp_help _wgsp_flag_count _wgsp_st_out
+    return 1
+  fi
+
+  unset _wgsp_repo _wgsp_ext _wgsp_bin _wgsp_help _wgsp_flag_count _wgsp_st_out
+  return 0
+}
+
 wm_guard_transport_sync() {
   _wgts_transport="$1"; _wgts_repo="$2"
   case "$_wgts_transport" in
     claude-json)
       _wgts_out="$(_wm_gt_sync_claude "$_wgts_repo")"; _wgts_rc=$?
+      ;;
+    pi-extension)
+      _wgts_out="$(_wm_gt_sync_pi "$_wgts_repo")"; _wgts_rc=$?
       ;;
     *)
       _wgts_out="the guard transport '$_wgts_transport' has no orchestrator-side guard install/verify implementation yet."
