@@ -265,6 +265,55 @@ _wm_gt_sync_grok() {
   return 0
 }
 
+# --- codex-json ------------------------------------------------------------
+#
+# Install: bin/lib/sync-codex-hooks.py writes $CODEX_HOME/hooks.json only
+# (default $HOME/.codex/hooks.json) - user scope, no repo-scoped file (plan
+# §5.7). That reconciler itself refuses (fails closed, writes nothing) on
+# either of the two codex-specific hazards: [features].hooks explicitly
+# false in any layer it reads, or a foreign hook source existing anywhere
+# --dangerously-bypass-hook-trust would also un-gate - see its own docstring
+# for the full reasoning. This branch's own job is just to check codex's
+# --help actually documents that trust-bypass flag (so the launch line
+# bin/lib/agents/codex.sh composes is not silently stale against whatever
+# codex version is actually installed) and run the shared self-test.
+_wm_gt_sync_codex() {
+  _wgsc2_repo="$1"
+  _wgsc2_bin="${WM_AGENT_BIN:-codex}"
+
+  if ! wm_have "$_wgsc2_bin"; then
+    printf 'the codex binary (%s) is not on PATH, so the guard transport cannot be verified' "$_wgsc2_bin"
+    unset _wgsc2_repo _wgsc2_bin
+    return 1
+  fi
+
+  _wgsc2_help="$(timeout 20 "$_wgsc2_bin" --help 2>&1)"
+  case "$_wgsc2_help" in
+    *--dangerously-bypass-hook-trust*) ;;
+    *)
+      printf 'the installed codex binary (%s) no longer documents --dangerously-bypass-hook-trust in its own --help output - bin/lib/agents/codex.sh'"'"'s launch line depends on this flag existing; an untrusted-and-therefore-skipped hook would otherwise silently disable enforcement.' "$_wgsc2_bin"
+      unset _wgsc2_repo _wgsc2_bin _wgsc2_help
+      return 1
+      ;;
+  esac
+
+  if ! _wgsc2_err="$($WM_UV "$WM_LIB/sync-codex-hooks.py" --repo "$_wgsc2_repo" 2>&1)"; then
+    printf '%s' "$_wgsc2_err"
+    unset _wgsc2_repo _wgsc2_bin _wgsc2_help _wgsc2_err
+    return 1
+  fi
+
+  if ! _wgsc2_st_out="$(wm_guard_transport_selftest codex \
+      $WM_UV "$_wgsc2_repo/hooks/lib/guard_dispatch.py" --dialect codex --guards "$_WM_GT_ALL_GUARDS" 2>&1)"; then
+    printf '%s' "$_wgsc2_st_out"
+    unset _wgsc2_repo _wgsc2_bin _wgsc2_help _wgsc2_err _wgsc2_st_out
+    return 1
+  fi
+
+  unset _wgsc2_repo _wgsc2_bin _wgsc2_help _wgsc2_err _wgsc2_st_out
+  return 0
+}
+
 wm_guard_transport_sync() {
   _wgts_transport="$1"; _wgts_repo="$2"
   case "$_wgts_transport" in
@@ -276,6 +325,9 @@ wm_guard_transport_sync() {
       ;;
     grok-json)
       _wgts_out="$(_wm_gt_sync_grok "$_wgts_repo")"; _wgts_rc=$?
+      ;;
+    codex-json)
+      _wgts_out="$(_wm_gt_sync_codex "$_wgts_repo")"; _wgts_rc=$?
       ;;
     *)
       _wgts_out="the guard transport '$_wgts_transport' has no orchestrator-side guard install/verify implementation yet."
