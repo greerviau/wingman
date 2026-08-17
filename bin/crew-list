@@ -38,14 +38,16 @@ if wm_tmux_reachable; then
 fi
 # Herdr inventory is read-only during reconciliation, and gathered from every
 # session a live Herdr member actually names, not just this shell's own
-# ambient $HERDR_SESSION. A failed API read anywhere in that gather skips the
-# whole pass; a successful empty inventory is authoritative for Herdr
-# members.
+# ambient $HERDR_SESSION. A session whose read fails is dropped from the
+# gather (not the whole pass) and left un-judged this call via
+# --inventory-sessions, so one broken session can never mask every other
+# session's own deaths; a successful empty inventory is still authoritative
+# for whichever sessions it did cover.
 _herdr_roster="$(wm_state crew-list --all --json 2>/dev/null)"
 if printf '%s' "$_herdr_roster" | grep -q '"backend": "herdr"'; then
-  if _herdr_inventory="$(wm_backend_herdr_reconcile_inventory "$_herdr_roster")"; then
-    wm_state reconcile --inventory "$_herdr_inventory" --inventory-backends herdr >/dev/null
-  fi
+  wm_backend_herdr_reconcile_inventory "$_herdr_roster"
+  wm_state reconcile --inventory "$WM_HERDR_RECONCILE_INVENTORY" --inventory-backends herdr \
+    --inventory-sessions "$WM_HERDR_RECONCILE_SESSIONS" >/dev/null
 fi
 
 # Default the owner scope to the caller (wingman = "", a lead = its own id) so a

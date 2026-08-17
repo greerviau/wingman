@@ -407,22 +407,50 @@ wm_backend_herdr_reachable() {
 # while an aborted read makes the caller defer the pass entirely. That is the
 # one deliberate difference from wm_backend_herdr_list_live above, which
 # only ever finds panes and so can afford to skip an unreadable one.
+#
+# Reads "tab list" and "pane list" once each (not once per tab via
+# wm_backend_herdr_pane_for_tab) and validates the shape of both before
+# joining them in jq: an exit-0 response whose body isn't the shape this
+# parses (an error object, protocol drift, an unparseable payload) must fail
+# the read too - jq's own `?` would otherwise swallow it into zero matches,
+# indistinguishable from a workspace that genuinely holds none. One call per
+# API instead of N also narrows the tab-list/pane-list race window to a
+# single pair of reads, and lets jq build each line's JSON from `--argjson`
+# instead of raw printf interpolation, so a label containing a quote or
+# backslash can never emit a line json.loads on the reading side would
+# silently drop - which would read as that member being absent, the same
+# failure shape this function exists to rule out.
+#
+# A tab jq cannot pair with any pane in this same pane-list read (checked
+# once the shape validation above has passed) is dropped from the inventory,
+# not treated as a read failure: the workspace's pane list is itself
+# authoritative for which tabs currently have a live root pane, exactly as
+# the tab list is authoritative for which tabs currently exist - an absence
+# there is real, current evidence, not an unreadable response.
 wm_backend_herdr_inventory() {
-  local session=$1 wsid tabs tab_id label pane_id
+  local session=$1 wsid tabs panes
   wsid="$(wm_backend_herdr_workspace_find "$session")" || return 1
   [ -n "$wsid" ] || return 0
   tabs="$(HERDR_SESSION="$session" herdr tab list --workspace "$wsid" 2>/dev/null)" || return 1
-  # An exit-0 response whose body isn't the shape this parses (an error
-  # object, protocol drift, an unparseable payload) must fail the read too -
-  # jq's own `?` below would otherwise swallow it into zero extracted tabs,
-  # indistinguishable from a workspace that genuinely holds none.
   printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
-  while IFS=$'\t' read -r tab_id label; do
-    [ -n "$tab_id" ] || continue
-    pane_id="$(wm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" || return 1
-    [ -n "$pane_id" ] || continue
-    printf '{"backend":"herdr","endpoint":"%s:%s","physical_id":"%s","label":"%s","workspace_id":"%s","tab_id":"%s","pane_id":"%s"}\n' "$session" "$pane_id" "$tab_id" "$label" "$wsid" "$tab_id" "$pane_id"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  panes="$(HERDR_SESSION="$session" herdr pane list --workspace "$wsid" 2>/dev/null)" || return 1
+  printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
+  jq -n -c --arg session "$session" --arg wsid "$wsid" --argjson tabs "$tabs" --argjson panes "$panes" '
+    ($panes.result.panes // []) as $panes
+    | ($tabs.result.tabs // [])[] as $t
+    | select(($t.tab_id // "") != "")
+    | ([$panes[] | select(.tab_id == $t.tab_id) | .pane_id] | .[0]) as $pane_id
+    | select($pane_id != null and $pane_id != "")
+    | {
+        backend: "herdr",
+        endpoint: ($session + ":" + $pane_id),
+        physical_id: $t.tab_id,
+        label: ($t.label // ""),
+        workspace_id: $wsid,
+        tab_id: $t.tab_id,
+        pane_id: $pane_id
+      }
+  ' 2>/dev/null
 }
 wm_backend_herdr_close() {
   local target=$1

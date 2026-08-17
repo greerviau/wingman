@@ -1550,10 +1550,21 @@ def cmd_reconcile(args):
     fleet's liveness - flags every live member of the other backend dead.
     --inventory-backends is therefore read whether or not --inventory came back
     empty: a readable container currently holding no panes is authoritatively
-    empty and must still flip that backend's own members. An UNREADABLE
-    container is a different case and never reaches here - both callers
-    (bin/crew-list, bin/watch-fleet) skip the pass when the read itself fails,
-    so an unavailable API defers reconciliation instead of killing the fleet.
+    empty and must still flip that backend's own members. A container this
+    call never even attempted to read is a different case, handled by session
+    scoping below rather than by omitting --inventory-backends altogether.
+
+    Session scoping: a backend whose endpoint embeds a session (Herdr's is
+    "<session>:<pane-id>") can have one session unreachable while others are
+    fine, and a caller gathering across several sessions drops a failed one
+    from its gather rather than aborting the whole read (an all-or-nothing
+    read per session, but not across sessions - see bin/lib/backend.sh's
+    wm_backend_herdr_reconcile_inventory). --inventory-sessions names exactly
+    which sessions this call's --inventory actually covers; a record whose
+    own session isn't in that set is left alone (deferred) rather than judged
+    against a gather that was never authoritative for it. Omitting the flag
+    entirely (as a caller with no session concept does) keeps every named
+    backend's endpoints judged, same as before this scoping existed.
 
     Cause attribution (issue #23): each flip also checks the member's cached
     pane-tail file (pane_tail_path, written every poll by bin/watch-fleet for
@@ -1602,6 +1613,15 @@ def cmd_reconcile(args):
             inventory_entries.append(item)
             inventory_backends.add(item["backend"])
     inventory_endpoints = set((item.get("backend"), item.get("endpoint")) for item in inventory_entries)
+    # See the docstring's "Session scoping": None (the flag omitted) means no
+    # session concept, so every named backend's endpoints are judged as
+    # before; an explicit value (even "") restricts judgment to records in
+    # the named sessions only.
+    _inventory_sessions_raw = getattr(args, "inventory_sessions", None)
+    if _inventory_sessions_raw is None:
+        inventory_sessions = None
+    else:
+        inventory_sessions = set(s for s in _inventory_sessions_raw.split(",") if s)
     with with_locked(crew_json_path()):
         roster = load_roster()
         changed = []
@@ -1612,7 +1632,13 @@ def cmd_reconcile(args):
             # the backends it names, tmux windows for tmux (see the docstring).
             if inventory_backends:
                 endpoint = r.get("window") or ""
-                missing_endpoint = backend in inventory_backends and (backend, endpoint) not in inventory_endpoints
+                session = endpoint.split(":", 1)[0] if endpoint else ""
+                session_covered = inventory_sessions is None or session in inventory_sessions
+                missing_endpoint = (
+                    backend in inventory_backends
+                    and session_covered
+                    and (backend, endpoint) not in inventory_endpoints
+                )
             else:
                 missing_endpoint = backend == "tmux" and r.get("window") not in live_windows
             if m.get("status") in LIVE_STATES and missing_endpoint:
@@ -1648,7 +1674,18 @@ def cmd_reconcile(args):
         # mismatch as "already flagged died" and skip re-adopting it, which
         # silently left a live Herdr worker with a dead owner unwatched
         # instead.
-        if owner == "" and not inventory_backends:
+        #
+        # Not gated on `not inventory_backends` (unlike the orphan-window
+        # pass below, which genuinely needs tmux window names): this pass no
+        # longer reads live_windows or inventory_backends at all, so it is
+        # equally safe to run during a herdr-scoped call as during the tmux
+        # windows-scoped one. Letting it run on both means it also fires on
+        # a fleet with no reachable tmux server at all - bin/watch-fleet's
+        # tmux reconcile call is skipped there, but its herdr call still
+        # passes --owner "", which is otherwise the only trigger this pass
+        # has - without this, a live Herdr worker's dead owner would never
+        # be detected on a pure-Herdr fleet.
+        if owner == "":
             by_id = dict((r.get("id"), r) for r in roster)
             orphans_by_owner = {}
             for r in roster:
@@ -5290,6 +5327,14 @@ def _args_reconcile(a):
     a.add_argument("--windows", default="")
     a.add_argument("--inventory", default="", help="newline-delimited backend inventory JSON")
     a.add_argument("--inventory-backends", default="", dest="inventory_backends")
+    # Which sessions --inventory actually covers (comma-separated), for a
+    # backend whose endpoint embeds a session ("<session>:<pane-id>"). Omit
+    # entirely for no session scoping (every named backend's endpoints are
+    # judged); pass an explicit value - even "" - once a caller gathers
+    # per-session and wants a record outside the covered sessions left alone
+    # rather than compared against a gather that was never authoritative
+    # for it (see the docstring's "Backend scoping").
+    a.add_argument("--inventory-sessions", default=None, dest="inventory_sessions")
     # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
     # omit or pass a lead id to keep reconcile to the global death-flip only.
     a.add_argument("--owner", default=None)

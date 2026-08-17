@@ -151,28 +151,46 @@ wm_backend_live_inventory() {
 # HERDR_SESSION is one operator's own selection (herdr.sh:45-51, mirroring
 # tmux's $TMUX), so a member spawned under a different session is real
 # evidence this pass must also gather, never an absence to judge it dead by.
-# All sessions or none: one unreachable or
-# unreadable session fails the whole read (empty output, exit 1) rather than
-# reconciling every other session's members against a view that is silently
-# missing one of them - the same all-or-nothing invariant a single session's
-# own wm_backend_herdr_inventory keeps for its own reads. Prints nothing and
-# returns 0 when no Herdr member is currently live, so the caller skips
-# reconcile entirely rather than issuing a no-op call.
+#
+# Each session's OWN read stays all-or-nothing (wm_backend_live_inventory
+# either returns that session's full inventory or fails outright), but a
+# session that fails is DROPPED from the gather rather than aborting the
+# whole call: a permanently unreachable session would otherwise defer this
+# pass forever on every future call too (a member whose session died writes
+# nothing further, so its own record keeps naming that same dead session),
+# masking every other session's genuine deaths right along with it - a new
+# failure mode this exists to rule out, not the one --inventory-sessions
+# already exists to catch.
+#
+# Two results, not one, so this is called plainly (never via `$(...)` - a
+# command substitution forks a subshell, and everything this sets would be
+# lost the instant it exits): $WM_HERDR_RECONCILE_INVENTORY (the merged
+# inventory) and $WM_HERDR_RECONCILE_SESSIONS (comma-separated, the sessions
+# actually covered - pass it to `reconcile --inventory-sessions`, which
+# leaves a record in an uncovered session alone instead of comparing it
+# against a gather that was never authoritative for it). Both reset on every
+# call, empty when no Herdr member is currently live - the caller still
+# calls reconcile in that case (an empty --inventory-sessions judges every
+# herdr record as outside the covered set, so it is a harmless no-op call,
+# not a skipped one).
 wm_backend_herdr_reconcile_inventory() {
-  local roster_json=$1 sessions session inventory="" one
+  local roster_json=$1 sessions session one covered=""
+  WM_HERDR_RECONCILE_SESSIONS=""
+  WM_HERDR_RECONCILE_INVENTORY=""
   sessions="$(printf '%s' "$roster_json" | jq -r \
     '.[] | select(.backend == "herdr") | select(.status == "working" or .status == "blocked" or .status == "review" or .status == "stalled") | (.window // "") | split(":")[0] | select(length > 0)' \
     2>/dev/null | sort -u)"
   [ -n "$sessions" ] || return 0
   while IFS= read -r session; do
     [ -n "$session" ] || continue
-    one="$(wm_backend_live_inventory herdr "$session" 2>/dev/null)" || return 1
-    [ -n "$one" ] && inventory="$inventory
+    one="$(wm_backend_live_inventory herdr "$session" 2>/dev/null)" || continue
+    covered="$covered,$session"
+    [ -n "$one" ] && WM_HERDR_RECONCILE_INVENTORY="$WM_HERDR_RECONCILE_INVENTORY
 $one"
   done <<EOF
 $sessions
 EOF
-  printf '%s' "$inventory"
+  WM_HERDR_RECONCILE_SESSIONS="${covered#,}"
 }
 wm_backend_close() {
   local backend=$1 target=$2

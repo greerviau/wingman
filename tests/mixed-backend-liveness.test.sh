@@ -16,10 +16,14 @@
 #   3. cmd_reconcile's window pass must be scoped to tmux. Unscoped, tmux window
 #      names decide the liveness of Herdr members whose endpoint
 #      ("<session>:<pane-id>") can never appear in that list.
-#   4. wm_backend_herdr_inventory (and the workspace lookup it depends on)
-#      must fail the read on an exit-0 response whose body isn't the shape it
-#      parses, not silently empty it - an unreadable response and a genuinely
-#      empty workspace are otherwise indistinguishable to reconcile.
+#   4. wm_backend_herdr_inventory's three API reads (workspace list, tab
+#      list, pane list) must each fail the read on an exit-0 response whose
+#      body isn't the shape they parse, not silently empty it - an
+#      unreadable response and a genuinely empty workspace/tab/pane list are
+#      otherwise indistinguishable to reconcile. The inventory line itself is
+#      built by jq from parsed JSON, not raw printf interpolation, so a
+#      label containing a quote can never emit a line reconcile's own
+#      json.loads would silently drop.
 #   5. Both bin/crew-list and bin/watch-fleet must gather Herdr inventory from
 #      every session a live member actually names, not just their own ambient
 #      $HERDR_SESSION - a member spawned under a different session than the
@@ -27,6 +31,15 @@
 #   6. The dead-owner re-adopt pass must not skip a live worker just because
 #      its endpoint is not a tmux window name - that mismatch is expected for
 #      every non-tmux backend and proves nothing about the worker's liveness.
+#      Nor is it gated to the tmux windows-scoped reconcile call: it must
+#      also fire from a herdr-scoped call, since a fleet with no reachable
+#      tmux server never issues the windows-scoped call at all.
+#   7. The multi-session gather itself must not defer the whole pass just
+#      because one session is unreachable - a permanently unreachable
+#      session (its member writes nothing further once it's gone) would
+#      otherwise mask every OTHER session's own genuine deaths forever. A
+#      failed session is dropped from the gather; the sessions actually
+#      covered are what reconcile is scoped to via --inventory-sessions.
 #
 # A fake herdr CLI keeps the whole file independent of a running Herdr session.
 set -u
@@ -62,6 +75,9 @@ new_home() { test_new_home; export HERDR_SESSION="$WM_TEST_HERDR_SESSION"; }
 # EMPTY=1 / WM_FAKE_HERDR_WORKSPACELIST_EMPTY=1 answer a well-shaped but
 # genuinely empty result, the positive control proving the malformed-response
 # check above does not also reject a workspace that legitimately holds none.
+# WM_FAKE_HERDR_TABLIST_QUOTED_LABEL=1 answers a single tab whose label
+# carries a literal double quote, a real operator-chosen label the inventory
+# must still be able to emit as valid JSON.
 fake="$(wm_mktemp_dir)"
 cat > "$fake/herdr" <<EOF
 #!/usr/bin/env bash
@@ -77,9 +93,12 @@ case "\$sess" in
       "tab list")
         [ "\${WM_FAKE_HERDR_TABLIST_MALFORMED:-0}" = 1 ] && { printf '%s\n' '{"error":{"code":-32001,"message":"workspace busy"}}'; exit 0; }
         [ "\${WM_FAKE_HERDR_TABLIST_EMPTY:-0}" = 1 ] && { printf '%s\n' '{"result":{"tabs":[]}}'; exit 0; }
+        [ "\${WM_FAKE_HERDR_TABLIST_QUOTED_LABEL:-0}" = 1 ] && { printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab1","label":"wm-quote\"here"}]}}'; exit 0; }
         printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab1","label":"wm-alpha"},{"tab_id":"tab2","label":"wm-beta"},{"tab_id":"tab-other","label":"shell"}]}}' ;;
       "pane list")
         [ "\${WM_FAKE_HERDR_PANE_LIST_FAILS:-0}" = 1 ] && exit 1
+        [ "\${WM_FAKE_HERDR_PANELIST_MALFORMED:-0}" = 1 ] && { printf '%s\n' '{"error":{"code":-32001,"message":"workspace busy"}}'; exit 0; }
+        [ "\${WM_FAKE_HERDR_PANELIST_EMPTY:-0}" = 1 ] && { printf '%s\n' '{"result":{"panes":[]}}'; exit 0; }
         printf '%s\n' '{"result":{"panes":[{"tab_id":"tab1","pane_id":"p:1"},{"tab_id":"tab2","pane_id":"p:2"},{"tab_id":"tab-other","pane_id":"p:9"}]}}' ;;
       *) exit 1 ;;
     esac
@@ -93,6 +112,12 @@ case "\$sess" in
       *) exit 1 ;;
     esac
     ;;
+  "${WM_TEST_HERDR_SESSION}-c")
+    # An entirely unreachable session (server down / never started): every
+    # call fails, standing in for a session whose member the roster still
+    # names but that can no longer be reached at all.
+    exit 1
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -103,7 +128,11 @@ export PATH="$fake:$PATH"
 # Sourced into this shell so the two functions are compared directly on one
 # fixture. Endpoints, not whole lines: list_live emits "<endpoint>\t<label>"
 # while the inventory emits JSON, and agreement on the endpoint set is the
-# property reconcile actually depends on.
+# property reconcile actually depends on. WM_LIB is set by hand (rather than
+# sourcing lib/common.sh) so backend.sh's own wm_backend_source lazy-loads
+# find herdr.sh, without pulling in common.sh's own env/state setup here.
+WM_LIB="$TEST_REPO/bin/lib"
+. "$TEST_REPO/bin/lib/backend.sh"
 . "$TEST_REPO/bin/lib/backends/herdr.sh"
 
 inventory="$(wm_backend_herdr_inventory "$HERDR_SESSION")"
@@ -165,6 +194,32 @@ assert_true "a genuinely empty workspace list still succeeds" \
   'WM_FAKE_HERDR_WORKSPACELIST_EMPTY=1 wm_backend_herdr_inventory "$HERDR_SESSION"'
 assert_eq "a genuinely empty workspace list emits an empty inventory" "$empty_ws" ""
 
+# The pane-list read gets the identical malformed/empty treatment: it is the
+# third and last API read the inventory depends on, and a malformed response
+# here is just as capable of silently emptying the inventory as the other two.
+malformed_panes="$(WM_FAKE_HERDR_PANELIST_MALFORMED=1 wm_backend_herdr_inventory "$HERDR_SESSION")"
+assert_false "a malformed pane-list response fails the inventory read" \
+  'WM_FAKE_HERDR_PANELIST_MALFORMED=1 wm_backend_herdr_inventory "$HERDR_SESSION"'
+assert_eq "a malformed pane-list response emits no partial inventory" "$malformed_panes" ""
+
+empty_panes="$(WM_FAKE_HERDR_PANELIST_EMPTY=1 wm_backend_herdr_inventory "$HERDR_SESSION")"
+assert_true "a genuinely empty pane list still succeeds" \
+  'WM_FAKE_HERDR_PANELIST_EMPTY=1 wm_backend_herdr_inventory "$HERDR_SESSION"'
+# Every tab in the fixture's tab list fails to pair with any pane once the
+# pane list is empty - dropped from the inventory, not a read failure: the
+# pane list is authoritative for which tabs currently have a live root pane.
+assert_eq "no matching pane for any tab drops every tab, not the whole read" "$empty_panes" ""
+
+# A label containing a quote must still round-trip as valid JSON: the
+# inventory is built by jq from --argjson, not raw printf interpolation, so
+# a quote can never emit a line reconcile's own json.loads would silently
+# drop - which would read as that member being absent.
+quoted_label_inventory="$(WM_FAKE_HERDR_TABLIST_QUOTED_LABEL=1 wm_backend_herdr_inventory "$HERDR_SESSION")"
+assert_true "an inventory line with a quoted label is valid JSON" \
+  'printf "%s" "$quoted_label_inventory" | jq -e . >/dev/null'
+assert_contains "the quoted label round-trips with its quote intact" "$quoted_label_inventory" \
+  '"label":"wm-quote\"here"'
+
 # --- defects 2 and 3: each reconcile pass is scoped to its own backend ---------
 new_home
 wm_state crew-add --id tmux-member --type developer --objective T --repo /tmp \
@@ -214,6 +269,31 @@ assert_eq "a live member in the ambient session survives a roster read" \
 assert_eq "a live member spawned under a DIFFERENT session survives too" \
   "$(field_of herdr-session-b status)" working
 
+# --- defect 8: one permanently unreachable session must not mask every other -
+# session's own deaths forever. A member whose session goes away writes
+# nothing further, so its record keeps naming that dead session on every
+# future read too - an all-or-nothing gather across sessions (not just per
+# session) would therefore defer this pass, and every OTHER session's genuine
+# deaths right along with it, indefinitely.
+new_home
+WM_TEST_HERDR_SESSION_C="${HERDR_SESSION}-c"
+wm_state crew-add --id herdr-live-a --type developer --objective LA --repo /tmp \
+  --window "$HERDR_SESSION:p:1" --session-id la --backend herdr >/dev/null
+wm_state crew-add --id herdr-dead-a --type developer --objective DA --repo /tmp \
+  --window "$HERDR_SESSION:p:404" --session-id da --backend herdr >/dev/null
+wm_state crew-add --id herdr-unreachable-c --type developer --objective UC --repo /tmp \
+  --window "$WM_TEST_HERDR_SESSION_C:p:1" --session-id uc --backend herdr >/dev/null
+
+for _i in 1 2 3; do
+  "$TEST_REPO/bin/crew-list" >/dev/null 2>&1
+done
+assert_eq "a live member in a reachable session survives despite another unreachable session" \
+  "$(field_of herdr-live-a status)" working
+assert_eq "a genuinely dead member in a reachable session is still flagged" \
+  "$(field_of herdr-dead-a status)" died
+assert_eq "a member whose own session is unreachable is deferred, not flipped" \
+  "$(field_of herdr-unreachable-c status)" working
+
 # --- defect 6: a live Herdr worker with a dead owner must still be re-adopted -
 # not silently left unwatched. A tmux worker in the same shape is the
 # positive control: it was already re-adopted correctly before this fix.
@@ -236,6 +316,28 @@ assert_eq "the tmux worker is re-adopted to wingman" "$(field_of tmux-worker par
 assert_eq "the tmux worker stays working" "$(field_of tmux-worker status)" working
 assert_eq "the Herdr worker is re-adopted to wingman too" "$(field_of herdr-worker parent)" ""
 assert_eq "the Herdr worker stays working, not silently unwatched" "$(field_of herdr-worker status)" working
+
+# --- defect 9: dead-owner re-adopt must fire from a herdr-scoped call too, ---
+# not only the tmux windows-scoped one - on a fleet with no reachable tmux
+# server, bin/watch-fleet's windows pass never runs at all, and the herdr
+# pass (which still passes --owner "") is the only trigger left. No --windows
+# call happens anywhere in this scenario at all.
+new_home
+wm_state crew-add --id herdr-lead --type lead --objective HL --repo /tmp \
+  --window "$HERDR_SESSION:p:404" --session-id hl --backend herdr >/dev/null
+wm_state crew-add --id herdr-lead-worker --type developer --objective HLW --repo /tmp \
+  --window "$HERDR_SESSION:p:1" --session-id hlw --backend herdr --parent herdr-lead >/dev/null
+
+# herdr-lead's own endpoint (p:404) is absent from the fixture, so this one
+# herdr-scoped call both flips it dead and re-adopts its live worker.
+wm_backend_herdr_reconcile_inventory "$(wm_state crew-list --all --json)"
+wm_state reconcile --inventory "$WM_HERDR_RECONCILE_INVENTORY" --inventory-backends herdr \
+  --inventory-sessions "$WM_HERDR_RECONCILE_SESSIONS" --owner "" >/dev/null
+assert_eq "the dead herdr lead is flipped by its own herdr-scoped call" \
+  "$(field_of herdr-lead status)" died
+assert_eq "its herdr worker is re-adopted by that same herdr-scoped call" \
+  "$(field_of herdr-lead-worker parent)" ""
+assert_eq "the re-adopted worker stays working" "$(field_of herdr-lead-worker status)" working
 
 # --- E2E: the roster read itself no longer reports a live member dead ----------
 # bin/crew-list runs both passes in one read, which is where the three defects

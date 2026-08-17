@@ -1836,12 +1836,14 @@ for tid in ids:
   # passive: an unreadable Herdr API defers reconciliation rather than marking
   # the mixed fleet dead. The inventory itself is gathered from every session a
   # live Herdr member actually names, not just this watcher's own ambient
-  # $HERDR_SESSION.
+  # $HERDR_SESSION - a session whose read fails is dropped from the gather
+  # (not the whole pass) and left un-judged this poll via --inventory-sessions,
+  # so one broken session can never mask every other session's own deaths.
   _herdr_roster="$(wm_state crew-list --all --json 2>/dev/null)"
   if printf '%s' "$_herdr_roster" | grep -q '"backend": "herdr"'; then
-    if _herdr_inventory="$(wm_backend_herdr_reconcile_inventory "$_herdr_roster")"; then
-      _reconcile_died="$(wm_state reconcile --inventory "$_herdr_inventory" --inventory-backends herdr --owner "$OWNER" 2>/dev/null) $_reconcile_died"
-    fi
+    wm_backend_herdr_reconcile_inventory "$_herdr_roster"
+    _reconcile_died="$(wm_state reconcile --inventory "$WM_HERDR_RECONCILE_INVENTORY" --inventory-backends herdr \
+      --inventory-sessions "$WM_HERDR_RECONCILE_SESSIONS" --owner "$OWNER" 2>/dev/null) $_reconcile_died"
     while IFS="$(printf '\t')" read -r _hid _hstatus _hagent _htarget; do
       [ -n "$_hid" ] || continue
       [ "$(wm_backend_endpoint_state herdr "$_htarget")" = alive ] || continue
