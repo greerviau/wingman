@@ -38,6 +38,20 @@
 # absent from what the model could see with the flag set and present
 # without it, confirmed across both filenames and both flag spellings - see
 # that field's own comment below for the exact method and result.
+#
+# Separately (2026-08-17, portable crew command vocabulary): WM_AGENT_SKILLS_
+# FLAG/WM_AGENT_SKILL_FORM below are live-verified against real pi v0.84.1
+# in a tmux pane, launched with --offline --no-session --no-context-files
+# --skill <this repo>/.agents/skills --no-approve from an UNRELATED cwd
+# (/tmp, not this repo) - confirming the flag's cwd-independence directly,
+# not just its documented behavior. The startup banner listed all seven
+# skills under [Skills]: wingman-ask, wingman-blocked, wingman-prune,
+# wingman-say, wingman-status, wingman-takeover, wingman-watch. Typing
+# "/skill:wingman-sta" rendered the autocomplete entry "→ skill:wingman-
+# status [t] Show the current crew roster (who is on what, what is blocked,
+# what is ready)" - the exact description from wingman-status/SKILL.md,
+# confirming both the invocation form and that pi reads the file's real
+# frontmatter, not a stale/cached copy.
 
 WM_AGENT_BIN=pi
 WM_AGENT_DISPLAY_NAME="pi"
@@ -47,6 +61,20 @@ WM_AGENT_DISPLAY_NAME="pi"
 # no flag-based bypass and must be automated via claude-gate-check.py), pi's
 # own project-trust dialog is fully avoidable with a plain launch flag - see
 # WM_AGENT_BYPASS_FLAG below - so there is no separate gate left to wrap.
+#
+# Also, deliberately, no home-directory skills install (unlike codex/grok/
+# opencode's own preflight-time installer, bin/lib/sync-user-skills.py):
+# WM_AGENT_SKILLS_FLAG below is a complete per-launch route on its own, and
+# installing pi's own link set on top of it would be actively worse than
+# useless - pi reads ~/.agents/skills/ as a global location in ADDITION to
+# every --skill path, so the same seven wingman-<verb> names would be
+# discovered twice. Once codex is served from ~/.agents/skills/ (its own
+# only cwd-independent location), pi sees the same seven names from both
+# that directory and its --skill path regardless of anything this
+# descriptor does - a startup warning per name ("Name collisions... warn and
+# keep the first skill found", pi's own shipped docs), cosmetic and provably
+# so: both discoveries resolve to the identical file through the identical
+# symlink, so "keep the first found" can never pick different content.
 WM_AGENT_PREFLIGHT=""
 WM_AGENT_ENV_PREFIX=""
 # The orchestrator that execs every crew member is always Claude Code, so a
@@ -187,9 +215,19 @@ WM_AGENT_EXIT_CMD="/quit"
 WM_AGENT_INTERRUPT_KEY="Escape"
 WM_AGENT_INTERRUPT_REPEAT=1
 WM_AGENT_POST_INTERRUPT_CLEAR=""
-# Not confirmed: pi's --help documents a --skill <path> launch-time flag
-# (skills are loaded up front, not invoked mid-session by name the way
-# claude/grok's "/<skill>" or codex's "$<skill>" forms are), and nothing
-# observed this session confirms an in-session invocation syntax either
-# way. Left unset rather than assumed.
-WM_AGENT_SKILL_FORM=""
+# pi's own --skill <path> launch-time flag (pi --help) loads a skills
+# directory in addition to its two always-scanned global locations
+# (~/.pi/agent/skills/, ~/.agents/skills/) - repeatable and additive even
+# with --no-skills (plan §3.2), and confirmed live to accept a directory
+# wholly outside the working tree, independent of cwd and of project trust
+# (--skill <path> with --no-approve). Pointed at wingman's own canonical
+# .agents/skills/ tree (bin/spawn-crew/bin/crew-resume), so a pi crew member
+# sees the seven exported wingman-<verb> skills regardless of which repo it
+# is grounded in.
+WM_AGENT_SKILLS_FLAG="--skill %s"
+# Verified live via pi's own autocomplete popup: typing "/sk" rendered
+# "→ skill:wm-status" for a project-local test skill - confirmed invocation
+# syntax, not attributed. Corrected from the earlier unset value now that
+# this descriptor has a real route to load skills at all (WM_AGENT_SKILLS_FLAG
+# above) - there was nothing to characterize an invocation form FOR before.
+WM_AGENT_SKILL_FORM="/skill:<skill>"

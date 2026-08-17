@@ -55,6 +55,10 @@ assert_not_contains "no --add-dir/--settings (claude-only CLAUDE.md-exclusion me
 assert_contains "the system prompt is delivered via --append-system-prompt with the file's content substituted" \
   "$exec_line" "--append-system-prompt \"\$(cat '$sysprompt')\""
 
+# --- the portable crew command vocabulary: pi's own --skill flag (plan §4.4) -
+assert_contains "the crew command vocabulary is loaded via --skill, pointed at the canonical .agents/skills/ tree" \
+  "$exec_line" "--skill '$TEST_REPO/.agents/skills'"
+
 # --- an out-of-domain effort is omitted rather than composed (plan §4.3) ------
 id2="$("$SPAWN" --type software-analyst --repo "$WS/repoA" --agent pi --effort "not-a-real-level" --objective "out of domain effort" 2>/dev/null | tail -1)"
 assert_true "spawn with an out-of-domain effort still succeeds" "[ -n '$id2' ]"
@@ -75,5 +79,8 @@ assert_eq "pi's descriptor uses flag-mode system-prompt delivery" "$WM_AGENT_SYS
 assert_eq "pi's descriptor's composer shape is separated, per the plan's §4.6 catalogue" "$WM_AGENT_COMPOSER_SHAPE" "separated"
 assert_eq "pi's descriptor is not yet marked fully verified (no live model turn was possible)" "$WM_AGENT_VERIFIED" "0"
 assert_eq "pi's descriptor sets its own repo-doc-context suppression flag" "$WM_AGENT_CONTEXT_SUPPRESS_FLAG" "--no-context-files"
+assert_eq "pi's descriptor sets its own skills-directory launch flag" "$WM_AGENT_SKILLS_FLAG" "--skill %s"
+assert_eq "pi's descriptor's skill invocation form is corrected to /skill:<skill>" "$WM_AGENT_SKILL_FORM" "/skill:<skill>"
+assert_eq "pi's descriptor has no preflight - the --skill flag is a complete route on its own" "$WM_AGENT_PREFLIGHT" ""
 
 test_summary

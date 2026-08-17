@@ -543,6 +543,11 @@ for c in (d.get("constraints") or []):
       printf ' --add-dir %s' "$(quote "$_repo")"
       printf ' --settings %s' "$(quote "$(wm_claude_md_excludes)")"
     fi
+    # The portable crew command vocabulary (plan step 6): see bin/spawn-crew's
+    # identical gate and comment - a per-launch skills-directory flag (pi's
+    # own --skill), pointed at wingman's own canonical .agents/skills/ tree
+    # unconditionally, empty for every adapter with no such flag.
+    wm_agent_emit_flag "$WM_AGENT_SKILLS_FLAG" "$WM_REPO/.agents/skills"
     [ -n "$MODEL" ]  && wm_agent_emit_flag "$WM_AGENT_MODEL_FLAG"  "$MODEL"
     [ -n "$EFFORT" ] && wm_agent_emit_flag "$WM_AGENT_EFFORT_FLAG" "$EFFORT"
     if [ -z "$WM_AGENT_RESUME_FLAG" ]; then
