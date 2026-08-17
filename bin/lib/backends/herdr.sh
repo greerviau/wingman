@@ -390,6 +390,15 @@ wm_backend_herdr_reachable() {
   running="$(printf '%s' "$out" | jq -r '.server.running // false' 2>/dev/null)"
   [ "$running" = true ]
 }
+# wm_backend_herdr_inventory: one JSON line per live pane in <session>'s
+# "wingman" workspace, for reconcile's liveness pass. This read is
+# authoritative for death - reconcile flips every Herdr member whose endpoint
+# is absent from it - so every failure to read the API aborts the whole
+# function (return 1) rather than emitting a partial inventory: a partial
+# inventory silently omitting a live pane would flag that live member dead,
+# while an aborted read makes the caller defer the pass entirely. That is the
+# one deliberate difference from wm_backend_herdr_list_live above, which
+# only ever finds panes and so can afford to skip an unreadable one.
 wm_backend_herdr_inventory() {
   local session=$1 wsid tabs tab_id label pane_id
   wsid="$(wm_backend_herdr_workspace_find "$session")" || return 1
@@ -400,7 +409,7 @@ wm_backend_herdr_inventory() {
     pane_id="$(wm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" || return 1
     [ -n "$pane_id" ] || continue
     printf '{"backend":"herdr","endpoint":"%s:%s","physical_id":"%s","label":"%s","workspace_id":"%s","tab_id":"%s","pane_id":"%s"}\n' "$session" "$pane_id" "$tab_id" "$label" "$wsid" "$tab_id" "$pane_id"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\\(.tab_id)\\t\\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 wm_backend_herdr_close() {
   local target=$1

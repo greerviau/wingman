@@ -1539,6 +1539,22 @@ def cmd_reconcile(args):
     """Mark live-but-windowless crew as 'died'. Given the current tmux windows,
     any crew member still in a live state whose window is gone is flagged.
 
+    Backend scoping (issue #370): each call carries liveness evidence about
+    some backends and none about the others, and only ever judges the ones it
+    holds evidence about. --windows is a list of tmux window names, so it is
+    evidence about tmux-backed members alone; --inventory/--inventory-backends
+    is evidence about exactly the backends named there. A member's `window` is
+    an opaque backend-specific endpoint (herdr's is "<session>:<pane-id>"),
+    which is why crossing the two - comparing a herdr endpoint against tmux
+    window names, or letting an empty herdr inventory stand in for the whole
+    fleet's liveness - flags every live member of the other backend dead.
+    --inventory-backends is therefore read whether or not --inventory came back
+    empty: a readable container currently holding no panes is authoritatively
+    empty and must still flip that backend's own members. An UNREADABLE
+    container is a different case and never reaches here - both callers
+    (bin/crew-list, bin/watch-fleet) skip the pass when the read itself fails,
+    so an unavailable API defers reconciliation instead of killing the fleet.
+
     Cause attribution (issue #23): each flip also checks the member's cached
     pane-tail file (pane_tail_path, written every poll by bin/watch-fleet for
     a live working/blocked member) against --apierr-re; a match tags
@@ -1572,17 +1588,19 @@ def cmd_reconcile(args):
     apierr_re = getattr(args, "apierr_re", None) or DEFAULT_APIERR_RE
     live_windows = set(w for w in (args.windows or "").split(",") if w)
     inventory_entries = []
-    inventory_backends = set()
-    if getattr(args, "inventory", ""):
-        for line in args.inventory.splitlines():
-            try:
-                item = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(item, dict) and item.get("backend"):
-                inventory_entries.append(item)
-                inventory_backends.add(item["backend"])
-        inventory_backends.update(b for b in (getattr(args, "inventory_backends", "") or "").split(",") if b)
+    # Read whether or not --inventory is empty: an empty inventory is still
+    # authoritative for the backends named here (see "Backend scoping" above).
+    inventory_backends = set(
+        b for b in (getattr(args, "inventory_backends", "") or "").split(",") if b
+    )
+    for line in (getattr(args, "inventory", "") or "").splitlines():
+        try:
+            item = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict) and item.get("backend"):
+            inventory_entries.append(item)
+            inventory_backends.add(item["backend"])
     inventory_endpoints = set((item.get("backend"), item.get("endpoint")) for item in inventory_entries)
     with with_locked(crew_json_path()):
         roster = load_roster()
@@ -1590,11 +1608,13 @@ def cmd_reconcile(args):
         for r in roster:
             m = merged(r)
             backend = r.get("backend") or "tmux"
+            # Judged only against evidence for its own backend - inventory for
+            # the backends it names, tmux windows for tmux (see the docstring).
             if inventory_backends:
                 endpoint = r.get("window") or ""
                 missing_endpoint = backend in inventory_backends and (backend, endpoint) not in inventory_endpoints
             else:
-                missing_endpoint = r.get("window") not in live_windows
+                missing_endpoint = backend == "tmux" and r.get("window") not in live_windows
             if m.get("status") in LIVE_STATES and missing_endpoint:
                 r["status"] = "died"
                 r["updated"] = now()
