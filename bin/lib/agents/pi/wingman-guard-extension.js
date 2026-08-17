@@ -42,19 +42,44 @@ import { fileURLToPath } from "node:url";
 // (hooks/lib/guard_policy.py's _REPO_ROOT, hooks/*.sh's own HERE/REPO walk).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 const DISPATCHER = join(REPO_ROOT, "hooks", "lib", "guard_dispatch.py");
-
-// The full portable set for pi (bin/lib/user-hooks.json's own 'portable'
-// field, dialect "pi") - one combined dispatcher invocation, matching
-// codex/grok's own single-matcher-group shape (plan §5.4.2/§5.4.3): merge
-// and worker-spawn are crew-only and excluded, exactly as they are for
-// every other non-Claude dialect.
-const GUARDS = "direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop";
+const HOOK_MANIFEST = join(REPO_ROOT, "bin", "lib", "hook_manifest.py");
 
 const WM_UV = process.env.WM_UV || "uv";
 const WM_UV_ARGS = process.env.WM_UV ? [] : ["run", "--no-project", "--quiet"];
 
+// The portable guard set for pi, read from bin/lib/user-hooks.json's own
+// 'portable' field via hook_manifest.py --print-guards - never hard-coded
+// here, so a guard added to the manifest's portable set later reaches this
+// extension with nothing else to update (the identical computation bin/lib/
+// guard-transport.sh's own self-test invocations and every non-Claude
+// reconciler already share). Resolved lazily, on first use, and cached -
+// not at module load time: a failure here must reach the SAME fail-closed
+// path as a dispatcher failure (a returned {block: true}), never a module-
+// load exception, since pi silently tolerates a broken/missing extension
+// (plan §3.2) - a load-time throw would disable this guard's ENTIRE guard
+// set instead of merely denying one call.
+let cachedGuards = null;
+
+function getGuards() {
+	if (cachedGuards !== null) {
+		return cachedGuards;
+	}
+	const result = spawnSync(WM_UV, [...WM_UV_ARGS, HOOK_MANIFEST, "--print-guards", "pi", "--repo", REPO_ROOT], {
+		encoding: "utf8",
+		timeout: 15000,
+	});
+	if (result.error) {
+		throw result.error;
+	}
+	if (result.status !== 0) {
+		throw new Error(`hook_manifest.py --print-guards pi failed (exit ${result.status}): ${result.stderr}`);
+	}
+	cachedGuards = result.stdout.trim();
+	return cachedGuards;
+}
+
 function runDispatcher(payload) {
-	const args = [...WM_UV_ARGS, DISPATCHER, "--dialect", "pi", "--guards", GUARDS];
+	const args = [...WM_UV_ARGS, DISPATCHER, "--dialect", "pi", "--guards", getGuards()];
 	const result = spawnSync(WM_UV, args, {
 		input: JSON.stringify(payload),
 		encoding: "utf8",

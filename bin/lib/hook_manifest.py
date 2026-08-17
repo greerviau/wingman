@@ -13,6 +13,7 @@ than drifting across three reconcilers - sync-user-hooks.py's own behaviour
 is unchanged by this factoring (a decision-logic move, not a policy change);
 it now imports these four functions rather than defining them itself.
 """
+import argparse
 import json
 import os
 import sys
@@ -75,3 +76,36 @@ def portable_entries(manifest, repo, dialect):
     for group, hook, command, event, matcher in flat_entries(manifest, repo):
         if dialect in (hook.get("portable") or []):
             yield group, hook, command, event, matcher
+
+
+def portable_guard_names(manifest, repo, dialect):
+    """The sorted, de-duplicated 'guard' names portable_entries() yields for
+    `dialect` - the single computation every caller that needs a --guards
+    value for this dialect (bin/lib/guard-transport.sh's own self-test
+    invocations, bin/lib/agents/pi/wingman-guard-extension.js's own
+    getGuards(), reached via this module's --print-guards CLI) shares, so
+    none of them hard-codes the guard set separately from what the manifest
+    and the reconcilers themselves would actually register - a guard added
+    to the manifest's portable set later reaches every caller of this
+    function with no separate list to update."""
+    return sorted(set(
+        hook["guard"] for _group, hook, _command, _event, _matcher in portable_entries(manifest, repo, dialect)
+        if hook.get("guard")
+    ))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--print-guards", metavar="DIALECT", required=True,
+                     help="print the comma-joined, sorted portable guard names for this dialect and exit")
+    ap.add_argument("--manifest", default=None, help="path to user-hooks.json (default: sibling of this script)")
+    ap.add_argument("--repo", default=None, help="repo root hook script paths resolve against (default: this script's own repo)")
+    args = ap.parse_args()
+
+    manifest = load_manifest(args.manifest or default_manifest())
+    repo = args.repo or default_repo()
+    print(",".join(portable_guard_names(manifest, repo, args.print_guards)))
+
+
+if __name__ == "__main__":
+    main()

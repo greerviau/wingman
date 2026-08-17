@@ -28,7 +28,7 @@ import stat
 import subprocess
 import sys
 
-from hook_manifest import default_manifest, default_repo, load_manifest, portable_entries
+from hook_manifest import default_manifest, default_repo, load_manifest, portable_guard_names
 
 DIALECT = "opencode"
 TEMPLATE_RELPATH = os.path.join("bin", "lib", "agents", "opencode", "wingman-guard.js.tmpl")
@@ -37,13 +37,6 @@ PLACEHOLDERS = ("__WM_UV_JSON__", "__WM_UV_ARGS_JSON__", "__WM_DISPATCHER_JSON__
 
 def default_plugin_path():
     return os.path.join(os.path.expanduser("~"), ".config", "opencode", "plugins", "wingman-guard.js")
-
-
-def guard_names(manifest, repo):
-    return sorted(set(
-        hook["guard"] for _group, hook, _command, _event, _matcher in portable_entries(manifest, repo, DIALECT)
-        if hook.get("guard")
-    ))
 
 
 def check_dispatcher(repo):
@@ -71,7 +64,7 @@ def load_template(repo):
 def render(repo, wm_uv_argv):
     dispatcher = check_dispatcher(repo)
     manifest = load_manifest(default_manifest())
-    names = guard_names(manifest, repo)
+    names = portable_guard_names(manifest, repo, DIALECT)
     template = load_template(repo)
 
     uv_bin = wm_uv_argv[0]

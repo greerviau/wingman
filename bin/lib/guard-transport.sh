@@ -185,7 +185,21 @@ _wm_gt_sync_claude() {
 # broken/missing extension - exit status alone proves nothing, plan §3.2);
 # plus the shared self-test, invoking the identical dispatcher command line
 # the extension's own handler calls internally.
-_WM_GT_ALL_GUARDS="direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop"
+
+# _wm_gt_guards_for <dialect> <repo>
+#
+# The portable guard set for <dialect>, read from the manifest itself
+# (bin/lib/hook_manifest.py's own portable_guard_names(), the identical
+# computation bin/lib/sync-grok-hooks.py/sync-codex-hooks.py/sync-opencode-
+# plugin.py already use to render each transport's own registration) -
+# never a hard-coded list here, so a guard added to the manifest's own
+# 'portable' set later reaches every self-test invocation with nothing else
+# to update. Used for pi/grok/codex, whose self-test invokes the dispatcher
+# directly; opencode's own installed plugin bakes in the identical value via
+# that same function, called from within sync-opencode-plugin.py itself.
+_wm_gt_guards_for() {
+  $WM_UV "$WM_LIB/hook_manifest.py" --print-guards "$1" --repo "$2"
+}
 
 _wm_gt_sync_pi() {
   _wgsp_repo="$1"
@@ -213,7 +227,7 @@ _wm_gt_sync_pi() {
   fi
 
   if ! _wgsp_st_out="$(wm_guard_transport_selftest pi \
-      $WM_UV "$_wgsp_repo/hooks/lib/guard_dispatch.py" --dialect pi --guards "$_WM_GT_ALL_GUARDS" 2>&1)"; then
+      $WM_UV "$_wgsp_repo/hooks/lib/guard_dispatch.py" --dialect pi --guards "$(_wm_gt_guards_for pi "$_wgsp_repo")" 2>&1)"; then
     printf '%s' "$_wgsp_st_out"
     unset _wgsp_repo _wgsp_ext _wgsp_bin _wgsp_help _wgsp_flag_count _wgsp_st_out
     return 1
@@ -255,7 +269,7 @@ _wm_gt_sync_grok() {
   fi
 
   if ! _wgsg_st_out="$(wm_guard_transport_selftest grok \
-      $WM_UV "$_wgsg_repo/hooks/lib/guard_dispatch.py" --dialect grok --guards "$_WM_GT_ALL_GUARDS" 2>&1)"; then
+      $WM_UV "$_wgsg_repo/hooks/lib/guard_dispatch.py" --dialect grok --guards "$(_wm_gt_guards_for grok "$_wgsg_repo")" 2>&1)"; then
     printf '%s' "$_wgsg_st_out"
     unset _wgsg_repo _wgsg_err _wgsg_st_out
     return 1
@@ -304,7 +318,7 @@ _wm_gt_sync_codex() {
   fi
 
   if ! _wgsc2_st_out="$(wm_guard_transport_selftest codex \
-      $WM_UV "$_wgsc2_repo/hooks/lib/guard_dispatch.py" --dialect codex --guards "$_WM_GT_ALL_GUARDS" 2>&1)"; then
+      $WM_UV "$_wgsc2_repo/hooks/lib/guard_dispatch.py" --dialect codex --guards "$(_wm_gt_guards_for codex "$_wgsc2_repo")" 2>&1)"; then
     printf '%s' "$_wgsc2_st_out"
     unset _wgsc2_repo _wgsc2_bin _wgsc2_help _wgsc2_err _wgsc2_st_out
     return 1
@@ -328,8 +342,6 @@ _wm_gt_sync_codex() {
 # hooks.json entries are, since the plugin is JS code, not a declarative
 # entry - plan §5.4.0's own table names this as the shim's "single
 # dispatcher command line" case, identical in spirit to pi-extension's).
-_WM_GT_OPENCODE_GUARDS="direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop"
-
 _wm_gt_sync_opencode() {
   _wgso_repo="$1"
 
@@ -367,7 +379,7 @@ _wm_gt_sync_opencode() {
   fi
 
   if ! _wgso_st_out="$(wm_guard_transport_selftest opencode \
-      $WM_UV "$_wgso_repo/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$_WM_GT_OPENCODE_GUARDS" 2>&1)"; then
+      $WM_UV "$_wgso_repo/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$(_wm_gt_guards_for opencode "$_wgso_repo")" 2>&1)"; then
     printf '%s' "$_wgso_st_out"
     unset _wgso_repo _wgso_err _wgso_plugin_path _wgso_st_out
     return 1

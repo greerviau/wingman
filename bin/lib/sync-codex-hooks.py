@@ -55,7 +55,7 @@ import re
 import stat
 import sys
 
-from hook_manifest import default_manifest, default_repo, load_manifest, portable_entries
+from hook_manifest import default_manifest, default_repo, load_manifest, portable_guard_names
 
 DIALECT = "codex"
 MATCHER = "^(Bash|apply_patch|Edit|Write)$"
@@ -85,14 +85,6 @@ def hooks_json_path(codex_home):
     return os.path.join(codex_home, "hooks.json")
 
 
-def guard_names(manifest, repo):
-    names = sorted(set(
-        hook["guard"] for _group, hook, _command, _event, _matcher in portable_entries(manifest, repo, DIALECT)
-        if hook.get("guard")
-    ))
-    return names
-
-
 def check_dispatcher(repo):
     dispatcher = os.path.join(repo, "hooks", "lib", "guard_dispatch.py")
     if not os.path.exists(dispatcher):
@@ -103,7 +95,7 @@ def check_dispatcher(repo):
 
 def desired_document(manifest, repo, wm_uv):
     dispatcher = check_dispatcher(repo)
-    names = guard_names(manifest, repo)
+    names = portable_guard_names(manifest, repo, DIALECT)
     command = "%s %s --dialect %s --guards %s" % (wm_uv, dispatcher, DIALECT, ",".join(names))
     return {
         "hooks": {
