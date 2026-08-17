@@ -34,55 +34,10 @@ import os
 import stat
 import sys
 
-# Sibling import - both scripts live in bin/lib/, and `uv run script.py` puts
-# the script's own directory at sys.path[0] automatically.
+# Sibling imports - all three modules live in bin/lib/, and `uv run
+# script.py` puts the script's own directory at sys.path[0] automatically.
+from hook_manifest import check_scripts, default_manifest, default_repo, flat_entries, load_manifest
 from user_hook_entry import desired_entry, entry_matches
-
-
-def default_repo():
-    # bin/lib/sync-user-hooks.py -> bin/lib -> bin -> repo root, the same
-    # three-dirname walk bin/lib/common.sh does (WM_LIB -> WM_BIN -> WM_REPO).
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def default_manifest():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "user-hooks.json")
-
-
-def load_manifest(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"error: could not read manifest {path}: {e}", file=sys.stderr)
-        sys.exit(2)
-
-
-def flat_entries(manifest, repo):
-    """Yield (group, hook_dict, command, event, matcher_or_None) for every
-    hook entry in the manifest, with `command` resolved to an absolute path
-    under `repo`."""
-    for group in manifest.get("groups", []):
-        for hook in group.get("hooks", []):
-            command = os.path.join(repo, hook["script"])
-            event = hook["event"]
-            matcher = None if event == "Stop" else hook.get("matcher", "Edit|Write|NotebookEdit|Bash")
-            yield group, hook, command, event, matcher
-
-
-def check_scripts(manifest, repo):
-    """Fail closed on any manifest script that does not exist or is not
-    executable. Returns nothing; exits 2 (printing every failure) if any."""
-    failures = []
-    for _group, _hook, command, _event, _matcher in flat_entries(manifest, repo):
-        if not os.path.exists(command):
-            failures.append(f"hook script not found: {command}")
-        elif not os.access(command, os.X_OK):
-            failures.append(f"hook script not executable: {command}")
-    if failures:
-        for f in failures:
-            print(f"error: {f}", file=sys.stderr)
-        sys.exit(2)
 
 
 def load_settings(path):
