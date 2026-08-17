@@ -108,5 +108,22 @@ assert_eq "codex's descriptor's exit command is /quit" "$WM_AGENT_EXIT_CMD" "/qu
 assert_eq "codex's descriptor's skill form is \$<skill>, not /<skill>" "$WM_AGENT_SKILL_FORM" '$<skill>'
 assert_eq "codex's descriptor sets SLASH_SETTLE for its own \$-prefixed skill form" "$WM_AGENT_SLASH_SETTLE" "1"
 assert_eq "codex's descriptor is not yet marked fully verified (no real model turn was possible)" "$WM_AGENT_VERIFIED" "0"
+assert_eq "codex's descriptor declares its skills-sync preflight" "$WM_AGENT_PREFLIGHT" "codex_preflight"
+
+# --- the portable crew command vocabulary: codex_preflight actually
+#     reconciles WM_CODEX_USER_SKILLS_DIR (test isolation override), never a
+#     real developer's actual $HOME/.agents/skills ---------------------------
+CODEX_SKILLS_DIR="$(wm_mktemp_dir)/agents-skills"
+WM_CODEX_USER_SKILLS_DIR="$CODEX_SKILLS_DIR" codex_preflight "$WS/repoA" bypassPermissions spawn
+assert_true "codex_preflight installs the seven wingman-<verb> symlinks into the overridden target" \
+  "[ -L '$CODEX_SKILLS_DIR/wingman-status' ]"
+resolved_codex_skill="$(uv run --no-project --quiet python -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$CODEX_SKILLS_DIR/wingman-status")"
+assert_eq "codex_preflight points the symlink at this repo's own canonical tree" "$resolved_codex_skill" "$TEST_REPO/.agents/skills/wingman-status"
+
+# --- the portable crew command vocabulary block, codex's own
+#     $<skill> rendering ------------------------------------------------------
+codex_sysprompt_body="$(cat "$WINGMAN_HOME/crew/$id.sysprompt.md")"
+assert_contains "the crew command vocabulary block is present" "$codex_sysprompt_body" "The crew command vocabulary."
+assert_contains "codex's own example renders the \$wingman-status form" "$codex_sysprompt_body" 'e.g. `$wingman-status` invokes'
 
 test_summary

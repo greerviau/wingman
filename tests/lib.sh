@@ -103,6 +103,18 @@ test_new_home() {
   WM_CLAUDE_USER_CONFIG="$_wm_home_parent/claude-config.json"
   export WM_CLAUDE_USER_CONFIG
   printf '{"projects": {}}\n' > "$WM_CLAUDE_USER_CONFIG"
+  # Isolated skills-sync targets (bin/lib/sync-user-skills.py, the portable
+  # crew command vocabulary's codex/grok preflight and bin/doctor's own
+  # reconcile block) - unconditional, same reasoning as every override
+  # above: without this, any test that runs a real bin/doctor -y (or a real
+  # codex_preflight/grok_preflight) would write symlinks straight into
+  # this machine's own actual ~/.agents/skills or ~/.grok/skills. Left
+  # unpopulated on disk deliberately - a test that wants a populated target
+  # creates one itself; this only ever needs to point somewhere harmless.
+  WM_CODEX_USER_SKILLS_DIR="$_wm_home_parent/codex-agents-skills"
+  export WM_CODEX_USER_SKILLS_DIR
+  WM_GROK_USER_SKILLS_DIR="$_wm_home_parent/grok-skills"
+  export WM_GROK_USER_SKILLS_DIR
   # Isolated settings file, pointed at a path that does not exist yet. Without
   # this the suite would read whatever config.local.toml the developer running
   # it happens to keep at the repo root: their own [prefs] answers would make

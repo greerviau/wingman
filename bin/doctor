@@ -845,6 +845,46 @@ else
   fi
 fi
 
+# --- the portable crew command vocabulary, user scope -----------------------
+# codex and grok have no per-launch flag for an arbitrary skills directory
+# (pi does; opencode's own OPENCODE_CONFIG_DIR route is per-launch too and
+# needs no install here), so each is served by a small, idempotent symlink
+# set into its own user-level skills directory, reconciled against this
+# repo's own canonical .agents/skills/ tree. Preflight (bin/lib/agents/
+# {codex,grok}.sh) is the primary reconcile path, on every spawn/resume;
+# this is the secondary, inspectable/repairable path for checking or fixing
+# the installed state outside of a spawn. Overridable target directories
+# mirror every other user-scope check above, for tests.
+CODEX_SKILLS_DIR="${WM_CODEX_USER_SKILLS_DIR:-$HOME/.agents/skills}"
+GROK_SKILLS_DIR="${WM_GROK_USER_SKILLS_DIR:-$HOME/.grok/skills}"
+for _sync_pair in "codex:$CODEX_SKILLS_DIR" "grok:$GROK_SKILLS_DIR"; do
+  _sync_adapter="${_sync_pair%%:*}"
+  _sync_target="${_sync_pair#*:}"
+  if uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" --target "$_sync_target" --repo "$WM_REPO" --check >/dev/null 2>&1; then
+    wm_ok "$_sync_adapter's crew command vocabulary is installed ($_sync_target)"
+  else
+    wm_warn "$_sync_adapter's crew command vocabulary is not fully installed ($_sync_target)"
+    do_it=0
+    if [ "$AUTO_YES" = 1 ]; then
+      do_it=1
+    elif [ -t 0 ]; then
+      printf 'Install it now? (y/N) '
+      read ans
+      case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+    else
+      wm_warn "non-interactive; run: uv run --no-project $WM_LIB/sync-user-skills.py --target $_sync_target --repo $WM_REPO"
+    fi
+    if [ "$do_it" = 1 ]; then
+      if uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" --target "$_sync_target" --repo "$WM_REPO" >/dev/null 2>&1; then
+        wm_ok "installed $_sync_adapter's crew command vocabulary"
+      else
+        wm_err "failed to install $_sync_adapter's crew command vocabulary"
+      fi
+    fi
+  fi
+done
+unset _sync_pair _sync_adapter _sync_target CODEX_SKILLS_DIR GROK_SKILLS_DIR
+
 # --- the settings file ------------------------------------------------------
 # A hand-edited config.local.toml is the one part of an install a pull cannot
 # keep correct, and a typo there fails quietly by nature: an unknown key simply

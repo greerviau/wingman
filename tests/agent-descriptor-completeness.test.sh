@@ -21,6 +21,18 @@ for f in "$TEST_REPO"/bin/lib/agents/*.sh; do
   name="$(basename "$f" .sh)"
 
   wm_agent_resolve "$name"
+  # wm_agent_resolve itself already dies loudly (wm_die) if WM_AGENT_PREFLIGHT
+  # is set but does not resolve to a defined function - so simply reaching
+  # this line for every descriptor in the loop is already proof of that
+  # invariant; this assertion just makes it explicit and self-documenting
+  # rather than leaving it as an implicit side effect of the loop not
+  # crashing (codex_preflight/grok_preflight are new consumers of this
+  # same guarantee).
+  if [ -z "$WM_AGENT_PREFLIGHT" ] || command -v "$WM_AGENT_PREFLIGHT" >/dev/null 2>&1; then
+    ok "$name: WM_AGENT_PREFLIGHT is empty or resolves to a defined function"
+  else
+    fail "$name: WM_AGENT_PREFLIGHT ('$WM_AGENT_PREFLIGHT') does not resolve to a defined function"
+  fi
   assert_true "$name: WM_AGENT_BIN is non-empty" "[ -n '$WM_AGENT_BIN' ]"
   assert_true "$name: WM_AGENT_DISPLAY_NAME is non-empty" "[ -n '$WM_AGENT_DISPLAY_NAME' ]"
   assert_true "$name: WM_AGENT_SYSPROMPT_MODE is a recognized mode" \
