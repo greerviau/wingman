@@ -77,7 +77,7 @@ WM_AGENT_ENV_UNSET="CLAUDECODE"
 # Unlike pi's --no-context-files (bin/lib/agents/pi.sh) or codex's own
 # -c project_doc_max_bytes=0, opencode has no narrow, dedicated flag that
 # suppresses AGENTS.md/CLAUDE.md discovery without unrelated collateral, so
-# WM_AGENT_CONTEXT_SUPPRESS_FLAG is left unset below (its schema default) -
+# WM_AGENT_CONTEXT_SUPPRESS_FLAG is left unset (its schema default) -
 # deliberately, not because this wasn't investigated.
 #
 # Two real env-var levers exist in the real opencode v1.18.17 binary
