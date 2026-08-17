@@ -31,6 +31,13 @@
 # credentials in this environment): an actual successful model turn, so
 # tool-call permission-prompt behavior and busy-queue behavior remain
 # unconfirmed and stay at their documented degrade defaults below.
+#
+# Separately (2026-08-17): WM_AGENT_CONTEXT_SUPPRESS_FLAG's suppression of
+# AGENTS.md/CLAUDE.md auto-loading was live-verified via real model turns
+# against a real provider credential (openai-codex) - the marker text was
+# absent from what the model could see with the flag set and present
+# without it, confirmed across both filenames and both flag spellings - see
+# that field's own comment below for the exact method and result.
 
 WM_AGENT_BIN=pi
 WM_AGENT_DISPLAY_NAME="pi"
@@ -47,6 +54,22 @@ WM_AGENT_ENV_PREFIX=""
 # CLAUDECODE=1 from it (plan §5 step 8's explicit instruction: unset this
 # for every non-claude adapter).
 WM_AGENT_ENV_UNSET="CLAUDECODE"
+# Repo-doc-context suppression: --no-context-files (-nc, pi --help) is pi's
+# own dedicated flag for exactly this - not a repurposed generic option the
+# way codex's -c project_doc_max_bytes=0 is, so there is no cross-adapter
+# subtlety to record here. pi's own --help text names both AGENTS.md and
+# CLAUDE.md explicitly as what it disables. Live-verified against real pi
+# v0.84.1 with a real provider credential (openai-codex): a scratch repo's
+# AGENTS.md (and, separately, its CLAUDE.md with no AGENTS.md present) each
+# held a unique marker token, and pi was asked (-p, non-interactively) to
+# report any MARKER-prefixed token visible in its own system prompt or
+# project context. Without the flag, the marker was echoed back in both
+# cases (the file was loaded); with --no-context-files, and separately with
+# its short form -nc, the marker was absent in both cases (the file was
+# suppressed) - a genuine model-turn-level proof, not merely a check that
+# the flag appears in argv, exercised across both filenames and both flag
+# spellings.
+WM_AGENT_CONTEXT_SUPPRESS_FLAG="--no-context-files"
 
 # --- launch capability ----------------------------------------------------
 # --approve ("Trust project-local files for this run", pi --help) is a bare

@@ -52,6 +52,7 @@ assert_not_contains "no --name is emitted (--title is run-subcommand-only, not t
 assert_contains "the resolved model is passed via --model" "$exec_line" "--model 'anthropic/claude-sonnet'"
 assert_not_contains "no --effort/--variant leaks in (opencode has no effort flag on the interactive launch path, plan §3)" "$exec_line" "--effort"
 assert_not_contains "no --add-dir/--settings (claude-only CLAUDE.md-exclusion mechanism) leaks into an opencode launch" "$exec_line" "--add-dir"
+assert_not_contains "no OPENCODE_DISABLE_PROJECT_CONFIG (rejected: silently disables all project-local opencode config, not just AGENTS.md) leaks into an opencode launch" "$exec_line" "OPENCODE_DISABLE_PROJECT_CONFIG"
 assert_contains "the system prompt is delivered via --prompt, opencode's own flag" "$exec_line" "--prompt "
 
 # --- WM_AGENT_ENV_PREFIX must precede the literal `exec` word ---------------
