@@ -1616,12 +1616,16 @@ def cmd_reconcile(args):
     # See the docstring's "Session scoping": None (the flag omitted) means no
     # session concept, so every named backend's endpoints are judged as
     # before; an explicit value (even "") restricts judgment to records in
-    # the named sessions only.
+    # the named sessions only. Newline-separated, not comma-separated: a
+    # session name is raw operator input with nothing validating its
+    # characters, and a comma-joined encoding split back on commas would
+    # silently desync a session name that itself contains a comma from its
+    # own entry in the covered set.
     _inventory_sessions_raw = getattr(args, "inventory_sessions", None)
     if _inventory_sessions_raw is None:
         inventory_sessions = None
     else:
-        inventory_sessions = set(s for s in _inventory_sessions_raw.split(",") if s)
+        inventory_sessions = set(s for s in _inventory_sessions_raw.split("\n") if s)
     with with_locked(crew_json_path()):
         roster = load_roster()
         changed = []
@@ -5327,13 +5331,15 @@ def _args_reconcile(a):
     a.add_argument("--windows", default="")
     a.add_argument("--inventory", default="", help="newline-delimited backend inventory JSON")
     a.add_argument("--inventory-backends", default="", dest="inventory_backends")
-    # Which sessions --inventory actually covers (comma-separated), for a
-    # backend whose endpoint embeds a session ("<session>:<pane-id>"). Omit
-    # entirely for no session scoping (every named backend's endpoints are
-    # judged); pass an explicit value - even "" - once a caller gathers
-    # per-session and wants a record outside the covered sessions left alone
-    # rather than compared against a gather that was never authoritative
-    # for it (see the docstring's "Backend scoping").
+    # Which sessions --inventory actually covers (newline-separated - a
+    # session name is unvalidated operator input, so a comma-joined encoding
+    # could collide with one that itself contains a comma), for a backend
+    # whose endpoint embeds a session ("<session>:<pane-id>"). Omit entirely
+    # for no session scoping (every named backend's endpoints are judged);
+    # pass an explicit value - even "" - once a caller gathers per-session
+    # and wants a record outside the covered sessions left alone rather than
+    # compared against a gather that was never authoritative for it (see the
+    # docstring's "Session scoping").
     a.add_argument("--inventory-sessions", default=None, dest="inventory_sessions")
     # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
     # omit or pass a lead id to keep reconcile to the global death-flip only.

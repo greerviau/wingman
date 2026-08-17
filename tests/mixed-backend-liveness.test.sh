@@ -118,6 +118,17 @@ case "\$sess" in
     # names but that can no longer be reached at all.
     exit 1
     ;;
+  "${WM_TEST_HERDR_SESSION},comma")
+    # A session name containing a comma - unvalidated operator input via
+    # HERDR_SESSION, and nothing stops it from holding one.
+    case "\$1 \$2" in
+      "status --json") printf '%s\n' '{"client":{"protocol":14,"version":"0.7.1"},"server":{"running":true}}' ;;
+      "workspace list") printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"ws5","label":"wingman"}]}}' ;;
+      "tab list") printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab5","label":"wm-comma"}]}}' ;;
+      "pane list") printf '%s\n' '{"result":{"panes":[{"tab_id":"tab5","pane_id":"p:5"}]}}' ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -293,6 +304,37 @@ assert_eq "a genuinely dead member in a reachable session is still flagged" \
   "$(field_of herdr-dead-a status)" died
 assert_eq "a member whose own session is unreachable is deferred, not flipped" \
   "$(field_of herdr-unreachable-c status)" working
+
+# --- defect 10: a session name containing a comma must not desync from its --
+# own entry in the covered-sessions set. A session name is unvalidated
+# operator input (HERDR_SESSION echoed verbatim, herdr.sh:49-51), and a
+# comma-joined encoding split back on commas breaks apart a comma-containing
+# session name into pieces that never match the whole - every member of that
+# session then reads as permanently uncovered, with no way to clear since the
+# session name itself never changes. A plain-named session pair is the
+# control: it must keep working exactly as defect 8 already proved.
+new_home
+WM_TEST_HERDR_SESSION_COMMA="${HERDR_SESSION},comma"
+wm_state crew-add --id herdr-plain-live --type developer --objective PL --repo /tmp \
+  --window "$HERDR_SESSION:p:1" --session-id pl --backend herdr >/dev/null
+wm_state crew-add --id herdr-plain-dead --type developer --objective PD --repo /tmp \
+  --window "$HERDR_SESSION:p:404" --session-id pd --backend herdr >/dev/null
+wm_state crew-add --id herdr-comma-live --type developer --objective CL --repo /tmp \
+  --window "$WM_TEST_HERDR_SESSION_COMMA:p:5" --session-id cl --backend herdr >/dev/null
+wm_state crew-add --id herdr-comma-dead --type developer --objective CD --repo /tmp \
+  --window "$WM_TEST_HERDR_SESSION_COMMA:p:404" --session-id cd --backend herdr >/dev/null
+
+for _i in 1 2 3; do
+  "$TEST_REPO/bin/crew-list" >/dev/null 2>&1
+done
+assert_eq "the plain-named session's live member survives (control)" \
+  "$(field_of herdr-plain-live status)" working
+assert_eq "the plain-named session's dead member is flagged (control)" \
+  "$(field_of herdr-plain-dead status)" died
+assert_eq "the comma-named session's live member survives" \
+  "$(field_of herdr-comma-live status)" working
+assert_eq "the comma-named session's dead member is flagged too" \
+  "$(field_of herdr-comma-dead status)" died
 
 # --- defect 6: a live Herdr worker with a dead owner must still be re-adopted -
 # not silently left unwatched. A tmux worker in the same shape is the

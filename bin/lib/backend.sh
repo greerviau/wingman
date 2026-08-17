@@ -165,16 +165,22 @@ wm_backend_live_inventory() {
 # Two results, not one, so this is called plainly (never via `$(...)` - a
 # command substitution forks a subshell, and everything this sets would be
 # lost the instant it exits): $WM_HERDR_RECONCILE_INVENTORY (the merged
-# inventory) and $WM_HERDR_RECONCILE_SESSIONS (comma-separated, the sessions
-# actually covered - pass it to `reconcile --inventory-sessions`, which
-# leaves a record in an uncovered session alone instead of comparing it
-# against a gather that was never authoritative for it). Both reset on every
-# call, empty when no Herdr member is currently live - the caller still
-# calls reconcile in that case (an empty --inventory-sessions judges every
-# herdr record as outside the covered set, so it is a harmless no-op call,
-# not a skipped one).
+# inventory) and $WM_HERDR_RECONCILE_SESSIONS (NEWLINE-separated, the
+# sessions actually covered - pass it to `reconcile --inventory-sessions`,
+# which leaves a record in an uncovered session alone instead of comparing
+# it against a gather that was never authoritative for it). Newline, not
+# comma: a session name is raw operator input (wm_backend_herdr_session
+# echoes $HERDR_SESSION verbatim, herdr.sh:49-51) with nothing validating
+# its characters, and a comma-joined encoding split back on commas silently
+# desyncs a session name that itself contains a comma from its own entry in
+# the covered set - every member of that session then reads as permanently
+# uncovered, with no way to clear since the session name never changes.
+# Both reset on every call, empty when no Herdr member is currently live -
+# the caller still calls reconcile in that case (an empty
+# --inventory-sessions judges every herdr record as outside the covered
+# set, so it is a harmless no-op call, not a skipped one).
 wm_backend_herdr_reconcile_inventory() {
-  local roster_json=$1 sessions session one covered=""
+  local roster_json=$1 sessions session one
   WM_HERDR_RECONCILE_SESSIONS=""
   WM_HERDR_RECONCILE_INVENTORY=""
   sessions="$(printf '%s' "$roster_json" | jq -r \
@@ -184,13 +190,13 @@ wm_backend_herdr_reconcile_inventory() {
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     one="$(wm_backend_live_inventory herdr "$session" 2>/dev/null)" || continue
-    covered="$covered,$session"
+    WM_HERDR_RECONCILE_SESSIONS="$WM_HERDR_RECONCILE_SESSIONS
+$session"
     [ -n "$one" ] && WM_HERDR_RECONCILE_INVENTORY="$WM_HERDR_RECONCILE_INVENTORY
 $one"
   done <<EOF
 $sessions
 EOF
-  WM_HERDR_RECONCILE_SESSIONS="${covered#,}"
 }
 wm_backend_close() {
   local backend=$1 target=$2
