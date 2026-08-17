@@ -1,0 +1,194 @@
+# bin/lib/guard-transport.sh - per-transport guard install/verify (the
+# orchestrator-guard-transports plan). Sourced by bin/wingman (and, once the
+# crew-side follow-on lands, bin/spawn-crew/bin/crew-resume) after
+# bin/lib/common.sh and bin/lib/agent.sh - assumes $WM_LIB/$WM_BIN/$WM_REPO
+# and wm_die/wm_warn already exist.
+#
+# wm_guard_transport_sync <transport> <repo>
+#   0  -> guards installed AND positively verified for this transport
+#   1  -> refused; the reason is printed on stdout for the caller to feed
+#         wm_launch_failure/wm_die (never printed directly, so the caller
+#         owns the sink - see bin/wingman's own use of this function)
+#
+# One new file rather than inline in bin/wingman: bin/spawn-crew and
+# bin/crew-resume will need the identical dispatch the moment crew run on a
+# non-Claude CLI (a follow-on, not built by this plan - see docs/guards.md),
+# and that follow-on must not have to re-extract this from bin/wingman.
+#
+# §5.4.0's self-test standard is the one check every branch below ends with,
+# and it is the one that actually matters: run the EXACT command line that
+# was registered, against two synthetic payloads whose verdicts are both
+# known in advance (deny, allow), and assert both. A transport that merely
+# REGISTERS a command - without ever executing it - proves nothing: `uv` not
+# on the CLI's own PATH, a typo'd --dialect/--guards value, an import error
+# inside the dispatcher, or a cold start slower than a fail-open CLI's own
+# timeout would all read as "installed" while enforcing nothing.
+#
+# bash-3.2-safe: no associative arrays, no ${x,,}.
+set -u
+
+WM_UV="${WM_UV:-uv run --no-project --quiet}"
+
+# --- §5.4.0 fixtures ---------------------------------------------------------
+#
+# The deny fixture is a bare arming `bin/watch-fleet` Bash call with no
+# run_in_background - decided by the foreground-watcher guard, which has NO
+# crew-id gating at all and whose every branch converges on deny (see
+# hooks/lib/guard_policy.py's own no-foreground-watcher-guard section, and
+# the plan's §5.4.0 table for the candidates this fixture beats: gh pr merge
+# and pkill/watch-fleet-kill are both crew-only or state-dependent, so
+# either would pass vacuously in the orchestrator's own preflight scope,
+# which has no WINGMAN_CREW_ID and nothing armed yet). The allow fixture is
+# a bare `ls`, which passes every guard in the set - asserting it catches an
+# inverted or over-broad dispatcher that would otherwise deny everything and
+# then block every tool call in the session.
+#
+# claude's own fixture is built inline here (its "registered command line"
+# is hooks/no-foreground-watcher-guard.sh, a different program from
+# guard_dispatch.py, with its own stdin contract - see that hook's own
+# header). The four non-Claude dialects reuse guard_dispatch.py's own
+# --emit-fixture so the fixture and that module's own parser can never drift
+# apart (plan §5.4.0).
+_wm_gt_fixture() {
+  # _wm_gt_fixture <dialect> <deny|allow>
+  _wgf_dialect="$1"; _wgf_case="$2"
+  if [ "$_wgf_dialect" = claude ]; then
+    if [ "$_wgf_case" = deny ]; then
+      printf '{"tool_name":"Bash","tool_input":{"command":"bin/watch-fleet"}}'
+    else
+      printf '{"tool_name":"Bash","tool_input":{"command":"ls"}}'
+    fi
+  else
+    $WM_UV "$WM_REPO/hooks/lib/guard_dispatch.py" --emit-fixture "$_wgf_dialect" --case "$_wgf_case"
+  fi
+  unset _wgf_dialect _wgf_case
+}
+
+# _wm_gt_verify_deny/_wm_gt_verify_allow <dialect> <stdout> <rc> - true (0)
+# iff <stdout>/<rc> match that dialect's own documented verdict shape
+# (§5.4.0's table). claude and codex share the hookSpecificOutput shape;
+# grok/opencode/pi share the {"decision": ...} shape; only opencode/pi
+# require an EXPLICIT allow verdict rather than silence (§5.1's "allow is
+# silence" holds only for the transports with no shim to interpret it).
+_wm_gt_verify_deny() {
+  _wgvd_dialect="$1"; _wgvd_out="$2"; _wgvd_rc="$3"
+  case "$_wgvd_dialect" in
+    claude)
+      [ "$_wgvd_rc" -eq 0 ] && case "$_wgvd_out" in *'"permissionDecision": "deny"'*) return 0 ;; esac
+      return 1
+      ;;
+    codex)
+      [ "$_wgvd_rc" -eq 2 ] && case "$_wgvd_out" in *'"permissionDecision": "deny"'*) return 0 ;; esac
+      return 1
+      ;;
+    grok|opencode|pi)
+      [ "$_wgvd_rc" -eq 2 ] && case "$_wgvd_out" in *'"decision": "deny"'*) return 0 ;; esac
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_wm_gt_verify_allow() {
+  _wgva_dialect="$1"; _wgva_out="$2"; _wgva_rc="$3"
+  case "$_wgva_dialect" in
+    claude|codex|grok)
+      [ "$_wgva_rc" -eq 0 ] && [ -z "$_wgva_out" ]
+      ;;
+    opencode|pi)
+      [ "$_wgva_rc" -eq 0 ] && case "$_wgva_out" in *'"decision": "allow"'*) return 0 ;; esac
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# wm_guard_transport_selftest <dialect> <cmd...>
+#
+# Runs both §5.4.0 fixtures through the registered command line `<cmd...>`
+# (read on stdin, exactly the way the real transport invokes it) and asserts
+# both verdicts. Returns 0 on success (nothing printed). On failure, prints a
+# diagnostic to STDOUT (never stderr - the caller owns the sink, same
+# convention as wm_guard_transport_sync itself) naming the exact command
+# line, its stdout/stderr, and the remedy - §5.4.0's own requirement, since
+# this self-test is the one new failure mode that reaches a live system
+# (claude-json is the only branch reachable in real use today - the
+# continuity gate refuses every other adapter before this ever runs there).
+wm_guard_transport_selftest() {
+  _wgt_dialect="$1"; shift
+
+  _wgt_deny_fixture="$(_wm_gt_fixture "$_wgt_dialect" deny)"
+  _wgt_deny_out="$(printf '%s' "$_wgt_deny_fixture" | "$@" 2>/tmp/wm-gt-selftest-stderr.$$)"
+  _wgt_deny_rc=$?
+  _wgt_deny_err="$(cat /tmp/wm-gt-selftest-stderr.$$ 2>/dev/null)"
+  rm -f "/tmp/wm-gt-selftest-stderr.$$"
+
+  if ! _wm_gt_verify_deny "$_wgt_dialect" "$_wgt_deny_out" "$_wgt_deny_rc"; then
+    printf 'guard-transport self-test failed for %s: the registered command did not deny the known-deny fixture.\nCommand: %s\nFixture (stdin): %s\nExit status: %s\nStdout: %s\nStderr: %s\nRemedy: run the command above by hand with the fixture on stdin and inspect why it did not deny - a missing `uv`, a broken PYTHONPATH, or an import error inside the dispatcher would all produce exactly this.\n' \
+      "$_wgt_dialect" "$*" "$_wgt_deny_fixture" "$_wgt_deny_rc" "$_wgt_deny_out" "$_wgt_deny_err"
+    return 1
+  fi
+
+  _wgt_allow_fixture="$(_wm_gt_fixture "$_wgt_dialect" allow)"
+  _wgt_allow_out="$(printf '%s' "$_wgt_allow_fixture" | "$@" 2>/tmp/wm-gt-selftest-stderr.$$)"
+  _wgt_allow_rc=$?
+  _wgt_allow_err="$(cat /tmp/wm-gt-selftest-stderr.$$ 2>/dev/null)"
+  rm -f "/tmp/wm-gt-selftest-stderr.$$"
+
+  if ! _wm_gt_verify_allow "$_wgt_dialect" "$_wgt_allow_out" "$_wgt_allow_rc"; then
+    printf 'guard-transport self-test failed for %s: the registered command denied the known-allow fixture (a deny-everything dispatcher would block every tool call in the session).\nCommand: %s\nFixture (stdin): %s\nExit status: %s\nStdout: %s\nStderr: %s\nRemedy: run the command above by hand with the fixture on stdin - an inverted allow/deny condition, an unknown payload treated as closed, or a --guards list that picked up an unrelated closed-direction guard would all produce exactly this.\n' \
+      "$_wgt_dialect" "$*" "$_wgt_allow_fixture" "$_wgt_allow_rc" "$_wgt_allow_out" "$_wgt_allow_err"
+    return 1
+  fi
+
+  unset _wgt_dialect _wgt_deny_fixture _wgt_deny_out _wgt_deny_rc _wgt_deny_err \
+    _wgt_allow_fixture _wgt_allow_out _wgt_allow_rc _wgt_allow_err
+  return 0
+}
+
+# --- claude-json -------------------------------------------------------------
+#
+# Relocated verbatim from bin/wingman's own inline case (no behaviour
+# change): run sync-user-hooks.py, on failure return its stderr. Project-
+# scope hooks continue to come free from .claude/settings.json. The §5.4.0
+# self-test is added here too (it costs one subprocess and closes the same
+# "uv not runnable in THIS session's own environment" hole every other
+# branch closes) - tests/orchestrator-guard-sync-gate.test.sh part (a) keeps
+# passing unchanged.
+_wm_gt_sync_claude() {
+  _wgsc_repo="$1"
+  if ! _wgsc_err="$($WM_UV "$WM_LIB/sync-user-hooks.py" \
+      --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$_wgsc_repo" 2>&1)"; then
+    printf '%s' "$_wgsc_err"
+    unset _wgsc_repo _wgsc_err
+    return 1
+  fi
+  if ! _wgsc_st_out="$(wm_guard_transport_selftest claude \
+      "$WM_REPO/hooks/no-foreground-watcher-guard.sh" 2>&1)"; then
+    printf '%s' "$_wgsc_st_out"
+    unset _wgsc_repo _wgsc_err _wgsc_st_out
+    return 1
+  fi
+  unset _wgsc_repo _wgsc_err _wgsc_st_out
+  return 0
+}
+
+wm_guard_transport_sync() {
+  _wgts_transport="$1"; _wgts_repo="$2"
+  case "$_wgts_transport" in
+    claude-json)
+      _wgts_out="$(_wm_gt_sync_claude "$_wgts_repo")"; _wgts_rc=$?
+      ;;
+    *)
+      _wgts_out="the guard transport '$_wgts_transport' has no orchestrator-side guard install/verify implementation yet."
+      _wgts_rc=1
+      ;;
+  esac
+  if [ "$_wgts_rc" -ne 0 ]; then
+    printf '%s' "$_wgts_out"
+    unset _wgts_transport _wgts_repo _wgts_out _wgts_rc
+    return 1
+  fi
+  unset _wgts_transport _wgts_repo _wgts_out _wgts_rc
+  return 0
+}
