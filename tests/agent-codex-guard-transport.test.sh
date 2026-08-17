@@ -21,18 +21,20 @@ NO_REQ="$WORK/no-requirements.toml"
 # real codex binary needed for THIS half (the registered command is the
 # dispatcher, not codex itself) - only for the --help/trust-flag check.
 # =============================================================================
-if wm_have codex; then
-  unset WM_AGENT_BIN_OVERRIDE
-  wm_agent_resolve codex
-else
-  # Descriptor resolution alone needs no real binary - only this branch's
-  # own --help probe does (guarded separately below).
-  . "$TEST_REPO/bin/lib/agent.sh"
-  wm_agent_resolve codex
-fi
+# tests/lib.sh's default WM_AGENT_BIN_OVERRIDE (a harmless stub) would
+# otherwise win over codex's own real WM_AGENT_BIN regardless of whether a
+# real codex binary is on PATH - unset it unconditionally before resolving,
+# the same pattern tests/agent-pi-guard-transport.test.sh/tests/agent-grok-
+# guard-transport.test.sh already use. Gating this file's own "is a real
+# codex installed" checks on `wm_have "${WM_AGENT_BIN:-codex}"` after a
+# contaminated resolve would silently check the STUB path (which always
+# exists and is executable) instead of the real binary - exactly the CI
+# failure this fixes: every check below tests `wm_have codex` directly.
+unset WM_AGENT_BIN_OVERRIDE
+wm_agent_resolve codex
 
 CODEX_HOME_1="$(wm_mktemp_dir)"
-if wm_have "${WM_AGENT_BIN:-codex}"; then
+if wm_have codex; then
   out="$(CODEX_HOME="$CODEX_HOME_1" wm_guard_transport_sync codex-json "$TEST_REPO")"; rc=$?
   assert_true "codex-json: a healthy repo syncs and self-tests" "[ $rc -eq 0 ]"
   assert_eq "codex-json: success prints nothing" "$out" ""
@@ -53,7 +55,7 @@ fi
 BAD_REPO="$(wm_mktemp_dir)/no-dispatcher"
 mkdir -p "$BAD_REPO"
 CODEX_HOME_2="$(wm_mktemp_dir)"
-if wm_have "${WM_AGENT_BIN:-codex}"; then
+if wm_have codex; then
   out="$(CODEX_HOME="$CODEX_HOME_2" wm_guard_transport_sync codex-json "$BAD_REPO")"; rc=$?
   assert_true "codex-json: a repo with no dispatcher refuses" "[ $rc -ne 0 ]"
   assert_contains "the refusal names the missing dispatcher" "$out" "guard_dispatch.py"
