@@ -270,20 +270,20 @@ wm_compose_crew_sysprompt() {
     fi
     # The portable crew command vocabulary. Without this block a crew
     # member has no way to learn that seven skills describing $WINGMAN_BIN's
-    # own scripts are loaded
-    # alongside it, or how its own CLI invokes one - on the four non-claude
-    # adapters they would be reachable only by the model spontaneously
-    # matching a skill's description. Rendered once, adapter-agnostically,
-    # from $WM_AGENT_SKILL_FORM (set by wm_agent_resolve in the caller's own
-    # process before this function runs).
+    # own scripts are loaded alongside it, or how its own CLI invokes one -
+    # on the four non-claude adapters they would be reachable only by the
+    # model spontaneously matching a skill's description. Rendered once,
+    # adapter-agnostically, from $WM_AGENT_SKILL_FORM (set by
+    # wm_agent_resolve in the caller's own process before this function
+    # runs).
     if [ -n "${WM_AGENT_SKILL_FORM:-}" ]; then
       if [ "$_wcs_agent" = claude ]; then
         # claude's own command files keep their bare filenames (the
         # linchpin of the whole design: Claude Code ignores a command
         # file's `name` frontmatter and resolves by filename instead) -
         # "/status", not "/wingman-status" - even though the underlying
-        # skill's own `name`
-        # frontmatter is wingman-status like everywhere else.
+        # skill's own `name` frontmatter is wingman-status like everywhere
+        # else.
         _wcs_skill_example="/status"
       else
         _wcs_skill_example="${WM_AGENT_SKILL_FORM/<skill>/wingman-status}"
