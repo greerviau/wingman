@@ -62,8 +62,10 @@ WM_AGENT_DISPLAY_NAME="pi"
 # own project-trust dialog is fully avoidable with a plain launch flag - see
 # WM_AGENT_BYPASS_FLAG below - so there is no separate gate left to wrap.
 #
-# Also, deliberately, no home-directory skills install (unlike codex/grok/
-# opencode's own preflight-time installer, bin/lib/sync-user-skills.py):
+# Also, deliberately, no home-directory skills install (unlike codex's and
+# grok's own preflight-time installer, bin/lib/sync-user-skills.py - opencode
+# has no installer of its own either, served instead by its own per-launch
+# OPENCODE_CONFIG_DIR route, see opencode.sh):
 # WM_AGENT_SKILLS_FLAG below is a complete per-launch route on its own, and
 # installing pi's own link set on top of it would be actively worse than
 # useless - pi reads ~/.agents/skills/ as a global location in ADDITION to

@@ -152,6 +152,31 @@ assert_not_contains "copy mode: the corruption is gone after reconcile" "$(cat "
 assert_eq "copy mode: repaired content matches the repo's source again" \
   "$(cat "$TARGET8/wingman-status/SKILL.md")" "$(cat "$TEST_REPO/.agents/skills/wingman-status/SKILL.md")"
 
+# --- test 8b: mode switches actually change the on-disk SHAPE, not just
+#              content - test 8 above only ever installs copy mode into an
+#              empty target, which never exercises the entry-already-exists
+#              path either direction; a content-only check here would pass
+#              vacuously the same way the real bug did (content compared
+#              through the symlink resolves identical to the source, so a
+#              switch to copy mode read as "already correct" and silently
+#              never became a real copy) --------------------------------------
+TARGET8B="$WORK/mode-switch/skills"
+run_sync --target "$TARGET8B" --repo "$TEST_REPO" --mode symlink >/dev/null
+assert_true "mode switch: starts out a symlink" "[ -L '$TARGET8B/wingman-status' ]"
+
+out8b_to_copy="$(run_sync --target "$TARGET8B" --repo "$TEST_REPO" --mode copy 2>&1)"
+assert_contains "mode switch: symlink -> copy is reported as an install, not silently skipped" "$out8b_to_copy" "installed:"
+assert_false "mode switch: wingman-status is no longer a symlink after switching to copy" "[ -L '$TARGET8B/wingman-status' ]"
+assert_true "mode switch: wingman-status is now a real directory" "[ -d '$TARGET8B/wingman-status' ]"
+assert_true "mode switch: the real directory holds a real SKILL.md" "[ -f '$TARGET8B/wingman-status/SKILL.md' ]"
+assert_eq "mode switch: --check in copy mode reports clean immediately after the switch (no residual drift)" \
+  "$(run_sync --target "$TARGET8B" --repo "$TEST_REPO" --mode copy --check >/dev/null 2>&1; echo $?)" "0"
+
+out8b_to_symlink="$(run_sync --target "$TARGET8B" --repo "$TEST_REPO" --mode symlink 2>&1)"
+assert_contains "mode switch: copy -> symlink is reported as an install too" "$out8b_to_symlink" "installed:"
+assert_true "mode switch: wingman-status is a symlink again" "[ -L '$TARGET8B/wingman-status' ]"
+assert_false "mode switch: the old copy directory is gone, not left alongside the new symlink" "[ -d '$TARGET8B/wingman-status' ] && [ ! -L '$TARGET8B/wingman-status' ]"
+
 # --- test 9: concurrency - N reconcilers racing one fresh target --------------
 TARGET9="$WORK/concurrent/skills"
 _pids=""

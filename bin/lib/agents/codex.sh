@@ -280,10 +280,18 @@ WM_AGENT_SKILL_FORM="\$<skill>"
 # mirrors claude_preflight's WM_CLAUDE_USER_SETTINGS/WM_CLAUDE_USER_CONFIG
 # convention) - a test suite run must never write into a real developer's
 # actual $HOME/.agents/skills.
+#
+# Mode defaults to symlink, matching grok_preflight's own convention;
+# switch WM_CODEX_SKILLS_SYNC_MODE=copy if hands-on verification ever shows
+# codex stops following a symlinked skill folder (its own docs currently
+# confirm it does - see the file header - so this is not expected to be
+# needed, but the switch exists for symmetry with grok and so bin/doctor's
+# own reconcile can read the identical variable rather than guessing).
 codex_preflight() {
   _cop_action="${3:-spawn}"
   if ! _cop_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" \
-      --target "${WM_CODEX_USER_SKILLS_DIR:-$HOME/.agents/skills}" --repo "$WM_REPO" 2>&1)"; then
+      --target "${WM_CODEX_USER_SKILLS_DIR:-$HOME/.agents/skills}" --repo "$WM_REPO" \
+      --mode "${WM_CODEX_SKILLS_SYNC_MODE:-symlink}" 2>&1)"; then
     wm_launch_failure "codex skills sync ($_cop_action)" "$_cop_err"
     wm_die "could not reconcile codex's user-level skills directory (\$HOME/.agents/skills): $_cop_err
 Fix the reported problem, or run 'bin/doctor -y', then retry this $_cop_action."

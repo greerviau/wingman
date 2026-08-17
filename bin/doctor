@@ -855,35 +855,43 @@ fi
 # this is the secondary, inspectable/repairable path for checking or fixing
 # the installed state outside of a spawn. Overridable target directories
 # mirror every other user-scope check above, for tests.
-CODEX_SKILLS_DIR="${WM_CODEX_USER_SKILLS_DIR:-$HOME/.agents/skills}"
-GROK_SKILLS_DIR="${WM_GROK_USER_SKILLS_DIR:-$HOME/.grok/skills}"
-for _sync_pair in "codex:$CODEX_SKILLS_DIR" "grok:$GROK_SKILLS_DIR"; do
-  _sync_adapter="${_sync_pair%%:*}"
-  _sync_target="${_sync_pair#*:}"
-  if uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" --target "$_sync_target" --repo "$WM_REPO" --check >/dev/null 2>&1; then
-    wm_ok "$_sync_adapter's crew command vocabulary is installed ($_sync_target)"
+#
+# _wm_sync_vocab_check <adapter> <target> <mode> - <mode> MUST be the exact
+# value that adapter's own preflight function would pass (WM_CODEX_SKILLS_
+# SYNC_MODE / WM_GROK_SKILLS_SYNC_MODE, defaulting to symlink like each
+# preflight does) - never a bare default here. Passing a different mode
+# than preflight uses would make this "repair" path actively destructive:
+# a correct copy-mode install (the documented fallback for an adapter that
+# does not follow a symlinked skill directory) would read as "not fully
+# installed" under the wrong mode and get silently replaced with symlinks.
+_wm_sync_vocab_check() {
+  _svc_adapter="$1"; _svc_target="$2"; _svc_mode="$3"
+  if uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" --target "$_svc_target" --repo "$WM_REPO" --mode "$_svc_mode" --check >/dev/null 2>&1; then
+    wm_ok "$_svc_adapter's crew command vocabulary is installed ($_svc_target, $_svc_mode mode)"
+    return
+  fi
+  wm_warn "$_svc_adapter's crew command vocabulary is not fully installed ($_svc_target, $_svc_mode mode)"
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Install it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
   else
-    wm_warn "$_sync_adapter's crew command vocabulary is not fully installed ($_sync_target)"
-    do_it=0
-    if [ "$AUTO_YES" = 1 ]; then
-      do_it=1
-    elif [ -t 0 ]; then
-      printf 'Install it now? (y/N) '
-      read ans
-      case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+    wm_warn "non-interactive; run: uv run --no-project $WM_LIB/sync-user-skills.py --target $_svc_target --repo $WM_REPO --mode $_svc_mode"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" --target "$_svc_target" --repo "$WM_REPO" --mode "$_svc_mode" >/dev/null 2>&1; then
+      wm_ok "installed $_svc_adapter's crew command vocabulary"
     else
-      wm_warn "non-interactive; run: uv run --no-project $WM_LIB/sync-user-skills.py --target $_sync_target --repo $WM_REPO"
-    fi
-    if [ "$do_it" = 1 ]; then
-      if uv run --no-project --quiet "$WM_LIB/sync-user-skills.py" --target "$_sync_target" --repo "$WM_REPO" >/dev/null 2>&1; then
-        wm_ok "installed $_sync_adapter's crew command vocabulary"
-      else
-        wm_err "failed to install $_sync_adapter's crew command vocabulary"
-      fi
+      wm_err "failed to install $_svc_adapter's crew command vocabulary"
     fi
   fi
-done
-unset _sync_pair _sync_adapter _sync_target CODEX_SKILLS_DIR GROK_SKILLS_DIR
+}
+_wm_sync_vocab_check codex "${WM_CODEX_USER_SKILLS_DIR:-$HOME/.agents/skills}" "${WM_CODEX_SKILLS_SYNC_MODE:-symlink}"
+_wm_sync_vocab_check grok "${WM_GROK_USER_SKILLS_DIR:-$HOME/.grok/skills}" "${WM_GROK_SKILLS_SYNC_MODE:-symlink}"
+unset _svc_adapter _svc_target _svc_mode
 
 # --- the settings file ------------------------------------------------------
 # A hand-edited config.local.toml is the one part of an install a pull cannot

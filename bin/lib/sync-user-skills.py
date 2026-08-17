@@ -144,6 +144,18 @@ def plan(target, repo, mode):
                 continue  # already correct
             installs.append((verb, desired_path))
         else:  # copy
+            # A managed entry that is currently a SYMLINK (e.g. a mode
+            # switch from a prior symlink-mode install) is never already
+            # correct in copy mode, however its content compares - checked
+            # first and unconditionally, the same symmetry the symlink
+            # branch above already has for the reverse case. Without this,
+            # `<entry>/SKILL.md` resolves THROUGH the symlink straight back
+            # to the source, so the content comparison below would compare
+            # the source against itself and silently treat a symlink as a
+            # correct copy, never actually converting it.
+            if os.path.islink(entry):
+                installs.append((verb, desired_path))
+                continue
             # Compares the COPY's actual live content against the SOURCE's
             # actual live content, every time - never the stored .wm-sync-hash
             # marker against the source alone. A marker-vs-source-only

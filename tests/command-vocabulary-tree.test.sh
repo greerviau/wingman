@@ -90,6 +90,16 @@ for d in "$SKILLS"/*/; do
   else
     fail "$dir/SKILL.md has a non-empty description"
   fi
+  # The Agent Skills specification caps `description` at 1024 characters -
+  # stripped of the "description: " frontmatter key itself, so this measures
+  # the value a spec-compliant parser would actually see, not the raw line.
+  desc_value="${desc_val#description: }"
+  desc_len="${#desc_value}"
+  if [ "$desc_len" -le 1024 ]; then
+    ok "$dir/SKILL.md's description is within the 1024-character spec cap ($desc_len chars)"
+  else
+    fail "$dir/SKILL.md's description exceeds the 1024-character spec cap ($desc_len chars)"
+  fi
 done
 
 # --- 4/5. every exported body: no bare bin/<script> invocation (excluding
@@ -102,9 +112,12 @@ done
 #          narrow carve-out phrases exempt the two places a bare bin/<script>
 #          form is deliberately illustrative rather than an instruction to
 #          run: the fallback sentence itself ("resolved relative to"), and
-#          watch.md's own "unlike a bare `bin/watch-fleet`" contrast (issue
-#          #214) - see the plan's own risk note on watch.md needing care
-#          rather than a blind substitution.
+#          watch.md's own "unlike a bare `bin/watch-fleet`" contrast, which
+#          deliberately shows the OLD cwd-dependent form to illustrate why
+#          the new one is needed - this is the one exported body where the
+#          $WINGMAN_BIN rewrite needed care rather than a blind
+#          substitution, since it also carries prose that discusses the
+#          rewrite itself, not only invocations of it.
 for v in $EXPORTED_VERBS; do
   f="$SKILLS/wingman-$v/SKILL.md"
   [ -f "$f" ] || { fail "wingman-$v/SKILL.md is missing"; continue; }
