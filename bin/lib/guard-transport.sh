@@ -117,23 +117,25 @@ _wm_gt_verify_allow() {
 wm_guard_transport_selftest() {
   _wgt_dialect="$1"; shift
 
+  _wgt_stderr_tmp="$(mktemp)"
+
   _wgt_deny_fixture="$(_wm_gt_fixture "$_wgt_dialect" deny)"
-  _wgt_deny_out="$(printf '%s' "$_wgt_deny_fixture" | "$@" 2>/tmp/wm-gt-selftest-stderr.$$)"
+  _wgt_deny_out="$(printf '%s' "$_wgt_deny_fixture" | "$@" 2>"$_wgt_stderr_tmp")"
   _wgt_deny_rc=$?
-  _wgt_deny_err="$(cat /tmp/wm-gt-selftest-stderr.$$ 2>/dev/null)"
-  rm -f "/tmp/wm-gt-selftest-stderr.$$"
+  _wgt_deny_err="$(cat "$_wgt_stderr_tmp" 2>/dev/null)"
 
   if ! _wm_gt_verify_deny "$_wgt_dialect" "$_wgt_deny_out" "$_wgt_deny_rc"; then
     printf 'guard-transport self-test failed for %s: the registered command did not deny the known-deny fixture.\nCommand: %s\nFixture (stdin): %s\nExit status: %s\nStdout: %s\nStderr: %s\nRemedy: run the command above by hand with the fixture on stdin and inspect why it did not deny - a missing `uv`, a broken PYTHONPATH, or an import error inside the dispatcher would all produce exactly this.\n' \
       "$_wgt_dialect" "$*" "$_wgt_deny_fixture" "$_wgt_deny_rc" "$_wgt_deny_out" "$_wgt_deny_err"
+    rm -f "$_wgt_stderr_tmp"
     return 1
   fi
 
   _wgt_allow_fixture="$(_wm_gt_fixture "$_wgt_dialect" allow)"
-  _wgt_allow_out="$(printf '%s' "$_wgt_allow_fixture" | "$@" 2>/tmp/wm-gt-selftest-stderr.$$)"
+  _wgt_allow_out="$(printf '%s' "$_wgt_allow_fixture" | "$@" 2>"$_wgt_stderr_tmp")"
   _wgt_allow_rc=$?
-  _wgt_allow_err="$(cat /tmp/wm-gt-selftest-stderr.$$ 2>/dev/null)"
-  rm -f "/tmp/wm-gt-selftest-stderr.$$"
+  _wgt_allow_err="$(cat "$_wgt_stderr_tmp" 2>/dev/null)"
+  rm -f "$_wgt_stderr_tmp"
 
   if ! _wm_gt_verify_allow "$_wgt_dialect" "$_wgt_allow_out" "$_wgt_allow_rc"; then
     printf 'guard-transport self-test failed for %s: the registered command denied the known-allow fixture (a deny-everything dispatcher would block every tool call in the session).\nCommand: %s\nFixture (stdin): %s\nExit status: %s\nStdout: %s\nStderr: %s\nRemedy: run the command above by hand with the fixture on stdin - an inverted allow/deny condition, an unknown payload treated as closed, or a --guards list that picked up an unrelated closed-direction guard would all produce exactly this.\n' \
@@ -141,7 +143,7 @@ wm_guard_transport_selftest() {
     return 1
   fi
 
-  unset _wgt_dialect _wgt_deny_fixture _wgt_deny_out _wgt_deny_rc _wgt_deny_err \
+  unset _wgt_dialect _wgt_stderr_tmp _wgt_deny_fixture _wgt_deny_out _wgt_deny_rc _wgt_deny_err \
     _wgt_allow_fixture _wgt_allow_out _wgt_allow_rc _wgt_allow_err
   return 0
 }
