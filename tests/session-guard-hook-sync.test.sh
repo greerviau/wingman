@@ -47,6 +47,13 @@ mk_mirror() {
   mkdir -p "$_mm_dir"
   ln -s "$TEST_REPO/bin" "$_mm_dir/bin"
   mkdir -p "$_mm_dir/hooks"
+  # Whole-directory symlink so guard_policy.py/cmd_match.py are present -
+  # bin/lib/guard-transport.sh's own self-test (the orchestrator-guard-
+  # transports plan) genuinely imports and runs them for the ALLOW fixture,
+  # not just the DENY one (which the cheap textual pre-gate can short-
+  # circuit before ever reaching python) - without this, a self-test that
+  # actually failed to import could still read as "passing" by accident.
+  ln -s "$TEST_REPO/hooks/lib" "$_mm_dir/hooks/lib"
   for f in "$TEST_REPO"/hooks/*; do
     [ -f "$f" ] || continue
     _mm_base="$(basename "$f")"
@@ -231,18 +238,22 @@ PATH="$STUBDIR5:$PATH" "$MIRROR_BAD4/bin/wingman" >/dev/null 2>&1
 wm_stop_guardian
 assert_true "the failure sink is written on a forced sync failure" "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
 sink_content="$(cat "$WINGMAN_HOME/last-launch-failure" 2>/dev/null)"
-assert_contains "the sink names the guard-hook-sync component" "$sink_content" "guard-hook sync"
+# The orchestrator-guard-transports plan consolidates every transport's own
+# failure-sink component label to "guard transport" (§5.5's own pseudocode),
+# replacing claude-json's former standalone "guard-hook sync" label - a
+# deliberate part of that consolidation, not drift.
+assert_contains "the sink names the guard-transport component" "$sink_content" "guard transport"
 assert_contains "the sink names the missing script's path" "$sink_content" "no-direct-edit-guard.sh"
 ts_line="$(sed -n 1p "$WINGMAN_HOME/last-launch-failure")"
 case "$ts_line" in
-  *T*Z*guard-hook*) ok "the sink's first line carries a timestamp and the component" ;;
+  *T*Z*guard*) ok "the sink's first line carries a timestamp and the component" ;;
   *) fail "the sink's first line carries a timestamp and the component" ;;
 esac
 
 # doctor surfaces it near the top of its own output while it is present.
 doctor_out="$("$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "bin/doctor surfaces the recorded launch failure" "$doctor_out" "the most recent session launch refused to start"
-assert_contains "bin/doctor's surfaced message names the component" "$doctor_out" "guard-hook sync"
+assert_contains "bin/doctor's surfaced message names the component" "$doctor_out" "guard transport"
 
 # A subsequent successful launch clears it.
 MIRROR_OK4="$(wm_mktemp_dir)/mirror-ok"

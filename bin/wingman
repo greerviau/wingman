@@ -8,6 +8,7 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 . "$WM_LIB/agent.sh"
+. "$WM_LIB/guard-transport.sh"
 
 # Ensure state home + a fresh-enough project cache exist.
 wm_state init >/dev/null
@@ -102,32 +103,57 @@ export WINGMAN_REPO="$WM_REPO"
 
 cd "$WM_REPO" || wm_die "cannot cd into wingman repo: $WM_REPO"
 
-# --- reconcile guard hooks for the resolved orchestrator adapter -------------
+# --- the second capability gate: fleet continuity (the orchestrator-guard-
+# transports plan, §5.5) -------------------------------------------------
+# Deterministic, reads only descriptor state, and has no side effects - run
+# BEFORE the guard install below, which writes to the operator's home
+# directory. Running the install first would mean a single curious
+# WM_ORCH_AGENT=codex run permanently registers wingman's guards in the
+# human's own global codex/grok/opencode config even though the launch
+# always refuses right after - and no-watcher-kill/no-foreground-watcher/
+# no-foreground-poll-loop have no crew-id gating, so they would start
+# denying that human's own while/sleep loops in unrelated repos, forever,
+# from a launch that never once succeeded.
+#
+# Named at its true strength: for every one of the four non-Claude adapters,
+# wingman's wake loop (asyncRewake on a Stop-hook entry, run_in_background
+# on a Bash tool call) has no wired equivalent - this is a capability that
+# has not been built, not one that was shown to be impossible (pi's own
+# extension API demonstrably has the underlying primitives for one -
+# docs/analysis/2026-08-17-pi-wake-loop-probe/ - building it is deliberately
+# out of this effort's scope).
+if [ -z "$WM_AGENT_CONTINUITY_TRANSPORT" ]; then
+  _ct_msg="the resolved orchestrator agent '$WM_AGENT_DISPLAY_NAME' (WM_ORCH_AGENT=${WM_ORCH_AGENT:-claude}) has a guard transport ('$WM_AGENT_GUARD_TRANSPORT'), but wingman has no fleet-continuity transport built for it: nothing re-invokes the session after a blocking wait, so the wake loop cannot run and this orchestrator could not wake itself. This is a capability that has not been built, not one that was shown to be impossible. Unset WM_ORCH_AGENT (or set it to claude) to run the orchestrator on Claude Code."
+  wm_launch_failure "continuity transport" "$_ct_msg"
+  wm_die "$_ct_msg"
+fi
+
+# --- reconcile and verify guard hooks for the resolved orchestrator adapter --
 # A merged guard hook is only active once it is registered through the
 # resolved orchestrator adapter's own guard-hook dispatch mechanism
-# (WM_AGENT_GUARD_TRANSPORT). Fail-closed and pre-exec: the orchestrator's
-# own guards must bind before ITS first tool call, not merely before it
-# spawns its first crew member. The failure sink makes the refusal
-# observable even under systemd, where bin/wingman's own stderr never
-# reaches anyone (see wm_launch_failure's own comment).
-case "$WM_AGENT_GUARD_TRANSPORT" in
-  claude-json)
-    if ! _sync_err="$(uv run --no-project --quiet "$WM_LIB/sync-user-hooks.py" \
-        --settings "${WM_CLAUDE_USER_SETTINGS:-$HOME/.claude/settings.json}" --repo "$WM_REPO" 2>&1)"; then
-      wm_launch_failure "guard-hook sync" "$_sync_err"
-      wm_die "could not wire wingman's user-level guard hooks: $_sync_err
-Fix the reported problem, or run 'bin/doctor -y', then start wingman again. This failure was also recorded in $WM_HOME/last-launch-failure."
-    fi
-    rm -f "$WM_HOME/last-launch-failure"   # the sync succeeded; the file means "last attempt refused"
-    ;;
-  *)
-    # No orchestrator-side install/verify exists for any transport but
-    # claude-json, so an unimplemented one refuses to start rather than run with no guard enforcement.
-    _got_msg="the resolved orchestrator agent '$WM_AGENT_DISPLAY_NAME' (WM_ORCH_AGENT=${WM_ORCH_AGENT:-claude}) uses guard transport '$WM_AGENT_GUARD_TRANSPORT', which has no orchestrator-side guard install/verify implementation yet. Only claude-json is supported for bin/wingman's own launch today. Unset WM_ORCH_AGENT (or set it to claude) to run the orchestrator on Claude Code."
-    wm_launch_failure "guard transport" "$_got_msg"
-    wm_die "$_got_msg"
-    ;;
-esac
+# (WM_AGENT_GUARD_TRANSPORT), and only PROVEN active once the shared self-
+# test (bin/lib/guard-transport.sh) has executed it against a known-deny and
+# known-allow fixture and observed both verdicts. Fail-closed and pre-exec:
+# the orchestrator's own guards must bind before ITS first tool call, not
+# merely before it spawns its first crew member. The failure sink makes the
+# refusal observable even under systemd, where bin/wingman's own stderr
+# never reaches anyone (see wm_launch_failure's own comment).
+#
+# The refusal claims only that a guard transport EXISTS, never that the
+# agent "has working guard enforcement" - for codex and grok this proves
+# registration plus an executed guard command; for opencode a parsed plugin
+# file plus an executed guard command; none of that alone proves the CLI
+# invokes it on a real tool call (the registration-versus-enforcement
+# distinction bin/lib/sync-user-hooks.py's own module docstring warns
+# about). Hands-on verification against each real CLI (recorded per
+# transport in bin/lib/agents/*.sh) is what closes that gap.
+_gt_err="$(wm_guard_transport_sync "$WM_AGENT_GUARD_TRANSPORT" "$WM_REPO")" || {
+  wm_launch_failure "guard transport" "$_gt_err"
+  wm_die "could not wire wingman's guard hooks for '$WM_AGENT_DISPLAY_NAME' (guard transport '$WM_AGENT_GUARD_TRANSPORT'): $_gt_err
+Fix the reported problem, or run 'bin/doctor -y' if this is the claude-json transport, then start wingman again. This failure was also recorded in $WM_HOME/last-launch-failure."
+}
+
+rm -f "$WM_HOME/last-launch-failure"   # both gates passed; the file means "last attempt refused"
 
 # --- checkout-freshness advisory (issue #241) ---------------------------------
 # Registration drift (above) is now impossible; deployment drift - this
@@ -143,5 +169,21 @@ case "$_gfc_out" in
     ;;
 esac
 
+# $CLAUDE_PROJECT_DIR's own generic equivalent (plan §5.3) - the field every
+# guard dialect's own GuardInput prefers, since cwd/workspaceRoot drift the
+# moment a session cd's. bin/wingman already knows the value and has already
+# cd'd there above, so it exports this unconditionally, for every adapter -
+# claude's own branch exports (and reads) $CLAUDE_PROJECT_DIR unaffected.
+export WINGMAN_PROJECT_DIR="$WM_REPO"
+
+# Applies the resolved adapter's own guard-transport environment
+# (WM_AGENT_GUARD_ENV - e.g. GROK_CLAUDE_HOOKS_ENABLED=0 for grok) and unsets
+# whatever WM_AGENT_ENV_UNSET names (e.g. CLAUDECODE for every non-claude
+# adapter), in THIS process, right before exec - see bin/lib/agent.sh's own
+# wm_agent_apply_guard_env for why this one deliberately does not apply
+# WM_AGENT_ENV_PREFIX (that field carries crew-side settings this launch
+# must not inherit as a side effect).
+wm_agent_apply_guard_env
+
 # shellcheck disable=SC2086
-exec $WM_AGENT_BIN $adddirs "$@"
+exec $WM_AGENT_BIN $adddirs $WM_AGENT_GUARD_LAUNCH_FLAGS "$@"

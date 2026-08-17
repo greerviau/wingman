@@ -20,6 +20,7 @@ mk_mirror() {
   mkdir -p "$1"
   ln -s "$TEST_REPO/bin" "$1/bin"
   mkdir -p "$1/hooks"
+  ln -s "$TEST_REPO/hooks/lib" "$1/hooks/lib"
   for f in "$TEST_REPO"/hooks/*; do
     [ -f "$f" ] || continue
     ln -s "$f" "$1/hooks/$(basename "$f")"
@@ -51,6 +52,7 @@ cat > "$STUB_DESC" <<'EOF'
 WM_AGENT_BIN="__test-orch-no-rc-stub-bin"
 WM_AGENT_DISPLAY_NAME="Test Orchestrator No-Remote-Control Stub"
 WM_AGENT_GUARD_TRANSPORT=claude-json
+WM_AGENT_CONTINUITY_TRANSPORT=claude-async-rewake
 WM_AGENT_REMOTE_CONTROL_FLAG=""
 EOF
 

@@ -75,6 +75,15 @@ WM_AGENT_RESUME_PROMPT_RE="$WM_RESUME_PROMPT_RE"
 # --- resume, lifecycle, and verification -----------------------------------
 WM_AGENT_RESUME_FLAG="--resume %s"
 WM_AGENT_GUARD_TRANSPORT=claude-json
+# The one built fleet-continuity transport (the orchestrator-guard-
+# transports plan, §5.5): Claude Code's own asyncRewake on a Stop-hook
+# entry (bin/lib/user_hook_entry.py) plus run_in_background on a Bash tool
+# call is what wingman's whole wake loop is built on. Every other adapter's
+# own field stays empty ("not built") until a continuity transport exists
+# for it too - see each descriptor's own comment.
+WM_AGENT_CONTINUITY_TRANSPORT=claude-async-rewake
+WM_AGENT_GUARD_LAUNCH_FLAGS=""
+WM_AGENT_GUARD_ENV=""
 WM_AGENT_VERIFIED=1
 
 # --- control values (B3) ----------------------------------------------------
