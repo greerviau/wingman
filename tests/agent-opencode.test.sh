@@ -110,7 +110,15 @@ assert_eq "opencode's descriptor's composer shape is left-bar, per the plan's §
 assert_eq "opencode's descriptor leaves BUSY_MEANS_QUEUED unset - inert given composer mode is disabled, not a contradiction" "$WM_AGENT_BUSY_MEANS_QUEUED" ""
 assert_eq "opencode's descriptor's model value shape is provider/model, not bare" "$WM_AGENT_MODEL_VALUE_SHAPE" "provider/model"
 assert_eq "opencode's descriptor declares its double-escape interrupt, hands-on confirmed live" "$WM_AGENT_INTERRUPT_REPEAT" "2"
-assert_eq "opencode's descriptor is not yet marked fully verified (no real-provider model turn was possible)" "$WM_AGENT_VERIFIED" "0"
+# Unlike codex/grok/pi (still 0 - blocked by an auth/credential wall this
+# environment cannot cross), opencode ships a free default model needing no
+# credentials at all - the orchestrator-guard-transports plan's §7 hands-on
+# gate was fully driven end to end against it: a real live model turn
+# genuinely blocked on the deny fixture and genuinely executed the allow
+# fixture, through the real installed wingman-guard.js plugin, not merely
+# registered-and-assumed. See bin/lib/agents/opencode.sh's own
+# WM_AGENT_VERIFIED comment for the full reproduction record.
+assert_eq "opencode's descriptor IS marked fully verified - a real model turn drove both the deny and allow fixtures through the real plugin" "$WM_AGENT_VERIFIED" "1"
 
 # --- composer fallback: previously zero coverage (round-2 review must-fix) ---
 # The reviewer mutated a copy of this descriptor to adopt claude's own

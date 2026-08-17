@@ -314,6 +314,69 @@ _wm_gt_sync_codex() {
   return 0
 }
 
+# --- opencode-plugin --------------------------------------------------------
+#
+# Install: bin/lib/sync-opencode-plugin.py renders bin/lib/agents/opencode/
+# wingman-guard.js.tmpl into $HOME/.config/opencode/plugins/wingman-guard.js
+# only - global scope, no project-scoped plugin (plan §5.7). Verify: the
+# rendered file is byte-identical to a fresh render (re-render and compare,
+# rather than trusting the reconciler's own idempotent-write claim); `node
+# --check` parses it; the baked-in dispatcher path exists; and the shared
+# self-test - which for this dialect means invoking the SAME dispatcher
+# command line the plugin's own handler calls internally (there is no
+# separate "registered command" to introspect the way codex/grok's
+# hooks.json entries are, since the plugin is JS code, not a declarative
+# entry - plan §5.4.0's own table names this as the shim's "single
+# dispatcher command line" case, identical in spirit to pi-extension's).
+_WM_GT_OPENCODE_GUARDS="direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop"
+
+_wm_gt_sync_opencode() {
+  _wgso_repo="$1"
+
+  if ! _wgso_err="$($WM_UV "$WM_LIB/sync-opencode-plugin.py" --repo "$_wgso_repo" 2>&1)"; then
+    printf '%s' "$_wgso_err"
+    unset _wgso_repo _wgso_err
+    return 1
+  fi
+
+  # Re-render to a scratch path and compare byte-for-byte against what is
+  # actually installed - proves the installed file genuinely matches what
+  # the reconciler would produce right now, not merely that SOME prior
+  # write once succeeded.
+  _wgso_plugin_path="$HOME/.config/opencode/plugins/wingman-guard.js"
+  _wgso_scratch="$(mktemp -d)/wingman-guard.js"
+  if ! $WM_UV "$WM_LIB/sync-opencode-plugin.py" --repo "$_wgso_repo" \
+      --plugin-path "$_wgso_scratch" --skip-node-check >/dev/null 2>&1; then
+    printf 'could not re-render the opencode plugin template to verify it'
+    rm -rf "$(dirname "$_wgso_scratch")"
+    unset _wgso_repo _wgso_err _wgso_plugin_path _wgso_scratch
+    return 1
+  fi
+  if ! diff -q "$_wgso_plugin_path" "$_wgso_scratch" >/dev/null 2>&1; then
+    printf 'the installed opencode plugin at %s does not match a fresh render of bin/lib/agents/opencode/wingman-guard.js.tmpl - it may have been hand-edited or left over from an older version. Re-run the sync to overwrite it.' "$_wgso_plugin_path"
+    rm -rf "$(dirname "$_wgso_scratch")"
+    unset _wgso_repo _wgso_err _wgso_plugin_path _wgso_scratch
+    return 1
+  fi
+  rm -rf "$(dirname "$_wgso_scratch")"
+
+  if wm_have node && ! node --check "$_wgso_plugin_path" >/dev/null 2>&1; then
+    printf 'the installed opencode plugin at %s does not parse as valid JavaScript (node --check failed)' "$_wgso_plugin_path"
+    unset _wgso_repo _wgso_err _wgso_plugin_path
+    return 1
+  fi
+
+  if ! _wgso_st_out="$(wm_guard_transport_selftest opencode \
+      $WM_UV "$_wgso_repo/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$_WM_GT_OPENCODE_GUARDS" 2>&1)"; then
+    printf '%s' "$_wgso_st_out"
+    unset _wgso_repo _wgso_err _wgso_plugin_path _wgso_st_out
+    return 1
+  fi
+
+  unset _wgso_repo _wgso_err _wgso_plugin_path _wgso_st_out
+  return 0
+}
+
 wm_guard_transport_sync() {
   _wgts_transport="$1"; _wgts_repo="$2"
   case "$_wgts_transport" in
@@ -328,6 +391,9 @@ wm_guard_transport_sync() {
       ;;
     codex-json)
       _wgts_out="$(_wm_gt_sync_codex "$_wgts_repo")"; _wgts_rc=$?
+      ;;
+    opencode-plugin)
+      _wgts_out="$(_wm_gt_sync_opencode "$_wgts_repo")"; _wgts_rc=$?
       ;;
     *)
       _wgts_out="the guard transport '$_wgts_transport' has no orchestrator-side guard install/verify implementation yet."

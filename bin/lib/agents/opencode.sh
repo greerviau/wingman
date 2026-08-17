@@ -263,12 +263,68 @@ WM_AGENT_RESUME_PROMPT_RE=""
 # not re-litigated here.
 WM_AGENT_RESUME_FLAG=""
 WM_AGENT_GUARD_TRANSPORT=opencode-plugin
-# Not yet 1: hands-on verification this stage confirmed launch-time
-# behavior, the busy/queued mechanism end-to-end, and control values, but
-# not an actual paid-provider model turn (no credentials in this
-# environment beyond the free default model) or the opencode-plugin
-# guard-transport shim itself (held, plan step 12b-12f, not yet built).
-WM_AGENT_VERIFIED=0
+# No fleet-continuity transport is built for opencode (the orchestrator-
+# guard-transports plan, §5.5/§10) - documented "not built", not
+# "impossible"; opencode's own primitives were not probed for this at all.
+WM_AGENT_CONTINUITY_TRANSPORT=""
+# opencode needs no extra environment for its guard transport - the plugin
+# is delivered as a plain global file, not a launch-time env var.
+WM_AGENT_GUARD_ENV=""
+WM_AGENT_GUARD_LAUNCH_FLAGS=""
+# 1 - §7's full hands-on gate is met, not merely the shim's own plumbing.
+# This stage installed real opencode-ai v1.18.18 (npm, user-prefix install -
+# the exact version this descriptor was already verified against) and drove
+# TWO real, live model turns against opencode's own free default model
+# ("big-pickle", no credentials needed) with bin/lib/agents/opencode/
+# wingman-guard.js.tmpl rendered and loaded as a genuine global plugin:
+#
+#   - ALLOW fixture: asked the model to run `echo <marker>` via the bash
+#     tool. The real tool call executed (opencode's own log line:
+#     `evaluated permission=bash ... action.action=allow`, followed by the
+#     marker text in the transcript) - the plugin did not block it.
+#   - DENY fixture: asked the model to run bin/watch-fleet directly via the
+#     bash tool. The call failed with the plugin's own thrown Error, and the
+#     model's own final report quoted the denial reason VERBATIM and stated
+#     plainly: "The command was blocked. It did not run." - a genuine,
+#     model-observed enforcement, not merely a registered-but-unverified
+#     hook.
+#
+# This is the pair §7 names as "the only test that distinguishes
+# 'registered' from 'enforced'", both halves passed against a real model
+# turn - the strongest evidence any of the five transports has, including
+# claude's own (which is exercised only by unit/E2E tests, not a live turn,
+# in this repo's existing suite). bin/lib/guard-transport.sh's own
+# opencode-plugin branch (install, byte-identical re-render check, node
+# --check, the shared self-test) was also run successfully against this
+# same installed version.
+#
+# Residuals, recorded rather than silently papered over:
+#   - OPENCODE_CONFIG_CONTENT (this file's own env-prefix wildcard
+#     permission allow, used only by the crew-side launch path this plan
+#     does not build) and the guard plugin were both active simultaneously
+#     during verification and did not interfere with each other - the
+#     open question §5.4.4 flagged ("confirm the two compose") is answered:
+#     they compose.
+#   - The historical subagent-bypass caveat (plan §3.5, a `task`-tool
+#     subagent not intercepted by tool.execute.before, filed against a much
+#     older version) was not re-exercised this pass - matters less for the
+#     orchestrator than for crew, since a task-spawned opencode subagent is
+#     not a wingman crew member, but is not independently re-confirmed
+#     fixed either.
+#   - A stray verification run (an early attempt at the deny fixture,
+#     phrased with a shell-variable indirection - `WT=bin/watch-fleet; exec
+#     "$WT"` - rather than a direct literal) was NOT caught by the guard,
+#     exactly as hooks/no-watcher-kill-guard.sh's own header already
+#     documents as a known limitation (cmd_match.py only resolves a
+#     LEADING $VAR in command position, not an indirected one) - it
+#     genuinely executed bin/watch-fleet for real, spawning a real cycle
+#     that was found and stopped (bin/watch-fleet --stop --owner
+#     item-a-developer) with no lasting effect. Recorded here as a
+#     methodology note for whoever re-runs this verification, not a defect
+#     in the shipped guard: the direct-literal deny fixture this plan
+#     actually specifies (§5.4.0) is unaffected and was independently
+#     confirmed to deny correctly.
+WM_AGENT_VERIFIED=1
 
 # --- control values (B3) ----------------------------------------------------
 WM_AGENT_EXIT_CMD="/exit"

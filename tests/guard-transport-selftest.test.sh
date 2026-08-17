@@ -118,9 +118,12 @@ assert_contains "the refusal names the missing script" "$out" "no-direct-edit-gu
 # =============================================================================
 # (8) an unimplemented transport refuses without touching anything
 # =============================================================================
-out="$(wm_guard_transport_sync codex-json "$MIRROR" 2>&1)"; rc=$?
-assert_true "codex-json (not yet built) refuses" "[ $rc -ne 0 ]"
-assert_contains "the refusal names the transport" "$out" "codex-json"
+# A genuinely unrecognized transport name (every real transport - claude-
+# json, pi-extension, grok-json, codex-json, opencode-plugin - now has its
+# own branch) exercises wm_guard_transport_sync's own `*)` fallback.
+out="$(wm_guard_transport_sync not-a-real-transport "$MIRROR" 2>&1)"; rc=$?
+assert_true "an unrecognized transport refuses" "[ $rc -ne 0 ]"
+assert_contains "the refusal names the transport" "$out" "not-a-real-transport"
 assert_contains "the refusal states no orchestrator-side implementation exists yet" \
   "$out" "no orchestrator-side guard install/verify implementation"
 
