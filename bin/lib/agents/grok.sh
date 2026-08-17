@@ -297,14 +297,51 @@ WM_AGENT_RESUME_PROMPT_RE=""
 # own §8 decision, not re-litigated here.
 WM_AGENT_RESUME_FLAG=""
 WM_AGENT_GUARD_TRANSPORT=grok-json
-# Not 1: hands-on verification this stage confirmed the --help flag surface,
-# AGENTS.md/CLAUDE.md discovery and GROK_CLAUDE_AGENTS_ENABLED's real effect,
-# and the reasoning-effort domain live via a real ACP handshake - but never
-# reached a live composer, an actual model turn, the real trust dialog (see
-# WM_AGENT_PREFLIGHT's own comment - genuinely unconfirmed, not just
-# attributed), or the grok-json guard-transport shim itself (held, plan step
-# 12c, not yet built), all blocked by grok's own account-level auth gate in
-# this credential-less environment.
+# No fleet-continuity transport is built for grok (the orchestrator-guard-
+# transports plan, §5.5/§10) - documented "not built", not "impossible" -
+# see pi.sh's own field for the fuller reasoning; grok's own primitives were
+# not probed at all this pass (plan §3.2's own honest labeling), unlike
+# pi's.
+WM_AGENT_CONTINUITY_TRANSPORT=""
+# GROK_CLAUDE_HOOKS_ENABLED=0 is an ENVIRONMENT VARIABLE the orchestrator's
+# own launch needs (plan §3.4's hazard, §5.6): this repo's checked-in
+# .claude/settings.json registers Claude-dialect hooks that would silently
+# read absent under grok's own camelCase payload and allow every call.
+# Delivered via WM_AGENT_GUARD_ENV (applied by bin/wingman's own
+# wm_agent_apply_guard_env, never WM_AGENT_ENV_PREFIX above, which
+# bin/wingman does not apply at all - plan §2.2/§5.6) - a SEPARATE field
+# from that one, not an addition to it, since WM_AGENT_ENV_PREFIX carries
+# crew-side settings (this file's own GROK_CLAUDE_AGENTS_ENABLED=0) that
+# have nothing to do with the guard transport specifically.
+WM_AGENT_GUARD_ENV="GROK_CLAUDE_HOOKS_ENABLED=0"
+# grok's own project-scope trust gate (--trust/grok inspect --json
+# projectTrusted) governs <project>/.grok/hooks/*.json only - this plan
+# installs personal scope only ($HOME/.grok/hooks/wingman.json, plan §5.7),
+# which grok's own docs state carries no trust requirement at all (plan
+# §3.4), so no --trust flag belongs here.
+WM_AGENT_GUARD_LAUNCH_FLAGS=""
+# Not 1: this stage installed real grok-build v1.0.4 (npm @xai-official/grok,
+# via a user-prefix npm install - the plan's own research pass never had it
+# installed) and confirmed several things hands-on that the plan's own
+# research left attributed: `grok inspect --json` genuinely reports a
+# "hooks" array reading this MACHINE's real Claude-dialect user-scope
+# registrations, each carrying `vendor: "claude"`; setting
+# GROK_CLAUDE_HOOKS_ENABLED=0 flips every one of them from
+# compatibilityStatus "enabled" to "disabled" in that same output (a live
+# diff, not source-reading) - direct, repeatable confirmation of the exact
+# mechanism this file's own WM_AGENT_GUARD_ENV comment describes; and a
+# rendered bin/lib/sync-grok-hooks.py wingman.json placed under a scratch
+# $HOME/.grok/hooks/ is genuinely discovered by `grok inspect --json` as a
+# native (vendor: none, no compatibilityStatus/trust gate at all) hook entry
+# - confirming plan §3.4's "personal hooks carry no trust requirement"
+# finding directly rather than by documentation alone. `grok login` was
+# also confirmed live to hang on an interactive OAuth flow with no
+# credential-based escape (10s timeout, no prompt reachable non-
+# interactively) - the account-level auth gate is real and not this
+# environment's own artifact. What remains unreached: an actual model turn
+# (blocked by that same auth gate), so the two things §7's hands-on gate
+# still needs - the deny fixture genuinely blocking a live tool call, and
+# the allow fixture's tool call genuinely executing - are not yet done.
 WM_AGENT_VERIFIED=0
 
 # --- control values (B3) ----------------------------------------------------

@@ -185,7 +185,7 @@ _wm_gt_sync_claude() {
 # broken/missing extension - exit status alone proves nothing, plan §3.2);
 # plus the shared self-test, invoking the identical dispatcher command line
 # the extension's own handler calls internally.
-_WM_GT_PI_GUARDS="direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop"
+_WM_GT_ALL_GUARDS="direct-edit,watcher-kill,spawn-pause,foreground-watcher,foreground-poll-loop"
 
 _wm_gt_sync_pi() {
   _wgsp_repo="$1"
@@ -213,13 +213,55 @@ _wm_gt_sync_pi() {
   fi
 
   if ! _wgsp_st_out="$(wm_guard_transport_selftest pi \
-      $WM_UV "$_wgsp_repo/hooks/lib/guard_dispatch.py" --dialect pi --guards "$_WM_GT_PI_GUARDS" 2>&1)"; then
+      $WM_UV "$_wgsp_repo/hooks/lib/guard_dispatch.py" --dialect pi --guards "$_WM_GT_ALL_GUARDS" 2>&1)"; then
     printf '%s' "$_wgsp_st_out"
     unset _wgsp_repo _wgsp_ext _wgsp_bin _wgsp_help _wgsp_flag_count _wgsp_st_out
     return 1
   fi
 
   unset _wgsp_repo _wgsp_ext _wgsp_bin _wgsp_help _wgsp_flag_count _wgsp_st_out
+  return 0
+}
+
+# --- grok-json ------------------------------------------------------------
+#
+# Install: bin/lib/sync-grok-hooks.py writes $HOME/.grok/hooks/wingman.json
+# only - personal scope, no trust gate at all (plan §3.4/§5.4.3/§5.7).
+# Suppress the Claude compatibility path: GROK_CLAUDE_HOOKS_ENABLED=0 must be
+# in grok's own launch environment (plan §3.4's hazard - this repo's checked-
+# in .claude/settings.json would otherwise silently allow on every call under
+# grok, since its Claude-dialect scripts would read a camelCase payload as
+# absent). This is carried by the descriptor's own WM_AGENT_GUARD_ENV field
+# (grok.sh), read here directly rather than checked against the process's
+# actual environment - by the time wm_guard_transport_sync runs, this
+# descriptor field is already resolved (wm_agent_resolve has run), which is
+# "the environment about to be exec'd into" in the sense that matters: it is
+# the value wm_agent_apply_guard_env will apply verbatim before exec, whether
+# or not that application has happened yet at THIS point in bin/wingman's own
+# sequence.
+_wm_gt_sync_grok() {
+  _wgsg_repo="$1"
+
+  if [ "${WM_AGENT_GUARD_ENV:-}" != "GROK_CLAUDE_HOOKS_ENABLED=0" ]; then
+    printf 'grok launch is missing GROK_CLAUDE_HOOKS_ENABLED=0 in its own guard-transport environment (WM_AGENT_GUARD_ENV=%s) - without it, this repo'"'"'s own .claude/settings.json compatibility path silently allows every tool call under grok (see bin/lib/agents/grok.sh'"'"'s own header comment). Fix grok.sh'"'"'s WM_AGENT_GUARD_ENV field.' "${WM_AGENT_GUARD_ENV:-<empty>}"
+    unset _wgsg_repo
+    return 1
+  fi
+
+  if ! _wgsg_err="$($WM_UV "$WM_LIB/sync-grok-hooks.py" --repo "$_wgsg_repo" 2>&1)"; then
+    printf '%s' "$_wgsg_err"
+    unset _wgsg_repo _wgsg_err
+    return 1
+  fi
+
+  if ! _wgsg_st_out="$(wm_guard_transport_selftest grok \
+      $WM_UV "$_wgsg_repo/hooks/lib/guard_dispatch.py" --dialect grok --guards "$_WM_GT_ALL_GUARDS" 2>&1)"; then
+    printf '%s' "$_wgsg_st_out"
+    unset _wgsg_repo _wgsg_err _wgsg_st_out
+    return 1
+  fi
+
+  unset _wgsg_repo _wgsg_err _wgsg_st_out
   return 0
 }
 
@@ -231,6 +273,9 @@ wm_guard_transport_sync() {
       ;;
     pi-extension)
       _wgts_out="$(_wm_gt_sync_pi "$_wgts_repo")"; _wgts_rc=$?
+      ;;
+    grok-json)
+      _wgts_out="$(_wm_gt_sync_grok "$_wgts_repo")"; _wgts_rc=$?
       ;;
     *)
       _wgts_out="the guard transport '$_wgts_transport' has no orchestrator-side guard install/verify implementation yet."
