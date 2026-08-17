@@ -8,7 +8,7 @@ checking, shared by every reconciler that reads bin/lib/user-hooks.json -
 bin/lib/sync-user-hooks.py (claude-json) and, per the orchestrator-guard-
 transports plan, bin/lib/sync-codex-hooks.py and bin/lib/sync-grok-hooks.py.
 Factored out of sync-user-hooks.py's own original functions of the same name
-(issue #241) so the manifest-parsing/script-checking logic lives once rather
+so the manifest-parsing/script-checking logic lives once rather
 than drifting across three reconcilers - sync-user-hooks.py's own behaviour
 is unchanged by this factoring (a decision-logic move, not a policy change);
 it now imports these four functions rather than defining them itself.

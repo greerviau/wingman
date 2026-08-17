@@ -5,16 +5,16 @@
 # operation"): a live bin/watch-fleet cycle's liveness is the only channel
 # that lets a wake reach an idle orchestrator (wingman's own top-level
 # session, or a lead watching its own crew), so nothing should ever kill it.
-# Issue #12 first documented a session misreading the pid printed in an
+# A session once misread the pid printed in an
 # "already armed" report as an instruction to stop it; that fix only reworded
-# the report and added the prose rule. Issue #64 reports the same failure
-# shape recurring, so this hook adds the same PreToolUse-deny layer already
-# used for issue #46's merge restriction and the onboarding-preferences gate,
+# the report and added the prose rule. The same failure shape recurred, so
+# this hook adds the same PreToolUse-deny layer already
+# used for the merge restriction and the onboarding-preferences gate,
 # rather than relying on prose alone.
 #
 # SCOPE (stated explicitly, not left to be discovered as a gap): this is
 # best-effort defense-in-depth against REALISTIC, ACCIDENTAL self-kills - the
-# failure shape issue #64 actually reports - not an airtight sandbox. It
+# failure shape actually reported - not an airtight sandbox. It
 # reliably recognizes kill/pkill/tmux kill-window/kill-session however they
 # are ordinarily spelled (including tmux subcommand abbreviations, leading
 # global flags, and a target built via command substitution or a shell
@@ -24,8 +24,8 @@
 # hook's dispatch entirely, since static command matching has no finite
 # grammar to anchor on the way tmux's own subcommand set does. Closing that
 # class completely means protecting the watcher at the PROCESS level
-# (auto-respawn on death, regardless of cause) - tracked separately as issue
-# #107, which this hook complements rather than duplicates.
+# (auto-respawn on death, regardless of cause) - tracked separately,
+# and this hook complements rather than duplicates that effort.
 #
 # What is denied, from EVERY session (no WINGMAN_CREW_ID/WINGMAN_CREW_TYPE
 # gating at all - killing the watcher is never legitimate from any session,
@@ -39,13 +39,13 @@
 #     background-armed watcher along with it.
 #
 # "Currently a live watch-fleet cycle" reuses bin/watch-fleet's own
-# owner_lock_alive() identity check exactly (issue #237, part 2): the
+# owner_lock_alive() identity check exactly: the
 # $PIDFILE.owner lock directory's stamped pid answers `kill -0` AND its
 # stamped process start time matches the pid's CURRENT start time - never a
 # bare pid-alive check, which a pid reused across a host reboot would
 # otherwise satisfy. On top of that, protection also requires the same
-# beacon-freshness-within-hard-grace term cycle_healthy() adds (issue #237
-# round-2 MF-A): a cycle whose beacon has gone stale for WM_WATCH_HARD_GRACE
+# beacon-freshness-within-hard-grace term cycle_healthy() adds: a cycle
+# whose beacon has gone stale for WM_WATCH_HARD_GRACE
 # (default 300s) is wedged, and bin/watch-fleet's own singleton guard is
 # legitimately trying to reap it via a supervised SIGTERM/SIGKILL takeover at
 # that point. This hook cannot actually deadlock against that takeover - a
@@ -53,7 +53,7 @@
 # string, never a plain in-process `kill` a script issues on its own, so
 # bin/watch-fleet's internal takeover kill was never subject to this hook in
 # the first place. The real reason to mirror the hard-grace term here is the
-# manual kill backstop this whole guard exists to preserve (issue #64): once
+# manual kill backstop this whole guard exists to preserve: once
 # a holder is stale enough that bin/watch-fleet's own logic no longer treats
 # it as the protected owner, a human/session killing it manually is the same
 # recovery this file's own singleton guard is already entitled to perform -
@@ -130,7 +130,7 @@
 #
 # cmd_match.py's command_segments()/resolve_command() are used exactly as the
 # other guards use them, including its fail-CLOSED contract on an unlexable
-# command (issue #56): unlike no-merge-guard.sh (which only fails closed for
+# command: unlike no-merge-guard.sh (which only fails closed for
 # a crew session), this hook has no session scope to narrow to, so an
 # unparsable command that reached this hook's cheap pre-gate is ALWAYS
 # denied, from any session.
@@ -278,16 +278,16 @@ def deny_dynamic(protected):
 
 # --- protected-pid discovery: bin/watch-fleet'"'"'s own owner_lock_alive()
 # identity check, replicated exactly (pid alive via kill -0 AND a matching
-# process start-time stamp - issue #237 part 2 MF1), PLUS the same
-# beacon-freshness-within-hard-grace term cycle_healthy() adds on top (issue
-# #237 round-2 MF-A) - a cycle beyond WM_WATCH_HARD_GRACE is wedged and
+# process start-time stamp), PLUS the same
+# beacon-freshness-within-hard-grace term cycle_healthy() adds on top - a
+# cycle beyond WM_WATCH_HARD_GRACE is wedged and
 # bin/watch-fleet'"'"'s own singleton guard is legitimately trying to reap it,
 # so this hook must not protect a pid that mechanism is entitled to kill.
 # Recomputed fresh every call, never cached.
 #
 # The start-time comparison is pinned to TZ=UTC LC_ALL=C, matching
 # bin/lib/common.sh'"'"'s wm_ps_lstart - the single source of this convention,
-# which bin/watch-fleet'"'"'s own stamp write goes through (issue #303). An
+# which bin/watch-fleet'"'"'s own stamp write goes through). An
 # unpinned comparison here would inherit whichever $TZ this hook'"'"'s own
 # calling session happens to export, so a live cycle stamped under one $TZ
 # and checked under a different one would never match and this guard would
@@ -296,11 +296,11 @@ def deny_dynamic(protected):
 # The stamp'"'"'s third line, "lstart-utc", marks the second line as having been
 # rendered by the pinned wm_ps_lstart. A stamp with no third line (or an
 # unrecognized one) cannot be meaningfully compared against a pinned
-# rendering - either a pre-#303 stamp (rendered in whatever $TZ the writer
+# rendering - either an older stamp (rendered in whatever $TZ the writer
 # had) or otherwise unverifiable.
 #
 # A marker-less stamp does NOT degrade to protecting on kill -0 alone (same
-# round-1 PR review finding on issue #303 as bin/watch-fleet'"'"'s own
+# round-1 review finding as bin/watch-fleet'"'"'s own
 # owner_lock_alive() - see its doc comment for the full reasoning): kill -0
 # alone cannot distinguish a genuine legacy watch-fleet cycle from a pid the
 # stamped one has since been RECYCLED to, and protecting the latter is wrong
@@ -339,7 +339,7 @@ def protected_pids():
             if not stamped_start or stamped_start != cur_start:
                 continue
         else:
-            # marker-less (pre-#303, or otherwise unverifiable): require
+            # marker-less (an older stamp, or otherwise unverifiable): require
             # independent evidence this pid is actually a watch-fleet cycle,
             # not just alive, before trusting the stamp at all.
             try:
@@ -697,7 +697,7 @@ def check_tmux(argv, protected):
     check_tmux_kill(["tmux", kind] + args[idx + 1:], protected)
 
 
-# cmd_match.py fails CLOSED on a command it cannot fully lex (issue #56):
+# cmd_match.py fails CLOSED on a command it cannot fully lex:
 # command_segments() returns None rather than a partial, truncated segment
 # list. This guard has no session scope to narrow the fail-closed behavior to
 # (unlike no-merge-guard.sh) - it applies to every session unconditionally -

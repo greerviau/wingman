@@ -9,12 +9,11 @@ own docstring) that two independent copies drifting apart over time is a
 real risk, not a hypothetical one.
 
 The DECISION logic itself now lives once in
-guard_policy.evaluate_spawn_pause_guards() (the orchestrator-guard-transports
-plan, issue #25 stage 3's follow-on) - run() below is a thin stdin-reading
-wrapper delegating to it, kept for its own sake so this module's external
-contract (and tests/spawn-pause-guard.test.sh, which exercises it directly
-via a throwaway fixture hook independent of either real guard) stays
-unchanged.
+guard_policy.evaluate_spawn_pause_guards() - run() below is a thin stdin-
+reading wrapper delegating to it, kept for its own sake so this module's
+external contract (and tests/spawn-pause-guard.test.sh, which exercises it
+directly via a throwaway fixture hook independent of either real guard)
+stays unchanged.
 
 A caller (a thin wrapper .sh, invoking this via `python -c` with
 PYTHONPATH=<hooks>/lib) supplies:

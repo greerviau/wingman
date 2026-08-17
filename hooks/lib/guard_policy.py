@@ -1,19 +1,14 @@
 """guard_policy.py: transport-agnostic decision core for wingman's portable
-PreToolUse security guards. Originally extracted (issue #25 stage 3, plan step
-12a) for three guards - no-merge-guard (issue #46/#132/#135/#136/#138),
-no-direct-edit-guard (issue #17/#171), and no-worker-spawn-guard (issue #212) -
-and later extended (the orchestrator-guard-transports plan) with four more:
-no-watcher-kill-guard (issue #64), the shared spawn-pause machinery behind
-api-outage-spawn-guard/usage-limit-spawn-guard (issue #23/#24), no-foreground-
-watcher-guard (issue #202), and no-foreground-poll-loop-guard (issue #268).
-Extracted from the claude-only shell hooks of the same name under hooks/ -
-this module carries the DECISION logic only; the .sh files remain the actual
-Claude Code entry points (stdin JSON in, env vars, PYTHONPATH, the deny JSON
-contract, and each hook's own cheap bash pre-gate) and are now thin callers
-into the functions below, and hooks/lib/guard_dispatch.py is the equivalent
-thin caller for the four non-Claude dialects. See issue #25 for why this
-module exists and the corrections applied here versus the plan's original
-sketch.
+PreToolUse security guards - no-merge-guard, no-direct-edit-guard, no-worker-
+spawn-guard, no-watcher-kill-guard, the shared spawn-pause machinery behind
+api-outage-spawn-guard/usage-limit-spawn-guard, no-foreground-watcher-guard,
+and no-foreground-poll-loop-guard. Extracted from the claude-only shell hooks
+of the same name under hooks/ - this module carries the DECISION logic only;
+the .sh files remain the actual Claude Code entry points (stdin JSON in, env
+vars, PYTHONPATH, the deny JSON contract, and each hook's own cheap bash
+pre-gate) and are thin callers into the functions below, and hooks/lib/
+guard_dispatch.py is the equivalent thin caller for the four non-Claude
+dialects.
 
 Normalized input contract (GuardInput, below): the plan's own draft named
 only {tool_name, command, cwd, crew_id}. The design review found five more
@@ -1225,7 +1220,7 @@ def evaluate_no_worker_spawn_guard(gi):
 
 
 # =============================================================================
-# no-watcher-kill-guard (issue #64)
+# no-watcher-kill-guard
 # =============================================================================
 
 def evaluate_no_watcher_kill_guard(gi):
@@ -1585,8 +1580,8 @@ def evaluate_no_watcher_kill_guard(gi):
 
 
 # =============================================================================
-# spawn-pause guards (issue #23 api-outage-spawn-guard, issue #24
-# usage-limit-spawn-guard) - shared machinery
+# spawn-pause guards (api-outage-spawn-guard, usage-limit-spawn-guard) -
+# shared machinery
 # =============================================================================
 
 _PARSE_FAIL_REASON_SPAWN_PAUSE = (
@@ -1660,7 +1655,7 @@ def evaluate_spawn_pause_guards(gi, state_path, is_blocking_state, override_flag
 
 
 # =============================================================================
-# no-foreground-watcher-guard (issue #202)
+# no-foreground-watcher-guard
 # =============================================================================
 
 _ARM_DENY_FLAGS = {
@@ -1720,8 +1715,8 @@ def _foreground_watcher_denial_reason(dialect):
 
 def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="claude"):
     """Port of hooks/no-foreground-watcher-guard.sh's python block. See that
-    file's own header comment for the full history (issue #202's wedge
-    incident) and the false-deny-only tradeoffs it documents - unchanged
+    file's own header comment for the full history and the false-deny-only
+    tradeoffs it documents - unchanged
     here for dialect=="claude", a decision-logic move, not a policy change.
 
     run_in_background is a separate parameter, not a GuardInput field: it
@@ -1862,7 +1857,7 @@ def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="c
 
 
 # =============================================================================
-# no-foreground-poll-loop-guard (issue #268)
+# no-foreground-poll-loop-guard
 # =============================================================================
 
 _LOOP_KEYWORDS = ("while", "until")
@@ -1914,8 +1909,8 @@ def _foreground_poll_loop_denial_reason(loop_kind, loop_text, sleep_text, dialec
 
 def evaluate_no_foreground_poll_loop_guard(gi, run_in_background=False, dialect="claude"):
     """Port of hooks/no-foreground-poll-loop-guard.sh's python block. See
-    that file's own header comment for the full history (issue #268's two
-    deadlock incidents) - unchanged here for dialect=="claude", a
+    that file's own header comment for the full history - unchanged here
+    for dialect=="claude", a
     decision-logic move, not a policy change.
 
     run_in_background: see evaluate_no_foreground_watcher_guard's own

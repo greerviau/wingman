@@ -112,8 +112,7 @@
 # in other repos, where this repo's project settings never load) - same
 # reasoning as every other crew-facing hook. bash-3.2-safe.
 #
-# issue #25 stage 3 / the orchestrator-guard-transports plan: the decision
-# logic below is now ALSO implemented, canonically, as
+# The decision logic below is now ALSO implemented, canonically, as
 # guard_policy.evaluate_no_foreground_poll_loop_guard() - this file's own
 # bash pre-gate, failure posture, and stdout contract are unchanged for
 # claude (decision-logic move, not a policy change). See guard_policy.py's

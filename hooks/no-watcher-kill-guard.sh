@@ -141,8 +141,7 @@
 # repo's checked-in .claude/settings.json, which would double-register it for
 # wingman's own top-level session. bash-3.2-safe.
 #
-# issue #25 stage 3 / the orchestrator-guard-transports plan: the decision
-# logic below is now ALSO implemented, canonically, as
+# The decision logic below is now ALSO implemented, canonically, as
 # guard_policy.evaluate_no_watcher_kill_guard() - this file's own bash
 # pre-gate and stdout contract are unchanged (decision-logic move, not a
 # policy change). See guard_policy.py's own docstring for the normalized

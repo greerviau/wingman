@@ -207,7 +207,7 @@ WM_AGENT_GUARD_TRANSPORT=pi-extension
 # transports plan, §5.5/§10) - wingman's wake loop needs asyncRewake on a
 # Stop-hook entry plus run_in_background on a Bash tool call, neither of
 # which pi has a wired equivalent for yet, even though §3.2.1's own
-# hands-on probe (docs/analysis/2026-08-17-pi-wake-loop-probe/) demonstrates
+# hands-on probe (docs/analysis/2026-08-17-pi-wake-loop-probe/) shows
 # pi HAS the underlying primitives (agent_settled, a blocking wait held by
 # the extension rather than a model-issued tool call, sendUserMessage) to
 # build one - a "not built yet" gap, not a "cannot be built" one. Building

@@ -4,7 +4,7 @@
 # and the rendered plugin's own tool.execute.before handler exercised
 # directly in a bare Node harness (no live opencode session, no network,
 # no credentials needed for THIS file - the real, live, credentialed model
-# turn that additionally confirmed this end to end was run manually during
+# turn that also confirmed this end to end was run manually during
 # development and is recorded in full in bin/lib/agents/opencode.sh's own
 # WM_AGENT_VERIFIED comment, not repeated here for CI reliability/network
 # independence).
