@@ -367,9 +367,30 @@ def main():
     if not isinstance(data, dict):
         data = {}
 
-    gi, run_in_background = build_guard_input(args.dialect, data)
+    try:
+        gi, run_in_background = build_guard_input(args.dialect, data)
+        reason = run_guards(args.dialect, guard_names, gi, run_in_background)
+    except Exception as e:
+        # A payload shape none of the parsers above expects (e.g. tool_input
+        # is a string, not an object) must never reach an UNCAUGHT exception
+        # - that would decide each dialect's fail direction as an accident
+        # of how codex/grok/opencode/pi each happen to treat a crashed
+        # subprocess, rather than the deliberate per-guard fail direction
+        # this module's own design otherwise holds to throughout. codex and
+        # grok are both documented fail-open on a crashed/malformed hook (so
+        # allowing here matches their own posture, and matches claude's own
+        # equivalent .sh hooks: a GuardInput construction failure there is
+        # ALSO never caught, and their own bash wrapper's stdout-empty/exit-0
+        # shape is exactly an allow - this is not a policy change, only
+        # making the same outcome an explicit branch instead of an accident);
+        # opencode and pi's own shims fail closed on ANY dispatcher failure,
+        # so denying here matches what they would already do if this
+        # exception's rc/empty-stdout reached them unhandled.
+        if args.dialect in ("codex", "grok"):
+            emit_allow(args.dialect)
+        else:
+            emit_deny(args.dialect, "wingman guard could not parse this payload, so this call is denied: %s" % e)
 
-    reason = run_guards(args.dialect, guard_names, gi, run_in_background)
     if reason is not None:
         emit_deny(args.dialect, reason)
     else:

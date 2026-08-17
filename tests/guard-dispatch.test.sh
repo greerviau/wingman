@@ -178,4 +178,33 @@ out="$(printf '{}' | uv run --no-project --quiet "$DISPATCH" --dialect codex --g
 assert_true "an unknown guard name fails" "[ $rc -ne 0 ]"
 assert_contains "the failure names the unknown guard" "$out" "bogus-guard"
 
+# =============================================================================
+# a payload shape none of the parsers expect (tool_input/toolInput/args/input
+# is a string, not an object) never reaches an uncaught exception - it takes
+# the SAME per-dialect fail direction an uncaught crash would produce
+# externally (codex/grok fail-open on a crashed hook, matching claude's own
+# equivalent .sh hooks for this exact shape; opencode/pi's own shims fail
+# closed on any dispatcher failure), but as a deliberate, tested branch
+# rather than an accident of exception propagation.
+# =============================================================================
+MALFORMED_CODEX='{"tool_name":"Bash","tool_input":"rm -rf /"}'
+MALFORMED_GROK='{"toolName":"Bash","toolInput":"rm -rf /"}'
+MALFORMED_OPENCODE='{"tool":"bash","args":"rm -rf /"}'
+MALFORMED_PI='{"toolName":"bash","input":"rm -rf /"}'
+
+out="$(printf '%s' "$MALFORMED_CODEX" | uv run --no-project --quiet "$DISPATCH" --dialect codex --guards direct-edit)"; rc=$?
+assert_eq "codex: a malformed tool_input allows (fail-open, matching claude's own equivalent hooks)" "$rc" "0"
+assert_eq "codex: ...and prints nothing" "$out" ""
+
+out="$(printf '%s' "$MALFORMED_GROK" | uv run --no-project --quiet "$DISPATCH" --dialect grok --guards direct-edit)"; rc=$?
+assert_eq "grok: a malformed toolInput allows (fail-open)" "$rc" "0"
+
+out="$(printf '%s' "$MALFORMED_OPENCODE" | uv run --no-project --quiet "$DISPATCH" --dialect opencode --guards direct-edit)"; rc=$?
+assert_eq "opencode: a malformed args denies (the shim's own fail-closed posture)" "$rc" "2"
+assert_contains "opencode: the denial names the parse failure" "$out" "could not parse this payload"
+
+out="$(printf '%s' "$MALFORMED_PI" | uv run --no-project --quiet "$DISPATCH" --dialect pi --guards direct-edit)"; rc=$?
+assert_eq "pi: a malformed input denies (the shim's own fail-closed posture)" "$rc" "2"
+assert_contains "pi: the denial names the parse failure" "$out" "could not parse this payload"
+
 test_summary
