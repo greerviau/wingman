@@ -486,11 +486,14 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   # CLI, so these stay a claude-only special case rather than a
   # descriptor-driven one. A non-claude crew member reaches $WM_HOME/$WM_REPO
   # by plain filesystem access instead (no sandbox to widen). Its own
-  # equivalent repo-doc-exclusion problem (issue #353) is what
-  # WM_AGENT_CONTEXT_SUPPRESS_FLAG above solves per-adapter as each one gets
-  # a descriptor field populated - codex's is solved as of issue #353; pi's
-  # and opencode's are tracked as a follow-up against their already-merged
-  # descriptors.
+  # equivalent repo-doc-exclusion problem is what
+  # WM_AGENT_CONTEXT_SUPPRESS_FLAG above solves per-adapter, where a narrow
+  # flag exists: both codex's and pi's descriptors populate it. opencode has
+  # no narrow equivalent that doesn't also disable unrelated project-local
+  # configuration (see opencode.sh's own comment for the investigation), and
+  # grok has no suppression mechanism of any kind (see grok.sh) - both stay
+  # on the composed-brief disclaimer alone, deliberately, not as an open
+  # follow-up.
   if [ "$AGENT" = claude ]; then
     printf ' --add-dir %s' "$(quote "$WM_HOME")"
     printf ' --add-dir %s' "$(quote "$WM_REPO")"

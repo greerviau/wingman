@@ -72,6 +72,53 @@ WM_AGENT_ENV_PREFIX="OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}
 # non-claude crew member (opencode included) would otherwise silently
 # inherit CLAUDECODE=1 from it (plan §5 step 8).
 WM_AGENT_ENV_UNSET="CLAUDECODE"
+#
+# *** No repo-doc-context suppression flag (investigated, not a gap) ***
+# Unlike pi's --no-context-files (bin/lib/agents/pi.sh) or codex's own
+# -c project_doc_max_bytes=0, opencode has no narrow, dedicated flag that
+# suppresses AGENTS.md/CLAUDE.md discovery without unrelated collateral, so
+# WM_AGENT_CONTEXT_SUPPRESS_FLAG is left unset (its schema default) -
+# deliberately, not because this wasn't investigated.
+#
+# Two real env-var levers exist in the real opencode v1.18.17 binary
+# (extracted directly from its own bundled source, since there is no public
+# opencode --help line for either), and neither is a safe fit:
+#
+# - OPENCODE_DISABLE_CLAUDE_CODE_PROMPT / OPENCODE_DISABLE_CLAUDE_CODE
+#   (source: disableClaudeCodePrompt) removes CLAUDE.md from opencode's own
+#   discovery filename list and removes the operator's own global
+#   ~/.claude/CLAUDE.md from its global-path list - but does NOT touch
+#   AGENTS.md at all, and opencode's own discovery walk checks AGENTS.md
+#   first and stops at the first filename with a match, so this repo's root
+#   AGENTS.md is never even reached. Live-verified: with this var set and
+#   only an AGENTS.md marker file present, the marker still reached the
+#   model. A real mechanism, but not one for this problem.
+#
+# - OPENCODE_DISABLE_PROJECT_CONFIG=1 does suppress the whole AGENTS.md/
+#   CLAUDE.md/CONTEXT.md discovery walk (confirmed directly in source: the
+#   entire walk is wrapped in `if(!Jr.OPENCODE_DISABLE_PROJECT_CONFIG)`) and
+#   was live-verified via the same marker-token method (the marker was
+#   visible without it, absent with it) - but per opencode's own documented
+#   purpose for this variable ("skip the project's local opencode.json and
+#   start from globals only" - an escape hatch for a broken config file, not
+#   an instructions-suppression feature), it ALSO disables the project's
+#   own local opencode.json/.opencode directory entirely: its own
+#   "instructions" config-key additions, local plugins, and local agents.
+#   Live-verified: a project opencode.json with "instructions":
+#   ["EXTRA.md"] was honored without the flag and silently dropped with it.
+#   Setting this unconditionally for every opencode crew launch would
+#   silently disable all project-local opencode configuration, forever, for
+#   every opencode crew member - a functional regression far wider than
+#   "stop loading the orchestrator-voiced root doc," not something worth
+#   trading for that.
+#
+# No other OPENCODE_* env var (85 distinct names extracted from the binary)
+# does anything narrower, and no flag on the base launch command (opencode
+# --help) touches this at all. Conclusion: opencode is handled exactly like
+# grok - the disclaimer composed into every crew member's own brief stays
+# its only protection here - documented so a future reader (or a future
+# opencode version that ships a real narrow flag) does not have to re-run
+# this investigation from scratch.
 
 # --- launch capability ----------------------------------------------------
 # No confirmed bypass FLAG (the bypass is the env-var prefix above) - a

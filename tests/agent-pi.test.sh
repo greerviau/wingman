@@ -43,6 +43,8 @@ assert_contains "the launch script unsets CLAUDECODE before exec'ing pi" "$launc
 exec_line="$(grep '^exec ' "$launch")"
 assert_contains "pi's own binary is the exec target" "$exec_line" "$WS/stub.sh"
 assert_contains "the bypass flag is the bare --approve token (no %s value)" "$exec_line" " --approve "
+assert_contains "the repo-doc-context suppression flag is present" "$exec_line" "--no-context-files"
+assert_not_contains "no -c project_doc_max_bytes= (codex's own suppression flag shape) leaks into a pi launch" "$exec_line" "project_doc_max_bytes"
 assert_not_contains "no --permission-mode (claude's own bypass flag shape) leaks into a pi launch" "$exec_line" "--permission-mode"
 assert_not_contains "no --session-id is emitted (pi has no confirmed force-session-id-at-creation flag, plan §3)" "$exec_line" "--session-id"
 assert_contains "the crew's own name is passed via --name" "$exec_line" "--name '$id'"
@@ -72,5 +74,6 @@ assert_eq "pi's descriptor declares its guard transport" "$WM_AGENT_GUARD_TRANSP
 assert_eq "pi's descriptor uses flag-mode system-prompt delivery" "$WM_AGENT_SYSPROMPT_MODE" "flag"
 assert_eq "pi's descriptor's composer shape is separated, per the plan's §4.6 catalogue" "$WM_AGENT_COMPOSER_SHAPE" "separated"
 assert_eq "pi's descriptor is not yet marked fully verified (no live model turn was possible)" "$WM_AGENT_VERIFIED" "0"
+assert_eq "pi's descriptor sets its own repo-doc-context suppression flag" "$WM_AGENT_CONTEXT_SUPPRESS_FLAG" "--no-context-files"
 
 test_summary
