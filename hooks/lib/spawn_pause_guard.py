@@ -8,6 +8,14 @@ fail-open-on-missing-state-file posture are subtle enough (see cmd_match.py's
 own docstring) that two independent copies drifting apart over time is a
 real risk, not a hypothetical one.
 
+The DECISION logic itself now lives once in
+guard_policy.evaluate_spawn_pause_guards() (the orchestrator-guard-transports
+plan, issue #25 stage 3's follow-on) - run() below is a thin stdin-reading
+wrapper delegating to it, kept for its own sake so this module's external
+contract (and tests/spawn-pause-guard.test.sh, which exercises it directly
+via a throwaway fixture hook independent of either real guard) stays
+unchanged.
+
 A caller (a thin wrapper .sh, invoking this via `python -c` with
 PYTHONPATH=<hooks>/lib) supplies:
 
@@ -29,17 +37,7 @@ module documents throughout.
 import json
 import sys
 
-from cmd_match import command_segments, resolve_command
-
-PARSE_FAIL_REASON = (
-    "This command could not be fully parsed - an unterminated quote, an "
-    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
-    "terminator line was never found, including inside a `bash -c`/`eval` "
-    "payload - so it is denied rather than "
-    "partially checked, the same posture hooks/no-merge-guard.sh "
-    "takes on this shape. Reformat it into well-formed shell syntax and "
-    "retry."
-)
+from guard_policy import GuardDenied, GuardInput, evaluate_spawn_pause_guards
 
 
 def deny(reason):
@@ -50,19 +48,6 @@ def deny(reason):
             "permissionDecisionReason": reason,
         }
     }))
-
-
-def _spawn_calls_and_force(segments, override_flag):
-    calls = []
-    force = False
-    for seg in segments or []:
-        b, argv = resolve_command(seg)
-        if not argv or b != "spawn-crew":
-            continue
-        calls.append(seg)
-        if any(t == override_flag for t in argv):
-            force = True
-    return calls, force
 
 
 def run(state_path, is_blocking_state, override_flag, build_message):
@@ -80,31 +65,11 @@ def run(state_path, is_blocking_state, override_flag, build_message):
     tool_input = data.get("tool_input", {}) or {}
     command = tool_input.get("command", "") or ""
 
-    # cmd_match.py fails CLOSED on a command it cannot fully lex:
-    # command_segments() returns None rather than a partial, truncated
-    # segment list.
-    segments = command_segments(command)
-    calls, forced = _spawn_calls_and_force(segments, override_flag)
-
-    if not calls:
-        # Only fail closed on an unresolvable command if it actually
-        # mentions spawn-crew (the caller's own cheap substring pre-gate
-        # already guarantees this for the whole script, but re-checked here
-        # so this branch is scoped identically regardless of caller).
-        if segments is None:
-            deny(PARSE_FAIL_REASON)
-        return
-
-    if forced:
-        return
-
+    gi = GuardInput(
+        tool_name="Bash", command=command, cwd="", crew_id="", crew_type="",
+        file_path="", notebook_path="", project_dir="", home="",
+    )
     try:
-        with open(state_path) as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
-        state = {}
-
-    if not isinstance(state, dict) or not is_blocking_state(state):
-        return
-
-    deny(build_message(state))
+        evaluate_spawn_pause_guards(gi, state_path, is_blocking_state, override_flag, build_message)
+    except GuardDenied as e:
+        deny(str(e))

@@ -130,6 +130,16 @@
 # Registered user-level by bin/doctor (crew sessions have their project root
 # in other repos, where this repo's project settings never load) - same
 # reasoning as every other crew-facing hook. bash-3.2-safe.
+#
+# issue #25 stage 3 / the orchestrator-guard-transports plan: the decision
+# logic below is now ALSO implemented, canonically, as
+# guard_policy.evaluate_no_foreground_watcher_guard() - this file's own bash
+# pre-gate, failure posture, and stdout contract are unchanged for claude
+# (decision-logic move, not a policy change). See guard_policy.py's own
+# docstring for the normalized 9-field GuardInput contract this hands off,
+# and hooks/lib/guard_dispatch.py for the equivalent entry point the four
+# non-Claude dialects use (each with a dialect-aware denial reason, since
+# none of them has a background tool-call mode for a model-issued call).
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
@@ -148,9 +158,9 @@ esac
 
 OUT="$(printf '%s' "$INPUT" | \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
-import json, os, re, sys
+import json, os, sys
 
-from cmd_match import basename, command_segments, resolve_command
+from guard_policy import GuardDenied, GuardInput, evaluate_no_foreground_watcher_guard
 
 data = json.load(sys.stdin)
 
@@ -201,186 +211,22 @@ if not isinstance(raw_command, str):
     deny(VERIFY_FAIL_REASON)
 
 try:
-    command = raw_command
-
-    PARSE_FAIL_REASON = (
-        "This command could not be fully parsed - an unterminated quote, an "
-        "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
-        "terminator line was never found, including inside a `bash -c`/`eval` "
-        "payload - so it is denied rather than partially checked, "
-        "since this command mentions watch-fleet/pr-watch and could not be "
-        "verified safe. Reformat it into well-formed shell syntax and retry."
+    gi = GuardInput(
+        tool_name=data.get("tool_name") or "",
+        command=raw_command,
+        cwd=data.get("cwd") or os.getcwd(),
+        crew_id=os.environ.get("WINGMAN_CREW_ID", ""),
+        crew_type=os.environ.get("WINGMAN_CREW_TYPE", ""),
+        file_path="",
+        notebook_path="",
+        project_dir=os.environ.get("CLAUDE_PROJECT_DIR", ""),
+        home=os.path.expanduser(os.environ.get("WINGMAN_HOME") or "~/.wingman"),
     )
-
-    DENIAL_REASON = (
-        "bin/watch-fleet blocks until an event fires - that is the entire "
-        "wake mechanism - so running it any way other than as a "
-        "harness-tracked background task wedges this session indefinitely "
-        "- a session that does this sits wedged indefinitely, invisible to "
-        "the stall detector. Re-issue this as a Bash call with "
-        "run_in_background: true, on its own, not bundled onto another "
-        "command. Never foreground, and never detached (nohup, setsid, a "
-        "trailing &) - a detached watcher'"'"'s exit cannot wake anyone, so "
-        "it is not a watcher. If you cannot arm it as a background task, arm "
-        "nothing: no watcher at all is strictly better than a foreground "
-        "one, because a missing watcher is recoverable and a wedged session "
-        "is not. Read-only forms (--status, --stop, --classify, and pr-watch "
-        "--once) are unaffected, including under a timeout/nice wrapper. To "
-        "watch a cycle'"'"'s behaviour interactively, run it from your own "
-        "terminal, not through a tool call."
-    )
-
-    segments = command_segments(command)
-    if segments is None:
-        deny(PARSE_FAIL_REASON)
-
-    # An arming invocation is anything OTHER than the read-only/one-shot
-    # forms - so a bare invocation, `arm`, and the deprecated `--start` alias
-    # (which warns and then blocks exactly like a bare call) are all arming
-    # by construction, with nothing to enumerate for them specifically.
-    ARM_DENY_FLAGS = {
-        "watch-fleet": ("--status", "--stop", "--classify", "--clear-standdown", "-h", "--help"),
-        "pr-watch": ("--once", "-h", "--help"),
-    }
-    LAUNCHER_WRAPPERS = ("nohup", "setsid", "timeout", "nice", "ionice", "stdbuf")
-    DETACHED_LAUNCHERS = ("nohup", "setsid")
-
-    def is_arming(target, target_argv):
-        deny_flags = ARM_DENY_FLAGS.get(target)
-        if deny_flags is None:
-            return False
-        return not any(f in target_argv for f in deny_flags)
-
-    def find_watcher_invocation(b, argv):
-        """(launcher, idx): idx is argv'"'"'s index of the watch-fleet/pr-watch
-        token; launcher is the wrapper'"'"'s own resolved basename if reached
-        through one of LAUNCHER_WRAPPERS, else None for a direct invocation.
-        (None, None) if this segment does not invoke watch-fleet/pr-watch at
-        all, directly or through a recognized launcher wrapper."""
-        if b in ("watch-fleet", "pr-watch"):
-            return None, 0
-        if b in LAUNCHER_WRAPPERS:
-            for i, tok in enumerate(argv):
-                if basename(tok) in ("watch-fleet", "pr-watch"):
-                    return b, i
-        return None, None
-
-    def extract_owner_flag(target_argv):
-        """The command'"'"'s own --owner value, or None if not passed at all -
-        matching bin/watch-fleet'"'"'s own arg loop (`--owner) OWNER="${2:-}";
-        shift 2`), which takes the very next token unconditionally, including
-        an empty string. None (not passed) is distinct from "" (passed
-        empty) - only None falls back to $WINGMAN_CREW_ID below."""
-        for i, tok in enumerate(target_argv):
-            if tok == "--owner":
-                return target_argv[i + 1] if i + 1 < len(target_argv) else ""
-        return None
-
-    arming_found = False
-    watch_fleet_arming = False
-    watch_fleet_owner_argv = None
-    for seg in segments:
-        b, argv = resolve_command(seg)
-        if not argv:
-            continue
-        launcher, idx = find_watcher_invocation(b, argv)
-        if idx is None:
-            continue
-        # Re-apply the flag allowlist to the argv AFTER the located token -
-        # never to the launcher'"'"'s own argv - so `timeout 5 bin/watch-fleet
-        # --status` reads its `--status` correctly instead of never seeing it.
-        target_argv = argv[idx:]
-        target = basename(target_argv[0])
-        if not is_arming(target, target_argv):
-            continue
-        if launcher in DETACHED_LAUNCHERS:
-            deny(DENIAL_REASON)
-        arming_found = True
-        if target == "watch-fleet":
-            watch_fleet_arming = True
-            watch_fleet_owner_argv = target_argv
-
-    if arming_found:
-        # issue #198: an arming watch-fleet call (never pr-watch, which has
-        # no standdown concept) is denied outright while a run-scoped
-        # spurious-repeated standdown holds for this session'"'"'s owner -
-        # checked ahead of the &/run_in_background checks below, since
-        # neither of those makes an arm under a standdown legitimate.
-        # Fixing the standdown'"'"'s own composed text (see bin/watch-fleet'"'"'s
-        # spurious_repeated_reason) removes the COMPETING instruction that
-        # told a model to arm; it does not make the refusal enforceable on
-        # its own - #198'"'"'s own incident was a model reading a correctly-
-        # identified deliberate refusal and overriding it anyway. This is
-        # what makes it structural instead.
-        if watch_fleet_arming:
-            _owner_flag = extract_owner_flag(watch_fleet_owner_argv or [])
-            def read_standdown_marker(path):
-                # None means "genuinely absent" (the overwhelmingly common
-                # case - no standdown in force) and must allow. Anything
-                # else this raises (e.g. PermissionError from an
-                # unreadable $WINGMAN_HOME) propagates to the outer
-                # except below, which fails CLOSED via VERIFY_FAIL_REASON -
-                # "could not verify" is not the same answer as "not there".
-                try:
-                    with open(path) as f:
-                        return f.read()
-                except FileNotFoundError:
-                    return None
-
-            # bin/watch-fleet'"'"'s own precedence (`:176-180`): --owner, when the
-            # command carries it, wins outright - only its ABSENCE falls back
-            # to $WINGMAN_CREW_ID. Checking the marker under $WINGMAN_CREW_ID
-            # alone would let `bin/watch-fleet --owner ""` bypass a standing
-            # standdown by targeting a different (or unscoped) owner than the
-            # one the guard checked (issue #198 plan review, MUST-FIX 3).
-            _owner = _owner_flag if _owner_flag is not None else (os.environ.get("WINGMAN_CREW_ID") or "")
-            _okey = re.sub(r"[^A-Za-z0-9._-]", "_", _owner) if _owner else ""
-            _wm_home = os.environ.get("WINGMAN_HOME") or os.path.join(os.path.expanduser("~"), ".wingman")
-            _marker_name = "watch-%s.suppressed" % _okey if _okey else "watch.suppressed"
-            _marker_path = os.path.join(_wm_home, _marker_name)
-            _marker_content = read_standdown_marker(_marker_path)
-            if _marker_content is not None:
-                _marker_lines = _marker_content.split("\n", 1)
-                _stamp = _marker_lines[0] if _marker_lines else ""
-                _body = _marker_lines[1] if len(_marker_lines) > 1 else ""
-                _run_id = os.environ.get("WINGMAN_RUN_ID") or ""
-                # wm_run_scoped_marker_active'"'"'s own rule (hooks/lib/
-                # watcher-liveness.sh): honored if the stamp matches this
-                # run, is empty, or this session has no run id to check
-                # against - false only for a DIFFERENT, presumably-ended
-                # run'"'"'s stamp.
-                if not _run_id or not _stamp or _stamp == _run_id:
-                    _count_match = re.search(r"died (\d+) times", _body)
-                    _count_clause = " (%s deaths in a row)" % _count_match.group(1) if _count_match else ""
-                    STANDDOWN_DENIAL_REASON = (
-                        "A spurious-repeated failure-budget standdown is in force "
-                        "for this session" + _count_clause + ": the "
-                        "watcher has died repeatedly with no successful cycle in "
-                        "between, and the failure budget is deliberately refusing "
-                        "further arms until a human intervenes. Arming now would "
-                        "clear the standdown, which is exactly the re-arm churn "
-                        "the budget exists to prevent. Lifting the standdown is "
-                        "up to the pilot, not a tool call: once the cause is "
-                        "understood, run bin/watch-fleet --clear-standdown, then "
-                        "fleet continuity re-arms automatically on the next Stop "
-                        "event."
-                    )
-                    deny(STANDDOWN_DENIAL_REASON)
-        # command_segments() discards a bare `&` the same way it discards
-        # `;` (it is punctuation to the segment splitter, not part of any
-        # token), so a trailing background operator is invisible to the
-        # segment/argv analysis above and must be caught with a conservative
-        # textual scan over the raw command string instead: strip every
-        # SAFE `&` shape (&&, a fd-duplication redirect like 2>&1/&>2, &>,
-        # <&) and deny if a bare & remains. A false deny here costs nothing;
-        # a miss reintroduces the exact class this hook exists to close.
-        _safe_amp_re = re.compile(r"&&|[0-9]*>&[0-9]*|&>|<&")
-        if "&" in _safe_amp_re.sub("", command_text):
-            deny(DENIAL_REASON)
-        # Fail CLOSED: absent, false, or any unexpected shape denies. There
-        # is deliberately no "cannot verify -> allow" branch here.
-        if not tool_input.get("run_in_background"):
-            deny(DENIAL_REASON)
+    try:
+        evaluate_no_foreground_watcher_guard(
+            gi, run_in_background=bool(tool_input.get("run_in_background")), dialect="claude")
+    except GuardDenied as e:
+        deny(str(e))
 except Exception:
     deny(VERIFY_FAIL_REASON)
 
