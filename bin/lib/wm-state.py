@@ -1539,9 +1539,9 @@ def cmd_reconcile(args):
     """Mark live-but-windowless crew as 'died'. Given the current tmux windows,
     any crew member still in a live state whose window is gone is flagged.
 
-    Backend scoping (issue #370): each call carries liveness evidence about
-    some backends and none about the others, and only ever judges the ones it
-    holds evidence about. --windows is a list of tmux window names, so it is
+    Backend scoping: each call carries liveness evidence about some backends
+    and none about the others, and only ever judges the ones it holds
+    evidence about. --windows is a list of tmux window names, so it is
     evidence about tmux-backed members alone; --inventory/--inventory-backends
     is evidence about exactly the backends named there. A member's `window` is
     an opaque backend-specific endpoint (herdr's is "<session>:<pane-id>"),
@@ -1575,8 +1575,8 @@ def cmd_reconcile(args):
     silently reading identically to a clean tree.
 
     Dead-owner re-adopt (Fix B / #11), run ONLY under wingman's watcher
-    (--owner ""): after the death flip, any still-live worker whose window is alive
-    but whose owner is now terminal (died/stood-down) is re-parented to the dead
+    (--owner ""): after the death flip, any worker still in a live status
+    whose owner is now terminal (died/stood-down) is re-parented to the dead
     owner's own parent (the grandparent, always "" = wingman under the depth-2 cap),
     with the prior parent recorded in `orphaned_from`. Re-parenting immediately
     restores a live watcher (wingman now sees the worker as a direct report), and
@@ -1637,15 +1637,23 @@ def cmd_reconcile(args):
                 write_json(status_path(r["id"]), live)
                 changed.append(r["id"])
 
-        # Dead-owner re-adopt, wingman's watcher only (owner == "").
+        # Dead-owner re-adopt, wingman's watcher only (owner == ""). No
+        # `window not in live_windows` guard here: a record this same call's
+        # death-flip pass just flipped is already excluded by the LIVE_STATES
+        # check above, for whichever backend that pass actually judged (tmux
+        # windows here, or an --inventory-backends backend on a separate
+        # call). A record of any OTHER backend was never judged by this call
+        # at all, so comparing its endpoint against `live_windows` - tmux
+        # window names - proves nothing about it; the guard used to read that
+        # mismatch as "already flagged died" and skip re-adopting it, which
+        # silently left a live Herdr worker with a dead owner unwatched
+        # instead.
         if owner == "" and not inventory_backends:
             by_id = dict((r.get("id"), r) for r in roster)
             orphans_by_owner = {}
             for r in roster:
                 if merged(r).get("status") not in LIVE_STATES:
                     continue
-                if r.get("window") not in live_windows:
-                    continue  # its own window is gone; the death flip already handled it
                 p = parent_of(r)
                 if not p:
                     continue  # top-level: owned by wingman, which never dies

@@ -1834,13 +1834,13 @@ for tid in ids:
 
   # Herdr uses the same poll backstop as tmux. Inventory and endpoint reads are
   # passive: an unreadable Herdr API defers reconciliation rather than marking
-  # the mixed fleet dead.
-  if wm_state crew-list --all --json 2>/dev/null | grep -q '"backend": "herdr"' \
-     && wm_backend_reachable herdr "${HERDR_SESSION:-default}" 2>/dev/null; then
-    if _herdr_inventory="$(wm_backend_live_inventory herdr "${HERDR_SESSION:-default}" 2>/dev/null)"; then
+  # the mixed fleet dead. The inventory itself is gathered from every session a
+  # live Herdr member actually names, not just this watcher's own ambient
+  # $HERDR_SESSION.
+  _herdr_roster="$(wm_state crew-list --all --json 2>/dev/null)"
+  if printf '%s' "$_herdr_roster" | grep -q '"backend": "herdr"'; then
+    if _herdr_inventory="$(wm_backend_herdr_reconcile_inventory "$_herdr_roster")"; then
       _reconcile_died="$(wm_state reconcile --inventory "$_herdr_inventory" --inventory-backends herdr --owner "$OWNER" 2>/dev/null) $_reconcile_died"
-    else
-      _herdr_inventory=""
     fi
     while IFS="$(printf '\t')" read -r _hid _hstatus _hagent _htarget; do
       [ -n "$_hid" ] || continue

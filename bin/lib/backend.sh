@@ -145,6 +145,35 @@ wm_backend_live_inventory() {
   wm_backend_source "$backend" || return 1
   case "$backend" in tmux) wm_backend_tmux_inventory ;; herdr) wm_backend_herdr_inventory "${2:-${HERDR_SESSION:-default}}" ;; esac
 }
+# wm_backend_herdr_reconcile_inventory <roster-json>: the merged Herdr
+# liveness inventory across every session any LIVE Herdr roster record
+# actually names, not just the caller's own ambient $HERDR_SESSION -
+# HERDR_SESSION is one operator's own selection (herdr.sh:45-51, mirroring
+# tmux's $TMUX), so a member spawned under a different session is real
+# evidence this pass must also gather, never an absence to judge it dead by.
+# All sessions or none: one unreachable or
+# unreadable session fails the whole read (empty output, exit 1) rather than
+# reconciling every other session's members against a view that is silently
+# missing one of them - the same all-or-nothing invariant a single session's
+# own wm_backend_herdr_inventory keeps for its own reads. Prints nothing and
+# returns 0 when no Herdr member is currently live, so the caller skips
+# reconcile entirely rather than issuing a no-op call.
+wm_backend_herdr_reconcile_inventory() {
+  local roster_json=$1 sessions session inventory="" one
+  sessions="$(printf '%s' "$roster_json" | jq -r \
+    '.[] | select(.backend == "herdr") | select(.status == "working" or .status == "blocked" or .status == "review" or .status == "stalled") | (.window // "") | split(":")[0] | select(length > 0)' \
+    2>/dev/null | sort -u)"
+  [ -n "$sessions" ] || return 0
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    one="$(wm_backend_live_inventory herdr "$session" 2>/dev/null)" || return 1
+    [ -n "$one" ] && inventory="$inventory
+$one"
+  done <<EOF
+$sessions
+EOF
+  printf '%s' "$inventory"
+}
 wm_backend_close() {
   local backend=$1 target=$2
   wm_backend_source "$backend" || return 1

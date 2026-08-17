@@ -71,9 +71,17 @@ wm_backend_herdr_server_ensure() {  # <session>
 
 # wm_backend_herdr_workspace_find: the "wingman" workspace's id inside
 # <session>, or empty (never creates). Read-only, safe for recovery/list paths.
+# A response whose exit status is 0 but whose body isn't the shape this
+# parses (an error object, protocol drift, a truncated payload) is validated
+# before extraction rather than left to jq's `?` to silently swallow into an
+# empty result indistinguishable from "the workspace genuinely doesn't
+# exist" - the empty case is authoritative for every caller here
+# (wm_backend_herdr_inventory treats it as proof of zero live panes), so a
+# merely-unreadable response must fail loudly instead.
 wm_backend_herdr_workspace_find() {  # <session>
   local session=$1 list ids count
   list=$(HERDR_SESSION="$session" herdr workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
   if [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
     ids=$(printf '%s' "$list" | jq -r --arg id "$HERDR_WORKSPACE_ID" \
       '.result.workspaces[]? | select(.workspace_id == $id) | .workspace_id' 2>/dev/null)
@@ -404,6 +412,11 @@ wm_backend_herdr_inventory() {
   wsid="$(wm_backend_herdr_workspace_find "$session")" || return 1
   [ -n "$wsid" ] || return 0
   tabs="$(HERDR_SESSION="$session" herdr tab list --workspace "$wsid" 2>/dev/null)" || return 1
+  # An exit-0 response whose body isn't the shape this parses (an error
+  # object, protocol drift, an unparseable payload) must fail the read too -
+  # jq's own `?` below would otherwise swallow it into zero extracted tabs,
+  # indistinguishable from a workspace that genuinely holds none.
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] || continue
     pane_id="$(wm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" || return 1
