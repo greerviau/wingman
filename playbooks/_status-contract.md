@@ -104,6 +104,15 @@ Once your turn ends you are idle and **cannot rouse yourself** - so if you are i
   The chain persists only if you re-arm after every fire.
 - Your playbook names the concrete watcher for your kind of work (a `developer` watches its PR; a role with no external signal - like a plan awaiting approval - simply idles in `review` with no watcher, since feedback arrives as a message).
 
+## When your deliverable is consumed, or your delivery lands
+
+Two facts about your own work can become true without anyone thinking to tell you, and the supervisor watches for both. Neither one ever changes your status - each only wakes you, as an ordinary message in your session, so the judgment and the close-out stay yours:
+
+- **Your deliverable was consumed.** If the file you reported as your `artifact` is later handed to another member as its `--input`, you are told so, by that member's id and type. Consuming a deliverable downstream **is** its disposition: if you hold nothing further, that is your terminal condition - report `done`. The exception is a member spawned to **critique** your deliverable rather than build on it (a `reviewer` handed your plan): that is a round of your own revision loop, so stay in `review` and expect its findings. You will not receive this message at all if you hold a `delivery` of your own - a PR or a branch has its own terminal condition, below.
+- **Your PR-shaped delivery reached a terminal state.** If the PR you reported as your `delivery` shows as merged or closed on the forge - read directly from the forge, never inferred from anyone's report - you are told so even if nothing was watching it on your behalf. Finish whatever cleanup your own playbook prescribes and report `done`.
+
+Neither message is a status change, and neither is authority to skip a close-out step your own playbook requires (a closing handoff file, a worktree cleanup, an untracked-docs check). If a message is wrong for a reason only you can see - your plan is mid-revision for a reviewer, or the PR named is not the one you are on - say so in your `summary` and carry on. Nothing is imposed on you.
+
 ## Escalation & peers
 
 Your status is watched by your **owner** (the party that spawned you). Its watcher is scoped to just its own reports, so nothing here changes based on who your owner is.

@@ -222,6 +222,10 @@ if [ -n "$OWNER" ]; then
   # Low-volume 'rolled' telemetry (issue #196) - see the ROLLEDCOUNTFILE
   # comment at the --classify dispatch for what this counts and why.
   ROLLEDCOUNTFILE="$WM_HOME/watch-rolled-count-$_key"
+  # The terminal-condition throttle's own tick counter - see its own comment
+  # at the gated block below for why this file's count is the throttle's
+  # only externally observable behavior.
+  TERMCHECKCOUNTFILE="$WM_HOME/terminal-check-count-$_key"
   RUNFILE="$WM_HOME/watch-$_key.run"
   CODEFILE="$WM_HOME/watch-$_key.code"
   CODECHECKFILE="$WM_HOME/watch-$_key.codecheck"
@@ -249,6 +253,7 @@ else
   EXITFILE="$WM_HOME/watch-exit"
   SPURCOUNTFILE="$WM_HOME/watch-spurious-count"
   ROLLEDCOUNTFILE="$WM_HOME/watch-rolled-count"
+  TERMCHECKCOUNTFILE="$WM_HOME/terminal-check-count"
   RUNFILE="$WM_HOME/watch.run"
   CODEFILE="$WM_HOME/watch.code"
   CODECHECKFILE="$WM_HOME/watch.codecheck"
@@ -361,6 +366,21 @@ WM_REVIEW_WAKER_GRACE="${WM_REVIEW_WAKER_GRACE:-120}"           # > pr-watch's o
 # trees show measurable CPU spend either - even with a fully healthy, armed
 # watcher cycle - see bin/lib/wm-state.py's forward-motion-check.
 WM_FORWARD_MOTION_SECS="${WM_FORWARD_MOTION_SECS:-1800}"   # 30 min default
+# How often the two terminal-condition checks below run, in seconds. They
+# answer minutes-scale questions, so they deliberately do not run on every
+# WM_WATCH_INTERVAL poll: each is a separate python startup, and paying for
+# both every 5s would be pure overhead against windows measured in minutes.
+WM_TERMINAL_CHECK_EVERY="${WM_TERMINAL_CHECK_EVERY:-60}"
+# How long a single member's forge state is trusted before this cycle asks the
+# forge again. One `gh pr view` per candidate per window; a member with a live
+# bin/pr-watch beacon is never a candidate at all.
+WM_PR_TERMINAL_POLL_SECS="${WM_PR_TERMINAL_POLL_SECS:-600}"
+# How long a lead's own roster must sit with no live report, and nothing else
+# about its own record changing, before its own cycle wakes it to deal with
+# what is left there. Long enough that an ordinary gap between phases - the
+# analyst closed out, the architect not yet spawned - never trips it, short
+# enough that a genuinely finished effort closes the same hour.
+WM_ROSTER_TERMINAL_SECS="${WM_ROSTER_TERMINAL_SECS:-900}"
 # API/connectivity-error pane signature (#23): a member showing one of these and
 # then going quiet is a likely local network blip or Anthropic-side outage, not a
 # broken agent, so its check-in nudge (see #61 below) uses this wording instead of
@@ -1478,7 +1498,27 @@ fire() {
   exit 0
 }
 
+# Deliver one terminal-condition nudge into a member's own session. Every
+# addressing field is passed in - the check that selected this candidate had
+# them all in memory already - so this path costs zero python startups;
+# resolving them through wm_backend_send_for_member instead would cost ~14
+# per nudge. Returns 0 only on a CONFIRMED submit, so the caller records a
+# delivery only when it genuinely landed and records an attempt otherwise.
+# Deliberately the direct backend send rather than bin/crew-say: this message
+# is a supervisor courtesy, not a relayed answer, so it must never enter the
+# outbox - a queued copy would later be swept and surfaced to the owner as an
+# abandoned message the moment the member is closed out normally, which is
+# precisely the ordinary outcome here.
+terminal_nudge_send() {
+  _tn_backend="$1"; _tn_id="$2"; _tn_window="$3"; _tn_agent="$4"; _tn_msg="$5"
+  _tn_target="$(wm_backend_endpoint_from_fields "$_tn_backend" "$_tn_id" "$_tn_window")"
+  [ "$(wm_backend_endpoint_state "$_tn_backend" "$_tn_target")" = alive ] || return 1
+  wm_backend_send_message "$_tn_backend" "$_tn_target" "$_tn_msg" "$_tn_agent"
+}
+
 # --- the blocking loop ------------------------------------------------------
+_terminal_check_last=0
+_tc_due=0
 while :; do
   : > "$BEATFILE" || true   # liveness beacon for the singleton guard + Stop hook
 
@@ -2621,6 +2661,77 @@ EOF_USAGE
     esac
   fi
 
+  # One throttle decision per poll, with BOTH arms explicit: $_tc_due is read
+  # again further down (after the fire call) by the roster wake check, so it
+  # must hold a defined value on every path through this loop, and it must fall
+  # back to 0 on a poll that is not due or the flag would latch on after its
+  # first tick and both checks would run every poll forever.
+  _tc_now="$(date +%s)"
+  if [ $(( _tc_now - _terminal_check_last )) -ge "$WM_TERMINAL_CHECK_EVERY" ]; then
+    _tc_due=1
+    _terminal_check_last="$_tc_now"
+  else
+    _tc_due=0
+  fi
+
+  if [ "$_tc_due" = 1 ]; then
+    # The counter file is the throttle's only externally observable behavior: a
+    # check that runs once per window and one that runs every poll otherwise
+    # produce byte-identical rosters, stores, and nudge logs, so without this
+    # there is no way for a test to tell a working throttle from a broken one.
+    #
+    # It belongs HERE, at the top of the gated block - not up in the decision
+    # that sets $_tc_due. Counting there would record only whether the window
+    # elapsed, and would read identically whether or not the flag latches on,
+    # which is exactly the failure this counter exists to catch. Counting here
+    # records what actually ran, so every way of breaking the throttle moves the
+    # number. Outside the pipeline below, so the subshell never touches it.
+    _tc_count=0
+    [ -f "$TERMCHECKCOUNTFILE" ] && IFS= read -r _tc_count < "$TERMCHECKCOUNTFILE"
+    case "$_tc_count" in ''|*[!0-9]*) _tc_count=0 ;; esac
+    printf '%s\n' "$(( _tc_count + 1 ))" > "$TERMCHECKCOUNTFILE"
+
+    wm_state terminal-nudge-check --owner "$OWNER" \
+        --pr-poll-secs "$WM_PR_TERMINAL_POLL_SECS" \
+        --waker-grace "$WM_REVIEW_WAKER_GRACE" 2>/dev/null \
+      | while IFS=$'\t' read -r _tn_kind _tn_target_id _tn_key _tn_extra _tn_artifact \
+                                _tn_backend _tn_window _tn_agent; do
+          [ -n "$_tn_target_id" ] || continue
+          case "$_tn_kind" in
+            consumed)
+              _tn_msg="Your deliverable ($_tn_artifact) has been handed to another member as its --input: $_tn_extra \"$_tn_key\". Per the status contract (\"When your deliverable is consumed, or your delivery lands\"): if that member was spawned to build on your deliverable, consuming it is its disposition - if you hold nothing further, report done. If it was spawned to critique your deliverable instead, stay in review and expect its findings. Your status has not been changed; this judgment and your own close-out steps are yours."
+              if terminal_nudge_send "$_tn_backend" "$_tn_target_id" "$_tn_window" "$_tn_agent" "$_tn_msg"; then
+                _tn_rc=0
+                wm_state terminal-nudge-mark --id "$_tn_target_id" --kind consumed --key "$_tn_key" --outcome delivered >/dev/null 2>&1
+              else
+                _tn_rc=$?
+                wm_state terminal-nudge-mark --id "$_tn_target_id" --kind consumed --key "$_tn_key" --outcome attempted >/dev/null 2>&1
+              fi
+              printf '%s %s %s %s rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tn_target_id" "$_tn_kind" "$_tn_key" "$_tn_rc" \
+                >> "$WM_HOME/terminal-nudge.log"
+              ;;
+            pr-probe)
+              _tn_state="$("$WM_LIB/pr-state-probe.sh" "$_tn_key" 2>/dev/null)"
+              case "$_tn_state" in
+                MERGED|CLOSED)
+                  _tn_msg="Your delivery ($_tn_key) is $_tn_state on the forge - read from the forge itself just now (gh pr view), not from anyone's report. Per your delivery playbook that is your terminal condition: finish the cleanup your workflow prescribes and report done. Your status has not been changed."
+                  if terminal_nudge_send "$_tn_backend" "$_tn_target_id" "$_tn_window" "$_tn_agent" "$_tn_msg"; then
+                    _tn_rc=0
+                    wm_state terminal-nudge-mark --id "$_tn_target_id" --kind pr --key "$_tn_key" --state "$_tn_state" --outcome delivered >/dev/null 2>&1
+                  else
+                    _tn_rc=$?
+                    wm_state terminal-nudge-mark --id "$_tn_target_id" --kind pr --key "$_tn_key" --state "$_tn_state" --outcome attempted >/dev/null 2>&1
+                  fi
+                  printf '%s %s %s %s rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_tn_target_id" "$_tn_kind" "$_tn_key" "$_tn_rc" \
+                    >> "$WM_HOME/terminal-nudge.log"
+                  ;;
+                *) : ;;   # OPEN or unknown - nothing this tick; the probe stamp already throttles the next query
+              esac
+              ;;
+          esac
+        done
+  fi
+
   # Structural forward-motion / logical-stall detection (issue #199, Gap B):
   # run BEFORE needs-attention, not merged into $attention afterward like
   # review-resurface-check below - this call performs the roster mutation
@@ -2673,6 +2784,96 @@ EOF_USAGE
   # even with no genuine attention event of its own - see fire()'s own
   # notice-only handling above.
   { [ -n "$attention" ] || [ -s "$NOTICEFILE" ]; } && fire "$attention"
+
+  # Class D2's own wake: a `lead` (--self "$OWNER", never the parent's cycle -
+  # see cmd_roster_terminal_check's own docstring for why this inversion from
+  # forward-motion-check above is deliberate) whose roster has fully closed
+  # out, or whose closed-out roster still carries an un-reaped `done` report.
+  # Reached only on a quiet poll (fire() above exits the process on any
+  # genuine crew event), and only for a scoped owner - the top-level
+  # orchestrator's cycle (OWNER="") has no crew record of its own to be a
+  # candidate here. Reuses this same poll's own $_tc_due decision so both
+  # terminal-condition checks run on the same tick.
+  if [ -n "$OWNER" ] && [ "$_tc_due" = 1 ]; then
+    _rt="$(wm_state roster-terminal-check --self "$OWNER" \
+             --window-secs "$WM_ROSTER_TERMINAL_SECS" 2>/dev/null)"
+    if [ -n "$_rt" ]; then
+      # roster-terminal <id> <n-stood-down> <n-died> <window>
+      # roster-unreaped <id> <n-done> <window>
+      # Read rather than `set --`: this loop is long past argument parsing, but
+      # clobbering the script's own positional parameters from inside it is the
+      # kind of action-at-a-distance that only shows up much later.
+      _rt_kind=""; _rt_id=""; _rt_a=0; _rt_b=0; _rt_c=""
+      IFS=' ' read -r _rt_kind _rt_id _rt_a _rt_b _rt_c <<EOF
+$_rt
+EOF
+      case "$_rt_kind" in
+        roster-terminal)
+          if [ "$_rt_b" = 0 ]; then
+            {
+              echo "# Your own roster is fully closed out"
+              echo
+              echo "All \`$_rt_a\` of your direct reports are \`stood-down\`, and nothing about your own report or theirs has changed for $_rt_c. This is a prompt to re-evaluate, not a verdict - nothing has been changed on your record."
+              echo
+              echo "Decide which of these is true, and act on it in this turn:"
+              echo
+              echo "- **The effort itself is delivered and dispositioned.** Write your closing handoff, run the untracked-docs check, and report \`done\` with the handoff as your \`--artifact\` - see your own playbook's \"Handoff at stand-down\"."
+              echo "- **A phase simply has not been spawned yet.** Spawning it *is* the answer - do it now. This wake stops on its own once your roster changes."
+              echo "- **You are waiting on something external that no worker of yours can move.** Reflect that in your own status and \`summary\` per your playbook's escalation rules, so it is visible to your owner rather than silent here."
+              echo
+              echo "Then arm one fresh cycle as usual."
+              echo
+              echo "## Full roster (this owner's scope)"
+              echo
+              wm_state crew-list --owner "$OWNER" --all 2>/dev/null
+            } > "$WAKEFILE"
+            echo "roster-terminal: your own roster is fully closed out ($_rt_a stood-down, 0 died), unchanged for $_rt_c - re-evaluate your own terminal condition (see $WAKEFILE)"
+          else
+            {
+              echo "# Your own roster has no live reports, but $_rt_b of them died"
+              echo
+              echo "\`$_rt_a\` of your direct reports are \`stood-down\` and **\`$_rt_b\` are \`died\`** - a \`died\` report is one whose session disappeared, not one that finished. Nothing about your own report or theirs has changed for $_rt_c. This is a prompt to re-evaluate, not a verdict - nothing has been changed on your record."
+              echo
+              echo "**Start with the dead reports, not with your own close-out.** A \`died\` report may have been holding unfinished work: an open PR, an unpushed branch, an uncommitted worktree. Run \`\$WINGMAN_BIN/crew-list --owner $OWNER --all\` to see them (a resumable one renders as \`died (resumable)\`), and for each one decide:"
+              echo
+              echo "- **Its work is unfinished** - resume it with \`\$WINGMAN_BIN/crew-resume <id>\`, or respawn that phase. That is the answer, and this wake stops on its own once your roster changes."
+              echo "- **Its work was already complete and delivered before it died** - nothing to recover; fold it into your own judgment below."
+              echo
+              echo "Only once every dead report is accounted for, decide whether the effort itself is delivered and dispositioned - and if it is, write your closing handoff, run the untracked-docs check, and report \`done\` with the handoff as your \`--artifact\`."
+              echo
+              echo "Then arm one fresh cycle as usual."
+              echo
+              echo "## Full roster (this owner's scope)"
+              echo
+              wm_state crew-list --owner "$OWNER" --all 2>/dev/null
+            } > "$WAKEFILE"
+            echo "roster-terminal: your own roster has no live reports, but $_rt_b of them died ($_rt_a stood-down), unchanged for $_rt_c - re-evaluate your own terminal condition (see $WAKEFILE)"
+          fi
+          ;;
+        roster-unreaped)
+          {
+            echo "# $_rt_a of your reports are sitting in \`done\` and were never closed out"
+            echo
+            echo "None of your direct reports is live, but \`$_rt_a\` of them have reported \`done\` and are still on your roster. A worker's \`done\` earns an immediate close-out, unconditionally - and nothing will raise it again on its own: a \`done\` announces exactly once, and that announcement has already been made and acked."
+            echo
+            echo "**Close them out now**, before anything else: \`\$WINGMAN_BIN/crew-list --owner $OWNER --all\` lists them, and \`\$WINGMAN_BIN/crew-standdown <id>\` closes each one (it cascades to anything that worker owns)."
+            echo
+            echo "Then re-evaluate your own position. If those \`done\` reports were the effort's actual outcome and nothing further is owed, write your closing handoff, run the untracked-docs check, and report \`done\` with the handoff as your \`--artifact\`. If a phase is still missing, spawn it. Either way this wake stops on its own once your roster changes."
+            echo
+            echo "Then arm one fresh cycle as usual."
+            echo
+            echo "## Full roster (this owner's scope)"
+            echo
+            wm_state crew-list --owner "$OWNER" --all 2>/dev/null
+          } > "$WAKEFILE"
+          echo "roster-unreaped: $_rt_a of your reports are done and un-reaped, unchanged for $_rt_b - close them out (see $WAKEFILE)"
+          ;;
+      esac
+      printf 'fire\n' > "$EXITFILE"
+      rm -f "$PIDFILE"; rm -rf "$OWNERLOCK"
+      exit 0
+    fi
+  fi
 
   sleep "$INTERVAL"
 done
