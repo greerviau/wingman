@@ -63,28 +63,80 @@ else
   ok "invalid JSON: trust-status fails closed (reports not accepted)"
 fi
 
-# Ancestor trust does NOT propagate to a child directory: verified directly
-# by launching a fresh `claude` process in a brand-new child of an
-# already-trusted parent and observing the live trust dialog render anyway,
-# regardless of the parent's own accepted state. trust-status must check the
-# exact repo path only - treating an ancestor's acceptance as covering an
-# untrusted child is exactly what let a real spawn proceed past this gate and
-# freeze on a live dialog instead of being refused.
-printf '{"projects": {"/home/x": {"hasTrustDialogAccepted": true}}}\n' > "$CONFIG"
-if run_check trust-status --config "$CONFIG" --repo "/home/x/repo" >/dev/null 2>&1; then
-  fail "trusted ancestor, exact repo entry absent: trust-status must not report accepted"
+# Ancestor trust propagates to a non-git directory - a plain directory has no
+# repository boundary of its own, so it inherits from any accepted ancestor
+# up to /. Verified directly against real Claude Code (see
+# bin/lib/claude-gate-check.py's own trust-status doc comment for the full
+# probe method and CLI version).
+NONGIT_PARENT="$(wm_mktemp_dir)/nongit-parent"
+NONGIT_CHILD="$NONGIT_PARENT/plain-child"
+mkdir -p "$NONGIT_CHILD"
+printf '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}\n' "$NONGIT_PARENT" > "$CONFIG"
+if run_check trust-status --config "$CONFIG" --repo "$NONGIT_CHILD" >/dev/null 2>&1; then
+  ok "trusted ancestor, non-git child with no entry of its own: trust-status reports accepted"
 else
-  ok "trusted ancestor, exact repo entry absent: trust-status reports not accepted"
+  fail "trusted ancestor, non-git child with no entry of its own: trust-status reports accepted"
 fi
-if run_check trust-status --config "$CONFIG" --repo "/home/x/repo/nested/deep" >/dev/null 2>&1; then
-  fail "trust must not inherit through multiple levels of nesting"
+
+NONGIT_DEEP="$NONGIT_PARENT/plain-child/nested/deep"
+mkdir -p "$NONGIT_DEEP"
+if run_check trust-status --config "$CONFIG" --repo "$NONGIT_DEEP" >/dev/null 2>&1; then
+  ok "trust inherits through multiple levels of non-git nesting"
 else
-  ok "trust does not inherit through multiple levels of nesting"
+  fail "trust inherits through multiple levels of non-git nesting"
 fi
-if run_check trust-status --config "$CONFIG" --repo "/home/y/repo" >/dev/null 2>&1; then
-  fail "unrelated repo under a different, untrusted parent: trust-status reports accepted"
+
+UNRELATED="$(wm_mktemp_dir)/unrelated/repo"
+mkdir -p "$UNRELATED"
+if run_check trust-status --config "$CONFIG" --repo "$UNRELATED" >/dev/null 2>&1; then
+  fail "unrelated dir under a different, untrusted parent: trust-status reports accepted"
 else
-  ok "unrelated repo under a different, untrusted parent: trust-status reports not accepted"
+  ok "unrelated dir under a different, untrusted parent: trust-status reports not accepted"
+fi
+
+# The ancestor walk stops at an enclosing git repository's own root: a git
+# repo's root never inherits trust from anything above it, only from its own
+# entry or a path inside the same working tree. This is the incident case -
+# a repo nested under an already-trusted parent, with no accepted entry of
+# its own, must still refuse (a fresh `git init` repo renders the live
+# dialog even under a trusted parent, unlike the plain-directory case above).
+GITROOT_PARENT="$(wm_mktemp_dir)/gitroot-parent"
+GITROOT_REPO="$GITROOT_PARENT/nested-repo"
+mkdir -p "$GITROOT_REPO"
+git -C "$GITROOT_REPO" init -q
+printf '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}\n' "$GITROOT_PARENT" > "$CONFIG"
+if run_check trust-status --config "$CONFIG" --repo "$GITROOT_REPO" >/dev/null 2>&1; then
+  fail "trusted parent, git repo root with no entry of its own: trust-status must not report accepted"
+else
+  ok "trusted parent, git repo root with no entry of its own: trust-status reports not accepted"
+fi
+
+# A subdirectory of a TRUSTED git repo inherits from the repo's own root, the
+# same way a non-git directory inherits from a trusted ancestor.
+TRUSTED_REPO="$(wm_mktemp_dir)/trusted-repo"
+TRUSTED_REPO_SUB="$TRUSTED_REPO/sub/deep"
+mkdir -p "$TRUSTED_REPO_SUB"
+git -C "$TRUSTED_REPO" init -q
+printf '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}\n' "$TRUSTED_REPO" > "$CONFIG"
+if run_check trust-status --config "$CONFIG" --repo "$TRUSTED_REPO_SUB" >/dev/null 2>&1; then
+  ok "subdirectory of a trusted git repo: trust-status reports accepted"
+else
+  fail "subdirectory of a trusted git repo: trust-status reports accepted"
+fi
+
+# A subdirectory of an UNTRUSTED git repo does not reach past the repo root
+# to a trusted grandparent, even though a non-git directory in the same spot
+# would - the repository boundary blocks the walk regardless of depth.
+UNTRUSTED_GP="$(wm_mktemp_dir)/untrusted-repo-gp"
+UNTRUSTED_GITREPO="$UNTRUSTED_GP/repo"
+UNTRUSTED_GITREPO_SUB="$UNTRUSTED_GITREPO/sub"
+mkdir -p "$UNTRUSTED_GITREPO_SUB"
+git -C "$UNTRUSTED_GITREPO" init -q
+printf '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}\n' "$UNTRUSTED_GP" > "$CONFIG"
+if run_check trust-status --config "$CONFIG" --repo "$UNTRUSTED_GITREPO_SUB" >/dev/null 2>&1; then
+  fail "subdirectory of an untrusted git repo under a trusted grandparent: trust-status must not report accepted"
+else
+  ok "subdirectory of an untrusted git repo under a trusted grandparent: trust-status reports not accepted"
 fi
 
 # An ancestor entry's own accepted state, true or false, must never affect
@@ -216,6 +268,28 @@ GID6="global-trusted"
 rc6=$?
 assert_true "global scope, workspace root trusted: spawn succeeds" "[ $rc6 -eq 0 ]"
 assert_true "global scope, workspace root trusted: roster record exists" "wm_state crew-get --id '$GID6' >/dev/null 2>&1"
+
+# --- global scope, workspace root trusted only through a non-git ancestor:
+# spawn must succeed, not deadlock forever ------------------------------------
+# A non-git workspace root inherits trust the same way any other plain
+# directory does. Refusing here would give a remedy the human cannot follow:
+# Claude Code renders no dialog for an already-inherited-trust directory and
+# writes no hasTrustDialogAccepted entry for it either, so "run claude there
+# and accept the dialog" can never be satisfied.
+WS_ANCESTOR="$(wm_mktemp_dir)/ws-ancestor"
+WS2="$WS_ANCESTOR/workspace"
+mkdir -p "$WS2/subrepo"
+git -C "$WS2/subrepo" init -q
+wm_write_config <<EOF
+[projects]
+roots = ["$WS2"]
+EOF
+wm_trust_repo "$WS_ANCESTOR"
+GID6B="global-trusted-via-ancestor"
+"$SPAWN" --type software-analyst --scope global --id "$GID6B" --objective "global trusted via ancestor" >/dev/null 2>&1
+rc6b=$?
+assert_true "global scope, workspace root trusted only via a non-git ancestor: spawn succeeds" "[ $rc6b -eq 0 ]"
+assert_true "global scope, workspace root trusted only via a non-git ancestor: roster record exists" "wm_state crew-get --id '$GID6B' >/dev/null 2>&1"
 
 # --- worktree-adjacent regression: the preflight check reads $REPO only -----
 # (there is no worktree path to check yet at this point in spawn-crew - a
