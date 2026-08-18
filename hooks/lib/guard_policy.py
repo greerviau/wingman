@@ -1,13 +1,14 @@
-"""guard_policy.py: transport-agnostic decision core for wingman's three
-portable PreToolUse security guards (issue #25 stage 3, plan step 12a):
-no-merge-guard (issue #46/#132/#135/#136/#138), no-direct-edit-guard (issue
-#17/#171), and no-worker-spawn-guard (issue #212). Extracted from the three
-claude-only shell hooks of the same name under hooks/ - this module carries
-the DECISION logic only; the .sh files remain the actual Claude Code entry
-points (stdin JSON in, env vars, PYTHONPATH, the deny JSON contract, and each
-hook's own cheap bash pre-gate) and are now thin callers into the functions
-below. See issue #25 for why this module exists and the corrections applied
-here versus the plan's original sketch.
+"""guard_policy.py: transport-agnostic decision core for wingman's portable
+PreToolUse security guards - no-merge-guard, no-direct-edit-guard, no-worker-
+spawn-guard, no-watcher-kill-guard, the shared spawn-pause machinery behind
+api-outage-spawn-guard/usage-limit-spawn-guard, no-foreground-watcher-guard,
+and no-foreground-poll-loop-guard. Extracted from the claude-only shell hooks
+of the same name under hooks/ - this module carries the DECISION logic only;
+the .sh files remain the actual Claude Code entry points (stdin JSON in, env
+vars, PYTHONPATH, the deny JSON contract, and each hook's own cheap bash
+pre-gate) and are thin callers into the functions below, and hooks/lib/
+guard_dispatch.py is the equivalent thin caller for the four non-Claude
+dialects.
 
 Normalized input contract (GuardInput, below): the plan's own draft named
 only {tool_name, command, cwd, crew_id}. The design review found five more
@@ -70,13 +71,15 @@ that an aggregate entry point can be added later as a thin, additive
 wrapper around them, not a second extraction.
 """
 import dataclasses
+import glob
 import hashlib
 import json
 import os
 import re
 import subprocess
+import time
 
-from cmd_match import command_segments, redirect_write_targets, resolve_command
+from cmd_match import basename, command_segments, redirect_write_targets, resolve_command
 
 # hooks/lib/guard_policy.py -> repo root is two directories up (mirrors every
 # hook .sh file's own `HERE="$(cd "$(dirname "$0")" && pwd -P)"; REPO="$(dirname
@@ -1214,3 +1217,763 @@ def evaluate_no_worker_spawn_guard(gi):
                 "playbooks/common/lead.md's Guardrails section), not something "
                 "to reach for now."
             )
+
+
+# =============================================================================
+# no-watcher-kill-guard
+# =============================================================================
+
+def evaluate_no_watcher_kill_guard(gi):
+    """Port of hooks/no-watcher-kill-guard.sh's python block. See that file's
+    own header comment for the full history and the false-deny-only tradeoffs
+    it documents (pkill comm-vs-args conservatism, the tmux process-tree walk,
+    and fail-closed on a dynamic/unresolvable kill/pkill/tmux target) -
+    unchanged here, this is a decision-logic move, not a policy change.
+
+    Active for EVERY session, crew and top-level alike (no crew_id/crew_type
+    gating at all, matching the original hook) - so gi.crew_id/gi.crew_type
+    are simply unused by this guard, the same "required but not consumed"
+    shape evaluate_no_worker_spawn_guard already has for gi.cwd.
+
+    WM_WATCH_HARD_GRACE is read directly from os.environ, not threaded
+    through GuardInput: it is a fleet-wide tuning knob, not a per-request
+    field any transport's own payload shape could supply, so it stays an
+    ambient default exactly as the original hook read it."""
+    if gi.tool_name != "Bash":
+        return
+
+    command = gi.command
+    home = gi.home
+    try:
+        hard_grace = int(os.environ.get("WM_WATCH_HARD_GRACE") or "300")
+    except ValueError:
+        hard_grace = 300
+
+    def deny(reason):
+        raise GuardDenied(reason)
+
+    def watcher_kill_reason(pid):
+        return (
+            "Killing a live watch-fleet cycle (pid %d) is never something to do "
+            "from a session: its liveness is the only channel "
+            "that lets a wake reach an idle orchestrator, and this exact shape - "
+            "a session misreading the pid as an instruction to stop it - has "
+            "happened before. Leave it running; it exits on its own the instant "
+            "there is an actionable event. If you genuinely need to stop this "
+            "cycle for manual testing (rare - normal operation never requires "
+            "it), use `bin/watch-fleet --stop` instead of killing the pid "
+            "directly." % pid
+        )
+
+    DYNAMIC_TARGET_REASON = (
+        "This command's kill/pkill/tmux target is not a literal value - it is "
+        "built via command substitution ($(...)/`...`) or a shell variable "
+        "($VAR/${VAR}), so this hook cannot statically verify it will not "
+        "resolve to the live watch-fleet cycle (pid %d) once bash actually "
+        "expands it. Denied conservatively rather than risk "
+        "a missed deny: resolve it to a literal pid or pattern first and retry - "
+        "a literal value that genuinely targets something unrelated to the "
+        "watcher passes through untouched."
+    )
+
+    def is_dynamic_token(tok):
+        if tok in ("$(...)", "`...`", "<(...)", ">(...)"):
+            return True
+        return "$" in tok
+
+    def deny_dynamic(protected):
+        deny(DYNAMIC_TARGET_REASON % sorted(protected)[0])
+
+    def protected_pids():
+        pids = set()
+        for ownerlock in glob.glob(os.path.join(home, "watch*.pid.owner")):
+            if not ownerlock.endswith(".pid.owner"):
+                continue
+            ownerfile = os.path.join(ownerlock, "owner")
+            try:
+                with open(ownerfile) as fh:
+                    lines = fh.read().splitlines()
+                pid = int(lines[0])
+                stamped_start = lines[1] if len(lines) > 1 else ""
+                marker = lines[2] if len(lines) > 2 else ""
+            except (OSError, ValueError, IndexError):
+                continue
+            if pid <= 0:
+                continue
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                continue
+            if marker == "lstart-utc":
+                try:
+                    cur_start = subprocess.check_output(
+                        ["ps", "-o", "lstart=", "-p", str(pid)],
+                        stderr=subprocess.DEVNULL, timeout=5,
+                        env={**os.environ, "TZ": "UTC", "LC_ALL": "C"}).decode().strip()
+                except Exception:
+                    continue
+                if not stamped_start or stamped_start != cur_start:
+                    continue
+            else:
+                try:
+                    args = subprocess.check_output(
+                        ["ps", "-o", "args=", "-p", str(pid)],
+                        stderr=subprocess.DEVNULL, timeout=5,
+                        env={**os.environ, "LC_ALL": "C"}).decode()
+                except Exception:
+                    continue
+                if "watch-fleet" not in args:
+                    continue
+            beatfile = ownerlock[: -len(".pid.owner")] + ".beat"
+            try:
+                mtime = os.path.getmtime(beatfile)
+            except OSError:
+                continue
+            if (time.time() - mtime) < hard_grace:
+                pids.add(pid)
+        return pids
+
+    def parse_kill(argv):
+        args = argv[1:]
+        if not args:
+            return False, None, []
+        if args[0] in ("-l", "-L"):
+            return True, None, []
+        tok0 = args[0]
+        signal = None
+        idx = 0
+        if tok0 == "-s":
+            signal = args[1] if len(args) > 1 else None
+            idx = 2
+        elif tok0.startswith("-s") and len(tok0) > 2:
+            signal = tok0[2:]
+            idx = 1
+        elif tok0 == "-n":
+            signal = args[1] if len(args) > 1 else None
+            idx = 2
+        elif tok0.startswith("-n") and len(tok0) > 2:
+            signal = tok0[2:]
+            idx = 1
+        elif tok0.startswith("-") and tok0 != "-":
+            signal = tok0[1:]
+            idx = 1
+        return False, signal, args[idx:]
+
+    def is_null_signal(signal):
+        if signal is None:
+            return False
+        s = signal.strip()
+        if s.upper().startswith("SIG"):
+            s = s[3:]
+        return s == "0"
+
+    def check_kill(argv, protected):
+        if not protected:
+            return
+        listmode, signal, targets = parse_kill(argv)
+        if listmode or is_null_signal(signal):
+            return
+        for tok in targets:
+            t = tok[1:] if tok.startswith("-") else tok
+            try:
+                val = int(t)
+            except ValueError:
+                if is_dynamic_token(t):
+                    deny_dynamic(protected)
+                continue
+            if abs(val) in protected:
+                deny(watcher_kill_reason(abs(val)))
+
+    _PKILL_BOOL_FLAGS = ("-f", "-x", "-v", "-n", "-o")
+    _PKILL_VALUE_FLAGS = ("-s", "--signal", "-P", "-u", "-U", "-g", "-G", "-t")
+
+    def extract_pkill_pattern(argv):
+        args = argv[1:]
+        pattern = None
+        i = 0
+        while i < len(args):
+            tok = args[i]
+            if tok in _PKILL_VALUE_FLAGS:
+                i += 2
+                continue
+            if tok.startswith("--signal="):
+                i += 1
+                continue
+            if tok in _PKILL_BOOL_FLAGS:
+                i += 1
+                continue
+            if tok.startswith("-") and tok != "-":
+                i += 1
+                continue
+            pattern = tok
+            i += 1
+        return pattern
+
+    def ps_identity(pid):
+        try:
+            out = subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "comm=,args="],
+                stderr=subprocess.DEVNULL, timeout=5).decode()
+        except Exception:
+            return None, None
+        line = out.strip("\n")
+        if not line.strip():
+            return None, None
+        parts = line.split(None, 1)
+        comm = parts[0] if parts else ""
+        args_str = parts[1] if len(parts) > 1 else ""
+        return comm, args_str
+
+    def check_pkill(argv, protected):
+        if not protected:
+            return
+        pattern = extract_pkill_pattern(argv)
+        if pattern is None:
+            return
+        if is_dynamic_token(pattern):
+            deny_dynamic(protected)
+        try:
+            rx = re.compile(pattern)
+        except re.error:
+            deny(watcher_kill_reason(sorted(protected)[0]))
+            return
+        for pid in protected:
+            comm, args_str = ps_identity(pid)
+            if comm is None:
+                continue
+            if rx.search(comm) or rx.search(args_str):
+                deny(watcher_kill_reason(pid))
+
+    def tmux_target_value(rest):
+        for i, tok in enumerate(rest):
+            if tok == "-t" and i + 1 < len(rest):
+                return rest[i + 1]
+            if tok.startswith("-t") and len(tok) > 2:
+                return tok[2:]
+        return None
+
+    _TMUX_KILL_FULL_NAMES = {"kill-window", "kill-session"}
+    _TMUX_KILL_FALLBACK_NAMES = {"kill-window", "kill-session"}
+    _TMUX_KILL_FALLBACK_ALIASES = {"killw": "kill-window"}
+
+    def tmux_command_catalog():
+        try:
+            out = subprocess.check_output(
+                ["tmux", "list-commands", "-F",
+                 "#{command_list_name}|#{command_list_alias}"],
+                stderr=subprocess.DEVNULL, timeout=5).decode()
+        except Exception:
+            return set(), {}
+        names = set()
+        aliases = {}
+        for line in out.splitlines():
+            parts = line.split("|", 1)
+            name = parts[0] if parts else ""
+            if not name:
+                continue
+            names.add(name)
+            alias = parts[1] if len(parts) > 1 else ""
+            if alias:
+                aliases[alias] = name
+        return names, aliases
+
+    def resolve_tmux_subcommand(token, names, aliases):
+        if token in names:
+            return token
+        if token in aliases:
+            return aliases[token]
+        candidates = [n for n in names if n.startswith(token)]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def tmux_kill_subcommand_index(args, names, aliases):
+        for i, tok in enumerate(args):
+            resolved = resolve_tmux_subcommand(tok, names, aliases)
+            if resolved in _TMUX_KILL_FULL_NAMES:
+                return i, resolved
+        return len(args), None
+
+    def resolve_pane_pids(kind, target):
+        cmd = ["tmux", "list-panes"]
+        if kind == "kill-session":
+            cmd.append("-s")
+        if target:
+            cmd += ["-t", target]
+        cmd += ["-F", "#{pane_pid}"]
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=5).decode()
+        except Exception:
+            return []
+        return [int(ln.strip()) for ln in out.splitlines() if ln.strip().isdigit()]
+
+    def ps_tree_descendants(root_pids):
+        try:
+            out = subprocess.check_output(
+                ["ps", "-ax", "-o", "pid=,ppid="],
+                stderr=subprocess.DEVNULL, timeout=5).decode()
+        except Exception:
+            return set()
+        children = {}
+        known = set()
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid, ppid = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            children.setdefault(ppid, []).append(pid)
+            known.add(pid)
+        result = set()
+        stack = list(root_pids)
+        while stack:
+            p = stack.pop()
+            if p in result:
+                continue
+            if p in known or p in root_pids:
+                result.add(p)
+            stack.extend(children.get(p, []))
+        return result
+
+    def check_tmux_kill(argv, protected):
+        if not protected:
+            return
+        kind = argv[1]
+        target = tmux_target_value(argv[2:])
+        if target is not None and is_dynamic_token(target):
+            deny_dynamic(protected)
+        root_pids = resolve_pane_pids(kind, target)
+        if not root_pids:
+            return
+        hit = protected & ps_tree_descendants(root_pids)
+        if hit:
+            deny(watcher_kill_reason(sorted(hit)[0]))
+
+    def check_tmux(argv, protected):
+        args = argv[1:]
+        names, aliases = tmux_command_catalog()
+        if not names:
+            names, aliases = _TMUX_KILL_FALLBACK_NAMES, _TMUX_KILL_FALLBACK_ALIASES
+        idx, kind = tmux_kill_subcommand_index(args, names, aliases)
+        if idx >= len(args):
+            return
+        check_tmux_kill(["tmux", kind] + args[idx + 1:], protected)
+
+    segments = command_segments(command)
+    if segments is None:
+        deny(_PARSE_FAIL_REASON_GENERIC)
+
+    protected = protected_pids()
+    if protected:
+        for seg in segments:
+            b, argv = resolve_command(seg)
+            if not argv:
+                continue
+            if b == "kill":
+                check_kill(argv, protected)
+            elif b == "pkill":
+                check_pkill(argv, protected)
+            elif b == "tmux":
+                check_tmux(argv, protected)
+
+
+# =============================================================================
+# spawn-pause guards (api-outage-spawn-guard, usage-limit-spawn-guard) -
+# shared machinery
+# =============================================================================
+
+_PARSE_FAIL_REASON_SPAWN_PAUSE = (
+    "This command could not be fully parsed - an unterminated quote, an "
+    "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+    "terminator line was never found, including inside a `bash -c`/`eval` "
+    "payload - so it is denied rather than "
+    "partially checked, the same posture hooks/no-merge-guard.sh "
+    "takes on this shape. Reformat it into well-formed shell syntax and "
+    "retry."
+)
+
+
+def _spawn_calls_and_force(segments, override_flag):
+    calls = []
+    force = False
+    for seg in segments or []:
+        b, argv = resolve_command(seg)
+        if not argv or b != "spawn-crew":
+            continue
+        calls.append(seg)
+        if any(t == override_flag for t in argv):
+            force = True
+    return calls, force
+
+
+def evaluate_spawn_pause_guards(gi, state_path, is_blocking_state, override_flag, build_message):
+    """Port of hooks/lib/spawn_pause_guard.py's run(), minus the stdin
+    reading and printing it used to own directly - that module's own run()
+    is now a thin wrapper delegating here (see its own docstring), which
+    keeps its existing external contract (and tests/spawn-pause-guard.test.sh,
+    which exercises it via a throwaway fixture hook independent of either
+    real guard) unchanged.
+
+    A single (state_path, is_blocking_state, override_flag, build_message)
+    tuple describes ONE pause condition - this function checks exactly one,
+    not both api-outage and usage-limit at once, so hooks/api-outage-spawn-
+    guard.sh and hooks/usage-limit-spawn-guard.sh each keep evaluating only
+    their own state file (no policy change to either individually), and
+    hooks/lib/guard_dispatch.py's combined "spawn-pause" dispatcher guard
+    (for codex/grok, which have no separate registration per condition) calls
+    this twice - api-outage first, then usage-limit, matching the manifest's
+    own group order - denying on whichever fires first."""
+    if gi.tool_name != "Bash":
+        return
+
+    def deny(reason):
+        raise GuardDenied(reason)
+
+    segments = command_segments(gi.command)
+    calls, forced = _spawn_calls_and_force(segments, override_flag)
+
+    if not calls:
+        if segments is None:
+            deny(_PARSE_FAIL_REASON_SPAWN_PAUSE)
+        return
+
+    if forced:
+        return
+
+    try:
+        with open(state_path) as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+
+    if not isinstance(state, dict) or not is_blocking_state(state):
+        return
+
+    deny(build_message(state))
+
+
+# =============================================================================
+# no-foreground-watcher-guard
+# =============================================================================
+
+_ARM_DENY_FLAGS = {
+    "watch-fleet": ("--status", "--stop", "--classify", "--clear-standdown", "-h", "--help"),
+    "pr-watch": ("--once", "-h", "--help"),
+}
+_LAUNCHER_WRAPPERS = ("nohup", "setsid", "timeout", "nice", "ionice", "stdbuf")
+_DETACHED_LAUNCHERS = ("nohup", "setsid")
+_SAFE_AMP_RE = re.compile(r"&&|[0-9]*>&[0-9]*|&>|<&")
+
+
+def _foreground_watcher_denial_reason(dialect):
+    """The DENIAL_REASON text below is byte-identical to the original
+    claude-only hook's for dialect=="claude" (or unset - claude's own
+    default), preserving decision equivalence exactly. Every other dialect
+    gets a dialect-aware variant stating the truth (plan §5.2): none of the
+    four non-Claude CLIs has a background tool-call mode for a MODEL-ISSUED
+    call (the pi-extension continuity probe at docs/analysis/2026-08-17-pi-
+    wake-loop-probe/ shows an EXTENSION can hold a blocking wait - a
+    different thing entirely, see that probe's own README), so telling the
+    model to "reissue with run_in_background: true" would be actively wrong
+    there - there is no such flag for it to set."""
+    if not dialect or dialect == "claude":
+        return (
+            "bin/watch-fleet blocks until an event fires - that is the entire "
+            "wake mechanism - so running it any way other than as a "
+            "harness-tracked background task wedges this session indefinitely "
+            "- a session that does this sits wedged indefinitely, invisible to "
+            "the stall detector. Re-issue this as a Bash call with "
+            "run_in_background: true, on its own, not bundled onto another "
+            "command. Never foreground, and never detached (nohup, setsid, a "
+            "trailing &) - a detached watcher's exit cannot wake anyone, so "
+            "it is not a watcher. If you cannot arm it as a background task, arm "
+            "nothing: no watcher at all is strictly better than a foreground "
+            "one, because a missing watcher is recoverable and a wedged session "
+            "is not. Read-only forms (--status, --stop, --classify, and pr-watch "
+            "--once) are unaffected, including under a timeout/nice wrapper. To "
+            "watch a cycle's behaviour interactively, run it from your own "
+            "terminal, not through a tool call."
+        )
+    return (
+        "bin/watch-fleet blocks until an event fires - that is the entire "
+        "wake mechanism - so running it any way other than as a "
+        "harness-tracked background task wedges this session indefinitely, "
+        "invisible to the stall detector. This CLI (%s) has no background "
+        "tool-call mode for a model-issued call, unlike Claude Code's own "
+        "run_in_background flag - so there is no way to arm this from a tool "
+        "call at all here. Arm nothing: no watcher at all is strictly better "
+        "than a foreground one, because a missing watcher is recoverable and "
+        "a wedged session is not. Never foreground, and never detached "
+        "(nohup, setsid, a trailing &) - a detached watcher's exit cannot "
+        "wake anyone, so it is not a watcher. Read-only forms (--status, "
+        "--stop, --classify, and pr-watch --once) are unaffected, including "
+        "under a timeout/nice wrapper." % dialect
+    )
+
+
+def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="claude"):
+    """Port of hooks/no-foreground-watcher-guard.sh's python block. See that
+    file's own header comment for the full history and the false-deny-only
+    tradeoffs it documents - unchanged
+    here for dialect=="claude", a decision-logic move, not a policy change.
+
+    run_in_background is a separate parameter, not a GuardInput field: it
+    models a Claude-Code-specific Bash tool_input attribute (plan §5.2), not
+    a general per-request fact every dialect can supply - none of the four
+    non-Claude CLIs has an analogous concept at all (pi's own bash tool
+    schema is `{command, timeout}` - no such field, confirmed in plan §3.2),
+    so a non-claude caller simply never passes True here, which correctly
+    makes every arming call deny unconditionally for those dialects.
+
+    Active for EVERY session (no crew_id/crew_type gating), matching the
+    original hook - gi.crew_type is unused (gi.crew_id is read only for the
+    standdown-marker owner fallback below, mirroring the original hook's own
+    $WINGMAN_CREW_ID read)."""
+    if gi.tool_name != "Bash":
+        return
+
+    raw_command = gi.command
+    command_text = raw_command if isinstance(raw_command, str) else str(raw_command)
+
+    def deny(reason):
+        raise GuardDenied(reason)
+
+    def is_relevant(text):
+        return "watch-fleet" in text or "pr-watch" in text
+
+    if not is_relevant(command_text):
+        return
+
+    if not isinstance(raw_command, str):
+        deny(
+            "This command mentions watch-fleet/pr-watch but could not be "
+            "verified safe - an unexpected tool_input shape - so it is "
+            "denied rather than partially checked, since silence is this "
+            "guard's own allow signal and a failure is not silence. If this "
+            "is a legitimate arming call, reissue it as a plain "
+            "bin/watch-fleet or bin/pr-watch invocation on its own, not "
+            "bundled onto another command."
+        )
+
+    command = raw_command
+    segments = command_segments(command)
+    if segments is None:
+        deny(
+            "This command could not be fully parsed - an unterminated quote, an "
+            "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+            "terminator line was never found, including inside a `bash -c`/`eval` "
+            "payload - so it is denied rather than partially checked, "
+            "since this command mentions watch-fleet/pr-watch and could not be "
+            "verified safe. Reformat it into well-formed shell syntax and retry."
+        )
+
+    DENIAL_REASON = _foreground_watcher_denial_reason(dialect)
+
+    def is_arming(target, target_argv):
+        deny_flags = _ARM_DENY_FLAGS.get(target)
+        if deny_flags is None:
+            return False
+        return not any(f in target_argv for f in deny_flags)
+
+    def find_watcher_invocation(b, argv):
+        if b in ("watch-fleet", "pr-watch"):
+            return None, 0
+        if b in _LAUNCHER_WRAPPERS:
+            for i, tok in enumerate(argv):
+                if basename(tok) in ("watch-fleet", "pr-watch"):
+                    return b, i
+        return None, None
+
+    def extract_owner_flag(target_argv):
+        for i, tok in enumerate(target_argv):
+            if tok == "--owner":
+                return target_argv[i + 1] if i + 1 < len(target_argv) else ""
+        return None
+
+    arming_found = False
+    watch_fleet_arming = False
+    watch_fleet_owner_argv = None
+    for seg in segments:
+        b, argv = resolve_command(seg)
+        if not argv:
+            continue
+        launcher, idx = find_watcher_invocation(b, argv)
+        if idx is None:
+            continue
+        target_argv = argv[idx:]
+        target = basename(target_argv[0])
+        if not is_arming(target, target_argv):
+            continue
+        if launcher in _DETACHED_LAUNCHERS:
+            deny(DENIAL_REASON)
+        arming_found = True
+        if target == "watch-fleet":
+            watch_fleet_arming = True
+            watch_fleet_owner_argv = target_argv
+
+    if arming_found:
+        if watch_fleet_arming:
+            _owner_flag = extract_owner_flag(watch_fleet_owner_argv or [])
+
+            def read_standdown_marker(path):
+                try:
+                    with open(path) as f:
+                        return f.read()
+                except FileNotFoundError:
+                    return None
+
+            _owner = _owner_flag if _owner_flag is not None else (gi.crew_id or "")
+            _okey = re.sub(r"[^A-Za-z0-9._-]", "_", _owner) if _owner else ""
+            _marker_name = "watch-%s.suppressed" % _okey if _okey else "watch.suppressed"
+            _marker_path = os.path.join(gi.home, _marker_name)
+            _marker_content = read_standdown_marker(_marker_path)
+            if _marker_content is not None:
+                _marker_lines = _marker_content.split("\n", 1)
+                _stamp = _marker_lines[0] if _marker_lines else ""
+                _body = _marker_lines[1] if len(_marker_lines) > 1 else ""
+                _run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+                if not _run_id or not _stamp or _stamp == _run_id:
+                    _count_match = re.search(r"died (\d+) times", _body)
+                    _count_clause = " (%s deaths in a row)" % _count_match.group(1) if _count_match else ""
+                    deny(
+                        "A spurious-repeated failure-budget standdown is in force "
+                        "for this session" + _count_clause + ": the "
+                        "watcher has died repeatedly with no successful cycle in "
+                        "between, and the failure budget is deliberately refusing "
+                        "further arms until a human intervenes. Arming now would "
+                        "clear the standdown, which is exactly the re-arm churn "
+                        "the budget exists to prevent. Lifting the standdown is "
+                        "up to the pilot, not a tool call: once the cause is "
+                        "understood, run bin/watch-fleet --clear-standdown, then "
+                        "fleet continuity re-arms automatically on the next Stop "
+                        "event."
+                    )
+        if "&" in _SAFE_AMP_RE.sub("", command_text):
+            deny(DENIAL_REASON)
+        if not run_in_background:
+            deny(DENIAL_REASON)
+
+
+# =============================================================================
+# no-foreground-poll-loop-guard
+# =============================================================================
+
+_LOOP_KEYWORDS = ("while", "until")
+_LEADING_KEYWORDS = ("do", "then", "else", "elif")
+
+
+def _foreground_poll_loop_denial_reason(loop_kind, loop_text, sleep_text, dialect):
+    """Byte-identical to the original claude-only hook's wording for
+    dialect=="claude" (or unset); a dialect-aware variant for every other
+    dialect, same reasoning as _foreground_watcher_denial_reason above -
+    none of the four non-Claude CLIs has a background tool-call mode for a
+    model-issued call, so "reissue with run_in_background: true" would be
+    actively wrong there."""
+    if not dialect or dialect == "claude":
+        return (
+            "This command runs an unbounded %s loop with a sleep in its body in "
+            "the FOREGROUND of a Bash tool call - a hand-rolled polling wait with "
+            "no independent timeout. Two crew sessions hard-"
+            "deadlocked exactly this way and cost roughly four hours combined: "
+            "one ran `until ! pgrep -f \"tests/run.sh\" ...; do sleep 5; done` "
+            "and never noticed that `pgrep -f` matches its OWN command line (a "
+            "permanent self-match, since the pattern text is also part of the "
+            "waiting shell's own -c payload); the other waited on a sentinel "
+            "file a different process never wrote. Neither loop's exit "
+            "condition could ever become true, and neither session could read "
+            "incoming messages, self-diagnose, or be woken by anything except an "
+            "external kill, while blocked inside the foreground tool call. "
+            "Reissue the IDENTICAL command with run_in_background: true - the "
+            "harness tracks it and notifies this session on completion, so no "
+            "polling loop is needed at all. To stream output from an already-"
+            "backgrounded process instead of polling it, use the Monitor tool. "
+            "Matched loop: `%s`; matched sleep: `%s`."
+        ) % (loop_kind, loop_text, sleep_text)
+    return (
+        "This command runs an unbounded %s loop with a sleep in its body in "
+        "the FOREGROUND of a Bash tool call - a hand-rolled polling wait with "
+        "no independent timeout. Two crew sessions on Claude Code hard-"
+        "deadlocked exactly this way and cost roughly four hours combined - "
+        "one matched its own command line via `pgrep -f`, the other waited on "
+        "a sentinel file nobody wrote; neither loop's exit condition could "
+        "ever become true. This CLI (%s) has no background tool-call mode for "
+        "a model-issued call, so there is no run_in_background flag to set "
+        "here - arm nothing instead: rerun this command later after the "
+        "condition it is waiting on has already been confirmed true some "
+        "other way, rather than polling for it in the foreground. "
+        "Matched loop: `%s`; matched sleep: `%s`."
+    ) % (loop_kind, dialect, loop_text, sleep_text)
+
+
+def evaluate_no_foreground_poll_loop_guard(gi, run_in_background=False, dialect="claude"):
+    """Port of hooks/no-foreground-poll-loop-guard.sh's python block. See
+    that file's own header comment for the full history - unchanged here
+    for dialect=="claude", a
+    decision-logic move, not a policy change.
+
+    run_in_background: see evaluate_no_foreground_watcher_guard's own
+    docstring - identical reasoning, not a GuardInput field.
+
+    Active for EVERY session (no crew_id/crew_type gating), matching the
+    original hook - gi.crew_id/gi.crew_type are unused."""
+    if gi.tool_name != "Bash":
+        return
+
+    raw_command = gi.command
+    command_text = raw_command if isinstance(raw_command, str) else str(raw_command)
+
+    def deny(reason):
+        raise GuardDenied(reason)
+
+    def is_relevant(text):
+        return "sleep" in text and ("while" in text or "until" in text)
+
+    if not is_relevant(command_text):
+        return
+
+    if not isinstance(raw_command, str):
+        deny(
+            "This command mentions a while/until loop and sleep but could not be "
+            "verified safe - an unexpected tool_input shape - so it is "
+            "denied rather than partially checked, since silence is this "
+            "guard's own allow signal and a failure is not silence. If this "
+            "is a legitimate polling wait, reissue the identical command "
+            "with run_in_background: true."
+        )
+
+    command = raw_command
+    segments = command_segments(command)
+    if segments is None:
+        deny(
+            "This command could not be fully parsed - an unterminated quote, an "
+            "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
+            "terminator line was never found, including inside a `bash -c`/`eval` "
+            "payload - so it is denied rather than partially checked, "
+            "since this command mentions a while/until loop and sleep and could "
+            "not be verified safe. Reformat it into well-formed shell syntax and "
+            "retry."
+        )
+
+    loop_opener = None
+    sleep_invocation = None
+
+    for seg in segments:
+        if not seg:
+            continue
+        body = seg[1:] if seg[0] in _LEADING_KEYWORDS else seg
+        body_head = basename(body[0]) if body else ""
+        opener_tok = body_head if body_head in _LOOP_KEYWORDS else basename(seg[0])
+        if loop_opener is None and opener_tok in _LOOP_KEYWORDS:
+            loop_opener = (opener_tok, " ".join(seg))
+        if not body:
+            continue
+        resolved_b, _resolved_argv = resolve_command(body)
+        if sleep_invocation is None and resolved_b == "sleep":
+            sleep_invocation = " ".join(seg)
+
+    if loop_opener is not None and sleep_invocation is not None:
+        if not run_in_background:
+            deny(_foreground_poll_loop_denial_reason(
+                loop_opener[0], loop_opener[1], sleep_invocation, dialect))

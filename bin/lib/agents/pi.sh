@@ -203,11 +203,47 @@ WM_AGENT_RESUME_PROMPT_RE=""
 # reattach a wingman-managed session correctly.
 WM_AGENT_RESUME_FLAG=""
 WM_AGENT_GUARD_TRANSPORT=pi-extension
+# No fleet-continuity transport is built for pi (the orchestrator-guard-
+# transports plan, §5.5/§10) - wingman's wake loop needs asyncRewake on a
+# Stop-hook entry plus run_in_background on a Bash tool call, neither of
+# which pi has a wired equivalent for yet, even though §3.2.1's own
+# hands-on probe (docs/analysis/2026-08-17-pi-wake-loop-probe/) shows
+# pi HAS the underlying primitives (agent_settled, a blocking wait held by
+# the extension rather than a model-issued tool call, sendUserMessage) to
+# build one - a "not built yet" gap, not a "cannot be built" one. Building
+# it is explicitly out of this plan's own scope.
+WM_AGENT_CONTINUITY_TRANSPORT=""
+# Delivers bin/lib/agents/pi/wingman-guard-extension.js: no install step at
+# all (nothing written outside the repo, nothing to reconcile) - `-e` under
+# `--no-extensions` is hands-on confirmed to still load (plan §3.2), so the
+# guard set is exactly what wingman supplied. An ABSOLUTE path, not relative
+# to whatever cwd happens to be active at launch (bin/wingman's own launch
+# cds into $WM_REPO first, but this same field is meant to be reusable by a
+# future crew-side caller too - bin/spawn-crew/bin/crew-resume launch from
+# inside a worktree of the TARGET repo, not this one, per §10's own "shared
+# seam" framing). $WM_REPO is a real value by the time this descriptor is
+# sourced (bin/lib/common.sh sets it before bin/lib/agent.sh - and this - is
+# ever sourced), so this expands to a genuine absolute path here, at
+# descriptor-source time - bin/wingman's own launch line only ever
+# word-splits WM_AGENT_GUARD_LAUNCH_FLAGS (never evals it as shell text, the
+# way it treats WM_AGENT_GUARD_ENV - see bin/wingman's own comment on that
+# distinction), so a literal, unexpanded "$WM_REPO" baked into this string
+# would reach pi as garbage text instead of a real path.
+WM_AGENT_GUARD_LAUNCH_FLAGS="-e $WM_REPO/bin/lib/agents/pi/wingman-guard-extension.js --no-extensions"
+WM_AGENT_GUARD_ENV=""
 # Not yet 1: hands-on verification this stage confirmed launch-time
 # behavior (bypass flag, composer shape, system-prompt delivery, control
-# values) but not a full live model turn (no credentials in this
-# environment) or the pi-extension guard-transport shim itself (held,
-# plan step 12b-12f, not yet built).
+# values) and the guard-transport shim itself (the extension loads, its
+# --wingman-guard-active flag is observable, and the shared self-test
+# passes against the real installed pi binary - see bin/lib/guard-
+# transport.sh's own pi-extension branch and its test suite) - but NOT a
+# full live model turn through the shim (no credentials in this
+# environment to drive one), which is what §7's hands-on gate actually
+# requires before this can move to 1. Record: a real turn against a live
+# provider, attempting the §5.4.0 deny fixture and confirming both that the
+# call is genuinely blocked AND that the allow fixture's tool call actually
+# executes, is the one remaining step - not "not built", "not yet driven
+# end to end with real credentials".
 WM_AGENT_VERIFIED=0
 
 # --- control values (B3) ----------------------------------------------------

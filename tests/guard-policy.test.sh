@@ -274,4 +274,37 @@ equivalence_check "no-worker-spawn: wingman's own top-level session spawning a l
 
 rm -f "$OLD_MERGE" "$OLD_EDIT" "$OLD_SPAWN"
 
+# =============================================================================
+# Part 3: decision equivalence for the orchestrator-guard-transports plan's
+# own extraction (evaluate_no_watcher_kill_guard) - same technique as Part 2.
+#
+# no-foreground-watcher-guard and no-foreground-poll-loop-guard are NOT given
+# the same frozen-fixture treatment here: each already carries its own
+# extensive, directly-pinned E2E suite (tests/no-foreground-watcher-
+# guard.test.sh, tests/no-foreground-poll-loop-guard.test.sh - 70+ assertions
+# apiece) that exercises the REWIRED hook script directly and passed
+# unchanged across this extraction, which is the stronger drift net for
+# everything those suites already cover; a second, hand-copied frozen-fixture
+# comparison here would be pure duplication with no additional coverage,
+# not a gap.
+# =============================================================================
+OLD_WATCHER_KILL="$TEST_REPO/hooks/no-watcher-kill-guard.OLD.sh"
+cp "$FIXTURE_DIR/no-watcher-kill-guard.sh" "$OLD_WATCHER_KILL"
+chmod +x "$OLD_WATCHER_KILL"
+[ -s "$OLD_WATCHER_KILL" ] || { echo "guard-policy.test.sh: fixture copy at $OLD_WATCHER_KILL is empty or missing - refusing to run the decision-equivalence corpus against a broken baseline" >&2; exit 1; }
+NEW_WATCHER_KILL="$TEST_REPO/hooks/no-watcher-kill-guard.sh"
+
+equivalence_check "no-watcher-kill: an unrelated command is allowed" \
+  "$OLD_WATCHER_KILL" "$NEW_WATCHER_KILL" "$(payload Bash "ls -la")"
+equivalence_check "no-watcher-kill: kill -0 <pid> (liveness probe) is allowed" \
+  "$OLD_WATCHER_KILL" "$NEW_WATCHER_KILL" "$(payload Bash "kill -0 1")"
+equivalence_check "no-watcher-kill: kill against an unrelated real pid is allowed" \
+  "$OLD_WATCHER_KILL" "$NEW_WATCHER_KILL" "$(payload Bash "kill -9 1")"
+equivalence_check "no-watcher-kill: an unresolvable command mentioning kill is denied" \
+  "$OLD_WATCHER_KILL" "$NEW_WATCHER_KILL" "$(payload Bash "kill \"unterminated")"
+equivalence_check "no-watcher-kill: an unresolvable command with no kill mention is allowed" \
+  "$OLD_WATCHER_KILL" "$NEW_WATCHER_KILL" "$(payload Bash "echo 'oops")"
+
+rm -f "$OLD_WATCHER_KILL"
+
 test_summary

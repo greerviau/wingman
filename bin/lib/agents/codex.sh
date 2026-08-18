@@ -245,10 +245,44 @@ WM_AGENT_RESUME_PROMPT_RE=""
 # §8 decision, not re-litigated here.
 WM_AGENT_RESUME_FLAG=""
 WM_AGENT_GUARD_TRANSPORT=codex-json
-# Not yet 1: hands-on verification this stage confirmed launch-time
-# behavior, the trust dialog, and control values, but not an actual model
-# turn (no real credentials in this environment) or the codex-json
-# guard-transport shim itself (held, plan step 12b-12f, not yet built).
+# No fleet-continuity transport is built for codex (the orchestrator-guard-
+# transports plan, §5.5/§10) - documented "not built", not "impossible" -
+# see pi.sh's own field for the fuller reasoning; codex's own primitives
+# were not probed at all this pass.
+WM_AGENT_CONTINUITY_TRANSPORT=""
+# codex needs no extra environment for its guard transport - bin/lib/sync-
+# codex-hooks.py writes user-scope $CODEX_HOME/hooks.json directly, with no
+# compatibility-path hazard analogous to grok's own GROK_CLAUDE_HOOKS_ENABLED
+# (codex reads no Claude-dialect settings file at all).
+WM_AGENT_GUARD_ENV=""
+# --dangerously-bypass-hook-trust (confirmed live against real codex-cli
+# v0.147.0: `codex exec --dangerously-bypass-hook-trust ...` prints "warning:
+# `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without
+# review for this invocation." - the flag is real and does something
+# observable) so an untrusted-and-therefore-SKIPPED hook cannot silently
+# disable enforcement. This un-gates every enabled hook source for the
+# invocation, not only wingman's own - bin/lib/sync-codex-hooks.py's own
+# check_no_foreign_hook_sources() is the compensating control (plan §5.4.2).
+WM_AGENT_GUARD_LAUNCH_FLAGS="--dangerously-bypass-hook-trust"
+# Not yet 1: this stage installed real codex-cli v0.147.0 (npm @openai/codex,
+# a user-prefix npm install - matching the exact version this descriptor was
+# verified against) and confirmed hands-on, beyond the plan's own research
+# pass: `codex features list` genuinely reports `hooks  stable  true` (the
+# documented default, live not just source-read); `--dangerously-bypass-
+# hook-trust` prints the warning above when passed to a real `codex exec`
+# invocation; `$CODEX_HOME` override and `codex login --with-api-key` both
+# work exactly as the plan's own research found (a syntactically-valid but
+# non-functional key gets past onboarding into a genuine attempted API
+# round-trip - confirmed here as a real 401 against
+# wss://api.openai.com/v1/responses, not a local/composer-level failure);
+# and a hand-written hooks.json under a scratch $CODEX_HOME produced no
+# startup error from `codex doctor`. What remains blocked, identically to
+# the plan's own finding: an actual model turn, which needs a real OpenAI
+# credential this environment does not have - so whether the guard
+# genuinely blocks a live tool call (as opposed to being silently skipped
+# by the trust gate, or read as a malformed/timed-out hook under codex's
+# own fail-open posture) is not yet confirmed end to end. That is §7's
+# remaining gate.
 WM_AGENT_VERIFIED=0
 
 # --- control values (B3) ----------------------------------------------------

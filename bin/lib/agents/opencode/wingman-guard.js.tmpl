@@ -1,0 +1,81 @@
+// wingman-guard.js.tmpl - the opencode-plugin guard transport template (the
+// orchestrator-guard-transports plan, §5.4.4). Rendered by
+// bin/lib/sync-opencode-plugin.py into $HOME/.config/opencode/plugins/
+// wingman-guard.js ONLY (plan §5.7 - no project-scoped plugin) with the two
+// placeholder tokens below substituted for absolute values - the renderer
+// resolves nothing itself beyond that substitution, so this file (and the
+// substitution values) is the single source of truth for the plugin's own
+// behaviour.
+//
+// Four placeholder tokens below are substituted verbatim as JS string/array
+// literals by bin/lib/sync-opencode-plugin.py (never raw string
+// interpolation, so a path or guards list containing a quote/backslash
+// cannot break the generated file's own syntax): the uv binary's own argv[0]
+// as a JSON string; the uv invocation's leading args (e.g. run/--no-project/
+// --quiet) as a JSON array; the absolute path to hooks/lib/guard_dispatch.py
+// as a JSON string; and the comma-joined guard names as a JSON string. Each
+// appears exactly once below, at its own const assignment - see that
+// reconciler's own PLACEHOLDERS tuple for the literal token spelling.
+//
+// The shim FAILS CLOSED: it throws (opencode's own documented block
+// channel - "tool.execute.before" has no return-value channel at all, per
+// @opencode-ai/plugin@1.18.18's own type declarations, so throwing IS the
+// only way to block) unless an explicit, well-formed {"decision": "allow"}
+// verdict came back from the dispatcher. An earlier draft of this shim only
+// threw on an explicit deny, under which a spawn failure, a non-zero exit
+// with no stdout, or a timeout would all fall through as allow - inverted
+// here, the same fail-closed shape as the pi-extension shim (bin/lib/agents/
+// pi/wingman-guard-extension.js).
+//
+// node --check must accept this file as plain JavaScript - deliberately no
+// TypeScript syntax, so bin/lib/sync-opencode-plugin.py's own verify step
+// can parse-check the rendered file directly (plan §5.4.4).
+
+import { spawnSync } from "node:child_process";
+
+const WM_UV = __WM_UV_JSON__;
+const WM_UV_ARGS = __WM_UV_ARGS_JSON__;
+const DISPATCHER = __WM_DISPATCHER_JSON__;
+const GUARDS = __WM_GUARDS_JSON__;
+
+function runDispatcher(payload) {
+	const args = [...WM_UV_ARGS, DISPATCHER, "--dialect", "opencode", "--guards", GUARDS];
+	const result = spawnSync(WM_UV, args, {
+		input: JSON.stringify(payload),
+		encoding: "utf8",
+		timeout: 15000,
+	});
+	if (result.error) {
+		throw result.error;
+	}
+	if (result.status === null) {
+		throw new Error(`dispatcher timed out or was killed (signal ${result.signal})`);
+	}
+	let verdict;
+	try {
+		verdict = result.stdout ? JSON.parse(result.stdout) : null;
+	} catch (e) {
+		throw new Error(`dispatcher produced unparseable stdout: ${result.stdout}`);
+	}
+	return verdict;
+}
+
+export const WingmanGuard = async ({ directory }) => ({
+	"tool.execute.before": async (input, output) => {
+		let verdict;
+		try {
+			verdict = runDispatcher({
+				tool: input.tool,
+				args: output.args,
+				cwd: directory,
+			});
+		} catch (err) {
+			throw new Error(`wingman guard could not run, so this call is denied: ${err}`);
+		}
+		if (!verdict || verdict.decision !== "allow") {
+			throw new Error(
+				(verdict && verdict.reason) || "wingman guard returned no usable verdict, so this call is denied",
+			);
+		}
+	},
+});

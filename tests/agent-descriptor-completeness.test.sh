@@ -11,8 +11,15 @@ set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 . "$TEST_REPO/bin/lib/common.sh"
 . "$TEST_REPO/bin/lib/agent.sh"
+. "$TEST_REPO/bin/lib/guard-transport.sh"
 
 test_new_home
+
+# Every value bin/lib/agents/*.sh's own WM_AGENT_CONTINUITY_TRANSPORT field
+# is allowed to carry - empty (the "not built" degrade sentinel) or one of
+# these recognised, real transports (the orchestrator-guard-transports
+# plan).
+KNOWN_CONTINUITY_TRANSPORTS="claude-async-rewake"
 
 FOUND=0
 for f in "$TEST_REPO"/bin/lib/agents/*.sh; do
@@ -49,6 +56,33 @@ for f in "$TEST_REPO"/bin/lib/agents/*.sh; do
         "[ -n '$WM_AGENT_SYSPROMPT_FLAG' ]"
       ;;
   esac
+
+  # WM_AGENT_CONTINUITY_TRANSPORT is empty or a recognised value - never a
+  # typo'd/invented one that would silently degrade to "not built" without
+  # anyone noticing (the orchestrator-guard-transports plan).
+  assert_true "$name: WM_AGENT_CONTINUITY_TRANSPORT is empty or recognised" \
+    "[ -z '${WM_AGENT_CONTINUITY_TRANSPORT:-}' ] || case ' $KNOWN_CONTINUITY_TRANSPORTS ' in *\" ${WM_AGENT_CONTINUITY_TRANSPORT:-} \"*) true ;; *) false ;; esac"
+
+  # Any non-empty WM_AGENT_GUARD_TRANSPORT has a REAL branch in
+  # wm_guard_transport_sync - probed directly (not against a hard-coded
+  # list here, which could itself drift from that function's own case
+  # statement) by calling it against the real repo under a scratch $HOME
+  # and asserting the output does NOT read as the function's own generic
+  # "no orchestrator-side implementation yet" fallback. Whether that real
+  # branch then succeeds or fails for some unrelated reason (a missing
+  # binary, a fixture gap) is exactly what each transport's own dedicated
+  # test file (tests/agent-<name>-guard-transport.test.sh) already covers -
+  # this assertion only proves a future adapter cannot declare a transport
+  # that silently falls through to that shared fallback with no
+  # orchestrator-side implementation ever having been checked in.
+  if [ -n "${WM_AGENT_GUARD_TRANSPORT:-}" ]; then
+    _adc_probe_home="$(wm_mktemp_dir)"
+    _adc_probe_out="$(HOME="$_adc_probe_home" WINGMAN_HOME="$_adc_probe_home/.wingman" \
+      WM_AGENT_GUARD_ENV="GROK_CLAUDE_HOOKS_ENABLED=0" \
+      wm_guard_transport_sync "$WM_AGENT_GUARD_TRANSPORT" "$TEST_REPO" 2>&1)"
+    assert_not_contains "$name: WM_AGENT_GUARD_TRANSPORT ($WM_AGENT_GUARD_TRANSPORT) has a real wm_guard_transport_sync branch" \
+      "$_adc_probe_out" "has no orchestrator-side guard install/verify implementation yet"
+  fi
 done
 
 assert_true "at least one descriptor was found (claude.sh, at minimum)" "[ '$FOUND' -ge 1 ]"

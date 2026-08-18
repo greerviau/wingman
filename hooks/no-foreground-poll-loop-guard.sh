@@ -111,6 +111,14 @@
 # Registered user-level by bin/doctor (crew sessions have their project root
 # in other repos, where this repo's project settings never load) - same
 # reasoning as every other crew-facing hook. bash-3.2-safe.
+#
+# The decision logic below is now ALSO implemented, canonically, as
+# guard_policy.evaluate_no_foreground_poll_loop_guard() - this file's own
+# bash pre-gate, failure posture, and stdout contract are unchanged for
+# claude (decision-logic move, not a policy change). See guard_policy.py's
+# own docstring for the normalized 9-field GuardInput contract this hands
+# off, and hooks/lib/guard_dispatch.py for the equivalent entry point the
+# four non-Claude dialects use (each with a dialect-aware denial reason).
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
@@ -133,9 +141,9 @@ esac
 
 OUT="$(printf '%s' "$INPUT" | \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
-import json, sys
+import json, os, sys
 
-from cmd_match import basename, command_segments, resolve_command
+from guard_policy import GuardDenied, GuardInput, evaluate_no_foreground_poll_loop_guard
 
 data = json.load(sys.stdin)
 
@@ -185,93 +193,22 @@ if not isinstance(raw_command, str):
     deny(VERIFY_FAIL_REASON)
 
 try:
-    command = raw_command
-
-    PARSE_FAIL_REASON = (
-        "This command could not be fully parsed - an unterminated quote, an "
-        "unbalanced $(...)/`...`/<(...)/>(...) span, or a heredoc whose "
-        "terminator line was never found, including inside a `bash -c`/`eval` "
-        "payload - so it is denied rather than partially checked, "
-        "since this command mentions a while/until loop and sleep and could "
-        "not be verified safe. Reformat it into well-formed shell syntax and "
-        "retry."
+    gi = GuardInput(
+        tool_name=data.get("tool_name") or "",
+        command=raw_command,
+        cwd=data.get("cwd") or os.getcwd(),
+        crew_id=os.environ.get("WINGMAN_CREW_ID", ""),
+        crew_type=os.environ.get("WINGMAN_CREW_TYPE", ""),
+        file_path="",
+        notebook_path="",
+        project_dir=os.environ.get("CLAUDE_PROJECT_DIR", ""),
+        home=os.path.expanduser(os.environ.get("WINGMAN_HOME") or "~/.wingman"),
     )
-
-    DENIAL_REASON_TEMPLATE = (
-        "This command runs an unbounded %s loop with a sleep in its body in "
-        "the FOREGROUND of a Bash tool call - a hand-rolled polling wait with "
-        "no independent timeout. Two crew sessions hard-"
-        "deadlocked exactly this way and cost roughly four hours combined: "
-        "one ran `until ! pgrep -f \"tests/run.sh\" ...; do sleep 5; done` "
-        "and never noticed that `pgrep -f` matches its OWN command line (a "
-        "permanent self-match, since the pattern text is also part of the "
-        "waiting shell'"'"'s own -c payload); the other waited on a sentinel "
-        "file a different process never wrote. Neither loop'"'"'s exit "
-        "condition could ever become true, and neither session could read "
-        "incoming messages, self-diagnose, or be woken by anything except an "
-        "external kill, while blocked inside the foreground tool call. "
-        "Reissue the IDENTICAL command with run_in_background: true - the "
-        "harness tracks it and notifies this session on completion, so no "
-        "polling loop is needed at all. To stream output from an already-"
-        "backgrounded process instead of polling it, use the Monitor tool. "
-        "Matched loop: `%s`; matched sleep: `%s`."
-    )
-
-    segments = command_segments(command)
-    if segments is None:
-        deny(PARSE_FAIL_REASON)
-
-    LOOP_KEYWORDS = ("while", "until")
-    LEADING_KEYWORDS = ("do", "then", "else", "elif")
-
-    loop_opener = None       # (keyword, raw segment text) of the first match
-    sleep_invocation = None  # raw segment text of the first match
-
-    for seg in segments:
-        if not seg:
-            continue
-
-        # Step 3: strip AT MOST ONE leading shell keyword before checking
-        # whether this segment invokes `sleep` - a segment immediately
-        # following a loop'"'"'s own `;` starts with `do` (or `then`/`else`/
-        # `elif`), not the command actually being run.
-        body = seg[1:] if seg[0] in LEADING_KEYWORDS else seg
-
-        # Step 4: loop-opener check runs on the segment'"'"'s own first token
-        # AS LEXED, and ALSO on the stripped `body`'"'"'s own first token: a
-        # nested while/until loop'"'"'s opener can appear immediately after a
-        # `do`/`then`/`else`/`elif` belonging to an ENCLOSING block that is
-        # not itself a while/until - a `for` or an `if`, neither of which
-        # sets loop_opener on its own. `for item in a b c; do until grep -q
-        # done x; do sleep 5; done; done` produces the segment [\'"'"'do\'"'"',
-        # \'"'"'until\'"'"', \'"'"'!\'"'"', \'"'"'grep\'"'"', ...] - checking only the raw
-        # \'"'"'do\'"'"' misses the nested until entirely, since no other segment in
-        # that command carries a while/until keyword at all. Checking
-        # body[0] in addition to seg[0] catches this with no new false
-        # positive: basename() is an exact-token match, and a segment whose
-        # stripped body genuinely starts with while/until is opening a loop
-        # by shell grammar however it got there.
-        body_head = basename(body[0]) if body else ""
-        opener_tok = body_head if body_head in LOOP_KEYWORDS else basename(seg[0])
-        if loop_opener is None and opener_tok in LOOP_KEYWORDS:
-            loop_opener = (opener_tok, " ".join(seg))
-
-        if not body:
-            continue
-        resolved_b, _resolved_argv = resolve_command(body)
-        if sleep_invocation is None and resolved_b == "sleep":
-            sleep_invocation = " ".join(seg)
-
-    # Deny iff a loop-opener AND a sleep-invocation both appear SOMEWHERE in
-    # the command - not required to be textually paired with each other
-    # (see the header comment'"'"'s false-positive discussion) - and
-    # run_in_background is not true.
-    if loop_opener is not None and sleep_invocation is not None:
-        # Fail CLOSED: absent, false, or any unexpected shape denies. There
-        # is deliberately no "cannot verify -> allow" branch here, and no
-        # override flag (see the header comment).
-        if not tool_input.get("run_in_background"):
-            deny(DENIAL_REASON_TEMPLATE % (loop_opener[0], loop_opener[1], sleep_invocation))
+    try:
+        evaluate_no_foreground_poll_loop_guard(
+            gi, run_in_background=bool(tool_input.get("run_in_background")), dialect="claude")
+    except GuardDenied as e:
+        deny(str(e))
 except Exception:
     deny(VERIFY_FAIL_REASON)
 

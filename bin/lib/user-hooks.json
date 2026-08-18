@@ -1,17 +1,26 @@
 {
-  "_comment": "Declarative manifest of every guard hook that must be registered in USER-scope Claude Code settings (~/.claude/settings.json) so it fires for a session whose project root is some other repo entirely - a project-level entry in this repo's own .claude/settings.json never loads there. Reconciled by bin/lib/sync-user-hooks.py at every session-creation choke point (bin/wingman, bin/spawn-crew, bin/crew-resume), so a merged guard is an active guard with no human step in between (issue #241). bin/doctor registers the identical set today via bin/lib/install-user-hook.py; tests/doctor.test.sh's manifest/doctor equality test keeps the two from drifting apart until bin/doctor is refactored to read this file directly (a deferred follow-up). Script paths are repo-relative, resolved against --repo at read time. ok_text/warn_text/blurb exist so that future refactor can drive bin/doctor's own reporting from this file without changing a single user-visible string; the reconciler itself never reads them.",
+  "_comment": "Declarative manifest of every guard hook that must be registered in USER-scope Claude Code settings (~/.claude/settings.json) so it fires for a session whose project root is some other repo entirely - a project-level entry in this repo's own .claude/settings.json never loads there. Reconciled by bin/lib/sync-user-hooks.py at every session-creation choke point (bin/wingman, bin/spawn-crew, bin/crew-resume), so a merged guard is an active guard with no human step in between. bin/doctor registers the identical set today via bin/lib/install-user-hook.py; tests/doctor.test.sh's manifest/doctor equality test keeps the two from drifting apart until bin/doctor is refactored to read this file directly (a deferred follow-up). Script paths are repo-relative, resolved against --repo at read time. ok_text/warn_text/blurb exist so that future refactor can drive bin/doctor's own reporting from this file without changing a single user-visible string; the reconciler itself never reads them. A hook entry's own 'portable' array names which non-Claude dialects (codex/grok/opencode/pi) bin/lib/sync-codex-hooks.py and bin/lib/sync-grok-hooks.py render it for, and which guard-dispatch.py --guards name the opencode-plugin/pi-extension shims bake in - absent or empty means claude-json only (every crew-only or not-orchestrator-active entry below: merge-authorization, pr-open-marker, interactive-prompt, worker-spawn, artifact-publish, fleet-continuity-crew, denial-report). This keeps the orchestrator-active/portable triage in ONE place rather than hard-coded separately in each reconciler.",
   "groups": [
     {
       "id": "delegation",
       "issue": "#17",
       "ok_text": "delegation guard hook",
       "warn_text": "delegation guard hook",
-      "blurb": ["blocks direct Edit/Write/test-runner calls at wingman's top-level session and any lead, machine-wide"],
+      "blurb": [
+        "blocks direct Edit/Write/test-runner calls at wingman's top-level session and any lead, machine-wide"
+      ],
       "hooks": [
         {
           "script": "hooks/no-direct-edit-guard.sh",
           "event": "PreToolUse",
-          "matcher": "Edit|Write|NotebookEdit|Bash"
+          "matcher": "Edit|Write|NotebookEdit|Bash",
+          "portable": [
+            "codex",
+            "grok",
+            "opencode",
+            "pi"
+          ],
+          "guard": "direct-edit"
         }
       ]
     },
@@ -20,11 +29,25 @@
       "issue": null,
       "ok_text": "Artifact-publish contract hooks",
       "warn_text": "Artifact-publish contract hooks",
-      "blurb": ["records Artifact publishes and gates crew deliverable reports on them, for crew sessions in any repo, machine-wide"],
+      "blurb": [
+        "records Artifact publishes and gates crew deliverable reports on them, for crew sessions in any repo, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/artifact-publish-tracker.sh", "event": "PostToolUse", "matcher": "Artifact|Bash" },
-        { "script": "hooks/artifact-publish-tracker.sh", "event": "PostToolUseFailure", "matcher": "Artifact|Bash" },
-        { "script": "hooks/artifact-link-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/artifact-publish-tracker.sh",
+          "event": "PostToolUse",
+          "matcher": "Artifact|Bash"
+        },
+        {
+          "script": "hooks/artifact-publish-tracker.sh",
+          "event": "PostToolUseFailure",
+          "matcher": "Artifact|Bash"
+        },
+        {
+          "script": "hooks/artifact-link-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash"
+        }
       ]
     },
     {
@@ -32,10 +55,20 @@
       "issue": "#46",
       "ok_text": "merge-authorization contract hooks",
       "warn_text": "merge-authorization contract hooks",
-      "blurb": ["denies crew-session merges by default and attributes any authorized one, for crew sessions in any repo, machine-wide"],
+      "blurb": [
+        "denies crew-session merges by default and attributes any authorized one, for crew sessions in any repo, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/no-merge-guard.sh", "event": "PreToolUse", "matcher": "Bash" },
-        { "script": "hooks/merge-attribution-tracker.sh", "event": "PostToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/no-merge-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash"
+        },
+        {
+          "script": "hooks/merge-attribution-tracker.sh",
+          "event": "PostToolUse",
+          "matcher": "Bash"
+        }
       ]
     },
     {
@@ -43,9 +76,15 @@
       "issue": "#50",
       "ok_text": "PR-open attribution marker hook",
       "warn_text": "PR-open attribution marker hook",
-      "blurb": ["marks every PR a crew member opens with the same attribution marker, for crew sessions in any repo, machine-wide"],
+      "blurb": [
+        "marks every PR a crew member opens with the same attribution marker, for crew sessions in any repo, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/pr-open-marker-tracker.sh", "event": "PostToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/pr-open-marker-tracker.sh",
+          "event": "PostToolUse",
+          "matcher": "Bash"
+        }
       ]
     },
     {
@@ -53,9 +92,22 @@
       "issue": "#64",
       "ok_text": "watcher-protection guard hook",
       "warn_text": "watcher-protection guard hook",
-      "blurb": ["denies killing a live watch-fleet cycle from any session, machine-wide"],
+      "blurb": [
+        "denies killing a live watch-fleet cycle from any session, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/no-watcher-kill-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/no-watcher-kill-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "portable": [
+            "codex",
+            "grok",
+            "opencode",
+            "pi"
+          ],
+          "guard": "watcher-kill"
+        }
       ]
     },
     {
@@ -63,9 +115,22 @@
       "issue": "#202",
       "ok_text": "foreground-watcher guard hook",
       "warn_text": "foreground-watcher guard hook",
-      "blurb": ["denies a foreground or detached watch-fleet/pr-watch arm from any session, machine-wide"],
+      "blurb": [
+        "denies a foreground or detached watch-fleet/pr-watch arm from any session, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/no-foreground-watcher-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/no-foreground-watcher-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "portable": [
+            "codex",
+            "grok",
+            "opencode",
+            "pi"
+          ],
+          "guard": "foreground-watcher"
+        }
       ]
     },
     {
@@ -73,9 +138,22 @@
       "issue": "#268",
       "ok_text": "foreground-poll-loop guard hook",
       "warn_text": "foreground-poll-loop guard hook",
-      "blurb": ["denies a foreground while/until+sleep polling loop from any session, machine-wide"],
+      "blurb": [
+        "denies a foreground while/until+sleep polling loop from any session, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/no-foreground-poll-loop-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/no-foreground-poll-loop-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "portable": [
+            "codex",
+            "grok",
+            "opencode",
+            "pi"
+          ],
+          "guard": "foreground-poll-loop"
+        }
       ]
     },
     {
@@ -83,9 +161,15 @@
       "issue": "#155",
       "ok_text": "interactive-prompt guard hook",
       "warn_text": "interactive-prompt guard hook",
-      "blurb": ["denies AskUserQuestion/EnterPlanMode/ExitPlanMode from every crew session, for crew sessions in any repo, machine-wide"],
+      "blurb": [
+        "denies AskUserQuestion/EnterPlanMode/ExitPlanMode from every crew session, for crew sessions in any repo, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/no-interactive-prompt-guard.sh", "event": "PreToolUse", "matcher": "AskUserQuestion|EnterPlanMode|ExitPlanMode" }
+        {
+          "script": "hooks/no-interactive-prompt-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "AskUserQuestion|EnterPlanMode|ExitPlanMode"
+        }
       ]
     },
     {
@@ -93,9 +177,22 @@
       "issue": "#23",
       "ok_text": "outage-detection guard hook",
       "warn_text": "outage-detection guard hook",
-      "blurb": ["pauses new bin/spawn-crew calls while a fleet-wide API outage is active, for crew sessions in any repo, machine-wide"],
+      "blurb": [
+        "pauses new bin/spawn-crew calls while a fleet-wide API outage is active, for crew sessions in any repo, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/api-outage-spawn-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/api-outage-spawn-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "portable": [
+            "codex",
+            "grok",
+            "opencode",
+            "pi"
+          ],
+          "guard": "spawn-pause"
+        }
       ]
     },
     {
@@ -103,9 +200,22 @@
       "issue": "#24",
       "ok_text": "usage-limit spawn guard hook",
       "warn_text": "usage-limit detection",
-      "blurb": ["denies new bin/spawn-crew calls while a fleet-wide usage-quota window is approaching its cap, for crew sessions in any repo, machine-wide - the statusLine half of this detection pair (bin/lib/usage-statusline.py) is not a hook and stays registered by bin/doctor only"],
+      "blurb": [
+        "denies new bin/spawn-crew calls while a fleet-wide usage-quota window is approaching its cap, for crew sessions in any repo, machine-wide - the statusLine half of this detection pair (bin/lib/usage-statusline.py) is not a hook and stays registered by bin/doctor only"
+      ],
       "hooks": [
-        { "script": "hooks/usage-limit-spawn-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/usage-limit-spawn-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "portable": [
+            "codex",
+            "grok",
+            "opencode",
+            "pi"
+          ],
+          "guard": "spawn-pause"
+        }
       ]
     },
     {
@@ -113,9 +223,15 @@
       "issue": "#212",
       "ok_text": "worker-spawn depth-cap guard hook",
       "warn_text": "worker-spawn depth-cap guard hook",
-      "blurb": ["restricts bin/spawn-crew to orchestrator-type callers (wingman/lead), for crew sessions in any repo, machine-wide"],
+      "blurb": [
+        "restricts bin/spawn-crew to orchestrator-type callers (wingman/lead), for crew sessions in any repo, machine-wide"
+      ],
       "hooks": [
-        { "script": "hooks/no-worker-spawn-guard.sh", "event": "PreToolUse", "matcher": "Bash" }
+        {
+          "script": "hooks/no-worker-spawn-guard.sh",
+          "event": "PreToolUse",
+          "matcher": "Bash"
+        }
       ]
     },
     {
@@ -123,9 +239,14 @@
       "issue": "#199",
       "ok_text": "fleet-continuity Stop hooks (crew)",
       "warn_text": "fleet-continuity Stop hooks (crew)",
-      "blurb": ["extends the project-scope fleet-continuity constraint to crew sessions in any repo, machine-wide (a lead's own session gets the same no-idle-blind guarantee)"],
+      "blurb": [
+        "extends the project-scope fleet-continuity constraint to crew sessions in any repo, machine-wide (a lead's own session gets the same no-idle-blind guarantee)"
+      ],
       "hooks": [
-        { "script": "hooks/stop-guard-crew.sh", "event": "Stop" },
+        {
+          "script": "hooks/stop-guard-crew.sh",
+          "event": "Stop"
+        },
         {
           "script": "hooks/stop-continuity-crew.sh",
           "event": "Stop",
@@ -142,9 +263,14 @@
       "issue": "#214",
       "ok_text": "denial-report Stop hook",
       "warn_text": "denial-report Stop hook",
-      "blurb": ["surfaces a denied tool call (toolDenialKind: user-rejected) a crew session would otherwise silently absorb, machine-wide (any repo a lead/worker runs in)"],
+      "blurb": [
+        "surfaces a denied tool call (toolDenialKind: user-rejected) a crew session would otherwise silently absorb, machine-wide (any repo a lead/worker runs in)"
+      ],
       "hooks": [
-        { "script": "hooks/denial-report-guard.sh", "event": "Stop" }
+        {
+          "script": "hooks/denial-report-guard.sh",
+          "event": "Stop"
+        }
       ]
     }
   ]

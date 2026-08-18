@@ -43,6 +43,7 @@ WM_AGENT_RESUME_PROMPT_RE
 WM_AGENT_RESUME_FLAG WM_AGENT_GUARD_TRANSPORT WM_AGENT_VERIFIED
 WM_AGENT_EXIT_CMD WM_AGENT_INTERRUPT_KEY WM_AGENT_INTERRUPT_REPEAT
 WM_AGENT_POST_INTERRUPT_CLEAR WM_AGENT_SKILL_FORM WM_AGENT_SKILLS_FLAG
+WM_AGENT_CONTINUITY_TRANSPORT WM_AGENT_GUARD_LAUNCH_FLAGS WM_AGENT_GUARD_ENV
 "
 
 # wm_agent_resolve <name>
@@ -198,4 +199,36 @@ wm_agent_emit_sysprompt() {
       ;;
   esac
   unset _waes_file _waes_opening _waes_brief
+}
+
+# wm_agent_apply_guard_env
+#
+# Applies the resolved adapter's own guard-transport environment in the
+# CALLING shell (the orchestrator-guard-transports plan, §5.6): unsets
+# whatever WM_AGENT_ENV_UNSET names (e.g. CLAUDECODE, so a non-claude
+# adapter never silently inherits it from the Claude Code orchestrator that
+# execs every crew member), then exports WM_AGENT_GUARD_ENV verbatim (e.g.
+# GROK_CLAUDE_HOOKS_ENABLED=0 for grok).
+#
+# Deliberately NOT WM_AGENT_ENV_PREFIX - that field is authored for CREW
+# launches and carries whatever else that role needs (e.g. opencode's own
+# OPENCODE_CONFIG_CONTENT permission-bypass wildcard), which has nothing to
+# do with the guard transport specifically and must not become a side
+# effect of this function. bin/spawn-crew/bin/crew-resume keep composing
+# WM_AGENT_ENV_PREFIX into their own generated launch-script text exactly as
+# before; this function is bin/wingman's own equivalent for the one field
+# its non-script, direct-exec launch line actually needs.
+#
+# WM_AGENT_GUARD_ENV is launch-script TEXT (may legitimately contain single
+# quotes, braces, or other shell metacharacters - see WM_AGENT_ENV_PREFIX's
+# own values elsewhere in this schema for why that authoring convention
+# exists), so applying it means one `eval`, guarded by `[ -n ... ]` so a
+# descriptor that sets nothing here (every adapter but grok, today) pays no
+# eval at all. This is safe ONLY because the value is descriptor-authored,
+# in-repo, and never derived from a roster record, a pane, or any other
+# runtime input - that trust boundary is the whole justification.
+wm_agent_apply_guard_env() {
+  for _waag_v in ${WM_AGENT_ENV_UNSET:-}; do unset "$_waag_v"; done
+  [ -n "${WM_AGENT_GUARD_ENV:-}" ] && eval "export $WM_AGENT_GUARD_ENV"
+  unset _waag_v
 }

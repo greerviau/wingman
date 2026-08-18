@@ -20,6 +20,7 @@ mk_mirror() {
   mkdir -p "$1"
   ln -s "$TEST_REPO/bin" "$1/bin"
   mkdir -p "$1/hooks"
+  ln -s "$TEST_REPO/hooks/lib" "$1/hooks/lib"
   for f in "$TEST_REPO"/hooks/*; do
     [ -f "$f" ] || continue
     ln -s "$f" "$1/hooks/$(basename "$f")"
