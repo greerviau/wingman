@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/greerviau/wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/greerviau/wingman/actions/workflows/ci.yml)
 
-Wingman is a long-lived Claude Code session that orchestrates a crew of agents for you.
+Wingman is a long-lived orchestrator session that runs a crew of agents for you. It resolves to an agent CLI the same way a crew member does - `claude` by default, and today the only one it can actually launch on, since none of `codex`/`grok`/`opencode`/`pi` has a wired fleet-continuity (wake-loop) mechanism yet for it to resume itself after a long wait.
 You (the pilot) give it high-level directives - *"implement this feature,"* *"investigate this issue,"* *"what's my crew doing?"* - and it delegates the real work, tracks status, and surfaces only real decisions to you.
 It orchestrates; it never does the heavy lifting itself.
 
-Each crew member is an independent agent-CLI session (`claude` by default, or `codex`/`grok`/`opencode`/`pi` via `--agent`) in a backend-owned terminal endpoint, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed. tmux remains the default runtime backend; Herdr is an experimental alternative. Wingman's own crew command vocabulary travels to all five CLIs alike - see [Harness-agnostic by design](docs/architecture.md#harness-agnostic-by-design). Wingman itself (the orchestrator session you're reading about here) still only runs on Claude Code: none of the other four CLIs has a wired fleet-continuity (wake-loop) mechanism yet for it to resume itself after a long wait.
+Each crew member is an independent agent-CLI session (`claude` by default, or `codex`/`grok`/`opencode`/`pi` via `--agent`) in a backend-owned terminal endpoint, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed. tmux remains the default runtime backend; Herdr is an experimental alternative. Most of wingman's own crew command vocabulary travels to all five CLIs alike (`/spawn` and `/standdown` stay Claude-Code-only) - see [Harness-agnostic by design](docs/architecture.md#harness-agnostic-by-design).
 
 ## Why not just subagents?
 
@@ -32,7 +32,7 @@ bin/wingman          # recommended; plain `claude` also works
 ```
 
 Run `bin/doctor -y` once, up front, to install missing dependencies and register wingman's guard hooks; `bin/wingman` then discovers your sibling repos with zero config and starts the tmux-server liveness guardian (it reconciles guard-hook registration on every launch, but does not install dependencies for you the way `bin/doctor` does).
-Then give it a directive. All you need up front is `claude` and `git`.
+Then give it a directive. All you need up front is `git` and `claude` - the one CLI wingman's own session actually launches on today (see above).
 
 > `bin/wingman` is a thin launcher: it pre-adds sibling repos (`--add-dir`), mints a run id so preferences are asked once per run, and wires up Remote Control disconnect detection. Plain `claude` works too, with less - see [the launcher docs](docs/configuration.md#the-wingman-launcher).
 
@@ -66,12 +66,12 @@ It stops early only if you `/standdown` it.
 
 - Attach to any crew member's tmux window to type or take over; detach (`Ctrl-b d`) to hand back.
 - Killing wingman leaves the crew running; relaunching rebuilds the roster.
-- Every crew member is also reachable from `claude.ai/code` and the Claude desktop/mobile apps via Remote Control, with dropped connections auto-recovered - see [Remote Control](docs/architecture.md#remote-control).
+- Every `claude`-descriptor crew member is also reachable from `claude.ai/code` and the Claude desktop/mobile apps via Remote Control, with dropped connections auto-recovered - a `claude`-adapter capability, not a wingman-wide one; the other four CLIs have no Remote-Control-equivalent connection to register - see [Remote Control](docs/architecture.md#remote-control).
 
 ## Autonomous by default
 
 Crew launch in their agent CLI's own bypass mode (`--permission-mode bypassPermissions` for `claude`/`grok`, the equivalent flag or environment setting for `codex`/`pi`/`opencode`), so gated tool calls auto-approve instead of hanging with no human at the terminal.
-For a `claude`-descriptor crew member, two further one-time gates (Claude Code's Bypass-Permissions acceptance and each repo's first-time trust dialog) are detected before a window opens, refusing the spawn with the exact remedy rather than freezing; once cleared, crew in that repo run unattended.
+For a `claude`-descriptor crew member, `bin/spawn-crew` gives two further one-time gates (Claude Code's Bypass-Permissions acceptance and each repo's first-time trust dialog) a best-effort preflight check before a window opens, refusing the spawn with the exact remedy when it catches either as unmet; once cleared, crew in that repo run unattended. A known gap remains in the trust check: a repo trusted only by inheritance from an already-trusted ancestor directory can still hit a live trust dialog and freeze, because this preflight doesn't catch that case.
 
 **Model:** most specific wins - an explicit `--model` on the spawn, then a per-crew-type entry in the [settings file](#settings-configlocaltoml), then its `default`, then the agent CLI's own.
 
