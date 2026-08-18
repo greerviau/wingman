@@ -139,6 +139,25 @@ else
   ok "subdirectory of an untrusted git repo under a trusted grandparent: trust-status reports not accepted"
 fi
 
+# A repo whose .git a plain `git` invocation cannot inspect (a permission
+# lockout, or the dubious-ownership refusal a real repo can hit) is still a
+# repository to Claude Code, which decides that from the .git marker on
+# disk rather than by asking `git` - so the boundary must be found the same
+# way, or a locked-down repo under a trusted parent would read as accepted
+# while still hitting the live dialog on launch.
+LOCKED_PARENT="$(wm_mktemp_dir)/locked-parent"
+LOCKED_REPO="$LOCKED_PARENT/locked-repo"
+mkdir -p "$LOCKED_REPO"
+git -C "$LOCKED_REPO" init -q
+chmod 000 "$LOCKED_REPO/.git"
+printf '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}\n' "$LOCKED_PARENT" > "$CONFIG"
+if run_check trust-status --config "$CONFIG" --repo "$LOCKED_REPO" >/dev/null 2>&1; then
+  fail "trusted parent, repo root with an unreadable .git: trust-status must not report accepted"
+else
+  ok "trusted parent, repo root with an unreadable .git: trust-status reports not accepted"
+fi
+chmod 755 "$LOCKED_REPO/.git"
+
 # An ancestor entry's own accepted state, true or false, must never affect
 # the exact-path result either way.
 printf '{"projects": {"/home/x": {"hasTrustDialogAccepted": false}, "/home/x/repo": {"hasTrustDialogAccepted": true}}}\n' > "$CONFIG"

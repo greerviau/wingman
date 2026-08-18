@@ -56,7 +56,6 @@ be read as a false "accepted".
 import argparse
 import json
 import os
-import subprocess
 import sys
 
 
@@ -99,23 +98,24 @@ def cmd_bypass_set(args):
 
 
 def git_toplevel(path):
-    """Return the physically-resolved root of the git working tree enclosing
-    <path>, or None if <path> is not inside one. A missing/broken git
-    invocation degrades the same way as "not inside a git working tree" -
-    the unbounded ancestor walk that falls out of that is the direction that
-    was already correct before this repo boundary was known, not a new
-    risk."""
-    try:
-        proc = subprocess.run(
-            ["git", "-C", path, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True,
-        )
-    except OSError:
-        return None
-    if proc.returncode != 0:
-        return None
-    toplevel = proc.stdout.strip()
-    return os.path.realpath(toplevel) if toplevel else None
+    """Return the nearest ancestor of <path> (inclusive) carrying a `.git`
+    entry - a directory for an ordinary repo root, or a file for a worktree
+    or submodule - or None if no ancestor up to `/` has one. This is how
+    Claude Code itself decides a directory is a repository: from the `.git`
+    marker on disk, not by asking `git`. A directory `git rev-parse` refuses
+    to identify (dubious-ownership refusal, an unreadable `.git`) is still a
+    repository to the CLI and still renders the live trust dialog for it, so
+    deriving the boundary by shelling out and falling back to an unbounded
+    walk on any failure would reopen exactly the freeze this file exists to
+    prevent - a locked-down `.git` under a trusted parent would read as
+    "accepted" while still hitting the dialog on launch."""
+    candidate = path.rstrip("/") or "/"
+    while True:
+        if os.path.exists(os.path.join(candidate, ".git")):
+            return candidate
+        if candidate == "/":
+            return None
+        candidate = os.path.dirname(candidate)
 
 
 def path_and_ancestors(path, boundary=None):
