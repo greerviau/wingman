@@ -19,19 +19,35 @@ ever happens, rather than reactively via bin/watch-fleet's stall detection
   (bin/doctor's own y/N or -y gate). Refuses (exit 2) if the existing file
   content is not valid JSON, exactly like install-user-hook.py's own rule.
 - `trust-status --config <path> --repo <abs-path>`: exit 0 if the one-time,
-  per-directory workspace-trust dialog has been accepted for <abs-path> OR
-  any ancestor directory up to `/` (projects[<path>].hasTrustDialogAccepted
-  is true in the main config file for <abs-path> itself or some ancestor),
-  exit 1 otherwise. Trust is hierarchical in Claude Code: accepting it for a
-  directory trusts every descendant, so a repo nested under an already-trusted
-  parent never re-prompts and its own entry stays unaccepted - checking only
-  the exact path would false-negative in that case (issue #147). <abs-path>
+  per-directory workspace-trust dialog has been accepted for <abs-path> or
+  some ancestor of it (projects[<path>].hasTrustDialogAccepted is true in
+  the main config file for <abs-path> itself or an ancestor), exit 1
+  otherwise. The ancestor walk stops at the nearest enclosing git repository
+  root, inclusive - it never crosses out of a git working tree to consult
+  something above it. Hands-on verified (2026-08-18) against real Claude
+  Code v2.1.234, launched in detached tmux panes with a scrubbed environment
+  (`env -i`, no inherited CLAUDECODE/CLAUDE_CODE_CHILD_SESSION - an
+  unscrubbed launch is not a fresh process and isn't admissible evidence
+  either way), keying on the version-stable "Yes, I trust this folder"
+  option row: a non-git directory inherits trust from any accepted ancestor
+  up to `/` (confirmed 3 levels deep and with files already present, to rule
+  out an empty-directory confound, against a positive control that renders
+  the dialog with no trusted ancestor at all); a git repository's own root
+  never inherits trust from anything above it, only from its own entry or a
+  path inside the same working tree at or below that root. This is why a
+  fresh `git init` repo under an already-trusted parent still renders the
+  dialog (the incident this fix addresses), while a plain subdirectory of
+  that same trusted parent does not, and a subdirectory of a *trusted* git
+  repo inherits from the repo root the way a non-git directory inherits from
+  a trusted ancestor. An explicit `hasTrustDialogAccepted: false` at some
+  path along the walk does not itself block inheritance from beyond it - it
+  only matters when the walk stops there (a git root behaves like an
+  exact-match lookup precisely because the walk cannot go further). <abs-path>
   is expected to already be physically normalized (no trailing slash,
-  symlinks resolved) by the caller, exactly like the exact-match lookup this
-  replaces; ancestors are derived from it by walking `os.path.dirname`, which
-  stays physically normalized for every prefix of an already-resolved path.
-  Read-only: there is deliberately no `trust-set` (see the plan's "Why the
-  trust gate is detect-and-block, not auto-clear").
+  symlinks resolved) by the caller; ancestors are derived from it by walking
+  `os.path.dirname`, which stays physically normalized for every prefix of
+  an already-resolved path. Read-only: there is deliberately no `trust-set`
+  (see the plan's "Why the trust gate is detect-and-block, not auto-clear").
 
 Every subcommand treats a missing file, missing key, or invalid JSON as "not
 accepted" (exit 1) rather than erroring - a corrupt or absent file must never
@@ -81,11 +97,33 @@ def cmd_bypass_set(args):
     print(f"skipDangerousModePermissionPrompt set in {args.settings}")
 
 
-def path_and_ancestors(path):
-    """Yield <path> itself, then each ancestor up to and including '/'."""
+def git_toplevel(path):
+    """Return the nearest ancestor of <path> (inclusive) carrying a `.git`
+    entry - a directory for an ordinary repo root, or a file for a worktree
+    or submodule - or None if no ancestor up to `/` has one. This is how
+    Claude Code itself decides a directory is a repository: from the `.git`
+    marker on disk, not by asking `git`. A directory `git rev-parse` refuses
+    to identify (dubious-ownership refusal, an unreadable `.git`) is still a
+    repository to the CLI and still renders the live trust dialog for it, so
+    deriving the boundary by shelling out and falling back to an unbounded
+    walk on any failure would reopen exactly the freeze this file exists to
+    prevent - a locked-down `.git` under a trusted parent would read as
+    "accepted" while still hitting the dialog on launch."""
+    candidate = path.rstrip("/") or "/"
+    while True:
+        if os.path.exists(os.path.join(candidate, ".git")):
+            return candidate
+        if candidate == "/":
+            return None
+        candidate = os.path.dirname(candidate)
+
+
+def path_and_ancestors(path, boundary=None):
+    """Yield <path> itself, then each ancestor up to and including
+    <boundary> if given, else up to and including '/'."""
     path = path.rstrip("/") or "/"
     yield path
-    while path != "/":
+    while path != "/" and path != boundary:
         path = os.path.dirname(path)
         yield path
 
@@ -97,7 +135,8 @@ def cmd_trust_status(args):
     projects = data.get("projects")
     if not isinstance(projects, dict):
         sys.exit(1)
-    for candidate in path_and_ancestors(args.repo):
+    boundary = git_toplevel(args.repo)
+    for candidate in path_and_ancestors(args.repo, boundary):
         entry = projects.get(candidate)
         if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
             sys.exit(0)
