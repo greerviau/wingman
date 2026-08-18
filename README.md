@@ -6,7 +6,7 @@ Wingman is a long-lived Claude Code session that orchestrates a crew of agents f
 You (the pilot) give it high-level directives - *"implement this feature,"* *"investigate this issue,"* *"what's my crew doing?"* - and it delegates the real work, tracks status, and surfaces only real decisions to you.
 It orchestrates; it never does the heavy lifting itself.
 
-Each crew member is an independent agent-CLI session (`claude` by default) in a backend-owned terminal endpoint, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed. tmux remains the default runtime backend; Herdr is an experimental alternative.
+Each crew member is an independent agent-CLI session (`claude` by default, or `codex`/`grok`/`opencode`/`pi` via `--agent`) in a backend-owned terminal endpoint, launched in your target project - so you can watch it, type into it, or take it over live, and it survives even if wingman is killed. tmux remains the default runtime backend; Herdr is an experimental alternative. Wingman's own crew command vocabulary travels to all five CLIs alike - see [Harness-agnostic by design](docs/architecture.md#harness-agnostic-by-design). Wingman itself (the orchestrator session you're reading about here) still only runs on Claude Code: none of the other four CLIs has a wired fleet-continuity (wake-loop) mechanism yet for it to resume itself after a long wait.
 
 ## Why not just subagents?
 
@@ -70,8 +70,8 @@ It stops early only if you `/standdown` it.
 
 ## Autonomous by default
 
-Crew launch with `--permission-mode bypassPermissions`, so gated tool calls auto-approve instead of hanging with no human at the terminal.
-Two one-time gates (Claude Code's Bypass-Permissions acceptance and each repo's first-time trust dialog) are detected before a window opens, refusing the spawn with the exact remedy rather than freezing; once cleared, crew in that repo run unattended.
+Crew launch in their agent CLI's own bypass mode (`--permission-mode bypassPermissions` for `claude`/`grok`, the equivalent flag or environment setting for `codex`/`pi`/`opencode`), so gated tool calls auto-approve instead of hanging with no human at the terminal.
+For a `claude`-descriptor crew member, two further one-time gates (Claude Code's Bypass-Permissions acceptance and each repo's first-time trust dialog) are detected before a window opens, refusing the spawn with the exact remedy rather than freezing; once cleared, crew in that repo run unattended.
 
 **Model:** most specific wins - an explicit `--model` on the spawn, then a per-crew-type entry in the [settings file](#settings-configlocaltoml), then its `default`, then the agent CLI's own.
 

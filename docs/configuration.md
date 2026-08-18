@@ -58,7 +58,7 @@ To find a knob, grep the source for `${WM_`.
 
 ## The wingman launcher
 
-`bin/wingman` is a thin wrapper around the real `claude` binary: it wires up a few things, then execs `claude` so the rest of the session is an ordinary Claude Code session.
+`bin/wingman` is a thin wrapper around the orchestrator's own resolved agent CLI: it wires up a few things, then execs the resolved CLI, so the rest of the session is an ordinary session of whatever CLI that turned out to be. `$WM_ORCH_AGENT` selects which one (defaulting to `claude`, independent of crew's own `$WM_AGENT`/`--agent` choice), but today `bin/wingman` refuses to start on anything other than `claude`: none of the other four descriptors has a wired fleet-continuity (wake-loop) mechanism yet for the orchestrator to resume itself after a long wait, so the launch is gated on that before the resolved CLI is ever exec'd. See [guards.md](guards.md#hooks-that-need-user-level-settings) for the gate and [architecture.md](architecture.md#harness-agnostic-by-design) for the descriptor mechanism.
 
 - It mints and exports a fresh `WINGMAN_RUN_ID`, inherited by every crew member spawned during that run.
   This is the cache key the onboarding-preference questions (remote vs. local, whether markdown deliverables also get published as Artifact links, verbosity, direct-spawn visibility, whether crew may write to GitHub PRs) are asked and cached against exactly once per run rather than once per crew member.
@@ -73,7 +73,7 @@ None of this is required - the underlying scripts work without the launcher - bu
 
 ## Spawning crew (the recipe)
 
-Every crew member is an independent, interactive `claude` session at a backend-owned terminal endpoint, launched in the target project:
+Every crew member is an independent, interactive agent-CLI session (`claude` by default; `--agent codex|grok|opencode|pi` selects another of the five shipped descriptors) at a backend-owned terminal endpoint, launched in the target project:
 
 ```
 bin/spawn-crew --type <name> (--repo <name-or-path> | --scope global) \

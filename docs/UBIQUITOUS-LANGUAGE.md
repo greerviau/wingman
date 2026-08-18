@@ -23,6 +23,13 @@ The words wingman's docs, prose, and code use for its domain concepts. Use these
 - **Lead** - a crew member (`--type lead`) that runs its own crew one layer down and rolls a single status line up to its owner. `playbooks/common/lead.md`.
 - **Playbook** - the markdown file at `playbooks/<category>/<type>.md` that defines a crew type's behavior. A crew type *is* its playbook; overridable with a gitignored `<type>.local.md`.
 
+## Multi-CLI
+
+- **Agent descriptor** - the shell-sourceable file at `bin/lib/agents/<name>.sh` describing one agent CLI's launch flags, preflight, and guard/continuity transports. `claude`, `codex`, `grok`, `opencode`, and `pi` are the five this repo ships; a crew member selects one via `--agent`, `bin/wingman`'s own launch via the separate `$WM_ORCH_AGENT`.
+- **Guard transport** - the mechanism a descriptor uses to receive wingman's guard hooks (`claude-json`, `codex-json`, `grok-json`, `opencode-plugin`, `pi-extension`). Wingman verifies it by executing the registered command against a known-deny and known-allow fixture, never by inspecting registration alone. Today only `bin/wingman`'s own orchestrator launch installs and verifies one; wiring a crew member's own spawn/resume into that install-and-verify step is a follow-on, not yet done.
+- **Fleet-continuity transport** - the mechanism, if any, that re-invokes the orchestrator session after a blocking wait. Only `claude` has one (`claude-async-rewake`) today; `bin/wingman` refuses to start the orchestrator on a descriptor without one, independent of whether that descriptor's guard transport is built.
+- **Command vocabulary** - the crew-facing command set (`/ask`, `/blocked`, `/prune`, `/say`, `/status`, `/takeover`, `/watch`) shared across every descriptor via one canonical `.agents/skills/wingman-<verb>/SKILL.md` tree, rather than one copy per CLI. `/spawn`, `/standdown`, `/lead`, and `/prefs` stay Claude-Code-only.
+
 ## The wake loop
 
 - **Cycle** - one run of `bin/watch-fleet`: it blocks, then exits on the first attention event.
