@@ -19,19 +19,21 @@ ever happens, rather than reactively via bin/watch-fleet's stall detection
   (bin/doctor's own y/N or -y gate). Refuses (exit 2) if the existing file
   content is not valid JSON, exactly like install-user-hook.py's own rule.
 - `trust-status --config <path> --repo <abs-path>`: exit 0 if the one-time,
-  per-directory workspace-trust dialog has been accepted for <abs-path> OR
-  any ancestor directory up to `/` (projects[<path>].hasTrustDialogAccepted
-  is true in the main config file for <abs-path> itself or some ancestor),
-  exit 1 otherwise. Trust is hierarchical in Claude Code: accepting it for a
-  directory trusts every descendant, so a repo nested under an already-trusted
-  parent never re-prompts and its own entry stays unaccepted - checking only
-  the exact path would false-negative in that case (issue #147). <abs-path>
-  is expected to already be physically normalized (no trailing slash,
-  symlinks resolved) by the caller, exactly like the exact-match lookup this
-  replaces; ancestors are derived from it by walking `os.path.dirname`, which
-  stays physically normalized for every prefix of an already-resolved path.
-  Read-only: there is deliberately no `trust-set` (see the plan's "Why the
-  trust gate is detect-and-block, not auto-clear").
+  per-directory workspace-trust dialog has been accepted for <abs-path>
+  exactly (projects[<abs-path>].hasTrustDialogAccepted is true in the main
+  config file), exit 1 otherwise. This checks the exact path only, never an
+  ancestor: workspace trust in the installed Claude Code build is NOT
+  hierarchical, confirmed directly by launching a fresh `claude` process in a
+  brand-new child directory of an already-trusted parent and observing the
+  live trust dialog render anyway. Treating an ancestor's acceptance as
+  covering the child (as this once did) makes trust-status report "accepted"
+  for a directory that still hits a real, un-refusable dialog on launch,
+  which is worse than the false negative it was trying to avoid - a spawn
+  freezing silently on a live dialog, instead of being refused with a clear
+  remedy. <abs-path> is expected to already be physically normalized (no
+  trailing slash, symlinks resolved) by the caller. Read-only: there is
+  deliberately no `trust-set` (see the plan's "Why the trust gate is
+  detect-and-block, not auto-clear").
 
 Every subcommand treats a missing file, missing key, or invalid JSON as "not
 accepted" (exit 1) rather than erroring - a corrupt or absent file must never
@@ -81,15 +83,6 @@ def cmd_bypass_set(args):
     print(f"skipDangerousModePermissionPrompt set in {args.settings}")
 
 
-def path_and_ancestors(path):
-    """Yield <path> itself, then each ancestor up to and including '/'."""
-    path = path.rstrip("/") or "/"
-    yield path
-    while path != "/":
-        path = os.path.dirname(path)
-        yield path
-
-
 def cmd_trust_status(args):
     data = load_json(args.config)
     if data is None:
@@ -97,10 +90,9 @@ def cmd_trust_status(args):
     projects = data.get("projects")
     if not isinstance(projects, dict):
         sys.exit(1)
-    for candidate in path_and_ancestors(args.repo):
-        entry = projects.get(candidate)
-        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
-            sys.exit(0)
+    entry = projects.get(args.repo)
+    if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+        sys.exit(0)
     sys.exit(1)
 
 

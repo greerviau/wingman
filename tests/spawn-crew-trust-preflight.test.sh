@@ -63,20 +63,23 @@ else
   ok "invalid JSON: trust-status fails closed (reports not accepted)"
 fi
 
-# Ancestor-inherited trust (issue #147): trust is hierarchical in Claude Code -
-# accepting it for a directory trusts every descendant, so a repo nested under
-# an already-trusted parent never gets its own exact-path entry set. Checking
-# only the exact path false-negatives here; trust-status must walk ancestors.
+# Ancestor trust does NOT propagate to a child directory: verified directly
+# by launching a fresh `claude` process in a brand-new child of an
+# already-trusted parent and observing the live trust dialog render anyway,
+# regardless of the parent's own accepted state. trust-status must check the
+# exact repo path only - treating an ancestor's acceptance as covering an
+# untrusted child is exactly what let a real spawn proceed past this gate and
+# freeze on a live dialog instead of being refused.
 printf '{"projects": {"/home/x": {"hasTrustDialogAccepted": true}}}\n' > "$CONFIG"
 if run_check trust-status --config "$CONFIG" --repo "/home/x/repo" >/dev/null 2>&1; then
-  ok "ancestor trusted, exact repo entry absent: trust-status reports accepted"
+  fail "trusted ancestor, exact repo entry absent: trust-status must not report accepted"
 else
-  fail "ancestor trusted, exact repo entry absent: trust-status reports accepted"
+  ok "trusted ancestor, exact repo entry absent: trust-status reports not accepted"
 fi
 if run_check trust-status --config "$CONFIG" --repo "/home/x/repo/nested/deep" >/dev/null 2>&1; then
-  ok "trust inherits through multiple levels of nesting"
+  fail "trust must not inherit through multiple levels of nesting"
 else
-  fail "trust inherits through multiple levels of nesting"
+  ok "trust does not inherit through multiple levels of nesting"
 fi
 if run_check trust-status --config "$CONFIG" --repo "/home/y/repo" >/dev/null 2>&1; then
   fail "unrelated repo under a different, untrusted parent: trust-status reports accepted"
@@ -84,8 +87,8 @@ else
   ok "unrelated repo under a different, untrusted parent: trust-status reports not accepted"
 fi
 
-# An ancestor entry present but explicitly false must not short-circuit a
-# deeper trusted ancestor, and must not itself grant trust.
+# An ancestor entry's own accepted state, true or false, must never affect
+# the exact-path result either way.
 printf '{"projects": {"/home/x": {"hasTrustDialogAccepted": false}, "/home/x/repo": {"hasTrustDialogAccepted": true}}}\n' > "$CONFIG"
 if run_check trust-status --config "$CONFIG" --repo "/home/x/repo" >/dev/null 2>&1; then
   ok "exact repo trusted despite an untrusted ancestor above it"
@@ -143,18 +146,25 @@ assert_contains "trust not accepted: message names the repo path" "$out2" "$UNTR
 assert_contains "trust not accepted: message names the remedy" "$out2" "accept the trust dialog"
 assert_eq "trust not accepted: no window and no roster record" "$(no_window_or_record "$GID2")" "ok"
 
-# --- ancestor-inherited trust (issue #147): trust granted on the parent, not
-# the repo itself - spawn-crew must still proceed, end to end -----------------
+# --- trust granted only on the parent, not the repo itself: spawn-crew must
+# refuse, not freeze -----------------------------------------------------------
+# A directory trusted only through an ancestor still hits a live, un-refusable
+# trust dialog on launch (verified directly: launching a fresh `claude`
+# process in a brand-new child of an already-trusted parent renders the
+# dialog anyway). Proceeding past the gate here is exactly the bug that let a
+# real spawn freeze on that dialog instead of being refused with a remedy.
 ANCESTOR_PARENT="$(wm_mktemp_dir)/ancestor-parent"
 NESTED_REPO="$ANCESTOR_PARENT/nested-repo"
 mkdir -p "$NESTED_REPO"
 git -C "$NESTED_REPO" init -q
 wm_trust_repo "$ANCESTOR_PARENT"
-GID2B="trust-inherited"
-out2b="$("$SPAWN" --type software-analyst --repo "$NESTED_REPO" --id "$GID2B" --objective "trust inherited from ancestor" 2>&1)"
+GID2B="trust-not-inherited"
+out2b="$("$SPAWN" --type software-analyst --repo "$NESTED_REPO" --id "$GID2B" --objective "trust not inherited from ancestor" 2>&1)"
 rc2b=$?
-assert_true "ancestor-inherited trust: spawn succeeds (issue #147)" "[ $rc2b -eq 0 ]"
-assert_true "ancestor-inherited trust: roster record exists" "wm_state crew-get --id '$GID2B' >/dev/null 2>&1"
+assert_true "ancestor trusted, repo itself not: spawn-crew exits non-zero" "[ $rc2b -ne 0 ]"
+assert_contains "ancestor trusted, repo itself not: message names the repo path" "$out2b" "$NESTED_REPO"
+assert_contains "ancestor trusted, repo itself not: message names the remedy" "$out2b" "accept the trust dialog"
+assert_eq "ancestor trusted, repo itself not: no window and no roster record" "$(no_window_or_record "$GID2B")" "ok"
 
 # --- bypass NOT accepted, trust fine, default permission mode ---------------
 # Default permission mode resolves PERM_MODE=bypassPermissions (WM_PERMISSION_MODE
