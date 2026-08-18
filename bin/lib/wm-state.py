@@ -1539,6 +1539,33 @@ def cmd_reconcile(args):
     """Mark live-but-windowless crew as 'died'. Given the current tmux windows,
     any crew member still in a live state whose window is gone is flagged.
 
+    Backend scoping: each call carries liveness evidence about some backends
+    and none about the others, and only ever judges the ones it holds
+    evidence about. --windows is a list of tmux window names, so it is
+    evidence about tmux-backed members alone; --inventory/--inventory-backends
+    is evidence about exactly the backends named there. A member's `window` is
+    an opaque backend-specific endpoint (herdr's is "<session>:<pane-id>"),
+    which is why crossing the two - comparing a herdr endpoint against tmux
+    window names, or letting an empty herdr inventory stand in for the whole
+    fleet's liveness - flags every live member of the other backend dead.
+    --inventory-backends is therefore read whether or not --inventory came back
+    empty: a readable container currently holding no panes is authoritatively
+    empty and must still flip that backend's own members. A container this
+    call never even attempted to read is a different case, handled by session
+    scoping below rather than by omitting --inventory-backends altogether.
+
+    Session scoping: a backend whose endpoint embeds a session (Herdr's is
+    "<session>:<pane-id>") can have one session unreachable while others are
+    fine, and a caller gathering across several sessions drops a failed one
+    from its gather rather than aborting the whole read (an all-or-nothing
+    read per session, but not across sessions - see bin/lib/backend.sh's
+    wm_backend_herdr_reconcile_inventory). --inventory-sessions names exactly
+    which sessions this call's --inventory actually covers; a record whose
+    own session isn't in that set is left alone (deferred) rather than judged
+    against a gather that was never authoritative for it. Omitting the flag
+    entirely (as a caller with no session concept does) keeps every named
+    backend's endpoints judged, same as before this scoping existed.
+
     Cause attribution (issue #23): each flip also checks the member's cached
     pane-tail file (pane_tail_path, written every poll by bin/watch-fleet for
     a live working/blocked member) against --apierr-re; a match tags
@@ -1559,8 +1586,8 @@ def cmd_reconcile(args):
     silently reading identically to a clean tree.
 
     Dead-owner re-adopt (Fix B / #11), run ONLY under wingman's watcher
-    (--owner ""): after the death flip, any still-live worker whose window is alive
-    but whose owner is now terminal (died/stood-down) is re-parented to the dead
+    (--owner ""): after the death flip, any worker still in a live status
+    whose owner is now terminal (died/stood-down) is re-parented to the dead
     owner's own parent (the grandparent, always "" = wingman under the depth-2 cap),
     with the prior parent recorded in `orphaned_from`. Re-parenting immediately
     restores a live watcher (wingman now sees the worker as a direct report), and
@@ -1572,29 +1599,52 @@ def cmd_reconcile(args):
     apierr_re = getattr(args, "apierr_re", None) or DEFAULT_APIERR_RE
     live_windows = set(w for w in (args.windows or "").split(",") if w)
     inventory_entries = []
-    inventory_backends = set()
-    if getattr(args, "inventory", ""):
-        for line in args.inventory.splitlines():
-            try:
-                item = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(item, dict) and item.get("backend"):
-                inventory_entries.append(item)
-                inventory_backends.add(item["backend"])
-        inventory_backends.update(b for b in (getattr(args, "inventory_backends", "") or "").split(",") if b)
+    # Read whether or not --inventory is empty: an empty inventory is still
+    # authoritative for the backends named here (see "Backend scoping" above).
+    inventory_backends = set(
+        b for b in (getattr(args, "inventory_backends", "") or "").split(",") if b
+    )
+    for line in (getattr(args, "inventory", "") or "").splitlines():
+        try:
+            item = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict) and item.get("backend"):
+            inventory_entries.append(item)
+            inventory_backends.add(item["backend"])
     inventory_endpoints = set((item.get("backend"), item.get("endpoint")) for item in inventory_entries)
+    # See the docstring's "Session scoping": None (the flag omitted) means no
+    # session concept, so every named backend's endpoints are judged as
+    # before; an explicit value (even "") restricts judgment to records in
+    # the named sessions only. Newline-separated, not comma-separated: a
+    # session name is raw operator input with nothing validating its
+    # characters, and a comma-joined encoding split back on commas would
+    # silently desync a session name that itself contains a comma from its
+    # own entry in the covered set.
+    _inventory_sessions_raw = getattr(args, "inventory_sessions", None)
+    if _inventory_sessions_raw is None:
+        inventory_sessions = None
+    else:
+        inventory_sessions = set(s for s in _inventory_sessions_raw.split("\n") if s)
     with with_locked(crew_json_path()):
         roster = load_roster()
         changed = []
         for r in roster:
             m = merged(r)
             backend = r.get("backend") or "tmux"
+            # Judged only against evidence for its own backend - inventory for
+            # the backends it names, tmux windows for tmux (see the docstring).
             if inventory_backends:
                 endpoint = r.get("window") or ""
-                missing_endpoint = backend in inventory_backends and (backend, endpoint) not in inventory_endpoints
+                session = endpoint.split(":", 1)[0] if endpoint else ""
+                session_covered = inventory_sessions is None or session in inventory_sessions
+                missing_endpoint = (
+                    backend in inventory_backends
+                    and session_covered
+                    and (backend, endpoint) not in inventory_endpoints
+                )
             else:
-                missing_endpoint = r.get("window") not in live_windows
+                missing_endpoint = backend == "tmux" and r.get("window") not in live_windows
             if m.get("status") in LIVE_STATES and missing_endpoint:
                 r["status"] = "died"
                 r["updated"] = now()
@@ -1617,15 +1667,34 @@ def cmd_reconcile(args):
                 write_json(status_path(r["id"]), live)
                 changed.append(r["id"])
 
-        # Dead-owner re-adopt, wingman's watcher only (owner == "").
-        if owner == "" and not inventory_backends:
+        # Dead-owner re-adopt, wingman's watcher only (owner == ""). No
+        # `window not in live_windows` guard here: a record this same call's
+        # death-flip pass just flipped is already excluded by the LIVE_STATES
+        # check above, for whichever backend that pass actually judged (tmux
+        # windows here, or an --inventory-backends backend on a separate
+        # call). A record of any OTHER backend was never judged by this call
+        # at all, so comparing its endpoint against `live_windows` - tmux
+        # window names - proves nothing about it; the guard used to read that
+        # mismatch as "already flagged died" and skip re-adopting it, which
+        # silently left a live Herdr worker with a dead owner unwatched
+        # instead.
+        #
+        # Not gated on `not inventory_backends` (unlike the orphan-window
+        # pass below, which genuinely needs tmux window names): this pass no
+        # longer reads live_windows or inventory_backends at all, so it is
+        # equally safe to run during a herdr-scoped call as during the tmux
+        # windows-scoped one. Letting it run on both means it also fires on
+        # a fleet with no reachable tmux server at all - bin/watch-fleet's
+        # tmux reconcile call is skipped there, but its herdr call still
+        # passes --owner "", which is otherwise the only trigger this pass
+        # has - without this, a live Herdr worker's dead owner would never
+        # be detected on a pure-Herdr fleet.
+        if owner == "":
             by_id = dict((r.get("id"), r) for r in roster)
             orphans_by_owner = {}
             for r in roster:
                 if merged(r).get("status") not in LIVE_STATES:
                     continue
-                if r.get("window") not in live_windows:
-                    continue  # its own window is gone; the death flip already handled it
                 p = parent_of(r)
                 if not p:
                     continue  # top-level: owned by wingman, which never dies
@@ -5262,6 +5331,16 @@ def _args_reconcile(a):
     a.add_argument("--windows", default="")
     a.add_argument("--inventory", default="", help="newline-delimited backend inventory JSON")
     a.add_argument("--inventory-backends", default="", dest="inventory_backends")
+    # Which sessions --inventory actually covers (newline-separated - a
+    # session name is unvalidated operator input, so a comma-joined encoding
+    # could collide with one that itself contains a comma), for a backend
+    # whose endpoint embeds a session ("<session>:<pane-id>"). Omit entirely
+    # for no session scoping (every named backend's endpoints are judged);
+    # pass an explicit value - even "" - once a caller gathers per-session
+    # and wants a record outside the covered sessions left alone rather than
+    # compared against a gather that was never authoritative for it (see the
+    # docstring's "Session scoping").
+    a.add_argument("--inventory-sessions", default=None, dest="inventory_sessions")
     # The watcher's owner scope. The dead-owner re-adopt pass runs only for "" (N4);
     # omit or pass a lead id to keep reconcile to the global death-flip only.
     a.add_argument("--owner", default=None)

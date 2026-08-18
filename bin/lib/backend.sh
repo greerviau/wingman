@@ -145,6 +145,59 @@ wm_backend_live_inventory() {
   wm_backend_source "$backend" || return 1
   case "$backend" in tmux) wm_backend_tmux_inventory ;; herdr) wm_backend_herdr_inventory "${2:-${HERDR_SESSION:-default}}" ;; esac
 }
+# wm_backend_herdr_reconcile_inventory <roster-json>: the merged Herdr
+# liveness inventory across every session any LIVE Herdr roster record
+# actually names, not just the caller's own ambient $HERDR_SESSION -
+# HERDR_SESSION is one operator's own selection (herdr.sh:45-51, mirroring
+# tmux's $TMUX), so a member spawned under a different session is real
+# evidence this pass must also gather, never an absence to judge it dead by.
+#
+# Each session's OWN read stays all-or-nothing (wm_backend_live_inventory
+# either returns that session's full inventory or fails outright), but a
+# session that fails is DROPPED from the gather rather than aborting the
+# whole call: a permanently unreachable session would otherwise defer this
+# pass forever on every future call too (a member whose session died writes
+# nothing further, so its own record keeps naming that same dead session),
+# masking every other session's genuine deaths right along with it - a new
+# failure mode this exists to rule out, not the one --inventory-sessions
+# already exists to catch.
+#
+# Two results, not one, so this is called plainly (never via `$(...)` - a
+# command substitution forks a subshell, and everything this sets would be
+# lost the instant it exits): $WM_HERDR_RECONCILE_INVENTORY (the merged
+# inventory) and $WM_HERDR_RECONCILE_SESSIONS (NEWLINE-separated, the
+# sessions actually covered - pass it to `reconcile --inventory-sessions`,
+# which leaves a record in an uncovered session alone instead of comparing
+# it against a gather that was never authoritative for it). Newline, not
+# comma: a session name is raw operator input (wm_backend_herdr_session
+# echoes $HERDR_SESSION verbatim, herdr.sh:49-51) with nothing validating
+# its characters, and a comma-joined encoding split back on commas silently
+# desyncs a session name that itself contains a comma from its own entry in
+# the covered set - every member of that session then reads as permanently
+# uncovered, with no way to clear since the session name never changes.
+# Both reset on every call, empty when no Herdr member is currently live -
+# the caller still calls reconcile in that case (an empty
+# --inventory-sessions judges every herdr record as outside the covered
+# set, so it is a harmless no-op call, not a skipped one).
+wm_backend_herdr_reconcile_inventory() {
+  local roster_json=$1 sessions session one
+  WM_HERDR_RECONCILE_SESSIONS=""
+  WM_HERDR_RECONCILE_INVENTORY=""
+  sessions="$(printf '%s' "$roster_json" | jq -r \
+    '.[] | select(.backend == "herdr") | select(.status == "working" or .status == "blocked" or .status == "review" or .status == "stalled") | (.window // "") | split(":")[0] | select(length > 0)' \
+    2>/dev/null | sort -u)"
+  [ -n "$sessions" ] || return 0
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    one="$(wm_backend_live_inventory herdr "$session" 2>/dev/null)" || continue
+    WM_HERDR_RECONCILE_SESSIONS="$WM_HERDR_RECONCILE_SESSIONS
+$session"
+    [ -n "$one" ] && WM_HERDR_RECONCILE_INVENTORY="$WM_HERDR_RECONCILE_INVENTORY
+$one"
+  done <<EOF
+$sessions
+EOF
+}
 wm_backend_close() {
   local backend=$1 target=$2
   wm_backend_source "$backend" || return 1

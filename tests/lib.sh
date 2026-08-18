@@ -37,6 +37,14 @@ _WM_TMP_BASE="$(cd -P "${TMPDIR:-/tmp}" && pwd -P)"
 # with WM_CONFIG_TOML already exported, or with a config.local.toml at the repo
 # root, must not have it read by the suite.
 export WM_CONFIG_TOML="$_WM_TMP_BASE/wm-test-absent-config.toml"
+# Same floor for the Herdr backend, which resolves its session as
+# ${HERDR_SESSION:-default} - the pilot's own live session name. A test that
+# leaves this unset addresses the live fleet's real panes the moment anything
+# reaches the real herdr CLI instead of a fake, and a Herdr inventory read is
+# what reconcile treats as authoritative for whether a member is alive.
+# Unconditional and named for a session no test ever starts, so the exposure
+# does not depend on each test remembering to shadow the CLI on PATH.
+export HERDR_SESSION="wm-test-absent-session"
 # Exported so every consumer of $TMPDIR in the code under test (e.g.
 # wm_guard_test_fixture_agent's case match in bin/lib/common.sh) sees the same
 # normalized base the temp dirs are actually created under.
@@ -60,6 +68,9 @@ test_new_home() {
   WM_TRACKED_HOMES="$WM_TRACKED_HOMES $WINGMAN_HOME"
   export WM_TMUX_SESSION="wm-test-${WM_TEST_RUN_ID:-x}-$$-$RANDOM"
   wm_track_tmux "$WM_TMUX_SESSION"
+  # Per-test Herdr session name, minted like WM_TMUX_SESSION above so a test
+  # addressing its own fake CLI can never name the pilot's live "default".
+  export HERDR_SESSION="wm-test-herdr-${WM_TEST_RUN_ID:-x}-$$-$RANDOM"
   # The tests model wingman's own top-level scope (owner ""). When the suite runs
   # inside a crew session, the inherited crew id would silently re-scope
   # watch-fleet and the Stop hook to that crew's (empty) reports.
