@@ -792,15 +792,27 @@ wm_composer_is_empty() {
 # holder as dead/reused (issue #298 round-1 MF1, and the same defect
 # independently in bin/watch-fleet's owner_lock_alive() - issue #303). Used
 # by owner_lock_alive() so a new pid+lstart identity comparison never has to
-# hand-copy the pin. It is the only remaining consumer: wm_tmux_send_lock's
-# own liveness predicate was replaced by a kernel flock() (issue #302) and
-# reads no process start time at all.
+# hand-copy the pin. It is the only remaining consumer within this file:
+# wm_tmux_send_lock's own liveness predicate was replaced by a kernel
+# flock() (issue #302) and reads no process start time at all.
+# wm_harness_process_identity (bin/lib/harness-identity.sh, sourced below)
+# needs the identical pinned computation but cannot call this function
+# directly - that file is deliberately sourced standalone, without this one,
+# by every per-tool-call consumer that cannot afford this file's own
+# config.local.toml load - so it carries its own copy of this single line
+# rather than depending on it.
 # An empty result means unknown (no such pid, or ps itself unavailable) -
 # never treat it as a match against anything, including another empty
 # string.
 wm_ps_lstart() {
   TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//'
 }
+
+# The harness-agnostic run-id substitute (wm_harness_process_identity) -
+# factored into its own tiny, side-effect-free file (see that file's own
+# header) rather than written inline here, so a per-tool-call consumer can
+# source just it without paying this file's own config.local.toml load.
+. "$WM_LIB/harness-identity.sh"
 
 # Acquire / release the per-pane send lock that serializes every keystroke aimed
 # at one pane. Extracted verbatim from wm_tmux_send_message's own body (issue
