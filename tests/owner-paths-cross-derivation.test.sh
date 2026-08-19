@@ -23,10 +23,20 @@ export WM_WATCH_INTERVAL=1
 
 run_guard() {
   # run_guard <command> - always run_in_background: true, matching an arm.
+  # WM_HARNESS_WALK_MAX=0 forces hooks/no-foreground-watcher-guard.sh's own
+  # (now shallow - review round 2 of #383's Half A) identity resolution to
+  # genuinely find no harness ancestor, regardless of whatever real one
+  # actually launched this test suite. Without this, a suite run from inside
+  # a real claude session (the ordinary way these tests are run in this
+  # repo's own development workflow) has claude itself as a genuine ancestor
+  # within the walk's own bound at this shallow a call site, which would
+  # silently resolve a real, non-empty identity here and defeat the
+  # "no run id to certify ownership against either way" precondition the
+  # check below depends on.
   uv run --no-project --quiet python -c '
 import json, sys
 print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1], "run_in_background": True}}))
-' "$1" | bash "$GUARD"
+' "$1" | WM_HARNESS_WALK_MAX=0 bash "$GUARD"
 }
 
 check_owner() {
