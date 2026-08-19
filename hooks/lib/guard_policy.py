@@ -1713,6 +1713,40 @@ def _foreground_watcher_denial_reason(dialect):
     )
 
 
+def _wm_effective_run_id():
+    """The run id this guard's own ownership checks compare against:
+    $WINGMAN_RUN_ID when genuinely set (a settable override), else the
+    harness-agnostic computed identity - bin/lib/harness-identity.sh's
+    wm_harness_process_identity (docs/analysis/2026-08-18-remove-bin-
+    wingman-launcher-spec.md, §4.3), the same substitution every bash
+    consumer of the run id makes. Shelled out to rather than reimplemented
+    here, so there is exactly one ancestor-walk implementation to keep
+    correct - this module already pays a subprocess per invocation for
+    other checks (e.g. `gh`), and this specific call site (the standdown
+    marker check) fires only when a `watch-fleet` arm is actually being
+    attempted, not on every tool call. Empty when neither resolves (e.g. the
+    helper script is missing, or no recognizable harness ancestor is found
+    within its own bounded walk).
+    """
+    run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+    if run_id:
+        return run_id
+    helper = os.path.join(_REPO_ROOT, "bin", "lib", "harness-identity.sh")
+    try:
+        # stderr NOT suppressed: wm_harness_process_identity traces its own
+        # reason to stderr on a genuine no-match (bin/lib/harness-identity.sh)
+        # - swallowing it here would defeat that visibility for this
+        # consumer specifically.
+        r = subprocess.run(
+            ["bash", "-c", '. "$1" && wm_harness_process_identity', "harness-identity", helper],
+            stdout=subprocess.PIPE, timeout=5)
+        if r.returncode == 0:
+            return r.stdout.decode().strip()
+    except Exception:
+        pass
+    return ""
+
+
 def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="claude"):
     """Port of hooks/no-foreground-watcher-guard.sh's python block. See that
     file's own header comment for the full history and the false-deny-only
@@ -1833,7 +1867,7 @@ def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="c
                 _marker_lines = _marker_content.split("\n", 1)
                 _stamp = _marker_lines[0] if _marker_lines else ""
                 _body = _marker_lines[1] if len(_marker_lines) > 1 else ""
-                _run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+                _run_id = _wm_effective_run_id()
                 if not _run_id or not _stamp or _stamp == _run_id:
                     _count_match = re.search(r"died (\d+) times", _body)
                     _count_clause = " (%s deaths in a row)" % _count_match.group(1) if _count_match else ""
