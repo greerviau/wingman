@@ -32,6 +32,11 @@ STATE_PY="$REPO/bin/lib/wm-state.py"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
 
 . "$HERE/lib/pilot-prefs.sh"
+# wm_harness_process_identity only - deliberately NOT bin/lib/common.sh; see
+# hooks/pilot-preferences-guard.sh's identical comment for why.
+# Tolerates a partial/broken install - see hooks/pilot-preferences-guard.sh's
+# identical line for why.
+[ -r "$REPO/bin/lib/harness-identity.sh" ] && . "$REPO/bin/lib/harness-identity.sh"
 
 # Consume stdin (the hook input JSON); the nudge behaves identically for every
 # SessionStart source, so nothing in it is needed.
@@ -45,9 +50,19 @@ wm_is_wingman_repo_session() {
 
 [ -z "${WINGMAN_CREW_ID:-}" ] || exit 0
 wm_is_wingman_repo_session || exit 0
-[ -n "${WINGMAN_RUN_ID:-}" ] || exit 0
 
-wm_prefs_missing "$STATE_PY" "$WINGMAN_RUN_ID"
+# See hooks/pilot-preferences-guard.sh's identical block for the full
+# rationale: $WINGMAN_RUN_ID when genuinely exported (a settable override),
+# else the harness-agnostic computed identity.
+WM_RUN_ID="${WINGMAN_RUN_ID:-}"
+WM_RUN_ID_EXPORTED=1
+if [ -z "$WM_RUN_ID" ]; then
+  WM_RUN_ID_EXPORTED=0
+  WM_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_RUN_ID=""
+fi
+[ -n "$WM_RUN_ID" ] || exit 0
+
+wm_prefs_missing "$STATE_PY" "$WM_RUN_ID"
 [ -n "$WM_PREFS_MISSING_KEYS" ] || exit 0
 
 # The same concrete, absolute escape command hooks/pilot-preferences-guard.sh
@@ -56,7 +71,8 @@ wm_prefs_missing "$STATE_PY" "$WINGMAN_RUN_ID"
 # denies anything, so it cannot strand a session by naming a shape the guard
 # would reject - the guard's own probe is what stands behind the command.
 printf '%s' "$WM_PREFS_MISSING_LINES" | \
-  WM_NUDGE_ESCAPE="$WM_UV $STATE_PY" WM_NUDGE_RUN_ID="$WINGMAN_RUN_ID" \
+  WM_NUDGE_ESCAPE="$WM_UV $STATE_PY" WM_NUDGE_RUN_ID="$WM_RUN_ID" \
+  WM_NUDGE_RUN_ID_EXPORTED="$WM_RUN_ID_EXPORTED" \
   WM_NUDGE_ENGINE_OK="$WM_PREFS_ENGINE_OK" WM_NUDGE_STATE_PY="$STATE_PY" \
   $WM_UV python -c '
 import json, os, shlex, sys
@@ -64,6 +80,7 @@ import json, os, shlex, sys
 missing = sys.stdin.read().rstrip("\n")
 escape = os.environ.get("WM_NUDGE_ESCAPE", "")
 run_id = os.environ.get("WM_NUDGE_RUN_ID", "")
+run_id_exported = os.environ.get("WM_NUDGE_RUN_ID_EXPORTED", "0") == "1"
 engine_ok = os.environ.get("WM_NUDGE_ENGINE_OK", "1") == "1"
 state_py = os.environ.get("WM_NUDGE_STATE_PY", "")
 
@@ -80,18 +97,20 @@ if not engine_ok:
         % (state_py or "<unset>", state_py or "bin/lib/wm-state.py")
     )
 else:
+    shorthand = (
+        "\n(the same command is exported as $WINGMAN_STATE: $WINGMAN_STATE "
+        "pref-set --run-id \"$WINGMAN_RUN_ID\" --key <key> --value <value>)"
+    ) if run_id_exported else ""
     ctx = (
         "Onboarding preferences for this wingman run are still unanswered. "
         "Before touching any directive, say to the pilot: \"Before I start "
         "working, I need to ask you some preference questions:\" and ask ALL of "
         "the following in ONE batched AskUserQuestion call:\n%s\n"
         "Then cache each answer with:\n  %s pref-set --run-id %s --key <key> "
-        "--value <value>\n"
-        "(the same command is exported as $WINGMAN_STATE: $WINGMAN_STATE "
-        "pref-set --run-id \"$WINGMAN_RUN_ID\" --key <key> --value <value>)\n"
+        "--value <value>%s\n"
         "A PreToolUse guard (hooks/pilot-preferences-guard.sh) denies every "
         "other tool call until all of them are cached."
-        % (missing, escape, shlex.quote(run_id))
+        % (missing, escape, shlex.quote(run_id), shorthand)
     )
 print(json.dumps({
     "hookSpecificOutput": {

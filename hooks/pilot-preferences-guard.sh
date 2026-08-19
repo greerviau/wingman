@@ -94,6 +94,15 @@ WM_HOME="${WINGMAN_HOME:-$HOME/.wingman}"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
 
 . "$HERE/lib/pilot-prefs.sh"
+# wm_harness_process_identity only - deliberately NOT bin/lib/common.sh,
+# which this hook avoids sourcing on purpose (it fires on every tool call;
+# common.sh's own config.local.toml load is a real `uv run` subprocess on
+# any machine that has one - see that file's own header comment).
+# Tolerates a partial/broken install (no bin/lib at all - the same fixture
+# shape the fail-open tests below construct): a missing file here degrades
+# to "no computed identity available", not a raw sourcing error - matching
+# this guard's own fail-open philosophy for a broken state engine.
+[ -r "$REPO/bin/lib/harness-identity.sh" ] && . "$REPO/bin/lib/harness-identity.sh"
 
 INPUT="$(cat)"
 
@@ -111,10 +120,31 @@ wm_is_wingman_repo_session() {
 # wingman's top-level session does), and never for unrelated sessions.
 [ -z "${WINGMAN_CREW_ID:-}" ] || exit 0
 wm_is_wingman_repo_session || exit 0
-# Not launched via bin/wingman (no run id to scope answers to): nothing to gate.
-[ -n "${WINGMAN_RUN_ID:-}" ] || exit 0
 
-wm_prefs_missing "$STATE_PY" "$WINGMAN_RUN_ID"
+# The run id this session's answers are scoped to: $WINGMAN_RUN_ID when it is
+# genuinely set (a settable override - existing test fixtures set it
+# directly, and it is what bin/wingman itself still exports today), else the
+# harness-agnostic computed identity (docs/analysis/2026-08-18-remove-bin-
+# wingman-launcher-spec.md, §4.3) - the (pid, start-time) of this claude
+# process's own root, reached the same way regardless of whether a launcher
+# minted anything. WM_RUN_ID_EXPORTED tracks which source it came from: only
+# when it is genuinely exported can the escape-hatch text below tell the
+# model to type the bare "$WINGMAN_RUN_ID" shell reference and have that
+# actually resolve to the right value in the model's own shell - a computed
+# value was never exported into that shell at all, so instructing "$WINGMAN_
+# RUN_ID" there would resolve to empty and cache the answer under the wrong
+# key.
+WM_RUN_ID="${WINGMAN_RUN_ID:-}"
+WM_RUN_ID_EXPORTED=1
+if [ -z "$WM_RUN_ID" ]; then
+  WM_RUN_ID_EXPORTED=0
+  WM_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_RUN_ID=""
+fi
+# No run id resolvable at all (ps unavailable, or no recognizable harness
+# ancestor within the bounded walk): nothing to gate.
+[ -n "$WM_RUN_ID" ] || exit 0
+
+wm_prefs_missing "$STATE_PY" "$WM_RUN_ID"
 [ -n "$WM_PREFS_MISSING_KEYS" ] || exit 0
 
 # The canonical escape hatch, built from the values this hook itself resolved:
@@ -125,7 +155,8 @@ WM_GUARD_ESCAPE="$WM_UV $STATE_PY"
 
 printf '%s' "$INPUT" | \
   WM_GUARD_HOME="$WM_HOME" WM_GUARD_MISSING="$WM_PREFS_MISSING_LINES" \
-  WM_GUARD_ESCAPE="$WM_GUARD_ESCAPE" WM_GUARD_RUN_ID="$WINGMAN_RUN_ID" \
+  WM_GUARD_ESCAPE="$WM_GUARD_ESCAPE" WM_GUARD_RUN_ID="$WM_RUN_ID" \
+  WM_GUARD_RUN_ID_EXPORTED="$WM_RUN_ID_EXPORTED" \
   WM_GUARD_ENGINE_OK="$WM_PREFS_ENGINE_OK" WM_GUARD_STATE_PY="$STATE_PY" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
 import json, os, re, shlex, sys
@@ -143,6 +174,7 @@ wm_home = os.environ.get("WM_GUARD_HOME", "")
 missing = os.environ.get("WM_GUARD_MISSING", "").rstrip("\n")
 escape = os.environ.get("WM_GUARD_ESCAPE", "")
 run_id = os.environ.get("WM_GUARD_RUN_ID", "")
+run_id_exported = os.environ.get("WM_GUARD_RUN_ID_EXPORTED", "0") == "1"
 engine_ok = os.environ.get("WM_GUARD_ENGINE_OK", "1") == "1"
 state_py = os.environ.get("WM_GUARD_STATE_PY", "")
 
@@ -159,8 +191,9 @@ def resolves_to_pref_set(prefix):
     allowlist keys on, never by assumption."""
     if not prefix:
         return False
-    # run_id is always non-empty here: the hook exits before this when
-    # WINGMAN_RUN_ID is unset (no run to scope answers to, nothing to gate).
+    # run_id is always non-empty here: the shell side exits before this when
+    # no run id (exported or computed) could be resolved at all (no run to
+    # scope answers to, nothing to gate).
     probe = "%s pref-set --run-id %s --key remote --value true" % (
         prefix, shlex.quote(run_id))
     segs = command_segments(probe)
@@ -237,10 +270,17 @@ PARSE_FAIL_REASON = (
 
 # The escape hatch, verified above and now safe to instruct. The $WINGMAN_STATE
 # short form is named only when it, too, resolves - so a session reading a
-# denial never sees a shape this guard would reject.
+# denial never sees a shape this guard would reject. The "$WINGMAN_RUN_ID"
+# shell-variable shorthand is offered ONLY when run_id is genuinely exported
+# (run_id_exported): a computed identity (the no-launcher path) was never
+# exported into the model'"'"'s own shell at all, so instructing it to type
+# that bare variable reference would resolve to empty there and cache the
+# answer under the wrong key - the primary form above, which always embeds
+# the resolved value literally, is correct either way and is all that is
+# shown when it is not.
 escape_cmd = "%s pref-set --run-id %s --key <key> --value <value>" % (
     escape, shlex.quote(run_id))
-if resolves_to_pref_set("$WINGMAN_STATE"):
+if run_id_exported and resolves_to_pref_set("$WINGMAN_STATE"):
     escape_cmd += ("\n(the same command is exported as $WINGMAN_STATE, which is "
                    "also accepted: $WINGMAN_STATE pref-set --run-id "
                    "\"$WINGMAN_RUN_ID\" --key <key> --value <value>)")

@@ -21,8 +21,11 @@
 # artifact (approximated by the .md extension - coarser than condition A's
 # "has headers/tables/code fences" test, deliberately), or `artifact_linking`
 # not cached as `artifact` for this run (condition B does not call for
-# publishing; this includes WINGMAN_RUN_ID being unset, e.g. after a resume
-# performed outside a wingman run).
+# publishing). The run id itself is $WINGMAN_RUN_ID when genuinely exported,
+# else the harness-agnostic computed identity (docs/analysis/2026-08-18-
+# remove-bin-wingman-launcher-spec.md, §4.3) - only when NEITHER resolves
+# (e.g. `ps` itself unavailable) does an unscoped run fall through as
+# "nothing to check" the way an unset WINGMAN_RUN_ID always used to.
 #
 # Otherwise the call is allowed only if $WINGMAN_HOME/artifact-markers/
 # <session_id>.json (written by hooks/artifact-publish-tracker.sh, never by
@@ -46,6 +49,12 @@ HERE="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(dirname "$HERE")"
 STATE_PY="$REPO/bin/lib/wm-state.py"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
+# wm_harness_process_identity only - deliberately NOT bin/lib/common.sh; see
+# hooks/pilot-preferences-guard.sh's identical comment for why (this hook
+# too fires on every Bash tool call, for every crew member on this machine).
+# Tolerates a partial/broken install - see hooks/pilot-preferences-guard.sh's
+# identical line for why.
+[ -r "$REPO/bin/lib/harness-identity.sh" ] && . "$REPO/bin/lib/harness-identity.sh"
 
 [ -n "${WINGMAN_CREW_ID:-}" ] || exit 0
 
@@ -57,8 +66,14 @@ case "$INPUT" in
   *) exit 0 ;;
 esac
 
+WM_RUN_ID="${WINGMAN_RUN_ID:-}"
+if [ -z "$WM_RUN_ID" ]; then
+  WM_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_RUN_ID=""
+fi
+
 printf '%s' "$INPUT" | \
   WINGMAN_HOME="${WINGMAN_HOME:-$HOME/.wingman}" \
+  WM_LINK_RUN_ID="$WM_RUN_ID" \
   WM_LINK_STATE_PY="$STATE_PY" \
   WM_LINK_UV="$WM_UV" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
@@ -153,9 +168,12 @@ if not os.path.isabs(artifact):
 artifact = os.path.realpath(artifact)
 
 # Condition B applies only when the pilot cached artifact_linking=artifact for
-# this run; unset (including no run id at all) defaults to local-only, which
-# the contract resolves with its own fallback ask, not this gate.
-run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+# this run; unset (including no run id resolvable at all) defaults to
+# local-only, which the contract resolves with its own fallback ask, not this
+# gate. WM_LINK_RUN_ID is $WINGMAN_RUN_ID when genuinely exported, else the
+# harness-agnostic computed identity (the shell side above already resolved
+# whichever applies) - never read $WINGMAN_RUN_ID directly here.
+run_id = os.environ.get("WM_LINK_RUN_ID") or ""
 if not run_id:
     sys.exit(0)
 try:

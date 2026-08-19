@@ -62,6 +62,12 @@ HERE="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(dirname "$HERE")"
 STATE_PY="$REPO/bin/lib/wm-state.py"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
+# wm_harness_process_identity only - deliberately NOT bin/lib/common.sh; see
+# hooks/pilot-preferences-guard.sh's identical comment for why (this hook
+# too fires on every Bash tool call, for every crew member on this machine).
+# Tolerates a partial/broken install - see hooks/pilot-preferences-guard.sh's
+# identical line for why.
+[ -r "$REPO/bin/lib/harness-identity.sh" ] && . "$REPO/bin/lib/harness-identity.sh"
 
 INPUT="$(cat)"
 
@@ -76,10 +82,21 @@ case "$INPUT" in
   *) exit 0 ;;
 esac
 
+# The run id this crew member's pr_comments preference is scoped to:
+# $WINGMAN_RUN_ID when genuinely exported, else the harness-agnostic
+# computed identity (docs/analysis/2026-08-18-remove-bin-wingman-launcher-
+# spec.md, §4.3) - never relayed-empty from a bare-launched parent orchestrator
+# after bin/spawn-crew's own fix (step 4 of that spec), but computed here too
+# as the same defense-in-depth every other consumer of the run id gets.
+WM_RUN_ID="${WINGMAN_RUN_ID:-}"
+if [ -z "$WM_RUN_ID" ]; then
+  WM_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_RUN_ID=""
+fi
+
 printf '%s' "$INPUT" | \
   WINGMAN_HOME="${WINGMAN_HOME:-$HOME/.wingman}" \
   WINGMAN_CREW_ID="${WINGMAN_CREW_ID:-}" \
-  WINGMAN_RUN_ID="${WINGMAN_RUN_ID:-}" \
+  WM_MARK_RUN_ID="$WM_RUN_ID" \
   WM_MARK_STATE_PY="$STATE_PY" \
   WM_MARK_UV="$WM_UV" \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
@@ -105,7 +122,10 @@ if not crew_id:
 # body untouched. Provenance is only load-bearing when the GitHub review/merge
 # machinery is in use, which is exactly the pr_comments=on case. Conservative
 # default (no run id, unset pref, unreadable engine) is "do not mark".
-run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+# WM_MARK_RUN_ID is $WINGMAN_RUN_ID when genuinely exported, else the
+# harness-agnostic computed identity (the shell side above already resolved
+# whichever applies) - never read $WINGMAN_RUN_ID directly here.
+run_id = os.environ.get("WM_MARK_RUN_ID") or ""
 if not run_id:
     sys.exit(0)
 try:
