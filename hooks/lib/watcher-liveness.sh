@@ -33,11 +33,9 @@ unset _wlv_hi
 # never changes mid-invocation), rather than re-walking the process tree on
 # every predicate call.
 WM_EFFECTIVE_RUN_ID="${WINGMAN_RUN_ID:-}"
-# command -v, not a bare call under 2>/dev/null - see hooks/pilot-
+# 2>/dev/null guards "command not found" only - see hooks/pilot-
 # preferences-guard.sh's identical block for why.
-if [ -z "$WM_EFFECTIVE_RUN_ID" ] && command -v wm_harness_process_identity >/dev/null 2>&1; then
-  WM_EFFECTIVE_RUN_ID="$(wm_harness_process_identity)" || WM_EFFECTIVE_RUN_ID=""
-fi
+[ -n "$WM_EFFECTIVE_RUN_ID" ] || WM_EFFECTIVE_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_EFFECTIVE_RUN_ID=""
 
 # The internal claim-wait-account loop's own budget constants (issue #231):
 # how long one hook invocation's lifetime defaults to, the minimum registered

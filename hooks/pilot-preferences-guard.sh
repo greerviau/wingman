@@ -138,13 +138,11 @@ WM_RUN_ID="${WINGMAN_RUN_ID:-}"
 WM_RUN_ID_EXPORTED=1
 if [ -z "$WM_RUN_ID" ]; then
   WM_RUN_ID_EXPORTED=0
-  # command -v, not a bare call under 2>/dev/null: harness-identity.sh may
-  # not have been sourced at all (a partial/broken install, above) - guard
-  # against "command not found" without also swallowing the function's own
-  # stderr diagnostic on a genuine no-match (see its header comment).
-  if command -v wm_harness_process_identity >/dev/null 2>&1; then
-    WM_RUN_ID="$(wm_harness_process_identity)" || WM_RUN_ID=""
-  fi
+  # 2>/dev/null guards "command not found" if harness-identity.sh was not
+  # sourced at all (a partial/broken install, above) - safe now that the
+  # function's own diagnostics go to a log file, never stderr (see its
+  # header comment), so there is nothing meaningful left to swallow here.
+  WM_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_RUN_ID=""
 fi
 # No run id resolvable at all (ps unavailable, or no recognizable harness
 # ancestor within the bounded walk): nothing to gate.
