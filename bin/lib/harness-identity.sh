@@ -106,6 +106,27 @@ WM_HARNESS_NAMES="claude codex grok opencode pi"
 # reasoned-but-unverified extra hop a compound command could add (3), while
 # cutting worst-case no-match latency well below what broke that test.
 #
+# One consumer sits deeper than every case above: hooks/lib/guard_policy.py's
+# own _wm_effective_run_id() fallback, which shells back out to this file's
+# wm_harness_process_identity from inside its own nested python/uv chain -
+# live-measured (review round 2) at 6 hops from the harness when it actually
+# fires (bash -c the fallback spawns -> the python3 process running
+# guard_policy.py -> uv -> the command-substitution subshell -> the calling
+# hook script -> the harness's own wrapper -> the harness), one more than
+# this bound allows. Raising the bound to cover it would tax the no-match
+# case above for every OTHER consumer just to cover one. Fixed instead by
+# moving the resolution earlier: both entry points that reach
+# evaluate_no_foreground_watcher_guard() in production (hooks/no-foreground-
+# watcher-guard.sh for claude, hooks/lib/guard_dispatch.py for the other four)
+# now resolve WM_EFFECTIVE_RUN_ID themselves at THEIR OWN shallow depth (2
+# hops, the same claude/grok case already covered above) and export/set it
+# before guard_policy.py ever runs, so _wm_effective_run_id() finds it already
+# resolved and never reaches its own deep shell-out. That fallback remains
+# only for a caller that invokes evaluate_no_foreground_watcher_guard()
+# directly, bypassing both shallow entry points - not a shape either guard
+# dispatcher takes today - so it is left deep and unresolvable-at-bound-5
+# rather than special-cased into this walk's own default.
+#
 # Constraint on recognition (not just on the five installs verified above):
 # `ps -o comm=` reports the EXECUTED FILE's own basename, not argv[0] and not
 # a shebang script's own filename - a shebang interpreter's basename shows
@@ -122,15 +143,26 @@ WM_HARNESS_NAMES="claude codex grok opencode pi"
 # ships no such install for any of the five today (verified per-harness
 # above), but a future or third-party install shaped that way would silently
 # get an unresolvable identity (see the walk's own final return-1 branch,
-# which traces this to stderr specifically for that reason).
-# Every failure path traces one line to stderr naming which of the four ways
-# this can fail actually happened - "at minimum" visibility for the no-match
-# case above (a shebang-shimmed install whose process image never carries
-# the harness's own name), so a silently unresolvable identity leaves
-# SOME trace rather than nothing. A caller in a context where this would be
-# noise (a per-tool-call hook that has already decided "no identity
-# resolvable" is an ordinary, expected outcome, not a diagnostic) is free to
-# redirect it away at the call site; none of the callers in this codebase do.
+# which traces this to a log file specifically for that reason).
+# Every failure path traces one line to $WINGMAN_HOME/harness-identity.log
+# naming which of the four ways this can fail actually happened - "at
+# minimum" visibility for the no-match case above (a shebang-shimmed install
+# whose process image never carries the harness's own name), so a silently
+# unresolvable identity leaves SOME trace rather than nothing. A LOG FILE,
+# deliberately NOT stderr (review round 2): several existing tests/consumers
+# treat a hook's or bin/watch-fleet's own stdout/stderr as a structured or
+# timing-sensitive channel (a test polling "the log file becomes non-empty"
+# as its own liveness/verdict signal, a hook's own JSON-on-stdout protocol) -
+# a stray diagnostic line landing there broke several of them in CI when
+# this was stderr. Every caller is therefore free to leave stdout/stderr
+# alone; none needs to redirect anything at its own call site to stay safe.
+_wm_harness_identity_trace() {
+  _whit_home="${WINGMAN_HOME:-$HOME/.wingman}"
+  mkdir -p "$_whit_home" 2>/dev/null
+  printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$1" >> "$_whit_home/harness-identity.log" 2>/dev/null
+  unset _whit_home
+  return 0
+}
 wm_harness_process_identity() {
   _whpi_pid=$$
   _whpi_hops=0
@@ -138,7 +170,7 @@ wm_harness_process_identity() {
   while [ "$_whpi_hops" -le "$_whpi_max" ]; do
     _whpi_comm="$(ps -o comm= -p "$_whpi_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
     if [ -z "$_whpi_comm" ]; then
-      echo "wm_harness_process_identity: no such process (pid $_whpi_pid vanished mid-walk, or ps is unavailable) - no identity resolvable" >&2
+      _wm_harness_identity_trace "wm_harness_process_identity: no such process (pid $_whpi_pid vanished mid-walk, or ps is unavailable) - no identity resolvable"
       unset _whpi_pid _whpi_hops _whpi_max _whpi_comm
       return 1
     fi
@@ -150,21 +182,40 @@ wm_harness_process_identity() {
           unset _whpi_pid _whpi_hops _whpi_max _whpi_comm _whpi_lstart
           return 0
         fi
-        echo "wm_harness_process_identity: matched harness ancestor pid $_whpi_pid (comm=$_whpi_comm) but could not read its start time - no identity resolvable" >&2
+        _wm_harness_identity_trace "wm_harness_process_identity: matched harness ancestor pid $_whpi_pid (comm=$_whpi_comm) but could not read its start time - no identity resolvable"
         unset _whpi_pid _whpi_hops _whpi_max _whpi_comm _whpi_lstart
         return 1
         ;;
     esac
     _whpi_ppid="$(ps -o ppid= -p "$_whpi_pid" 2>/dev/null | tr -d ' ')"
     if [ -z "$_whpi_ppid" ] || [ "$_whpi_ppid" = 0 ] || [ "$_whpi_ppid" = "$_whpi_pid" ]; then
-      echo "wm_harness_process_identity: reached the top of the process tree (pid $_whpi_pid, comm=$_whpi_comm) after $_whpi_hops hop(s) with no recognized harness ancestor ($WM_HARNESS_NAMES) - no identity resolvable. If this process's own harness IS one of those five, its process image does not carry its own name (see this file's header comment on the comm-recognition constraint)." >&2
+      _wm_harness_identity_trace "wm_harness_process_identity: reached the top of the process tree (pid $_whpi_pid, comm=$_whpi_comm) after $_whpi_hops hop(s) with no recognized harness ancestor ($WM_HARNESS_NAMES) - no identity resolvable. If this process's own harness IS one of those five, its process image does not carry its own name (see this file's header comment on the comm-recognition constraint)."
       unset _whpi_pid _whpi_hops _whpi_max _whpi_comm _whpi_ppid
       return 1
     fi
     _whpi_pid="$_whpi_ppid"
     _whpi_hops=$((_whpi_hops+1))
   done
-  echo "wm_harness_process_identity: walked the full bound (WM_HARNESS_WALK_MAX=$_whpi_max hops) from pid $$ with no recognized harness ancestor ($WM_HARNESS_NAMES) - no identity resolvable" >&2
+  _wm_harness_identity_trace "wm_harness_process_identity: walked the full bound (WM_HARNESS_WALK_MAX=$_whpi_max hops) from pid $$ with no recognized harness ancestor ($WM_HARNESS_NAMES) - no identity resolvable"
   unset _whpi_pid _whpi_hops _whpi_max _whpi_comm
   return 1
 }
+
+# Also directly executable, not just sourceable (`(return 0 2>/dev/null)`
+# fails exactly when this file is being run as a script, since `return` is
+# only valid inside a function or a sourced file - the standard portable
+# sourced-vs-executed test). This exists for .claude/commands/prefs.md's own
+# identity-resolution step (review round 2 of #383's Half A): a caller with
+# no launcher-provided $WINGMAN_BIN and no other reason to source this file
+# can invoke it as a single, bare, operator-free command
+# (`bin/lib/harness-identity.sh`, or `$WINGMAN_BIN/lib/harness-identity.sh`
+# when a launcher did set that) and read its stdout, rather than needing a
+# `. path && wm_harness_process_identity` compound embedded inline - the
+# compound form both depended on $WINGMAN_BIN unconditionally (broken in
+# exactly the no-launcher case it exists for) and, being command-chained
+# text inside a documentation-embedded command, was not obviously coverable
+# by a single Bash allowed-tools prefix rule.
+if ! (return 0 2>/dev/null); then
+  wm_harness_process_identity
+  exit $?
+fi
