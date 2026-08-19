@@ -486,11 +486,20 @@ for c in (d.get("constraints") or []):
       echo "export CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=${WM_RESUME_THRESHOLD_MINUTES:-999999999}"
     fi
     # The resuming session's own run id, exactly as spawn-crew captures it at
-    # spawn time: a resume is an action of the CURRENT wingman sit-down, so the
-    # preferences answered for that sit-down govern the resumed member (the
-    # artifact-link-guard's pref-get and the status contract's condition B both
-    # key off it). Empty when the resume happens outside a wingman run.
-    echo "export WINGMAN_RUN_ID=$(quote "${WINGMAN_RUN_ID:-}")"
+    # spawn time (same computation, same fallback): a resume is an action of
+    # the CURRENT wingman sit-down, so the preferences answered for that
+    # sit-down govern the resumed member (the artifact-link-guard's pref-get
+    # and the status contract's condition B both key off it). $WINGMAN_RUN_ID
+    # when this process (the orchestrator's own session, resuming this
+    # member) genuinely has one set (a settable override), else computed
+    # fresh via wm_harness_process_identity (docs/analysis/2026-08-18-remove-
+    # bin-wingman-launcher-spec.md, §4.3) rather than relayed verbatim from
+    # this process's own possibly-empty value - this process is itself a
+    # subprocess of the same orchestrator harness process every other
+    # consumer resolves to. Empty only when NEITHER resolves.
+    _wm_resume_run_id="${WINGMAN_RUN_ID:-}"
+    [ -n "$_wm_resume_run_id" ] || _wm_resume_run_id="$(wm_harness_process_identity)" || _wm_resume_run_id=""
+    echo "export WINGMAN_RUN_ID=$(quote "$_wm_resume_run_id")"
     echo "export WINGMAN_CREW_ID=$(quote "$_rid")"
     # The crew type from the member's own roster record, so a resumed lead
     # keeps its orchestrator-role hooks (no-direct-edit-guard.sh keys off
