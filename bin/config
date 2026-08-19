@@ -115,15 +115,21 @@ fi
 echo
 
 # Preferences resolve through the state engine, not wm_config.py: the run-scoped
-# answer store lives in ~/.wingman and only wm-state.py reads it. Without a run
-# id there is no run layer to consult, so only the settings file can answer.
+# answer store lives in ~/.wingman and only wm-state.py reads it. The run id is
+# $WINGMAN_RUN_ID when genuinely set, else the harness-agnostic computed
+# identity (docs/analysis/2026-08-18-remove-bin-wingman-launcher-spec.md, §4.3)
+# - THIS process's own root-process identity, so it reflects whatever run is
+# actually invoking bin/config right now. Only when neither resolves is there
+# genuinely no run layer to consult, so only the settings file can answer.
 echo "onboarding preferences"
 _tab="$(printf '\t')"
-if [ -n "${WINGMAN_RUN_ID:-}" ]; then
-  PREF_ROWS="$(wm_state prefs-list --run-id "$WINGMAN_RUN_ID" --with-source 2>/dev/null)"
+WM_CONFIG_RUN_ID="${WINGMAN_RUN_ID:-}"
+[ -n "$WM_CONFIG_RUN_ID" ] || WM_CONFIG_RUN_ID="$(wm_harness_process_identity)" || WM_CONFIG_RUN_ID=""
+if [ -n "$WM_CONFIG_RUN_ID" ]; then
+  PREF_ROWS="$(wm_state prefs-list --run-id "$WM_CONFIG_RUN_ID" --with-source 2>/dev/null)"
 else
   PREF_ROWS="$($WM_CONFIG prefs 2>/dev/null | sed "s/\$/${_tab}config.local.toml/")"
-  row "(no WINGMAN_RUN_ID)" "" "not launched via bin/wingman, so no run-scoped answers"
+  row "(no run id resolvable)" "" "no launcher-minted or computable run id, so no run-scoped answers"
 fi
 for k in $WM_PREF_KEYS; do
   line="$(printf '%s\n' "$PREF_ROWS" | awk -F"$_tab" -v key="$k" '$1==key {print $2 "\t" $3; exit}')"

@@ -3,8 +3,8 @@ description: Confirm onboarding preferences (remote, artifact_linking, verbosity
 allowed-tools: AskUserQuestion, Bash(uv run --no-project --quiet bin/lib/wm-state.py prefs-list:*), Bash(uv run --no-project --quiet $WINGMAN_BIN/lib/wm-state.py prefs-list:*), Bash(uv run --no-project --quiet bin/lib/wm-state.py pref-set:*), Bash(uv run --no-project --quiet $WINGMAN_BIN/lib/wm-state.py pref-set:*)
 ---
 
-1. If `$WINGMAN_RUN_ID` is unset, do nothing and say nothing - this session was not launched via `bin/wingman`, so there is no run to scope answers to.
-2. Run `uv run --no-project --quiet $WINGMAN_BIN/lib/wm-state.py prefs-list --run-id "$WINGMAN_RUN_ID"` (if `$WINGMAN_BIN` is unset, fall back to `bin/lib/wm-state.py` resolved relative to this repo's own root) and diff its output against the five required keys: `remote`, `artifact_linking`, `verbosity`, `direct_spawn_visibility`, `pr_comments`.
+1. Resolve the run id every command below scopes answers to: `$WINGMAN_RUN_ID` when it is genuinely set (e.g. this session was launched via `bin/wingman`), else the harness-agnostic computed identity every command below embeds inline (`${WINGMAN_RUN_ID:-$(. $WINGMAN_BIN/lib/harness-identity.sh && wm_harness_process_identity)}`) - this session's own root-process identity, resolved the same way whether or not a launcher minted anything. Only when NEITHER resolves (e.g. `ps` itself unavailable) is there genuinely no run to scope answers to; in that case, do nothing and say nothing.
+2. Run `uv run --no-project --quiet $WINGMAN_BIN/lib/wm-state.py prefs-list --run-id "${WINGMAN_RUN_ID:-$(. $WINGMAN_BIN/lib/harness-identity.sh && wm_harness_process_identity)}"` (if `$WINGMAN_BIN` is unset, fall back to `bin/lib/wm-state.py` resolved relative to this repo's own root) and diff its output against the five required keys: `remote`, `artifact_linking`, `verbosity`, `direct_spawn_visibility`, `pr_comments`.
    These are the same keys `WM_PREF_KEYS` lists in `hooks/lib/pilot-prefs.sh`, which is what the guard enforces - if the two ever disagree, that file is authoritative and this one is stale.
    Its output already includes anything the settings file's `[prefs]` table answers (`config.local.toml`), which is exactly why it is what you diff against: those keys are answered and must not be asked again.
 3. If nothing is missing, do nothing. A fully-configured settings file makes this the normal outcome.
@@ -15,8 +15,8 @@ allowed-tools: AskUserQuestion, Bash(uv run --no-project --quiet bin/lib/wm-stat
    - **`direct_spawn_visibility`**: "For work you spawn directly (not through a lead) - like a software-analyst and reviewer going back and forth on a plan - do you want to see each substantive round as it happens, or just the final outcome?" - *Each round (a spawn, a verdict, feedback routed - the default)* (`each-round`) / *Summary only (just the terminal outcome)* (`summary-only`).
    - **`pr_comments`**: "May crew write to GitHub PRs on your behalf - submitting reviews, replying on PR threads, and marking PR provenance - or should all inter-agent review feedback stay on wingman's own channel (`bin/crew-say`) and off GitHub?" - *Keep it on wingman's channel (the default)* (`off`) / *Also write to GitHub PRs* (`on`). Off means a reviewer reports its verdict over wingman's own channel and a developer takes feedback the same way, with nothing posted to the PR; on restores the GitHub-native review flow. Crew auto-merge (a granted `allow_merge`) needs verifiable review evidence on the forge, so it requires `pr_comments=on` for that effort - see `playbooks/_delivery.md`'s "Merge authorization."
 
-   Then cache each answer:
-   `uv run --no-project --quiet $WINGMAN_BIN/lib/wm-state.py pref-set --run-id "$WINGMAN_RUN_ID" --key <key> --value <value>`
+   Then cache each answer, using the identical run-id resolution as step 2 so every answer lands under the same key it will be read back under:
+   `uv run --no-project --quiet $WINGMAN_BIN/lib/wm-state.py pref-set --run-id "${WINGMAN_RUN_ID:-$(. $WINGMAN_BIN/lib/harness-identity.sh && wm_harness_process_identity)}" --key <key> --value <value>`
 
    An answer cached this way outranks the settings file for the rest of the run, so it is also how the pilot changes their mind mid-run.
    Never write to `config.local.toml` yourself - it is the pilot's file.
