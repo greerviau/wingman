@@ -616,6 +616,60 @@ assert_eq "the floor still yields exactly one window (never fewer)" "$armed6dflo
 assert_contains "the invocation still exits with a clean, well-formed rollover, not a crash" "$out6dfloor" "window rolled"
 unset WM_CONTINUITY_TIMEOUT_MARGIN WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
 
+# --- (6e) The harness-agnostic computed identity (docs/analysis/2026-08-18-
+# remove-bin-wingman-launcher-spec.md, #4.3): every scenario above either
+# sets WINGMAN_RUN_ID explicitly or runs with it unset in an environment
+# with no real harness ancestor to compute from (wm_harness_process_identity
+# finds nothing and $WM_EFFECTIVE_RUN_ID falls back to "", the same as an
+# empty stamp) - so the computed-identity fallback stop-continuity.sh's own
+# 5 stamp sites (the in-flight marker, both $stopfile writers, and
+# $killstampfile) actually depend on has never been exercised against a
+# genuine harness ancestor. Runs the hook through wm_fake_harness_bin's
+# deterministic "claude" ancestor and checks two of the five sites - the
+# in-flight marker (written unconditionally near the top of every
+# invocation) and $killstampfile (the TERM-path writer already exercised in
+# (6b) above) - against an independently-computed identity for that SAME
+# ancestor process. All 5 sites read the one $WM_EFFECTIVE_RUN_ID resolved
+# once at source time (hooks/lib/watcher-liveness.sh), so proving it holds
+# the right value at two independent write sites covers the shared
+# resolution behind all five, not a per-site coincidence. ---
+new_home
+add_crew_window d6eid
+wm_state crew-set --id d6eid --status working --summary busy >/dev/null
+FAKE_CLAUDE6E="$(wm_fake_harness_bin claude)"
+CHILD6E="$(wm_mktemp_file)"
+cat > "$CHILD6E" <<EOF
+. '$TEST_REPO/bin/lib/harness-identity.sh'
+rid="\$(wm_harness_process_identity)" || exit 9
+[ -n "\$rid" ] || exit 9
+printf '%s\n' "\$rid" > '$WINGMAN_HOME/fake-claude-rid.txt'
+printf '{}' | bash '$HOOK' >'$WINGMAN_HOME/hook6e.out' 2>&1 &
+echo \$! > '$WINGMAN_HOME/hook6e.pid'
+wait
+EOF
+export WM_STOP_CONTINUITY_WINDOW=3
+export WM_STOP_CONTINUITY_LIFETIME=60
+"$FAKE_CLAUDE6E" "$CHILD6E" >"$WINGMAN_HOME/fake6e.out" 2>&1 &
+fc6e=$!; wm_track "$fc6e"
+assert_true "the fake-ancestor invocation computes its own rid" "wait_for_file '$WINGMAN_HOME/fake-claude-rid.txt'"
+_expected_rid6e="$(cat "$WINGMAN_HOME/fake-claude-rid.txt" 2>/dev/null)"
+assert_true "the computed rid is genuinely non-empty" "[ -n '$_expected_rid6e' ]"
+assert_true "the hook claims a cycle under the fake ancestor" "wait_for_file '$WINGMAN_HOME/watch.pid'"
+assert_true "the in-flight marker is stamped while the hook is alive" "wait_for_file '$WINGMAN_HOME/stop-continuity.pid'"
+_inflight_rid6e="$(head -n 1 "$WINGMAN_HOME/stop-continuity.pid" 2>/dev/null)"
+assert_eq "the in-flight marker is stamped with this run's own computed identity" "$_inflight_rid6e" "$_expected_rid6e"
+_hook6epid="$(cat "$WINGMAN_HOME/hook6e.pid" 2>/dev/null)"
+sleep 5   # comfortably past the 3s window, matching (6b)'s own gate above
+[ -n "$_hook6epid" ] && kill -TERM "$_hook6epid" 2>/dev/null
+assert_true "the hook exits" "wait_for_gone $_hook6epid 100"
+wait "$fc6e" 2>/dev/null
+assert_true "the TERM'd invocation stamps a run-scoped killstamp under the fake ancestor" "wait_for_file '$WINGMAN_HOME/stop-continuity.killstamp'"
+_killstamp_rid6e="$(head -n 1 "$WINGMAN_HOME/stop-continuity.killstamp" 2>/dev/null)"
+assert_eq "the killstamp shares the same computed identity as the in-flight marker above" "$_killstamp_rid6e" "$_expected_rid6e"
+_claimant6e="$(cat "$WINGMAN_HOME/watch.pid" 2>/dev/null)"
+[ -n "$_claimant6e" ] && kill "$_claimant6e" 2>/dev/null
+unset WM_STOP_CONTINUITY_WINDOW; export WM_STOP_CONTINUITY_LIFETIME=1
+
 # --- (7, rewritten for issue #231) The internal loop absorbs several windows
 # and rewakes exactly once, from a SINGLE invocation - the direct regression
 # for this issue: the old code produced one rewake PER window (three
