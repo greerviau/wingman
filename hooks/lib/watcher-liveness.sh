@@ -11,6 +11,30 @@
 # file defines all three near the top, identically) - not re-threaded through
 # every call for that reason.
 
+# wm_harness_process_identity only - deliberately NOT bin/lib/common.sh: both
+# callers of this file (hooks/stop-guard.sh, hooks/stop-continuity.sh) avoid
+# sourcing common.sh themselves (its own config.local.toml load is a real
+# `uv run` subprocess on any machine that has one), so this file does not
+# reach for it either. Self-derives its own path via BASH_SOURCE rather than
+# assuming a caller-set $REPO, since neither current caller defines one under
+# that exact name.
+# Tolerates a partial/broken install - see hooks/pilot-preferences-guard.sh's
+# identical-purpose line for why.
+_wlv_hi="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/bin/lib/harness-identity.sh"
+[ -r "$_wlv_hi" ] && . "$_wlv_hi"
+unset _wlv_hi
+
+# The run id every marker/kill-stamp predicate below compares against:
+# $WINGMAN_RUN_ID when genuinely set (a settable override), else the
+# harness-agnostic computed identity (docs/analysis/2026-08-18-remove-bin-
+# wingman-launcher-spec.md, §4.3) - the same substitution bin/watch-fleet's
+# own $RUNFILE stamping makes. Computed once, at source time (both callers
+# source this file once per hook invocation, and this process's own ancestry
+# never changes mid-invocation), rather than re-walking the process tree on
+# every predicate call.
+WM_EFFECTIVE_RUN_ID="${WINGMAN_RUN_ID:-}"
+[ -n "$WM_EFFECTIVE_RUN_ID" ] || WM_EFFECTIVE_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_EFFECTIVE_RUN_ID=""
+
 # The internal claim-wait-account loop's own budget constants (issue #231):
 # how long one hook invocation's lifetime defaults to, the minimum registered
 # `timeout` bin/doctor requires so that lifetime actually fits inside it, and
@@ -149,18 +173,25 @@ wm_pr_watch_up() {
 # that must read a marker's stamp BEFORE the marker itself is overwritten
 # (hooks/stop-continuity.sh's own in-flight-marker kill-evidence read claims
 # the file for itself a few lines after capturing this value - see issue
-# #278). True (rc 0) iff <stamp> matches $WINGMAN_RUN_ID, or either side is
-# empty (cannot certify ownership either way, so any stamp is honored - the
-# existing $stopfile precedent).
+# #278). True (rc 0) iff <stamp> matches $WM_EFFECTIVE_RUN_ID (this session's
+# own $WINGMAN_RUN_ID when genuinely exported, else the harness-agnostic
+# computed identity - see that variable's own comment near the top of this
+# file), or either side is empty (cannot certify ownership either way, so any
+# stamp is honored - the existing $stopfile precedent). Deliberately compares
+# against $WM_EFFECTIVE_RUN_ID, never a bare $WINGMAN_RUN_ID: an unset
+# WINGMAN_RUN_ID used to make this predicate unconditionally true for EVERY
+# stamp, including a genuinely different, still-live run's own real one - the
+# defect this fixes (docs/analysis/2026-08-18-remove-bin-wingman-launcher-
+# spec.md, §2).
 wm_run_scoped_stamp_active() {
   _stamp="$1"
-  [ -z "${WINGMAN_RUN_ID:-}" ] || [ -z "$_stamp" ] || [ "$_stamp" = "${WINGMAN_RUN_ID:-}" ]
+  [ -z "$WM_EFFECTIVE_RUN_ID" ] || [ -z "$_stamp" ] || [ "$_stamp" = "$WM_EFFECTIVE_RUN_ID" ]
 }
 
 # wm_run_scoped_marker_active <file>
 # True (rc 0) iff <file> exists and is honored for the CURRENT run: its
-# first line matches $WINGMAN_RUN_ID, or is empty, or this session has no
-# run id at all (cannot certify ownership either way, so any stamp is
+# first line matches $WM_EFFECTIVE_RUN_ID, or is empty, or this session has
+# no run id at all (cannot certify ownership either way, so any stamp is
 # honored - the existing $stopfile precedent). False (rc 1) if absent, or
 # stamped by a different, presumably-ended run. Reads only the first line,
 # so this works unmodified for a marker that carries extra content after its
