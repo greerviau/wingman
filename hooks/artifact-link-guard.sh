@@ -68,7 +68,11 @@ esac
 
 WM_RUN_ID="${WINGMAN_RUN_ID:-}"
 if [ -z "$WM_RUN_ID" ]; then
-  WM_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_RUN_ID=""
+  # command -v, not a bare call under 2>/dev/null - see hooks/pilot-
+  # preferences-guard.sh's identical block for why.
+  if command -v wm_harness_process_identity >/dev/null 2>&1; then
+    WM_RUN_ID="$(wm_harness_process_identity)" || WM_RUN_ID=""
+  fi
 fi
 
 printf '%s' "$INPUT" | \

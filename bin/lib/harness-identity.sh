@@ -80,21 +80,65 @@ WM_HARNESS_NAMES="claude codex grok opencode pi"
 #             source, dist/core/tools/bash.js, which calls Node's `spawn()`
 #             directly with an argv array, never a `shell: true`/string
 #             command).
-# All five are comfortably inside the walk's own bound. The claude/grok
-# results are the load-bearing case for a bound greater than 1: a compound or
-# piped real-world command defeats a shell's own tail-call exec optimization
+# All five are comfortably inside the walk's own bound (WM_HARNESS_WALK_MAX,
+# default 5 - 2x the worst live-verified case below). The claude/grok results
+# are the load-bearing case for a bound greater than 1: a compound or piped
+# real-world command defeats a shell's own tail-call exec optimization
 # (confirmed for claude's `sh -c`, which persisted as its own live process
 # rather than exec'ing away even for a bare, non-compound command - some
 # other property of how Claude Code invokes it, not the command shape,
 # defeats the optimization there), which is exactly why this walks a small
-# bound rather than assuming any one fixed depth.
+# bound rather than assuming any one fixed depth. The bound is deliberately
+# TIGHT, not generously large: this function sits on bin/watch-fleet's own
+# startup path (computed once per process, but that process is created
+# freely - every re-arm pays it), and the NO-MATCH case (no WINGMAN_RUN_ID,
+# no recognizable harness ancestor anywhere in this process's tree - the
+# shape any CI runner or test suite invocation actually has) always walks
+# the FULL bound before giving up, at roughly two `ps` forks per hop. Live-
+# measured: a bound of 12 (the original, unmeasured "generous" choice) added
+# enough latency to a `ps`-heavy CI runner to make a real, timing-sensitive
+# test (tests/stop-continuity-pr-watch.test.sh's re-arm-within-window check)
+# fail intermittently in CI specifically - reproduced by forcing the same
+# no-match shape locally (WM_HARNESS_NAMES set to a name nothing matches) and
+# confirming the test passes again once the walk is bounded to WM_HARNESS_
+# WALK_MAX=0 (near-zero latency) but not at the original 12. 5 keeps 2x
+# headroom over every live-verified real case (2 hops) plus the one
+# reasoned-but-unverified extra hop a compound command could add (3), while
+# cutting worst-case no-match latency well below what broke that test.
+#
+# Constraint on recognition (not just on the five installs verified above):
+# `ps -o comm=` reports the EXECUTED FILE's own basename, not argv[0] and not
+# a shebang script's own filename - a shebang interpreter's basename shows
+# instead (confirmed live: a plain `#!/usr/bin/env bash` or `#!/usr/bin/env
+# node` script named e.g. "claude" surfaces comm "bash"/"node", never
+# "claude"). Recognition by comm therefore requires the harness's own process
+# image to carry its own name - true of a native/compiled binary (codex,
+# grok, opencode, all vendored binaries here) or a runtime entry point that
+# explicitly sets its own process title (confirmed for pi:
+# dist/cli.js sets process.title early in startup, which is WHY `ps -o comm=`
+# reports "pi" rather than "node" for it - this is pi's own choice, not a
+# property every Node CLI gets for free). A shebang shim that does neither
+# would surface its interpreter's name and match nothing here - this codebase
+# ships no such install for any of the five today (verified per-harness
+# above), but a future or third-party install shaped that way would silently
+# get an unresolvable identity (see the walk's own final return-1 branch,
+# which traces this to stderr specifically for that reason).
+# Every failure path traces one line to stderr naming which of the four ways
+# this can fail actually happened - "at minimum" visibility for the no-match
+# case above (a shebang-shimmed install whose process image never carries
+# the harness's own name), so a silently unresolvable identity leaves
+# SOME trace rather than nothing. A caller in a context where this would be
+# noise (a per-tool-call hook that has already decided "no identity
+# resolvable" is an ordinary, expected outcome, not a diagnostic) is free to
+# redirect it away at the call site; none of the callers in this codebase do.
 wm_harness_process_identity() {
   _whpi_pid=$$
   _whpi_hops=0
-  _whpi_max="${WM_HARNESS_WALK_MAX:-12}"
+  _whpi_max="${WM_HARNESS_WALK_MAX:-5}"
   while [ "$_whpi_hops" -le "$_whpi_max" ]; do
     _whpi_comm="$(ps -o comm= -p "$_whpi_pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
     if [ -z "$_whpi_comm" ]; then
+      echo "wm_harness_process_identity: no such process (pid $_whpi_pid vanished mid-walk, or ps is unavailable) - no identity resolvable" >&2
       unset _whpi_pid _whpi_hops _whpi_max _whpi_comm
       return 1
     fi
@@ -106,18 +150,21 @@ wm_harness_process_identity() {
           unset _whpi_pid _whpi_hops _whpi_max _whpi_comm _whpi_lstart
           return 0
         fi
+        echo "wm_harness_process_identity: matched harness ancestor pid $_whpi_pid (comm=$_whpi_comm) but could not read its start time - no identity resolvable" >&2
         unset _whpi_pid _whpi_hops _whpi_max _whpi_comm _whpi_lstart
         return 1
         ;;
     esac
     _whpi_ppid="$(ps -o ppid= -p "$_whpi_pid" 2>/dev/null | tr -d ' ')"
     if [ -z "$_whpi_ppid" ] || [ "$_whpi_ppid" = 0 ] || [ "$_whpi_ppid" = "$_whpi_pid" ]; then
+      echo "wm_harness_process_identity: reached the top of the process tree (pid $_whpi_pid, comm=$_whpi_comm) after $_whpi_hops hop(s) with no recognized harness ancestor ($WM_HARNESS_NAMES) - no identity resolvable. If this process's own harness IS one of those five, its process image does not carry its own name (see this file's header comment on the comm-recognition constraint)." >&2
       unset _whpi_pid _whpi_hops _whpi_max _whpi_comm _whpi_ppid
       return 1
     fi
     _whpi_pid="$_whpi_ppid"
     _whpi_hops=$((_whpi_hops+1))
   done
+  echo "wm_harness_process_identity: walked the full bound (WM_HARNESS_WALK_MAX=$_whpi_max hops) from pid $$ with no recognized harness ancestor ($WM_HARNESS_NAMES) - no identity resolvable" >&2
   unset _whpi_pid _whpi_hops _whpi_max _whpi_comm
   return 1
 }
