@@ -247,7 +247,9 @@ kill -KILL "$_lock_holder_pid" 2>/dev/null
 wait "$_lock_holder_shell_pid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
-# --- a resume outside any wingman run exports an empty run id ------------------
+# --- a resume outside any wingman run: computed identity, not a relayed ------
+# --- empty (docs/analysis/2026-08-18-remove-bin-wingman-launcher-spec.md, ----
+# --- §4.3/§8 step 4) ----------------------------------------------------------
 test_new_home
 wm_trust_repo /tmp
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
@@ -255,14 +257,53 @@ wm_state crew-add --id r1b --type lead --objective x --repo /tmp --window wm-r1b
 wm_state crew-set --id r1b --status died >/dev/null
 _saved_run_id="${WINGMAN_RUN_ID:-}"
 unset WINGMAN_RUN_ID
-out="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" "$CR" r1b 2>&1)"
-[ -n "$_saved_run_id" ] && export WINGMAN_RUN_ID="$_saved_run_id"
+
+# No recognizable harness ancestor within the bounded walk either (forced via
+# WM_HARNESS_WALK_MAX=0): the one genuine "cannot resolve a run id at all"
+# case - see hooks/pilot-preferences-guard.sh's identical-purpose test for
+# the full rationale.
+out="$(WM_AGENT_BIN_OVERRIDE="$ALIVE_STUB" WM_HARNESS_WALK_MAX=0 "$CR" r1b 2>&1)"
 assert_contains "resume without a run id still resumes" "$out" "1 resumed"
 launch="$(cat "$WINGMAN_HOME/crew/r1b.resume.sh")"
-assert_contains "no run id in the resuming environment exports empty" \
+assert_contains "no run id resolvable at all: exports empty" \
   "$launch" "export WINGMAN_RUN_ID=''"
 assert_contains "a resumed lead's crew type is lead" \
   "$launch" "export WINGMAN_CREW_TYPE='lead'"
+
+tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
+
+# No WINGMAN_RUN_ID exported, but a computed identity DOES resolve - the
+# no-launcher path this spec's whole design targets. Fresh state (a new
+# crew member, a new test_new_home) rather than reusing r1b: crew-resume
+# skips an already-live endpoint rather than duplicating it, so replaying
+# the exact same window/member from the case above would silently no-op the
+# second resume and leave `launch` reading the FIRST case's stale content.
+# Run through a deterministic fake "claude" ancestor (wm_fake_harness_bin)
+# rather than relying on whatever this test suite's own real parent process
+# happens to be, so the assertion holds regardless of how these tests are
+# invoked.
+test_new_home
+wm_trust_repo /tmp
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+wm_state crew-add --id r1c --type lead --objective x --repo /tmp --window wm-r1c --session-id sess-r1c >/dev/null
+wm_state crew-set --id r1c --status died >/dev/null
+FAKE_CLAUDE="$(wm_fake_harness_bin claude)"
+CHILD_SCRIPT="$(wm_mktemp_file)"
+# Not `quote` (bin/lib/common.sh): this file never sources it for real - the
+# only `.` mentioning that path elsewhere here is inside a heredoc writing a
+# DIFFERENT script's content, not a sourcing statement in this file's own
+# shell. $ALIVE_STUB/$CR are plain, space-free fixture paths, so a literal
+# single-quote wrap is safe without the general-purpose escaping quote()
+# provides.
+cat > "$CHILD_SCRIPT" <<EOF
+WM_AGENT_BIN_OVERRIDE='$ALIVE_STUB' '$CR' r1c
+EOF
+out="$("$FAKE_CLAUDE" "$CHILD_SCRIPT" 2>&1)"
+[ -n "$_saved_run_id" ] && export WINGMAN_RUN_ID="$_saved_run_id"
+assert_contains "computed identity: resume still resumes" "$out" "1 resumed"
+launch="$(cat "$WINGMAN_HOME/crew/r1c.resume.sh")"
+assert_not_contains "computed identity: never exports the empty-string run id" \
+  "$launch" "export WINGMAN_RUN_ID=''"
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- idempotency guard 1: --all-died twice resumes zero the second time -------

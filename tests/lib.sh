@@ -53,6 +53,28 @@ _wm_tmpl() { printf '%s/wm-test.%s.%s.' "$_WM_TMP_BASE" "${WM_TEST_RUN_ID:-x}" "
 wm_mktemp_dir()  { mktemp -d "$(_wm_tmpl)XXXXXXXX"; }
 wm_mktemp_file() { mktemp    "$(_wm_tmpl)XXXXXXXX"; }
 
+# wm_fake_harness_bin <name>
+# Creates a REAL executable literally named <name> (a byte copy of bash, in
+# its own throwaway wm_mktemp_dir) and prints its path. Used to give a
+# command a deterministic, recognizable harness-CLI ancestor for
+# wm_harness_process_identity (bin/lib/harness-identity.sh) regardless of
+# what this test suite's own real parent process happens to be - live-
+# confirmed that `ps -o comm=` reflects the EXECUTED FILE's own basename on
+# Linux, not argv[0] (`exec -a NAME cmd` does not change it) and not a
+# shebang script's own filename (the interpreter's basename shows instead) -
+# so faking an ancestor recognizable by name requires a real binary under
+# that literal name, not a wrapper script. The returned path behaves exactly
+# like bash (same binary, different filename): run a command through it with
+# `<path> -c '...'` to give that command's own process tree a
+# "claude"/"codex"/"grok"/"opencode"/"pi" ancestor.
+wm_fake_harness_bin() {
+  _wfhb_dir="$(wm_mktemp_dir)"
+  _wfhb_bin="$_wfhb_dir/$1"
+  cp "$(command -v bash)" "$_wfhb_bin"
+  chmod +x "$_wfhb_bin"
+  printf '%s\n' "$_wfhb_bin"
+}
+
 # Each test gets its own throwaway state home and a tmux session name that does
 # not exist (so the watcher's reconcile step is skipped - no live windows to check
 # against - and a test never disturbs the real fleet).

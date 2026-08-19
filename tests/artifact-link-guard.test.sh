@@ -131,9 +131,38 @@ wm_state pref-set --run-id run-link --key artifact_linking --value artifact >/de
 
 _saved_run_id="$WINGMAN_RUN_ID"
 unset WINGMAN_RUN_ID
+# No WINGMAN_RUN_ID exported, and nothing cached under whatever computed
+# identity applies here: condition B still correctly defaults to local. This
+# assertion alone does not prove the fix (a computed identity legitimately
+# has nothing cached for it either) - see the computed-identity case below,
+# which pre-caches the preference under the exact value the guard will
+# compute and confirms it is now genuinely enforced.
 out="$(run_guard "bin/lib/wm-state.py crew-set --id m1 --status review --artifact $NEW_DOC")"
-assert_eq "no WINGMAN_RUN_ID: never gated (condition B defaults to local)" "$out" ""
+assert_eq "no WINGMAN_RUN_ID, nothing cached under the computed identity: never gated" "$out" ""
 export WINGMAN_RUN_ID="$_saved_run_id"
+
+# No WINGMAN_RUN_ID exported, but artifact_linking=artifact IS cached under
+# the computed identity - the actual defect this spec fixes (docs/analysis/
+# 2026-08-18-remove-bin-wingman-launcher-spec.md, §2: "no run id -> hook
+# produces no output, exit 0 - the publish requirement is silently never
+# checked"). Run through a deterministic fake "claude" ancestor
+# (wm_fake_harness_bin) so the identical computed identity is shared across
+# both the pref-set below (which learns the value by computing it itself)
+# and the guard's own independent computation of it - proving the mechanism
+# end to end, not just that some arbitrary run id happens to already match.
+FAKE_CLAUDE="$(wm_fake_harness_bin claude)"
+CHILD_SCRIPT="$(wm_mktemp_file)"
+cat > "$CHILD_SCRIPT" <<EOF
+. '$TEST_REPO/bin/lib/harness-identity.sh'
+rid="\$(wm_harness_process_identity)" || exit 9
+[ -n "\$rid" ] || exit 9
+uv run --no-project --quiet '$TEST_REPO/bin/lib/wm-state.py' pref-set --run-id "\$rid" --key artifact_linking --value artifact >/dev/null
+printf '{"tool_name":"Bash","session_id":"$SID","cwd":"$WORK","tool_input":{"command":"bin/lib/wm-state.py crew-set --id m1 --status review --artifact $NEW_DOC"}}' | bash '$GUARD'
+EOF
+out="$("$FAKE_CLAUDE" "$CHILD_SCRIPT" 2>&1)"
+assert_contains "computed identity: artifact_linking=artifact cached under it is now enforced" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "computed identity: the denial names the deliverable" "$out" "$NEW_DOC"
 
 unset WINGMAN_CREW_ID
 out="$(run_guard "bin/lib/wm-state.py crew-set --id m1 --status review --artifact $NEW_DOC")"

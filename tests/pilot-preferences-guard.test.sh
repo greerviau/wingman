@@ -317,8 +317,35 @@ test_new_home
 export CLAUDE_PROJECT_DIR="$TEST_REPO"
 
 unset WINGMAN_RUN_ID
-out="$(run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
-assert_eq "no WINGMAN_RUN_ID (not launched via bin/wingman): no-op" "$out" ""
+# The one genuine "cannot certify a run at all" case (docs/analysis/2026-08-
+# 18-remove-bin-wingman-launcher-spec.md, §4.3): no WINGMAN_RUN_ID exported
+# AND no recognizable harness ancestor within the bounded walk, forced here
+# via WM_HARNESS_WALK_MAX=0 (the walk gives up after checking only this
+# process itself, which is never a match). Distinct from an unset
+# WINGMAN_RUN_ID alone, which used to be conflated with this case (the
+# defect the spec's own live audit found) - a bare no-launcher session
+# almost always DOES have a recognizable ancestor, covered next.
+out="$(WM_HARNESS_WALK_MAX=0 run_tool Edit "{\"file_path\":\"$TEST_REPO/x.py\"}")"
+assert_eq "no run id resolvable at all (forced): no-op" "$out" ""
+
+# No WINGMAN_RUN_ID exported, but a computed identity DOES resolve - the
+# no-launcher path this spec's whole design targets. Run through a
+# deterministic fake "claude" ancestor (wm_fake_harness_bin) rather than
+# relying on whatever this test suite's own real parent process happens to
+# be, so the assertion holds regardless of how these tests are invoked. The
+# guard is now ACTIVE (denies) even though no launcher ever minted a run id.
+FAKE_CLAUDE="$(wm_fake_harness_bin claude)"
+CHILD_SCRIPT="$(wm_mktemp_file)"
+cat > "$CHILD_SCRIPT" <<EOF
+printf '{"tool_name":"Edit","session_id":"$SID","tool_input":{"file_path":"$TEST_REPO/x.py"}}' | bash "$GUARD"
+EOF
+out="$("$FAKE_CLAUDE" "$CHILD_SCRIPT")"
+assert_contains "computed identity (no launcher, real harness ancestor): now denies" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "computed identity: the pref-set escape hatch names a real run id" \
+  "$out" "pref-set --run-id "
+assert_not_contains "computed identity: never the empty-string run id shape" \
+  "$out" "pref-set --run-id  --key"
 
 export WINGMAN_RUN_ID="run-guard2"
 export WINGMAN_CREW_ID=w1 WINGMAN_CREW_TYPE=developer
