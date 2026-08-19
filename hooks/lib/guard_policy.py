@@ -1715,28 +1715,33 @@ def _foreground_watcher_denial_reason(dialect):
 
 def _wm_effective_run_id():
     """The run id this guard's own ownership checks compare against:
-    $WINGMAN_RUN_ID when genuinely set (a settable override), else the
-    harness-agnostic computed identity - bin/lib/harness-identity.sh's
-    wm_harness_process_identity (docs/analysis/2026-08-18-remove-bin-
-    wingman-launcher-spec.md, §4.3), the same substitution every bash
-    consumer of the run id makes. Shelled out to rather than reimplemented
-    here, so there is exactly one ancestor-walk implementation to keep
-    correct - this module already pays a subprocess per invocation for
-    other checks (e.g. `gh`), and this specific call site (the standdown
-    marker check) fires only when a `watch-fleet` arm is actually being
-    attempted, not on every tool call. Empty when neither resolves (e.g. the
-    helper script is missing, or no recognizable harness ancestor is found
-    within its own bounded walk).
+    $WINGMAN_RUN_ID when genuinely set (a settable override), else
+    $WM_EFFECTIVE_RUN_ID when a shallow entry point has already resolved it
+    (hooks/no-foreground-watcher-guard.sh in bash, hooks/lib/
+    guard_dispatch.py in Python - both call bin/lib/harness-identity.sh's
+    wm_harness_process_identity at their OWN natural depth from the harness
+    and export/set the result, even when empty, so its mere presence in
+    os.environ means "already resolved, trust it"), else this module's own
+    fallback shell-out (review round 2: measured live at 6 hops from HERE
+    when this fallback fires - bash -c the walk spawns -> python3 -> uv ->
+    the command-substitution subshell -> the hook script -> claude's own
+    sh -c wrapper -> claude - one more than the walk's own bound, which is
+    why the two shallow entry points now pre-resolve instead of ever
+    reaching this branch in production; this remains only for a caller that
+    invokes evaluate_no_foreground_watcher_guard directly, bypassing both).
+    Empty when nothing resolves (e.g. the helper script is missing, or no
+    recognizable harness ancestor is found within its own bounded walk).
     """
     run_id = os.environ.get("WINGMAN_RUN_ID") or ""
     if run_id:
         return run_id
+    if "WM_EFFECTIVE_RUN_ID" in os.environ:
+        return os.environ["WM_EFFECTIVE_RUN_ID"]
     helper = os.path.join(_REPO_ROOT, "bin", "lib", "harness-identity.sh")
     try:
-        # stderr NOT suppressed: wm_harness_process_identity traces its own
-        # reason to stderr on a genuine no-match (bin/lib/harness-identity.sh)
-        # - swallowing it here would defeat that visibility for this
-        # consumer specifically.
+        # No stderr handling needed: wm_harness_process_identity traces its
+        # own reason to a log file, never stderr (bin/lib/harness-
+        # identity.sh) - nothing here to suppress or preserve either way.
         r = subprocess.run(
             ["bash", "-c", '. "$1" && wm_harness_process_identity', "harness-identity", helper],
             stdout=subprocess.PIPE, timeout=5)

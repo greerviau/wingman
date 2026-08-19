@@ -47,7 +47,8 @@ import json
 import os
 import sys
 
-from guard_policy import GuardDenied, GuardInput, evaluate_no_direct_edit_guard, \
+from guard_policy import GuardDenied, GuardInput, _wm_effective_run_id, \
+    evaluate_no_direct_edit_guard, \
     evaluate_no_foreground_poll_loop_guard, evaluate_no_foreground_watcher_guard, \
     evaluate_no_merge_guard, evaluate_no_watcher_kill_guard, evaluate_no_worker_spawn_guard, \
     evaluate_spawn_pause_guards
@@ -359,6 +360,23 @@ def main():
     if unknown:
         print("error: unknown guard(s): %s" % ", ".join(unknown), file=sys.stderr)
         sys.exit(2)
+
+    # Resolve WM_EFFECTIVE_RUN_ID once, here, at this process's own natural
+    # depth from the harness (review round 2) - only when foreground-watcher
+    # is actually requested, the one guard that needs it (the standdown-
+    # marker check). Without this, guard_policy._wm_effective_run_id()'s own
+    # fallback would shell out from wherever evaluate_no_foreground_watcher_
+    # guard happens to be called, which is this exact same process anyway
+    # for guard_dispatch.py - but resolving and CACHING it into os.environ
+    # here (even when empty) means a second call within the same process
+    # never re-walks. hooks/no-foreground-watcher-guard.sh (claude's own
+    # entry point) does the identical thing in bash, from ITS OWN process,
+    # for the same reason - see that file's comment for why claude
+    # specifically needed this (guard_policy.py's own shell-out, called from
+    # deep inside its nested python/uv chain, measured 6 hops from the
+    # harness there).
+    if "foreground-watcher" in guard_names:
+        os.environ["WM_EFFECTIVE_RUN_ID"] = _wm_effective_run_id()
 
     try:
         data = json.load(sys.stdin)
