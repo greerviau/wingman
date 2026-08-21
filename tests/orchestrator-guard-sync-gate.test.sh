@@ -146,34 +146,31 @@ rm -f "$STUB_DESC"
 # bootstrap.sh itself (which has none). hooks/lib/guard_dispatch.py's own
 # _orchestrator_bootstrap_gate is that caller for the four non-Claude
 # dialects, and every real descriptor among them already has an empty
-# continuity transport - no stub needed. codex is used here as one
-# representative; the mechanism is dialect-independent.
+# continuity transport - no stub needed. opencode is used here (not
+# codex/pi) specifically because its own reconcile needs no real binary on
+# PATH at all (bin/lib/guard-transport.sh's own _wm_gt_sync_opencode never
+# checks `wm_have`) - this section runs unconditionally, on every machine
+# including CI, rather than SKIPping wherever the real CLI happens to be
+# absent (review round 1: a codex-gated version of this section SKIPped in
+# CI and never actually ran there).
 test_new_home
 MIRROR_E="$(wm_mktemp_dir)/mirror-notice-real"
 mk_mirror "$MIRROR_E"
-# tests/lib.sh's default WM_AGENT_BIN_OVERRIDE (a harmless stub with no
-# --dangerously-bypass-hook-trust in its own --help) would otherwise win
-# over the real codex binary this section needs - see tests/agent-pi-guard-
-# transport.test.sh's identical unset for the same reason.
 unset WM_AGENT_BIN_OVERRIDE
-if ! command -v codex >/dev/null 2>&1; then
-  echo "  SKIP - no real codex binary on PATH in this environment"
-else
-GUARDS_E="$(uv run --no-project --quiet "$TEST_REPO/bin/lib/hook_manifest.py" --print-guards codex --repo "$MIRROR_E")"
-payload_e='{"tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"'"$MIRROR_E"'"}'
-CODEX_HOME_E="$(wm_mktemp_dir)"
+GUARDS_E="$(uv run --no-project --quiet "$TEST_REPO/bin/lib/hook_manifest.py" --print-guards opencode --repo "$MIRROR_E")"
+payload_e='{"tool":"bash","args":{"command":"ls"},"cwd":"'"$MIRROR_E"'"}'
+HOME_E="$(wm_mktemp_dir)"
 
 out_e1="$(printf '%s' "$payload_e" | \
-  CODEX_HOME="$CODEX_HOME_E" WINGMAN_RUN_ID="gate-e" WINGMAN_CREW_ID="" \
-  uv run --no-project --quiet "$MIRROR_E/hooks/lib/guard_dispatch.py" --dialect codex --guards "$GUARDS_E" 2>&1)"; rc_e1=$?
-assert_true "codex orchestrator: the first tool call is denied ONCE, as the notice" "[ $rc_e1 -eq 2 ]"
+  HOME="$HOME_E" WINGMAN_RUN_ID="gate-e" WINGMAN_CREW_ID="" \
+  uv run --no-project --quiet "$MIRROR_E/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$GUARDS_E" 2>&1)"; rc_e1=$?
+assert_true "opencode orchestrator: the first tool call is denied ONCE, as the notice" "[ $rc_e1 -eq 2 ]"
 assert_contains "the notice text names the continuity gap" "$out_e1" "has not been built"
 
 out_e2="$(printf '%s' "$payload_e" | \
-  CODEX_HOME="$CODEX_HOME_E" WINGMAN_RUN_ID="gate-e" WINGMAN_CREW_ID="" \
-  uv run --no-project --quiet "$MIRROR_E/hooks/lib/guard_dispatch.py" --dialect codex --guards "$GUARDS_E" 2>&1)"; rc_e2=$?
-assert_true "codex orchestrator: reissuing the identical command now proceeds (notice consumed)" "[ $rc_e2 -eq 0 ]"
-assert_eq "the reissued call's own output carries no leftover notice text" "$out_e2" ""
-fi
+  HOME="$HOME_E" WINGMAN_RUN_ID="gate-e" WINGMAN_CREW_ID="" \
+  uv run --no-project --quiet "$MIRROR_E/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$GUARDS_E" 2>&1)"; rc_e2=$?
+assert_true "opencode orchestrator: reissuing the identical command now proceeds (notice consumed)" "[ $rc_e2 -eq 0 ]"
+assert_eq "the reissued call's own output carries the explicit allow verdict (opencode has no silent-allow contract)" "$out_e2" '{"decision": "allow"}'
 
 test_summary
