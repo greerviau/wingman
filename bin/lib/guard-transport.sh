@@ -114,13 +114,29 @@ _wm_gt_verify_allow() {
 # this self-test is the one new failure mode that reaches a live system
 # (claude-json is the only branch reachable in real use today - the
 # continuity gate refuses every other adapter before this ever runs there).
+#
+# WM_GUARD_SELFTEST=1 is exported around both fixture calls specifically so
+# hooks/lib/guard_dispatch.py's own orchestrator-bootstrap gate (docs/
+# analysis/2026-08-18-remove-bin-wingman-launcher-spec.md §4.5) recognizes
+# this exact invocation as a self-test fixture, not a real tool call, and
+# skips the gate outright. Without this, a self-test run FROM INSIDE the
+# orchestrator's own bootstrap (this function is what wm_guard_transport_sync
+# calls, which orchestrator-bootstrap.sh calls) would recurse forever: the
+# fixture's own synthetic payload can satisfy _is_orchestrator_session's
+# cwd/crew_id check exactly like a genuine orchestrator command would, so the
+# self-test's OWN dispatcher invocation would re-enter the bootstrap gate,
+# find no cache entry yet (the outer bootstrap is still mid-flight, still
+# producing that very entry), and re-run the ENTIRE bootstrap - including
+# another self-test - unboundedly. Reproduced live before this fix: a bare
+# codex orchestrator's first tool call hung past a 2-minute timeout instead
+# of returning a verdict.
 wm_guard_transport_selftest() {
   _wgt_dialect="$1"; shift
 
   _wgt_stderr_tmp="$(mktemp)"
 
   _wgt_deny_fixture="$(_wm_gt_fixture "$_wgt_dialect" deny)"
-  _wgt_deny_out="$(printf '%s' "$_wgt_deny_fixture" | "$@" 2>"$_wgt_stderr_tmp")"
+  _wgt_deny_out="$(printf '%s' "$_wgt_deny_fixture" | WM_GUARD_SELFTEST=1 "$@" 2>"$_wgt_stderr_tmp")"
   _wgt_deny_rc=$?
   _wgt_deny_err="$(cat "$_wgt_stderr_tmp" 2>/dev/null)"
 
@@ -132,7 +148,7 @@ wm_guard_transport_selftest() {
   fi
 
   _wgt_allow_fixture="$(_wm_gt_fixture "$_wgt_dialect" allow)"
-  _wgt_allow_out="$(printf '%s' "$_wgt_allow_fixture" | "$@" 2>"$_wgt_stderr_tmp")"
+  _wgt_allow_out="$(printf '%s' "$_wgt_allow_fixture" | WM_GUARD_SELFTEST=1 "$@" 2>"$_wgt_stderr_tmp")"
   _wgt_allow_rc=$?
   _wgt_allow_err="$(cat "$_wgt_stderr_tmp" 2>/dev/null)"
   rm -f "$_wgt_stderr_tmp"

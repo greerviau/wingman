@@ -27,6 +27,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/hooks/orchestrator-guard-sync-gate.sh\""
+          },
+          {
+            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/hooks/pilot-preferences-guard.sh\""
           }
         ]
@@ -35,6 +39,10 @@
     "SessionStart": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/hooks/session-init.sh\""
+          },
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/hooks/pilot-preferences-nudge.sh\""
@@ -55,6 +63,6 @@
     ]
   },
   "permissions": {
-    "allow": ["Bash(bin/crew-standdown:*)", "Bash($WINGMAN_BIN/crew-standdown:*)"]
+    "allow": ["Bash(bin/crew-standdown:*)"]
   }
 }
