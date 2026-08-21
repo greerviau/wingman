@@ -219,16 +219,32 @@ def _is_orchestrator_session(gi):
     orchestrator alone). Mirrors hooks/pilot-preferences-guard.sh's own
     wm_is_wingman_repo_session gating (WINGMAN_CREW_ID unset AND the
     session's own project root is this exact checkout), ported to Python
-    since this is where the four non-Claude dialects' own equivalent lives."""
+    since this is where the four non-Claude dialects' own equivalent lives.
+
+    Containment (cwd is the repo root OR a path underneath it), not
+    equality: a real tool call's cwd is the payload's own `cwd` field
+    (build_guard_input's fallback chain, ultimately os.getcwd() when the
+    payload carries none), and a model working from a repo SUBDIRECTORY -
+    an entirely ordinary thing to do mid-session - has a cwd that is never
+    equal to the repo root even though it is unambiguously the same
+    orchestrator session. An equality check made every such tool call
+    silently skip the whole bootstrap gate (no reconcile, no self-pane, no
+    tmux-guardian, no notice) and - worse - made a FAILED bootstrap's own
+    fail-closed deny escapable simply by cd'ing into a subdirectory, exactly
+    backwards from this gate's own fail-closed intent. Live-reproduced
+    (review round 1) against --dialect codex: cwd <repo> bootstraps and
+    writes <identity>.outcome; cwd <repo>/bin wrote nothing at all."""
     if gi.crew_id:
         return False
     cwd = gi.cwd or ""
     if not cwd:
         return False
     try:
-        return os.path.realpath(cwd) == os.path.realpath(_repo_root())
+        real_cwd = os.path.realpath(cwd)
+        real_repo = os.path.realpath(_repo_root())
     except OSError:
         return False
+    return real_cwd == real_repo or real_cwd.startswith(real_repo + os.sep)
 
 
 # The two commands a bootstrap denial's own reason text names as the way
