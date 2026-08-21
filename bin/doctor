@@ -916,6 +916,20 @@ _wm_gt_check() {
     unset _wgtc_agent _wgtc_out
     return
   fi
+  # A missing binary (codex/pi's own reconcile genuinely needs the real CLI
+  # on PATH; grok/opencode need neither, so this branch for them is never a
+  # missing-binary case) is an environment fact, not a problem doctor found
+  # - reported at wm_warn's own "optional, skip" tone throughout, never
+  # escalated to wm_err's red X the way a genuinely broken install is below.
+  # Retrying would not help (the binary is still absent), so no offer to fix
+  # is made for this specific case.
+  case "$_wgtc_out" in
+    *"is not on PATH"*)
+      wm_warn "$_wgtc_agent's guard transport ($WM_AGENT_GUARD_TRANSPORT) skipped - $_wgtc_out"
+      unset _wgtc_agent _wgtc_out
+      return
+      ;;
+  esac
   wm_warn "$_wgtc_agent's guard transport ($WM_AGENT_GUARD_TRANSPORT) is not installed/verified: $_wgtc_out"
   do_it=0
   if [ "$AUTO_YES" = 1 ]; then
