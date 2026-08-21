@@ -643,7 +643,7 @@ while :; do
   # guard across a long lifetime" in the plan for why a stamp fixed at entry
   # would go stale mid-lifetime and let a concurrent instance in.
   printf '%s\n%s\n' "$WM_EFFECTIVE_RUN_ID" "$$" > "$inflightfile"
-  _body=""; _mode=""; _continue=0; _quiet=""
+  _body=""; _mode=""; _continue=0; _quiet=""; _claim_failed=0
 
   # Re-claiming here is only safe because the PREVIOUS iteration's
   # --classify (below) already consumed $exitfile - bin/watch-fleet itself
@@ -726,6 +726,27 @@ while :; do
   _reaped_pr_child="$pr_child"
   child=""; referee=""; pr_child=""
 
+  # Computed here, before child's own three-signal check below, rather than
+  # only afterward alongside the rest of pr_child's accounting: the shared
+  # reaping loop above kills whichever of child/pr_child is still alive the
+  # instant the OTHER one exits, so a pr_child that fires with an already-
+  # decided verdict (a PR already merged/closed by the time this iteration's
+  # very first poll runs) reliably force-closes child before it can finish
+  # arming - not just under contention, though contention (this hook's own
+  # startup, wm_harness_process_identity's ps-walk, the claim-lock mkdir
+  # retries) makes child's own arm sequence slow enough that it loses this
+  # race far more often. Without this, that race's own kill of child is
+  # indistinguishable from a genuine watch-fleet malfunction to the
+  # three-signal check below (nonzero child_rc, no armed-pid line, no
+  # exitfile - exactly what an interrupted-mid-claim child also looks like),
+  # so it fires the "did not claim... investigate manually" alarm every time
+  # pr_child happens to resolve first - a false positive, not a real
+  # operational problem: the PR's own decisive verdict is what the model
+  # needs next, and re-arming watch-fleet for THIS iteration was never going
+  # to matter once that verdict is in hand.
+  _pr_fire_reason=""
+  [ -n "$_reaped_pr_child" ] && _pr_fire_reason="$(grep -E '^(merged|closed|changes-requested|ci-failed|conflict|comment|merge-ready|checks-passed): ' "$pr_out" 2>/dev/null | tail -n 1)"
+
   # Account for the outcome. A nonzero $child_rc with no $exitfile is NOT by
   # itself proof the child never claimed - the identical pair also results
   # from a child that claimed and armed successfully, then died some other
@@ -764,15 +785,34 @@ while :; do
   #
   # None of the three is sufficient alone; together they leave no gap a
   # genuinely-armed child's own death - by any mechanism - can fall through.
-  if [ ! -f "$exitfile" ] && [ "$child_rc" -ne 0 ] \
+  _child_unclaimed=0
+  [ ! -f "$exitfile" ] && [ "$child_rc" -ne 0 ] \
     && [ "$term_forwarded" -ne 1 ] \
     && [ "$(cat "$pidfile" 2>/dev/null)" != "$_reaped_child" ] \
-    && ! grep -q "armed pid=$_reaped_child " "$armlog" 2>/dev/null; then
+    && ! grep -q "armed pid=$_reaped_child " "$armlog" 2>/dev/null \
+    && _child_unclaimed=1
+  if [ "$_child_unclaimed" -eq 1 ] && [ -z "$_pr_fire_reason" ]; then
     touch "$claimfailfile"
     _body="Automatic watcher re-arm failed: bin/watch-fleet did not claim within the continuity window. Last output:
 $(tail -n 20 "$armlog")
 Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
     _mode="manual-remedy"
+  elif [ "$_child_unclaimed" -eq 1 ]; then
+    # child never proved it claimed, but pr_child fired with a decisive
+    # verdict in this SAME iteration - the shared reaping loop above kills
+    # whichever of the two is still alive the instant the other exits, so an
+    # already-decided PR (merged/closed by the time pr_child's very first
+    # poll runs) routinely force-closes a child that is still mid-arm, not
+    # just under contention (which mainly makes child's own arm sequence
+    # slow enough to lose this race far more often). That is not a watch-
+    # fleet malfunction - re-arming for THIS iteration was never going to
+    # matter once the PR's own verdict is in hand - so neither the alarm
+    # above nor --classify's own "genuinely spurious" accounting (which
+    # would count it as one of the 3 consecutive strikes toward a standdown,
+    # exactly the false trip this branch exists to avoid) applies here.
+    # $_body/$_mode stay at their loop-top empty default; the pr_child
+    # accounting below supplies the entire rewake from $_pr_fire_reason.
+    :
   else
     classify_out="$(WINGMAN_HOME="$WM_HOME" "$REPO/bin/watch-fleet" --classify --owner "$OWNER" 2>/dev/null)"
     case "$classify_out" in
