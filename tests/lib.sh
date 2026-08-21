@@ -259,7 +259,7 @@ wm_track() { WM_TRACKED_PIDS="$WM_TRACKED_PIDS $1"; }
 WM_TRACKED_TMUX=""
 wm_track_tmux() { WM_TRACKED_TMUX="$WM_TRACKED_TMUX $1"; }
 
-# Stop a guardian a real bin/wingman invocation spawned against the CURRENT
+# Stop a guardian a real orchestrator-bootstrap invocation spawned against the CURRENT
 # $WINGMAN_HOME, right away rather than waiting for this file's own
 # end-of-run cleanup (_wm_live_guardian_pids/wm_cleanup_all, above) to reap
 # it. The guardian polls the box's real default tmux socket (it has no
@@ -267,9 +267,9 @@ wm_track_tmux() { WM_TRACKED_TMUX="$WM_TRACKED_TMUX $1"; }
 # forking a handful of tmux/ps processes every couple of seconds - genuinely
 # real, continuous background load for however long it survives, which is
 # otherwise "until this whole file's trap fires," not "until the one
-# assertion that needed it is done." A test invoking real bin/wingman
-# (tests/session-guard-hook-sync.test.sh) should call this immediately after
-# each such invocation, before its assertions even run.
+# assertion that needed it is done." A test invoking a real orchestrator
+# bootstrap (tests/session-guard-hook-sync.test.sh) should call this
+# immediately after each such invocation, before its assertions even run.
 wm_stop_guardian() { "$TEST_REPO/bin/lib/tmux-guardian.sh" --stop 2>/dev/null; }
 
 # Every $WINGMAN_HOME test_new_home has ever pointed at in this file (see
@@ -300,7 +300,7 @@ _wm_live_watch_pids() {
 # tmux-guardian.pid (issue #218). Kept as a separate helper, not folded into
 # the one above, because it is a genuinely different daemon with a different
 # lifecycle - but it needs the identical treatment: any test that runs a
-# real bin/wingman (e.g. tests/session-guard-hook-sync.test.sh) launches one
+# real orchestrator bootstrap (e.g. tests/session-guard-hook-sync.test.sh) launches one
 # of these as a deliberately detached, scope-wrapped background process (the
 # whole point of the guardian is to survive a death nothing else in its
 # tmux server survives), so nothing about a normal test teardown (killing
@@ -382,7 +382,7 @@ wm_cleanup_all() {
   [ -n "$WM_TRACKED_PIDS" ] && kill $WM_TRACKED_PIDS 2>/dev/null
   # Unlike a watch-fleet pid (expected to already have been stopped by the
   # test's own explicit `--stop` call, so this loop is purely a backstop), no
-  # test here knows to stop a guardian a real bin/wingman invocation happened
+  # test here knows to stop a guardian a real orchestrator bootstrap invocation happened
   # to spawn - so it gets an explicit, immediate TERM (its own trap handles
   # it in well under the 5s wait-then-SIGKILL window below) rather than
   # sitting through the full grace window on every such test for no reason.

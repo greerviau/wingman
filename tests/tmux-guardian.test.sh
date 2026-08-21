@@ -284,34 +284,38 @@ assert_not_contains "the logged heartbeat is NOT already the new server's" "$_ft
 kill_server_and_wait "$SOCK"
 
 # --- 9 (MUST-FIX 1, review round 1): the guardian must survive being
-# launched exactly the way bin/wingman launches it - scope-wrapped AND
-# setsid'd, from INSIDE the very tmux pane whose server later dies - not
-# from this test script's own, unrelated shell the way every assertion
-# above does. Without setsid, systemd-run's cgroup isolation is real but
-# irrelevant: the process is still a member of the pane's terminal session,
-# and when that pane's tmux server dies, the kernel sends SIGHUP to the
-# session's foreground process group. A guardian trapping only TERM/INT
-# dies silently, writing nothing - the exact failure this whole file was
-# blind to before this case existed, since launching it from the test
-# script's own shell never put it in the pane's session in the first place.
+# launched exactly the way the orchestrator's own bootstrap (bin/lib/
+# orchestrator-bootstrap.sh) launches it - scope-wrapped AND setsid'd, from
+# INSIDE the very tmux pane whose server later dies - not from this test
+# script's own, unrelated shell the way every assertion above does. Without
+# setsid, systemd-run's cgroup isolation is real but irrelevant: the process
+# is still a member of the pane's terminal session, and when that pane's
+# tmux server dies, the kernel sends SIGHUP to the session's foreground
+# process group. A guardian trapping only TERM/INT dies silently, writing
+# nothing - the exact failure this whole file was blind to before this case
+# existed, since launching it from the test script's own shell never put it
+# in the pane's session in the first place.
 #
 # (Review round 2, must-fix B.) The launch command is not hand-copied here:
-# it is extracted, verbatim, from bin/wingman's own source text. A hand-
-# transcribed duplicate would keep passing even if bin/wingman's real line
-# regressed (e.g. setsid silently dropped again) - confirmed as a real gap
-# by the reviewer, who removed setsid from bin/wingman and left this test
-# untouched: the suite stayed 100% green. Extracting the real line means
-# any such regression makes the grep below find nothing, which fails loudly
-# instead of testing a line bin/wingman no longer actually runs.
+# it is extracted, verbatim, from bin/lib/orchestrator-bootstrap.sh's own
+# source text (formerly bin/wingman's, before that launcher was retired -
+# docs/analysis/2026-08-18-remove-bin-wingman-launcher-spec.md - the exact
+# same launch line just moved files verbatim). A hand-transcribed duplicate
+# would keep passing even if the real line regressed (e.g. setsid silently
+# dropped again) - confirmed as a real gap by a reviewer who once removed
+# setsid from the source and left a hand-copied test untouched: the suite
+# stayed 100% green. Extracting the real line means any such regression
+# makes the grep below find nothing, which fails loudly instead of testing
+# a line the source no longer actually runs.
 #
 # Skipped, not silently passed, if systemd-run/the user D-Bus isn't
-# available here - the same condition bin/wingman itself checks.
+# available here - the same condition the bootstrap itself checks.
 if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${XDG_RUNTIME_DIR}/systemd/private" ]; then
-  _wingman_launch_line="$(grep -F 'systemd-run --user --scope --collect --quiet -- setsid "$WM_LIB/tmux-guardian.sh" --daemon' "$TEST_REPO/bin/wingman")"
+  _wingman_launch_line="$(grep -F 'systemd-run --user --scope --collect --quiet -- setsid "$WM_LIB/tmux-guardian.sh" --daemon' "$TEST_REPO/bin/lib/orchestrator-bootstrap.sh")"
   if [ -z "$_wingman_launch_line" ]; then
-    fail "bin/wingman's guardian launch line was not found verbatim (it may have regressed, or this test's expected text is stale)"
+    fail "bin/lib/orchestrator-bootstrap.sh's guardian launch line was not found verbatim (it may have regressed, or this test's expected text is stale)"
   else
-    ok "bin/wingman's guardian launch line still contains setsid"
+    ok "bin/lib/orchestrator-bootstrap.sh's guardian launch line still contains setsid"
 
     SOCK2="wm-test-guardian-launch-${WM_TEST_RUN_ID:-x}-$$"
     wm_on_exit "tmux -L '$SOCK2' kill-server >/dev/null 2>&1"
@@ -327,20 +331,20 @@ if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ 
     LAUNCH_PID1="$(tmux -L "$SOCK2" list-sessions -F '#{pid}' 2>/dev/null | head -n1)"
     [ -n "$LAUNCH_PID1" ] || fail "launchsess started"
 
-    # $WM_LIB is bin/wingman's own name for bin/lib/ (set by common.sh,
-    # which a bare pane never sources) - exported here as its own statement,
-    # NOT as a same-line "VAR=val cmd" prefix, so the EXTRACTED line's own
-    # "$WM_LIB/tmux-guardian.sh" reference actually resolves to the real
-    # script when the pane's shell evaluates it. A prefix assignment
-    # (`WM_LIB='...' systemd-run ... "$WM_LIB/..."`) does NOT work here -
-    # argument expansion happens in the pane's shell before that prefix
-    # takes effect for the child, so "$WM_LIB" would still resolve to
-    # whatever it was beforehand (empty), not the just-assigned value.
-    # Confirmed directly: that shape produces `setsid: failed to execute
-    # /tmux-guardian.sh: No such file or directory` - the exact silent
-    # failure this test saw before this fix (WM_LIB must be a real,
-    # already-exported shell variable, exactly as it is inside bin/wingman
-    # itself by the time its own line runs).
+    # $WM_LIB is bin/lib/orchestrator-bootstrap.sh's own name for bin/lib/
+    # (set by common.sh, which a bare pane never sources) - exported here as
+    # its own statement, NOT as a same-line "VAR=val cmd" prefix, so the
+    # EXTRACTED line's own "$WM_LIB/tmux-guardian.sh" reference actually
+    # resolves to the real script when the pane's shell evaluates it. A
+    # prefix assignment (`WM_LIB='...' systemd-run ... "$WM_LIB/..."`) does
+    # NOT work here - argument expansion happens in the pane's shell before
+    # that prefix takes effect for the child, so "$WM_LIB" would still
+    # resolve to whatever it was beforehand (empty), not the just-assigned
+    # value. Confirmed directly: that shape produces `setsid: failed to
+    # execute /tmux-guardian.sh: No such file or directory` - the exact
+    # silent failure this test saw before this fix (WM_LIB must be a real,
+    # already-exported shell variable, exactly as it is inside bin/lib/
+    # orchestrator-bootstrap.sh itself by the time its own line runs).
     tmux -L "$SOCK2" send-keys -t "$LAUNCHSESS" \
       "export WINGMAN_HOME='$LAUNCHHOME'; export WM_GUARDIAN_TMUX_ARGS='-L $SOCK2'; export WM_GUARDIAN_INTERVAL=0.2; export WM_LIB='$TEST_REPO/bin/lib'; $_wingman_launch_line" Enter
 

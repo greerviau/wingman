@@ -199,9 +199,11 @@ kill "$rc4pid" 2>/dev/null
 tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 
 # --- Remote Control disconnect, wingman-side (ask 2): detect-only, never inject --
-# bin/wingman registers $TMUX_PANE into $WM_HOME/self-pane at startup; here the
-# registration is simulated directly (the unit under test is watch-fleet's own
-# read-only check, not bin/wingman's write). Scoped to the owner "" cycle only.
+# The orchestrator's own bootstrap (bin/lib/orchestrator-bootstrap.sh)
+# registers $TMUX_PANE into $WM_HOME/self-pane on its first tool call; here
+# the registration is simulated directly (the unit under test is watch-
+# fleet's own read-only check, not the bootstrap's write). Scoped to the
+# owner "" cycle only.
 test_new_home
 tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
 tmux new-window -d -t "$WM_TMUX_SESSION" -n wm_self_pane 'printf "Remote Control disconnected - Transport closed: this connection is no longer usable\n"; sleep 600'

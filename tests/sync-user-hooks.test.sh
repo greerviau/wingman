@@ -5,9 +5,9 @@
 # ~/.claude/settings.json - every settings path here is a throwaway tmp file.
 # The manifest/bin-doctor equality test (the drift proof) lives in
 # tests/doctor.test.sh instead, alongside doctor's own hook-registration
-# assertions; the session-creation wiring (bin/wingman, bin/spawn-crew,
-# bin/crew-resume all reconcile before they start a session, and refuse if
-# they can't) lives in tests/session-guard-hook-sync.test.sh.
+# assertions; the session-creation wiring (the orchestrator's own bootstrap,
+# bin/spawn-crew, bin/crew-resume all reconcile before they start a session,
+# and refuse if they can't) lives in tests/session-guard-hook-sync.test.sh.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
