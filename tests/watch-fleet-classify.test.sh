@@ -158,17 +158,22 @@ wm_track "$livepid3"
 echo "$livepid3" > "$WINGMAN_HOME/watch.pid"
 : > "$WINGMAN_HOME/watch.beat"
 stamp_ownerlock "$livepid3"
-# Stamp RUNFILE to match this arm's own $WINGMAN_RUN_ID - exactly what a
+# Stamp RUNFILE to match this arm's own effective run id - exactly what a
 # genuine arm's claim step writes (see bin/watch-fleet) - rather than leaving
 # it absent. The run-id ownership check (#162) compares the fabricated
-# cycle's stamp against the arming side's own run id: an absent/mismatched
-# stamp reads this cycle as foreign and replaces it, discarding the pending
-# `fire` record below (issue #170). Self-referencing $WINGMAN_RUN_ID here,
-# not a hardcoded empty value, keeps this fixture correct whether or not
-# test_new_home's own neutralization of WINGMAN_RUN_ID is in effect.
+# cycle's stamp against the arming side's own effective run id: a
+# mismatched stamp reads this cycle as foreign and replaces it, discarding
+# the pending `fire` record below (issue #170) - this test is about the
+# write-priority race, not run-id computation, so both sides are forced to
+# the one value that is guaranteed to match regardless of what real harness
+# ancestor happens to be running this suite: genuinely empty, via
+# WM_HARNESS_WALK_MAX=0 on the arm below (docs/analysis/2026-08-18-remove-
+# bin-wingman-launcher-spec.md, §4.3 - with no launcher-minted $WINGMAN_RUN_ID
+# in this run-id-neutralized fixture, the arm would otherwise fall back to a
+# real computed identity that this hardcoded empty stamp could never match).
 printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$WINGMAN_HOME/watch.run"
 printf 'fire\n' > "$WINGMAN_HOME/watch-exit"
-out="$(wm_timeout 10 "$WF" 2>&1)"
+out="$(WM_HARNESS_WALK_MAX=0 wm_timeout 10 "$WF" 2>&1)"
 assert_contains "the redundant arm reports healthy (does not start a rival)" "$out" "healthy"
 assert_eq "the fire record is never clobbered by the racing healthy write" "$(cat "$WINGMAN_HOME/watch-exit" 2>/dev/null)" "fire"
 kill "$livepid3" 2>/dev/null

@@ -232,6 +232,57 @@ printf '%s\n%s\n' "some-other-run" "the watcher for this session has died 3 time
 out="$(run_hook 'bin/watch-fleet' true)"
 assert_eq "allowed: a foreign-run standdown marker is treated as inactive" "$out" ""
 
+# No WINGMAN_RUN_ID exported, but the standdown marker IS stamped under the
+# exact computed identity (docs/analysis/2026-08-18-remove-bin-wingman-
+# launcher-spec.md, §4.3) - bin/watch-fleet's own $SUPPRESSEDFILE stamp
+# already falls back to the computed identity when unset, so this guard's
+# own reimplementation of the ownership check must too, or a genuinely
+# current standdown would read as foreign and silently stop blocking the
+# re-arm it exists to prevent. Run through a deterministic fake "claude"
+# ancestor (wm_fake_harness_bin) so the marker's own stamp and the guard's
+# independent computation share the identical value.
+_saved_run_id="$WINGMAN_RUN_ID"
+unset WINGMAN_RUN_ID
+FAKE_CLAUDE="$(wm_fake_harness_bin claude)"
+CHILD_SCRIPT="$(wm_mktemp_file)"
+cat > "$CHILD_SCRIPT" <<EOF
+. '$TEST_REPO/bin/lib/harness-identity.sh'
+rid="\$(wm_harness_process_identity)" || exit 9
+[ -n "\$rid" ] || exit 9
+printf '%s\n%s\n' "\$rid" "the watcher for this session has died 3 times in a row (test remedy text)" > '$WINGMAN_HOME/watch.suppressed'
+uv run --no-project --quiet python -c '
+import json, sys
+print(json.dumps({"tool_name": "Bash", "tool_input": {"command": "bin/watch-fleet", "run_in_background": True}}))
+' | bash '$HOOK'
+EOF
+out="$("$FAKE_CLAUDE" "$CHILD_SCRIPT" 2>&1)"
+export WINGMAN_RUN_ID="$_saved_run_id"
+assert_contains "computed identity: a current-run standdown is now correctly enforced" \
+  "$out" '"permissionDecision": "deny"'
+assert_contains "computed identity: denial names the standdown in force" \
+  "$out" "A spurious-repeated failure-budget standdown is in force"
+
+# The complementary case, through the identical fallback path: WINGMAN_RUN_ID
+# still unset (computed-identity fallback in play, same fake "claude"
+# ancestor as above), but the marker is stamped under a rid that is NOT this
+# run's own computed identity. The "current-run" case just above cannot, by
+# itself, rule out a broken comparison that denies on "a marker file exists"
+# alone regardless of whose run it names - only a marker that must be read as
+# foreign under this exact fallback path proves the guard actually compares
+# rather than just detecting presence.
+unset WINGMAN_RUN_ID
+CHILD_SCRIPT2="$(wm_mktemp_file)"
+cat > "$CHILD_SCRIPT2" <<EOF
+printf '%s\n%s\n' "definitely-a-foreign-run-id" "the watcher for this session has died 3 times in a row (test remedy text)" > '$WINGMAN_HOME/watch.suppressed'
+uv run --no-project --quiet python -c '
+import json, sys
+print(json.dumps({"tool_name": "Bash", "tool_input": {"command": "bin/watch-fleet", "run_in_background": True}}))
+' | bash '$HOOK'
+EOF
+out="$("$FAKE_CLAUDE" "$CHILD_SCRIPT2" 2>&1)"
+export WINGMAN_RUN_ID="$_saved_run_id"
+assert_eq "computed identity: a foreign standdown marker under the same fallback path is treated as inactive" "$out" ""
+
 # Re-arm the CURRENT-run marker for the remaining checks in this section.
 printf '%s\n%s\n' "$WINGMAN_RUN_ID" "the watcher for this session has died 3 times in a row (test remedy text)" > "$WINGMAN_HOME/watch.suppressed"
 

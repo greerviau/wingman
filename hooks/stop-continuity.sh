@@ -367,7 +367,7 @@ fi
 if [ -n "$inflight_pid" ] && kill -0 "$inflight_pid" 2>/dev/null && [ "$inflight_age" -lt $(( window + 60 )) ]; then
   exit 0   # a genuinely concurrent instance is already managing continuity for this owner
 fi
-printf '%s\n%s\n' "${WINGMAN_RUN_ID:-}" "$$" > "$inflightfile"
+printf '%s\n%s\n' "$WM_EFFECTIVE_RUN_ID" "$$" > "$inflightfile"
 # Cleared unconditionally on every clean exit (issue #248) - the
 # harness-timeout scenario is now witnessed directly by the TERM/INT trap
 # below, which stamps $killstampfile BEFORE this process ever reaches its
@@ -551,7 +551,7 @@ else
 fi
 case "$classify_out" in
   stopped)
-    printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
+    printf '%s\n' "$WM_EFFECTIVE_RUN_ID" > "$stopfile"
     exit 0 ;;
   spurious-repeated\ *)
     # --classify has already written $suppressedfile (the trip branch's own
@@ -632,7 +632,7 @@ child=""; referee=""; pr_child=""; term_forwarded=0
 trap 'term_forwarded=1
   _elapsed=$(( $(date +%s) - hook_start ))
   if [ "$_elapsed" -ge "$window" ]; then
-    printf "%s\n%s\n" "${WINGMAN_RUN_ID:-}" "$_elapsed" > "$killstampfile"
+    printf "%s\n%s\n" "$WM_EFFECTIVE_RUN_ID" "$_elapsed" > "$killstampfile"
   fi
   kill -TERM $child $referee $pr_child 2>/dev/null' TERM INT
 
@@ -642,7 +642,7 @@ while :; do
   # invocation can now live many multiples of $window - see "The concurrency
   # guard across a long lifetime" in the plan for why a stamp fixed at entry
   # would go stale mid-lifetime and let a concurrent instance in.
-  printf '%s\n%s\n' "${WINGMAN_RUN_ID:-}" "$$" > "$inflightfile"
+  printf '%s\n%s\n' "$WM_EFFECTIVE_RUN_ID" "$$" > "$inflightfile"
   _body=""; _mode=""; _continue=0; _quiet=""
 
   # Re-claiming here is only safe because the PREVIOUS iteration's
@@ -788,7 +788,7 @@ Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
         _body="$(compose_attention_reason)"
         _mode="auto" ;;
       stopped)
-        printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$stopfile"
+        printf '%s\n' "$WM_EFFECTIVE_RUN_ID" > "$stopfile"
         _body=""; _mode="" ;;
       healthy)
         _body=""; _mode="" ;;

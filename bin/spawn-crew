@@ -385,10 +385,22 @@ LAUNCH="$WM_HOME/crew/$ID.launch.sh"
   echo "export WINGMAN_HOME=$(quote "$WM_HOME")"
   # The current wingman run's id, so this member can tell whether a cached
   # preferences.json answer was written during this same run (still valid) or a
-  # stale prior one (must ask again). Empty if wingman wasn't
-  # launched via bin/wingman (no run id stamped) - a member then treats the cache
-  # as never valid, the same conservative default as a missing/unreadable file.
-  echo "export WINGMAN_RUN_ID=$(quote "${WINGMAN_RUN_ID:-}")"
+  # stale prior one (must ask again). $WINGMAN_RUN_ID when this process (the
+  # orchestrator's own session, spawning this member) genuinely has one set (a
+  # settable override - existing test fixtures depend on setting it directly),
+  # else computed fresh via wm_harness_process_identity (docs/analysis/2026-
+  # 08-18-remove-bin-wingman-launcher-spec.md, §4.3) - NOT relayed verbatim
+  # from this process's own possibly-empty $WINGMAN_RUN_ID the way it used to
+  # be: this process is itself a subprocess of the same orchestrator harness
+  # process every other consumer of the identity resolves to, so computing it
+  # fresh here yields the identical value a launcher-minted run would have
+  # exported, cascading correctly to this member instead of relaying an empty
+  # one. Empty only when NEITHER resolves (e.g. `ps` itself unavailable) - a
+  # member then treats the cache as never valid, the same conservative
+  # default as a missing/unreadable file.
+  _wm_spawn_run_id="${WINGMAN_RUN_ID:-}"
+  [ -n "$_wm_spawn_run_id" ] || _wm_spawn_run_id="$(wm_harness_process_identity)" || _wm_spawn_run_id=""
+  echo "export WINGMAN_RUN_ID=$(quote "$_wm_spawn_run_id")"
   echo "export WINGMAN_CREW_ID=$(quote "$ID")"
   # The crew type (playbook name), so a hook or the member itself can distinguish
   # an orchestrator role (e.g. lead) from a worker role without re-deriving it.

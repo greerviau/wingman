@@ -1713,6 +1713,45 @@ def _foreground_watcher_denial_reason(dialect):
     )
 
 
+def _wm_effective_run_id():
+    """The run id this guard's own ownership checks compare against:
+    $WINGMAN_RUN_ID when genuinely set (a settable override), else
+    $WM_EFFECTIVE_RUN_ID when a shallow entry point has already resolved it
+    (hooks/no-foreground-watcher-guard.sh in bash, hooks/lib/
+    guard_dispatch.py in Python - both call bin/lib/harness-identity.sh's
+    wm_harness_process_identity at their OWN natural depth from the harness
+    and export/set the result, even when empty, so its mere presence in
+    os.environ means "already resolved, trust it"), else this module's own
+    fallback shell-out (review round 2: measured live at 6 hops from HERE
+    when this fallback fires - bash -c the walk spawns -> python3 -> uv ->
+    the command-substitution subshell -> the hook script -> claude's own
+    sh -c wrapper -> claude - one more than the walk's own bound, which is
+    why the two shallow entry points now pre-resolve instead of ever
+    reaching this branch in production; this remains only for a caller that
+    invokes evaluate_no_foreground_watcher_guard directly, bypassing both).
+    Empty when nothing resolves (e.g. the helper script is missing, or no
+    recognizable harness ancestor is found within its own bounded walk).
+    """
+    run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+    if run_id:
+        return run_id
+    if "WM_EFFECTIVE_RUN_ID" in os.environ:
+        return os.environ["WM_EFFECTIVE_RUN_ID"]
+    helper = os.path.join(_REPO_ROOT, "bin", "lib", "harness-identity.sh")
+    try:
+        # No stderr handling needed: wm_harness_process_identity traces its
+        # own reason to a log file, never stderr (bin/lib/harness-
+        # identity.sh) - nothing here to suppress or preserve either way.
+        r = subprocess.run(
+            ["bash", "-c", '. "$1" && wm_harness_process_identity', "harness-identity", helper],
+            stdout=subprocess.PIPE, timeout=5)
+        if r.returncode == 0:
+            return r.stdout.decode().strip()
+    except Exception:
+        pass
+    return ""
+
+
 def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="claude"):
     """Port of hooks/no-foreground-watcher-guard.sh's python block. See that
     file's own header comment for the full history and the false-deny-only
@@ -1833,7 +1872,7 @@ def evaluate_no_foreground_watcher_guard(gi, run_in_background=False, dialect="c
                 _marker_lines = _marker_content.split("\n", 1)
                 _stamp = _marker_lines[0] if _marker_lines else ""
                 _body = _marker_lines[1] if len(_marker_lines) > 1 else ""
-                _run_id = os.environ.get("WINGMAN_RUN_ID") or ""
+                _run_id = _wm_effective_run_id()
                 if not _run_id or not _stamp or _stamp == _run_id:
                     _count_match = re.search(r"died (\d+) times", _body)
                     _count_clause = " (%s deaths in a row)" % _count_match.group(1) if _count_match else ""

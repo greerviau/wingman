@@ -72,8 +72,26 @@ assert_not_contains "engine unusable: does not ask questions it cannot cache" \
 test_new_home
 export CLAUDE_PROJECT_DIR="$TEST_REPO"
 unset WINGMAN_RUN_ID
-out="$(run_nudge startup)"
-assert_eq "no WINGMAN_RUN_ID: no output" "$out" ""
+# The one genuine "cannot certify a run at all" case - see hooks/pilot-
+# preferences-guard.sh's identical-purpose test for the full rationale.
+out="$(WM_HARNESS_WALK_MAX=0 run_nudge startup)"
+assert_eq "no run id resolvable at all (forced): no output" "$out" ""
+
+# No WINGMAN_RUN_ID exported, but a computed identity DOES resolve - see
+# hooks/pilot-preferences-guard.sh's identical-purpose test for the full
+# rationale and wm_fake_harness_bin's own doc comment (tests/lib.sh).
+FAKE_CLAUDE="$(wm_fake_harness_bin claude)"
+CHILD_SCRIPT="$(wm_mktemp_file)"
+cat > "$CHILD_SCRIPT" <<EOF
+printf '{"session_id":"sess-nudge","source":"startup"}' | bash "$NUDGE"
+EOF
+out="$("$FAKE_CLAUDE" "$CHILD_SCRIPT")"
+assert_contains "computed identity (no launcher, real harness ancestor): now emits" \
+  "$out" '"additionalContext"'
+assert_contains "computed identity: quotes the concrete absolute pref-set command" \
+  "$out" "$TEST_REPO/bin/lib/wm-state.py pref-set"
+assert_not_contains "computed identity: never the empty-string run id shape" \
+  "$out" "pref-set --run-id  --key"
 
 export WINGMAN_RUN_ID="run-nudge2"
 export WINGMAN_CREW_ID=w1

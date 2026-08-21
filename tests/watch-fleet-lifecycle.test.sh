@@ -52,15 +52,24 @@ outsame="$(WINGMAN_RUN_ID=run-old wm_timeout 45 "$WF" 2>&1)"
 assert_contains "same-run re-arm reports healthy" "$outsame" "healthy"
 assert_true "same-run re-arm leaves the cycle running" "kill -0 $oldpid"
 
-# No run id on the arming side: ownership cannot be certified, legacy healthy.
-# env -u makes this genuinely run-id-less regardless of what the invoking
-# session exports (issue #170) - test_new_home already unsets WINGMAN_RUN_ID,
-# but this test's whole point is the run-id-less path, so it asserts the
-# precondition directly rather than relying on that unset holding by the time
-# execution reaches here.
-outnone="$(wm_timeout 45 env -u WINGMAN_RUN_ID "$WF" 2>&1)"
-assert_contains "run-id-less arm keeps legacy healthy" "$outnone" "healthy"
-assert_true "run-id-less arm leaves the cycle running" "kill -0 $oldpid"
+# No run id on the arming side AND no recognizable harness ancestor within
+# the bounded walk (forced via WM_HARNESS_WALK_MAX=0): ownership genuinely
+# cannot be certified either way, so legacy healthy still holds - the one
+# case docs/analysis/2026-08-18-remove-bin-wingman-launcher-spec.md, §4.3
+# leaves unresolvable by design. env -u makes this genuinely run-id-less
+# regardless of what the invoking session exports (issue #170) -
+# test_new_home already unsets WINGMAN_RUN_ID, but this test's whole point is
+# the run-id-less path, so it asserts the precondition directly rather than
+# relying on that unset holding by the time execution reaches here.
+# WM_HARNESS_WALK_MAX=0 is what makes this genuinely unresolvable rather than
+# picking up whatever real harness ancestor happens to be running this test
+# suite itself - see the computed-identity case at the end of this section
+# for the no-WINGMAN_RUN_ID-but-computed path (the actual defect this spec
+# fixes: a bare, no-launcher `claude` session used to make EVERY live cycle
+# read as healthy, including a genuinely different run's own).
+outnone="$(WM_HARNESS_WALK_MAX=0 wm_timeout 45 env -u WINGMAN_RUN_ID "$WF" 2>&1)"
+assert_contains "no run id resolvable at all: legacy healthy" "$outnone" "healthy"
+assert_true "no run id resolvable at all: leaves the cycle running" "kill -0 $oldpid"
 
 # Different run id: the live foreign cycle is stopped and replaced in place.
 WINGMAN_RUN_ID=run-new "$WF" >"$WINGMAN_HOME/new.log" 2>&1 &
@@ -78,6 +87,56 @@ wm_state crew-set --id r1 --status done --summary "done e" >/dev/null
 sleep 3
 assert_false "the replacement cycle fires normally" "kill -0 $newpid"
 assert_contains "the replacement cycle printed the fire reason" "$(cat "$WINGMAN_HOME/new.log")" "done: r1"
+
+# --- no WINGMAN_RUN_ID, but a computed identity resolves: the actual defect --
+# --- this spec fixes (docs/analysis/2026-08-18-remove-bin-wingman-launcher- --
+# --- spec.md, §2/§4.3) -------------------------------------------------------
+# Self-contained (its own test_new_home/tmux setup) rather than threaded into
+# the narrative above, so it cannot disturb that section's own pid-tracking
+# assumptions. Before this fix, a bare no-launcher `claude` session (no
+# WINGMAN_RUN_ID exported, the residual path this whole migration targets)
+# made owner_lock_alive's run-id check unconditionally true - ANY live cycle
+# read as healthy, including one armed by a genuinely different, unrelated
+# run. Run through a deterministic fake "claude" ancestor
+# (wm_fake_harness_bin) rather than relying on whatever this test suite's own
+# real parent process happens to be, so the assertion holds regardless of how
+# these tests are invoked.
+test_new_home
+tmux new-session -d -s "$WM_TMUX_SESSION" -n _wm_idle
+tmux new-window -d -t "$WM_TMUX_SESSION" -n wm-r1 'sleep 600'
+wm_state crew-add --id r1 --type analyst --objective e --repo /tmp --window wm-r1 --session-id s21 >/dev/null
+wm_state crew-set --id r1 --status working --summary "busy" >/dev/null
+WINGMAN_RUN_ID=run-old-ci "$WF" >"$WINGMAN_HOME/old.log" 2>&1 &
+oldpid=$!
+wm_track "$oldpid"
+sleep 3
+assert_true "computed-identity case: run-old-ci's cycle is live" "kill -0 $oldpid"
+
+FAKE_CLAUDE="$(wm_fake_harness_bin claude)"
+CHILD_SCRIPT="$(wm_mktemp_file)"
+# Deliberately NOT `exec`: an exec would replace the fake-claude process's
+# own image (and its comm="claude" identity along with it) with watch-fleet
+# itself, losing the very ancestor wm_harness_process_identity's walk needs
+# to find. Running it as an ordinary foreground command instead forks a
+# child for it, leaving the fake-claude process alive as that child's real
+# parent - the shape the walk expects.
+cat > "$CHILD_SCRIPT" <<EOF
+env -u WINGMAN_RUN_ID $(quote "$WF")
+EOF
+# Not wm_timeout: replacement falls through to claim its own new cycle,
+# which blocks on future events like any other armed watcher (the same
+# reason the explicit-different-run-id case above backgrounds it with `&`
+# rather than waiting on it to exit).
+"$FAKE_CLAUDE" "$CHILD_SCRIPT" >"$WINGMAN_HOME/computed.log" 2>&1 &
+computedpid=$!
+wm_track "$computedpid"
+sleep 3
+outcomputed="$(cat "$WINGMAN_HOME/computed.log")"
+assert_contains "computed identity: a genuinely foreign cycle is detected, not adopted" \
+  "$outcomputed" "Replacing it with a cycle this run tracks"
+assert_contains "computed identity: the arm printed armed, never healthy" "$outcomputed" "watcher: armed"
+assert_false "computed identity: the foreign (run-old-ci) cycle no longer lives" "kill -0 $oldpid"
+assert_true "computed identity: the replacement cycle is live and blocking" "kill -0 $computedpid"
 
 # --- issue #214 §3.6: a nudge that can never be delivered still eventually --
 # flips the member stalled, via the refused-nudge escape hatch, rather than

@@ -105,11 +105,14 @@
 # rather than reporting it healthy forever. Read the printed status line -
 # `armed`, `healthy`, or a `blocked:/review:/done:/died:/stalled:` reason - as
 # the source of truth. `healthy` is run-scoped (#162): each cycle stamps its
-# arming session's $WINGMAN_RUN_ID, and an arm from a different run replaces a
-# live foreign cycle (an orphan from a prior, ended run cannot wake the
-# current session) instead of adopting it - it prints `armed`, never
+# arming session's run id (its own $WINGMAN_RUN_ID when genuinely exported,
+# else the harness-agnostic computed identity - see $WM_EFFECTIVE_RUN_ID's
+# own comment near the top of this file), and an arm from a different run
+# replaces a live foreign cycle (an orphan from a prior, ended run cannot
+# wake the current session) instead of adopting it - it prints `armed`, never
 # `healthy`, in that case. Only when the arming session has no run id at all
-# is a live cycle accepted as healthy without an ownership check.
+# (neither resolves) is a live cycle accepted as healthy without an
+# ownership check.
 #
 # Owner scope: each cycle watches exactly one owner's direct reports. Wingman arms
 # its own cycle (--owner "" - it has no $WINGMAN_CREW_ID) and never sees a lead's
@@ -170,6 +173,23 @@
 set -u
 . "$(dirname "$0")/lib/common.sh"
 . "$(dirname "$0")/lib/agent.sh"
+
+# The run id every stamp/ownership-check below uses: $WINGMAN_RUN_ID when
+# genuinely set (a settable override - existing test fixtures depend on
+# setting it directly, and it is what bin/wingman itself still exports
+# today), else the harness-agnostic computed identity (docs/analysis/2026-
+# 08-18-remove-bin-wingman-launcher-spec.md, §4.3) - the (pid, start-time) of
+# THIS process's own harness ancestor, reached the same way whether or not a
+# launcher minted anything. Resolved once, at startup, like SELF_BIN_DIR
+# below: it is a constant for this process's whole lifetime (this process's
+# own ancestry never changes mid-run), and every consumer below needs the
+# identical value, not a value that could drift between two computations
+# later in the same cycle. Empty only when neither resolves (no export AND no
+# recognizable harness ancestor within the bounded walk, e.g. `ps` itself
+# unavailable) - every consumer below already treats an empty value as "no
+# run id" the same way an unset $WINGMAN_RUN_ID always did.
+WM_EFFECTIVE_RUN_ID="${WINGMAN_RUN_ID:-}"
+[ -n "$WM_EFFECTIVE_RUN_ID" ] || WM_EFFECTIVE_RUN_ID="$(wm_harness_process_identity)" || WM_EFFECTIVE_RUN_ID=""
 
 # Resolved once, at startup (issue #237, part 1): the worktree-removal
 # self-check below tests this directory's continued existence every poll. A
@@ -797,7 +817,7 @@ case "$MODE" in
       # in the same breath always finds it.
       _srr_text="$(spurious_repeated_reason "$_count" "$_hint")"
       {
-        printf '%s\n' "${WINGMAN_RUN_ID:-}"
+        printf '%s\n' "$WM_EFFECTIVE_RUN_ID"
         printf '%s' "$_srr_text"
       } > "$SUPPRESSEDFILE"
       printf '0\n' > "$SPURCOUNTFILE"
@@ -1121,16 +1141,20 @@ takeover_kill() {
 # previous, now-ended wingman run can outlive its session (a child of
 # systemd --user, not of any tracked harness task); adopting it as healthy
 # leaves the current run permanently unwakeable while board.md looks fine.
-# Each claim below stamps its arming session's $WINGMAN_RUN_ID into $RUNFILE;
-# an arm whose own run id differs from the live cycle's stamp is looking at a
-# foreign cycle and replaces it via the supervised takeover_kill() above, then
-# falls through to claim its own tracked cycle. With no run id on the arming
-# side ($WINGMAN_RUN_ID unset - e.g. `claude` started directly, not via
-# bin/wingman) ownership cannot be certified either way, so legacy behavior
-# stands: a live cycle reads as healthy.
+# Each claim below stamps its arming session's $WM_EFFECTIVE_RUN_ID into
+# $RUNFILE; an arm whose own run id differs from the live cycle's stamp is
+# looking at a foreign cycle and replaces it via the supervised
+# takeover_kill() above, then falls through to claim its own tracked cycle.
+# $WM_EFFECTIVE_RUN_ID (computed once at startup, above) is $WINGMAN_RUN_ID
+# when genuinely exported, else the harness-agnostic computed identity
+# (docs/analysis/2026-08-18-remove-bin-wingman-launcher-spec.md, §4.3) - live
+# for every arming session regardless of whether a launcher minted anything,
+# which is what fixes this check's own pre-existing gap: with NEITHER
+# resolvable (ps itself unavailable) ownership cannot be certified either
+# way, so legacy behavior stands: a live cycle reads as healthy.
 if owner_lock_alive; then
   _lock_pid="$(sed -n '1p' "$OWNERLOCK/owner" 2>/dev/null)"
-  if [ -n "${WINGMAN_RUN_ID:-}" ] && [ "$(cat "$RUNFILE" 2>/dev/null)" != "$WINGMAN_RUN_ID" ]; then
+  if [ -n "$WM_EFFECTIVE_RUN_ID" ] && [ "$(cat "$RUNFILE" 2>/dev/null)" != "$WM_EFFECTIVE_RUN_ID" ]; then
     _old_run="$(cat "$RUNFILE" 2>/dev/null)"
     wm_warn "watcher: live cycle (pid $_lock_pid) was armed by run '${_old_run:-unknown}', not this run - its exit cannot wake this session. Replacing it with a cycle this run tracks."
     takeover_kill "$_lock_pid" "foreign"
@@ -1181,10 +1205,11 @@ fi
 # this rendering regardless of either process's own $TZ (issue #303).
 _ol_start="$(wm_ps_lstart "$$")"
 echo $$ > "$PIDFILE"
-# Stamp the arming session's run id (possibly empty) so a later arm from a
+# Stamp the arming session's run id (possibly empty, only when neither
+# $WINGMAN_RUN_ID nor the computed identity resolved) so a later arm from a
 # different run can recognize this cycle as foreign - see the singleton
 # guard's run-id ownership check above (#162).
-printf '%s\n' "${WINGMAN_RUN_ID:-}" > "$RUNFILE"
+printf '%s\n' "$WM_EFFECTIVE_RUN_ID" > "$RUNFILE"
 # The only way a record can still be present at a fresh claim is that a wake
 # was never classified - i.e. the record is the last remaining trace of an
 # event `fire()` already acked. For `fire`/`remote-control-dropped` this is a

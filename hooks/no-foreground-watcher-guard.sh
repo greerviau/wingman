@@ -142,7 +142,14 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
+REPO="$(dirname "$HERE")"
 WM_UV="${WM_UV:-uv run --no-project --quiet}"
+# wm_harness_process_identity only - deliberately NOT bin/lib/common.sh; see
+# hooks/pilot-preferences-guard.sh's identical comment for why (this hook
+# too fires on every Bash tool call, for every session on this machine).
+# Tolerates a partial/broken install - see hooks/pilot-preferences-guard.sh's
+# identical line for why.
+[ -r "$REPO/bin/lib/harness-identity.sh" ] && . "$REPO/bin/lib/harness-identity.sh"
 
 INPUT="$(cat)"
 
@@ -154,6 +161,29 @@ case "$INPUT" in
   *watch-fleet*|*pr-watch*) ;;
   *) exit 0 ;;
 esac
+
+# Resolve WM_EFFECTIVE_RUN_ID once, here, at THIS SCRIPT's own natural depth
+# from claude (2 hops: self -> the `sh -c <command>` Claude Code wraps every
+# hook command string in -> claude itself, the same claude row already
+# live-verified in docs/analysis/2026-08-19-issue-383-half-a-live-
+# verification.md) - review round 2 of #383's Half A found guard_policy.py's
+# own fallback shell-out, invoked from deep inside its nested python/uv
+# chain when called some other way (i.e. without this pre-resolution),
+# measures 6 hops from the harness, one more than WM_HARNESS_WALK_MAX's
+# bound allows. Exporting it here (even when empty) means guard_policy._wm_
+# effective_run_id() finds it already resolved and never re-walks from its
+# own, deeper, call site. hooks/lib/guard_dispatch.py (the shared entry
+# point for the four non-Claude dialects) does the identical thing in
+# Python, from ITS OWN process, for the same reason.
+if [ -z "${WM_EFFECTIVE_RUN_ID:-}" ]; then
+  WM_EFFECTIVE_RUN_ID="${WINGMAN_RUN_ID:-}"
+  if [ -z "$WM_EFFECTIVE_RUN_ID" ]; then
+    # 2>/dev/null guards "command not found" only - see hooks/pilot-
+    # preferences-guard.sh's identical block for why.
+    WM_EFFECTIVE_RUN_ID="$(wm_harness_process_identity 2>/dev/null)" || WM_EFFECTIVE_RUN_ID=""
+  fi
+fi
+export WM_EFFECTIVE_RUN_ID
 
 OUT="$(printf '%s' "$INPUT" | \
   PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}" $WM_UV python -c '
