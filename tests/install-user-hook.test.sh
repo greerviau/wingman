@@ -6,6 +6,12 @@
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
+# The two `bin/doctor -y` calls below exercise claude-hook registration only
+# - skip the orchestrator's own non-Claude guard-transport reconcile (a
+# real self-test subprocess per transport), unrelated here and covered in
+# tests/doctor-orchestrator-guard-transports.test.sh.
+export WM_DOCTOR_SKIP_ORCH_GUARD_TRANSPORTS=1
+
 INSTALLER="$TEST_REPO/bin/lib/install-user-hook.py"
 HOOK_PATH="$TEST_REPO/hooks/no-direct-edit-guard.sh"
 
