@@ -94,9 +94,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 WM_OB_AGENT=""
 WM_OB_REPO="$WM_REPO"
 while [ $# -gt 0 ]; do
+  # A flag as the LAST argument (no value following) must not reach `shift
+  # 2`: with only one positional argument left, `shift 2` fails (bash
+  # refuses to shift past the end) and leaves $1 unchanged, so the loop
+  # re-enters the same case branch forever. Checked up front instead.
   case "$1" in
-    --agent) WM_OB_AGENT="${2:-}"; shift 2 ;;
-    --repo)  WM_OB_REPO="${2:-}"; shift 2 ;;
+    --agent|--repo) [ $# -ge 2 ] || { printf 'usage: orchestrator-bootstrap.sh --agent <name> [--repo <path>] (%s needs a value)\n' "$1" >&2; exit 2; } ;;
+  esac
+  case "$1" in
+    --agent) WM_OB_AGENT="$2"; shift 2 ;;
+    --repo)  WM_OB_REPO="$2"; shift 2 ;;
     *) printf 'usage: orchestrator-bootstrap.sh --agent <name> [--repo <path>]\n' >&2; exit 2 ;;
   esac
 done
@@ -272,7 +279,7 @@ esac
 unset _gfc_out
 
 if [ -z "$WM_AGENT_CONTINUITY_TRANSPORT" ]; then
-  _ct_msg="the resolved orchestrator agent '$WM_AGENT_DISPLAY_NAME' has a guard transport ('$WM_AGENT_GUARD_TRANSPORT'), but wingman has no fleet-continuity transport built for it: nothing re-invokes this session after a blocking wait, so the wake loop ('bin/watch-fleet', armed as a background task after a Stop event) cannot run here, and this session cannot wake itself the way a claude orchestrator does. This is a capability that has not been built for '$WM_AGENT_DISPLAY_NAME', not one that was shown to be impossible. Everything else - guard enforcement, onboarding-preferences enforcement, crew spawning, status commands - works normally. If you need fleet continuity, run wingman's orchestrator on Claude Code instead."
+  _ct_msg="the resolved orchestrator agent '$WM_AGENT_DISPLAY_NAME' has a guard transport ('$WM_AGENT_GUARD_TRANSPORT'), but wingman has no fleet-continuity transport built for it: nothing re-invokes this session after a blocking wait, so the wake loop ('bin/watch-fleet', armed as a background task after a Stop event) cannot run here, and this session cannot wake itself the way a claude orchestrator does. This is a capability that has not been built for '$WM_AGENT_DISPLAY_NAME', not one that was shown to be impossible. Guard enforcement, crew spawning, and status commands all work normally regardless. Onboarding-preferences and Artifact-publish enforcement do NOT: like fleet continuity, both are claude-only today (project-scoped hooks and the /prefs skill exist only for claude) - not silently absent, just not yet built for this CLI either. If you need fleet continuity or preferences enforcement, run wingman's orchestrator on Claude Code instead."
   if [ -n "$_notice" ]; then
     _notice="$_notice
 
