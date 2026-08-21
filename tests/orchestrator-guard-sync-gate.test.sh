@@ -173,4 +173,33 @@ out_e2="$(printf '%s' "$payload_e" | \
 assert_true "opencode orchestrator: reissuing the identical command now proceeds (notice consumed)" "[ $rc_e2 -eq 0 ]"
 assert_eq "the reissued call's own output carries the explicit allow verdict (opencode has no silent-allow contract)" "$out_e2" '{"decision": "allow"}'
 
+# Regression test for the cwd-CONTAINMENT fix (round-1 review, live-
+# reproduced): _is_orchestrator_session used to compare cwd to the repo root
+# by exact equality, so a tool call whose cwd was a repo SUBDIRECTORY (an
+# entirely ordinary thing mid-session) never triggered the bootstrap gate at
+# all. $MIRROR_F/hooks is a genuine, non-symlinked subdirectory of the
+# mirror (mk_mirror mkdir's it directly; only the files inside are
+# symlinked), so this exercises real containment, not equality-by-accident.
+test_new_home
+MIRROR_F="$(wm_mktemp_dir)/mirror-notice-subdir"
+mk_mirror "$MIRROR_F"
+unset WM_AGENT_BIN_OVERRIDE
+GUARDS_F="$(uv run --no-project --quiet "$TEST_REPO/bin/lib/hook_manifest.py" --print-guards opencode --repo "$MIRROR_F")"
+payload_f='{"tool":"bash","args":{"command":"ls"},"cwd":"'"$MIRROR_F/hooks"'"}'
+HOME_F="$(wm_mktemp_dir)"
+
+out_f1="$(printf '%s' "$payload_f" | \
+  HOME="$HOME_F" WINGMAN_RUN_ID="gate-f" WINGMAN_CREW_ID="" \
+  uv run --no-project --quiet "$MIRROR_F/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$GUARDS_F" 2>&1)"; rc_f1=$?
+assert_true "opencode orchestrator from a repo SUBDIRECTORY: still denied ONCE, as the notice" "[ $rc_f1 -eq 2 ]"
+assert_contains "the notice text names the continuity gap" "$out_f1" "has not been built"
+assert_true "the bootstrap actually ran from a subdirectory cwd (the cache file exists)" \
+  "[ -f '$WINGMAN_HOME/orchestrator-bootstrap/gate-f.outcome' ]"
+
+out_f2="$(printf '%s' "$payload_f" | \
+  HOME="$HOME_F" WINGMAN_RUN_ID="gate-f" WINGMAN_CREW_ID="" \
+  uv run --no-project --quiet "$MIRROR_F/hooks/lib/guard_dispatch.py" --dialect opencode --guards "$GUARDS_F" 2>&1)"; rc_f2=$?
+assert_true "reissuing from the same subdirectory cwd now proceeds (notice consumed)" "[ $rc_f2 -eq 0 ]"
+assert_eq "the reissued call's own output carries the explicit allow verdict" "$out_f2" '{"decision": "allow"}'
+
 test_summary

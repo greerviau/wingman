@@ -643,7 +643,7 @@ while :; do
   # guard across a long lifetime" in the plan for why a stamp fixed at entry
   # would go stale mid-lifetime and let a concurrent instance in.
   printf '%s\n%s\n' "$WM_EFFECTIVE_RUN_ID" "$$" > "$inflightfile"
-  _body=""; _mode=""; _continue=0; _quiet=""; _claim_failed=0
+  _body=""; _mode=""; _continue=0; _quiet=""
 
   # Re-claiming here is only safe because the PREVIOUS iteration's
   # --classify (below) already consumed $exitfile - bin/watch-fleet itself
@@ -729,9 +729,10 @@ while :; do
   # Computed here, before child's own three-signal check below, rather than
   # only afterward alongside the rest of pr_child's accounting: the shared
   # reaping loop above kills whichever of child/pr_child is still alive the
-  # instant the OTHER one exits, so a pr_child that fires with an already-
-  # decided verdict (a PR already merged/closed by the time this iteration's
-  # very first poll runs) reliably force-closes child before it can finish
+  # instant the OTHER one exits, so a pr_child that fires on its very first
+  # poll - any of its eight reason prefixes (merged/closed/changes-
+  # requested/ci-failed/conflict/comment/merge-ready/checks-passed), not
+  # merged/closed alone - reliably force-closes child before it can finish
   # arming - not just under contention, though contention (this hook's own
   # startup, wm_harness_process_identity's ps-walk, the claim-lock mkdir
   # retries) makes child's own arm sequence slow enough that it loses this
@@ -798,11 +799,11 @@ $(tail -n 20 "$armlog")
 Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
     _mode="manual-remedy"
   elif [ "$_child_unclaimed" -eq 1 ]; then
-    # child never proved it claimed, but pr_child fired with a decisive
-    # verdict in this SAME iteration - the shared reaping loop above kills
-    # whichever of the two is still alive the instant the other exits, so an
-    # already-decided PR (merged/closed by the time pr_child's very first
-    # poll runs) routinely force-closes a child that is still mid-arm, not
+    # child never proved it claimed, but pr_child fired on its very first
+    # poll (any of its eight reason prefixes, not merged/closed alone) in
+    # this SAME iteration - the shared reaping loop above kills whichever of
+    # the two is still alive the instant the other exits, so an already-
+    # decided PR routinely force-closes a child that is still mid-arm, not
     # just under contention (which mainly makes child's own arm sequence
     # slow enough to lose this race far more often). That is not a watch-
     # fleet malfunction - re-arming for THIS iteration was never going to
@@ -895,7 +896,9 @@ Investigate $claimlock and arm bin/watch-fleet manually, then you may stop."
   # appending to the same file, and matching this file's own existing
   # pattern of composing $armlog from completed output, not a live stream.
   if [ -n "$_reaped_pr_child" ]; then
-    _pr_fire_reason="$(grep -E '^(merged|closed|changes-requested|ci-failed|conflict|comment|merge-ready|checks-passed): ' "$pr_out" 2>/dev/null | tail -n 1)"
+    # $_pr_fire_reason is already computed above, before child's own three-
+    # signal check - reused here rather than recomputed, since nothing
+    # between the two points changes $pr_out.
     cat "$pr_out" >>"$armlog" 2>/dev/null
     if [ -n "$_pr_fire_reason" ]; then
       _pr_body="$(compose_pr_watch_attention_reason "$_pr_fire_reason")"
