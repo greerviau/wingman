@@ -8,6 +8,13 @@
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
+# This file calls `bin/doctor -y` many times to exercise sections unrelated
+# to the orchestrator's own non-Claude guard-transport reconcile (a self-test
+# per transport, real subprocess cost) - skip that one block here; it has
+# its own dedicated coverage in tests/doctor-orchestrator-guard-
+# transports.test.sh, unskipped.
+export WM_DOCTOR_SKIP_ORCH_GUARD_TRANSPORTS=1
+
 CHECK="$TEST_REPO/bin/lib/claude-gate-check.py"
 run_check() { uv run --no-project --quiet "$CHECK" "$@"; }
 

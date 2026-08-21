@@ -104,11 +104,17 @@ done
 
 # --- 4/5. every exported body: no bare bin/<script> invocation (excluding
 #          frontmatter), and the $WINGMAN_BIN-unset fallback sentence is
-#          present. "bin/wingman", "bin/spawn-crew", and "bin/crew-resume"
-#          are never flagged - they name a DIFFERENT script (the thing that
-#          exports $WINGMAN_BIN in the first place, or the top-level
-#          launcher), never invoked by any of these seven bodies, so
-#          rewriting them to $WINGMAN_BIN/... would be circular/wrong. Two
+#          present. "bin/spawn-crew" and "bin/crew-resume" are never flagged
+#          - they name a DIFFERENT script (the thing that exports
+#          $WINGMAN_BIN in the first place for a crew member), never invoked
+#          by any of these seven bodies, so rewriting them to
+#          $WINGMAN_BIN/... would be circular/wrong. `bin/wingman` no longer
+#          gets a carve-out here (there is no such script any more, and
+#          nothing exports $WINGMAN_BIN for wingman's own top-level session
+#          either - it resolves the value itself, per docs/configuration.md's
+#          "The orchestrator's own self-bootstrap") - if a future edit
+#          reintroduces a bare "bin/wingman" reference in one of these
+#          bodies, this check should flag it, not silently exempt it. Two
 #          narrow carve-out phrases exempt the two places a bare bin/<script>
 #          form is deliberately illustrative rather than an instruction to
 #          run: the fallback sentence itself ("resolved relative to"), and
@@ -129,7 +135,7 @@ for v in $EXPORTED_VERBS; do
     | grep -v 'resolved relative to' \
     | grep -v 'unlike a bare' \
     | grep -oE 'bin/[a-z][a-z0-9_-]*' \
-    | grep -vE '^bin/(wingman|spawn-crew|crew-resume)$' \
+    | grep -vE '^bin/(spawn-crew|crew-resume)$' \
     | sort -u || true)"
   if [ -z "$offending" ]; then
     ok "wingman-$v/SKILL.md's body carries no bare bin/<script> invocation"
@@ -137,7 +143,8 @@ for v in $EXPORTED_VERBS; do
     fail "wingman-$v/SKILL.md's body carries a bare bin/<script> invocation: $offending"
   fi
 
-  if printf '%s\n' "$body" | grep -q 'is unset' && printf '%s\n' "$body" | grep -q 'resolved relative to'; then
+  if (printf '%s\n' "$body" | grep -q 'is unset' || printf '%s\n' "$body" | grep -q 'is still unresolvable') \
+      && printf '%s\n' "$body" | grep -q 'resolved relative to'; then
     ok "wingman-$v/SKILL.md's body documents the \$WINGMAN_BIN-unset fallback"
   else
     fail "wingman-$v/SKILL.md's body is missing the \$WINGMAN_BIN-unset fallback sentence"

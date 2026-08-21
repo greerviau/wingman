@@ -100,8 +100,9 @@ assert_true "claude-json: the hooks were actually registered" \
 
 # A broken repo (missing hook script) still refuses, naming the sync
 # failure - unchanged regression behaviour (tests/orchestrator-guard-sync-
-# gate.test.sh part (a) exercises the equivalent path through bin/wingman
-# itself; this asserts the same property at the library-function level).
+# gate.test.sh exercises the equivalent path through hooks/orchestrator-
+# guard-sync-gate.sh and bin/lib/orchestrator-bootstrap.sh itself; this
+# asserts the same property at the library-function level).
 MIRROR_BAD="$(wm_mktemp_dir)/mirror-bad"
 mkdir -p "$MIRROR_BAD/hooks"
 ln -s "$TEST_REPO/bin" "$MIRROR_BAD/bin"

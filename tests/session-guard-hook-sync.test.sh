@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# E2E: all three of wingman's session-creation choke points - bin/wingman,
+# E2E: all three of wingman's session-creation choke points - the
+# orchestrator's own bootstrap (bin/lib/orchestrator-bootstrap.sh),
 # bin/spawn-crew, bin/crew-resume - reconcile user-scope guard hooks (via
-# bin/lib/sync-user-hooks.py) immediately before a Claude Code session
-# starts, and refuse to create that session at all if the reconcile fails
-# (issue #241). bin/crew-resume is not an edge case here: it writes its own
-# launcher and opens its own tmux window rather than going through
-# bin/spawn-crew, so it needs the identical wiring proven separately.
+# bin/lib/sync-user-hooks.py) before a Claude Code session's first tool call
+# is allowed, and refuse (deny every tool call, in the orchestrator's case;
+# refuse to create the session at all, for spawn-crew/crew-resume) if the
+# reconcile fails (issue #241). bin/crew-resume is not an edge case here: it
+# writes its own launcher and opens its own tmux window rather than going
+# through bin/spawn-crew, so it needs the identical wiring proven separately.
 #
 # The unit-level reconciler behavior (fresh/idempotent/partial/--check/fail-
 # closed/concurrency) is covered in tests/sync-user-hooks.test.sh; this file
@@ -18,19 +20,25 @@
 # script's own logic, including the real sync-user-hooks.py, is exercised
 # unmodified), while hooks/ is a real directory of individually symlinked
 # scripts with exactly one broken. The mirror is deliberately not a git repo,
-# so bin/wingman's checkout-freshness advisory (step 6) fails fast
+# so the orchestrator bootstrap's own checkout-freshness advisory fails fast
 # ("not a git repo") instead of attempting a real network fetch.
 set -u
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
-# bin/wingman resolves its agent through wm_agent_resolve(), so it also
-# honors tests/lib.sh's default WM_AGENT_BIN_OVERRIDE (the stub-agent.sh
-# safety net), overriding this file's PATH-based claude stubs below. Unset
-# here for the bare bin/wingman calls; the spawn-crew/crew-resume calls set
-# their own WM_AGENT_BIN_OVERRIDE as a per-command prefix, which still wins.
+# The `bin/doctor -y` calls below (test 13) exercise the failure-sink
+# surfacing only - skip the orchestrator's own non-Claude guard-transport
+# reconcile (a real self-test subprocess per transport), unrelated here and
+# covered in tests/doctor-orchestrator-guard-transports.test.sh.
+export WM_DOCTOR_SKIP_ORCH_GUARD_TRANSPORTS=1
+
+# bin/lib/orchestrator-bootstrap.sh resolves its agent through
+# wm_agent_resolve(), so it also honors tests/lib.sh's default
+# WM_AGENT_BIN_OVERRIDE (the stub-agent.sh safety net) - irrelevant here
+# since the orchestrator's own bootstrap never execs anything, but unset for
+# consistency with the spawn-crew/crew-resume calls, which set their own
+# WM_AGENT_BIN_OVERRIDE as a per-command prefix (still wins).
 unset WM_AGENT_BIN_OVERRIDE
 
-WINGMAN="$TEST_REPO/bin/wingman"
 SPAWN="$TEST_REPO/bin/spawn-crew"
 CRESUME="$TEST_REPO/bin/crew-resume"
 
@@ -97,25 +105,16 @@ print(sum(len(g['hooks']) for g in d['groups']))
 # test 11: all three choke points reconcile before the session is created
 # =============================================================================
 
-# --- bin/wingman -------------------------------------------------------------
+# --- the orchestrator's own bootstrap ----------------------------------------
 test_new_home
 MIRROR_OK1="$(wm_mktemp_dir)/mirror-ok"
 mk_mirror "$MIRROR_OK1"
-STUBDIR1="$(wm_mktemp_dir)"
-CLAUDE_MARKER1="$STUBDIR1/invoked"
-cat > "$STUBDIR1/claude" <<EOF
-#!/usr/bin/env bash
-printf 'STUB_CLAUDE_INVOKED %s\n' "\$*" > "$CLAUDE_MARKER1"
-exit 0
-EOF
-chmod +x "$STUBDIR1/claude"
-out11a="$(PATH="$STUBDIR1:$PATH" "$MIRROR_OK1/bin/wingman" 2>&1)"; rc11a=$?
+out11a="$(WINGMAN_RUN_ID="sghs-ok1" "$MIRROR_OK1/bin/lib/orchestrator-bootstrap.sh" --agent claude --repo "$MIRROR_OK1" 2>&1)"; rc11a=$?
 wm_stop_guardian
-assert_eq "bin/wingman: a healthy repo exits 0" "$rc11a" "0"
-assert_true "bin/wingman: claude was execed (session created)" "[ -f '$CLAUDE_MARKER1' ]"
-assert_eq "bin/wingman: every manifest hook is registered before exec" \
+assert_eq "orchestrator bootstrap: a healthy repo exits 0" "$rc11a" "0"
+assert_eq "orchestrator bootstrap: every manifest hook is registered before the session's first tool call" \
   "$(registered_count "$WM_CLAUDE_USER_SETTINGS")" "$MANIFEST_COUNT"
-assert_false "bin/wingman: the failure sink is absent after a clean launch" \
+assert_false "orchestrator bootstrap: the failure sink is absent after a clean bootstrap" \
   "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
 
 # --- bin/spawn-crew ------------------------------------------------------------
@@ -160,23 +159,14 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 # test 12: all three refuse outright on a sync failure - nothing half-created
 # =============================================================================
 
-# --- bin/wingman -------------------------------------------------------------
+# --- the orchestrator's own bootstrap ----------------------------------------
 test_new_home
 MIRROR_BAD1="$(wm_mktemp_dir)/mirror-bad"
 mk_mirror "$MIRROR_BAD1" "hooks/no-direct-edit-guard.sh" missing
-STUBDIR4="$(wm_mktemp_dir)"
-CLAUDE_MARKER4="$STUBDIR4/invoked"
-cat > "$STUBDIR4/claude" <<EOF
-#!/usr/bin/env bash
-printf 'STUB_CLAUDE_INVOKED %s\n' "\$*" > "$CLAUDE_MARKER4"
-exit 0
-EOF
-chmod +x "$STUBDIR4/claude"
-out12a="$(PATH="$STUBDIR4:$PATH" "$MIRROR_BAD1/bin/wingman" 2>&1)"; rc12a=$?
+out12a="$(WINGMAN_RUN_ID="sghs-bad1" "$MIRROR_BAD1/bin/lib/orchestrator-bootstrap.sh" --agent claude --repo "$MIRROR_BAD1" 2>&1)"; rc12a=$?
 wm_stop_guardian
-assert_true "bin/wingman: a broken repo exits non-zero" "[ $rc12a -ne 0 ]"
-assert_false "bin/wingman: claude was never execed" "[ -f '$CLAUDE_MARKER4' ]"
-assert_contains "bin/wingman: the refusal names the remedy" "$out12a" "bin/doctor -y"
+assert_true "orchestrator bootstrap: a broken repo exits non-zero" "[ $rc12a -ne 0 ]"
+assert_contains "orchestrator bootstrap: the refusal names the remedy" "$out12a" "bin/doctor -y"
 
 # --- bin/spawn-crew ------------------------------------------------------------
 test_new_home
@@ -232,9 +222,7 @@ tmux kill-session -t "$WM_TMUX_SESSION" 2>/dev/null
 test_new_home
 MIRROR_BAD4="$(wm_mktemp_dir)/mirror-bad"
 mk_mirror "$MIRROR_BAD4" "hooks/no-direct-edit-guard.sh" missing
-STUBDIR5="$(wm_mktemp_dir)"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBDIR5/claude"; chmod +x "$STUBDIR5/claude"
-PATH="$STUBDIR5:$PATH" "$MIRROR_BAD4/bin/wingman" >/dev/null 2>&1
+WINGMAN_RUN_ID="sghs-bad4" "$MIRROR_BAD4/bin/lib/orchestrator-bootstrap.sh" --agent claude --repo "$MIRROR_BAD4" >/dev/null 2>&1
 wm_stop_guardian
 assert_true "the failure sink is written on a forced sync failure" "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
 sink_content="$(cat "$WINGMAN_HOME/last-launch-failure" 2>/dev/null)"
@@ -255,12 +243,15 @@ doctor_out="$("$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"
 assert_contains "bin/doctor surfaces the recorded launch failure" "$doctor_out" "the most recent session launch refused to start"
 assert_contains "bin/doctor's surfaced message names the component" "$doctor_out" "guard transport"
 
-# A subsequent successful launch clears it.
+# A subsequent successful bootstrap clears it. A FRESH identity - the prior
+# (failed) bootstrap above already cached a "fail" outcome under
+# "sghs-bad4"; reusing it would just replay that cached denial rather than
+# re-running the reconcile this assertion needs to actually happen.
 MIRROR_OK4="$(wm_mktemp_dir)/mirror-ok"
 mk_mirror "$MIRROR_OK4"
-PATH="$STUBDIR5:$PATH" "$MIRROR_OK4/bin/wingman" >/dev/null 2>&1
+WINGMAN_RUN_ID="sghs-ok4" "$MIRROR_OK4/bin/lib/orchestrator-bootstrap.sh" --agent claude --repo "$MIRROR_OK4" >/dev/null 2>&1
 wm_stop_guardian
-assert_false "a successful launch clears the failure sink" "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
+assert_false "a successful bootstrap clears the failure sink" "[ -f '$WINGMAN_HOME/last-launch-failure' ]"
 
 # doctor no longer surfaces anything once it is cleared.
 doctor_out2="$("$TEST_REPO/bin/doctor" -y < /dev/null 2>&1)"

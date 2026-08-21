@@ -45,8 +45,10 @@ The ALLOW fixture is a bare `ls` - passes every guard in the set.
 import argparse
 import json
 import os
+import subprocess
 import sys
 
+from cmd_match import command_segments, resolve_command
 from guard_policy import GuardDenied, GuardInput, _wm_effective_run_id, \
     evaluate_no_direct_edit_guard, \
     evaluate_no_foreground_poll_loop_guard, evaluate_no_foreground_watcher_guard, \
@@ -79,12 +81,15 @@ _LOWERCASE_TOOL_MAP = {
 
 
 def _project_dir():
-    # $WINGMAN_PROJECT_DIR is what bin/wingman exports before exec (plan
-    # §5.3) - preferred because cwd/workspaceRoot drift the moment a session
-    # cd's, unlike Claude's own $CLAUDE_PROJECT_DIR, which every dialect
-    # falls back to only when the wingman-specific one is absent (e.g. a
-    # direct dispatcher invocation outside bin/wingman's own launch, such as
-    # this module's own test suite).
+    # $WINGMAN_PROJECT_DIR is set by bin/spawn-crew/bin/crew-resume's own
+    # generated launch script for a crew member (never by anything for the
+    # orchestrator's own bare session - there is no launcher left to export
+    # it - see _is_orchestrator_session below, which reads the dialect's own
+    # payload `cwd` field instead for exactly that reason) - preferred
+    # because cwd/workspaceRoot drift the moment a session cd's, unlike
+    # Claude's own $CLAUDE_PROJECT_DIR, which every dialect falls back to
+    # only when the wingman-specific one is absent (e.g. this module's own
+    # test suite).
     return os.environ.get("WINGMAN_PROJECT_DIR") or os.environ.get("CLAUDE_PROJECT_DIR") or ""
 
 
@@ -184,6 +189,167 @@ def build_guard_input(dialect, data):
         home=common["home"],
     )
     return gi, run_in_background
+
+
+# --- the orchestrator bootstrap gate (docs/analysis/2026-08-18-remove-bin-
+# wingman-launcher-spec.md §4.5, §8 steps 6/7): a lazy, once-per-process-
+# identity first step, run ONLY for wingman's own top-level orchestrator
+# session - never for a crew member, on any dialect, in any target repo.
+# bin/lib/orchestrator-bootstrap.sh (a sibling of this repo's other bin/lib/
+# scripts, NOT under hooks/) owns the actual work (guard-transport reconcile
+# + self-test, self-pane registration, tmux-guardian launch, the freshness/
+# continuity-transport notice) and the per-identity status-file contract this
+# module reads; see that script's own header for the full contract. -------
+
+def _repo_root():
+    # hooks/lib/guard_dispatch.py -> hooks/lib -> hooks -> the repo root.
+    # Self-derived from this file's own location, exactly like bin/lib/
+    # common.sh's _wm_lib_dir - never from an env var, since nothing exports
+    # WINGMAN_REPO/WINGMAN_BIN into a bare orchestrator's own process (§4.2).
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _is_orchestrator_session(gi):
+    """True iff THIS invocation is wingman's own top-level orchestrator
+    session bootstrapping itself - never a crew member, whatever repo it
+    operates in. Crew sessions get none of what follows: their own guard
+    enforcement is completely unchanged by any of it (spec §7 risk 2's own
+    containment - this module is shared by all four non-Claude crew
+    transports too, so this check is what keeps the blast radius to the
+    orchestrator alone). Mirrors hooks/pilot-preferences-guard.sh's own
+    wm_is_wingman_repo_session gating (WINGMAN_CREW_ID unset AND the
+    session's own project root is this exact checkout), ported to Python
+    since this is where the four non-Claude dialects' own equivalent lives.
+
+    Containment (cwd is the repo root OR a path underneath it), not
+    equality: a real tool call's cwd is the payload's own `cwd` field
+    (build_guard_input's fallback chain, ultimately os.getcwd() when the
+    payload carries none), and a model working from a repo SUBDIRECTORY -
+    an entirely ordinary thing to do mid-session - has a cwd that is never
+    equal to the repo root even though it is unambiguously the same
+    orchestrator session. An equality check made every such tool call
+    silently skip the whole bootstrap gate (no reconcile, no self-pane, no
+    tmux-guardian, no notice) and - worse - made a FAILED bootstrap's own
+    fail-closed deny escapable simply by cd'ing into a subdirectory, exactly
+    backwards from this gate's own fail-closed intent. Live-reproduced
+    (review round 1) against --dialect codex: cwd <repo> bootstraps and
+    writes <identity>.outcome; cwd <repo>/bin wrote nothing at all."""
+    if gi.crew_id:
+        return False
+    cwd = gi.cwd or ""
+    if not cwd:
+        return False
+    try:
+        real_cwd = os.path.realpath(cwd)
+        real_repo = os.path.realpath(_repo_root())
+    except OSError:
+        return False
+    return real_cwd == real_repo or real_cwd.startswith(real_repo + os.sep)
+
+
+# The two commands a bootstrap denial's own reason text names as the way
+# out: a direct re-run of the bootstrap script itself, or `bin/doctor -y`
+# (also useful here, not just for claude-json - once bin/doctor reconciles
+# all five guard transports, not just claude's, running it fixes the same
+# underlying registration this gate is checking, for any of the four
+# dialects reaching this module).
+_ORCH_BOOTSTRAP_RETRY_BASENAMES = ("orchestrator-bootstrap.sh", "doctor")
+
+
+def _is_bootstrap_retry(command):
+    """True iff `command` resolves, in every segment (hooks/lib/cmd_match.py's
+    own resolver - the same one every other guard in this codebase uses), to
+    a direct invocation of bin/lib/orchestrator-bootstrap.sh or bin/doctor -
+    the two commands the bootstrap gate below allowlists unconditionally, so
+    a failed bootstrap is never a dead end (mirrors hooks/pilot-preferences-
+    guard.sh's own escape-hatch shape: the denial names these exact commands,
+    and this is the check that lets a named command actually run). Fails
+    closed like every other cmd_match consumer - an unparseable or empty
+    command is never treated as the retry shape, so it still passes through
+    the gate below normally (which itself fails open on a resolvable
+    identity - see _orchestrator_bootstrap_gate)."""
+    if not command:
+        return False
+    segments = command_segments(command)
+    if not segments:
+        return False
+    for seg in segments:
+        b, _argv = resolve_command(seg)
+        if b not in _ORCH_BOOTSTRAP_RETRY_BASENAMES:
+            return False
+    return True
+
+
+def _read_text(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except (OSError, IOError):
+        return None
+
+
+def _orchestrator_bootstrap_gate(dialect, gi, identity):
+    """Runs before any --guards evaluation, only for wingman's own
+    orchestrator session (_is_orchestrator_session) with a resolvable
+    identity. Returns a deny reason string, or None to proceed to ordinary
+    guard evaluation - never raises (a subprocess failure degrades to fail-
+    open, below, the same posture every identity-gated guard in this
+    codebase already takes for an unresolvable identity)."""
+    home = gi.home
+    status_dir = os.path.join(home, "orchestrator-bootstrap")
+    outcome_path = os.path.join(status_dir, "%s.outcome" % identity)
+    reason_path = os.path.join(status_dir, "%s.reason" % identity)
+    notice_path = os.path.join(status_dir, "%s.notice" % identity)
+
+    if not os.path.exists(outcome_path):
+        # Cache miss: the lazy, once-per-process-identity first call (§4.5).
+        # Runs the FULL bootstrap now; it writes the status files itself, so
+        # nothing here needs to parse its stdout - only its exit status is
+        # (implicitly) reflected by which files exist afterward. stdout/
+        # stderr are discarded, not inherited: this process's own stdout is
+        # the codex/grok/opencode/pi deny/allow JSON contract, which a stray
+        # line from the bootstrap script's own diagnostics must never
+        # corrupt.
+        script = os.path.join(_repo_root(), "bin", "lib", "orchestrator-bootstrap.sh")
+        try:
+            subprocess.run(
+                [script, "--agent", dialect, "--repo", _repo_root()],
+                env=dict(os.environ, WM_EFFECTIVE_RUN_ID=identity),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        except Exception:
+            pass  # the outcome file's own absence below is the fail-open signal
+
+    outcome = (_read_text(outcome_path) or "").strip()
+    if outcome == "fail":
+        script = os.path.join(_repo_root(), "bin", "lib", "orchestrator-bootstrap.sh")
+        return _read_text(reason_path) or (
+            "wingman's orchestrator bootstrap failed for an unrecorded reason - "
+            "re-run %s --agent %s --repo %s directly to see the underlying error."
+            % (script, dialect, _repo_root()))
+    if outcome != "pass":
+        # No identity, the bootstrap script itself missing/unexecutable, or
+        # some other failure to even produce a cache entry - fail OPEN
+        # (proceed to ordinary guard evaluation) rather than deny forever
+        # with no way out: a broken bootstrap MECHANISM must never be able
+        # to brick the session the way a broken bootstrap RESULT (outcome ==
+        # "fail", handled above) legitimately denies with a stated remedy.
+        return None
+
+    notice = _read_text(notice_path)
+    if notice:
+        # One-time only: delete the notice file before returning, so this
+        # exact identity never sees it again regardless of what the model
+        # does next (retries the same command, or issues a different one -
+        # either way the notice already fired).
+        try:
+            os.remove(notice_path)
+        except OSError:
+            pass
+        return (
+            "wingman orchestrator notice (informational, not a problem - just "
+            "reissue your last command exactly as typed and it will proceed "
+            "normally):\n%s" % notice)
+    return None
 
 
 # --- api-outage / usage-limit state, mirroring hooks/api-outage-spawn-
@@ -387,7 +553,41 @@ def main():
 
     try:
         gi, run_in_background = build_guard_input(args.dialect, data)
-        reason = run_guards(args.dialect, guard_names, gi, run_in_background)
+
+        # The orchestrator bootstrap gate (docs/analysis/2026-08-18-remove-
+        # bin-wingman-launcher-spec.md §4.5, §8 steps 6/7): a lazy, once-per-
+        # process-identity first step, run ONLY for wingman's own top-level
+        # orchestrator session (_is_orchestrator_session) - never for a crew
+        # member, on any dialect, in any target repo, so this is a strict
+        # no-op on the hot path (every crew tool call, on every non-Claude
+        # transport) this module already served before this addition.
+        # _is_bootstrap_retry is checked first and cheaply (no subprocess),
+        # so a session working through a failed bootstrap's own escape hatch
+        # never pays the identity-resolution walk on each retry attempt.
+        #
+        # WM_GUARD_SELFTEST (set only by bin/lib/guard-transport.sh's own
+        # wm_guard_transport_selftest, around the exact fixture invocations
+        # that exercise THIS module recursively) short-circuits the whole
+        # gate unconditionally - required, not merely an optimization: a
+        # self-test's synthetic fixture payload can satisfy
+        # _is_orchestrator_session exactly like a genuine orchestrator
+        # command would, and a self-test invoked FROM INSIDE the bootstrap
+        # gate itself (wm_guard_transport_sync, called by orchestrator-
+        # bootstrap.sh, calls this) would otherwise re-enter this same gate,
+        # find no cache entry yet (the outer bootstrap is still producing
+        # it), and re-run the entire bootstrap - another self-test included -
+        # without end. Reproduced live before this guard existed.
+        reason = None
+        if (os.environ.get("WM_GUARD_SELFTEST") != "1"
+                and _is_orchestrator_session(gi) and not _is_bootstrap_retry(gi.command)):
+            if "WM_EFFECTIVE_RUN_ID" not in os.environ:
+                os.environ["WM_EFFECTIVE_RUN_ID"] = _wm_effective_run_id()
+            identity = os.environ["WM_EFFECTIVE_RUN_ID"]
+            if identity:
+                reason = _orchestrator_bootstrap_gate(args.dialect, gi, identity)
+
+        if reason is None:
+            reason = run_guards(args.dialect, guard_names, gi, run_in_background)
     except Exception as e:
         # A payload shape none of the parsers above expects (e.g. tool_input
         # is a string, not an object) must never reach an UNCAUGHT exception

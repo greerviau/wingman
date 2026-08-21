@@ -309,7 +309,7 @@ $WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key artifact_linking
 
 Prints the cached value and exits 0 if this run already has an answer; exits nonzero if unanswered.
 Publish only if it prints `artifact`.
-When it is unanswered for any reason - `$WINGMAN_RUN_ID` unset (not launched via `bin/wingman`), an unreadable preferences file, or a run whose onboarding never recorded this key - treat the answer as `local`: publish nothing, and report the local path only. That is the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does, and `hooks/artifact-link-guard.sh` lets the report through unchanged in exactly that case.
+When it is unanswered for any reason - `$WINGMAN_RUN_ID` unset for this session, an unreadable preferences file, or a run whose onboarding never recorded this key - treat the answer as `local`: publish nothing, and report the local path only. That is the conservative default, since an unnecessary local-only pointer costs nothing while a needless hosted-URL exposure for sensitive content does, and `hooks/artifact-link-guard.sh` lets the report through unchanged in exactly that case.
 
 Never try to ask the question yourself. `AskUserQuestion` is denied for every crew session (`hooks/no-interactive-prompt-guard.sh`, see "`blocked` for a human dependency" above), and this preference belongs to the requester's own once-per-run onboarding step, not to you - so an unanswered preference is never a reason to report `blocked` either.
 

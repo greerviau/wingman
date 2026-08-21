@@ -13,6 +13,11 @@ set -u
 # WM_CONTINUITY_TIMEOUT_MIN (issue #231) - the single source of truth for the
 # registered `timeout` the fleet-continuity Stop hooks below must carry.
 . "$WM_REPO/hooks/lib/watcher-liveness.sh"
+# wm_agent_resolve/wm_guard_transport_sync - the orchestrator's own guard-
+# transport reconcile+self-test (docs/analysis/2026-08-18-remove-bin-
+# wingman-launcher-spec.md, §4.5), below.
+. "$WM_LIB/agent.sh"
+. "$WM_LIB/guard-transport.sh"
 
 AUTO_YES=0
 for arg in "$@"; do
@@ -51,12 +56,14 @@ wm_info "wingman doctor - platform: $(wm_platform)"
 echo
 
 # --- surface a durable launch-failure sink, if one is present (issue #241) --
-# $WM_HOME/last-launch-failure is written by bin/wingman when it could not
-# reconcile the user-scope guard hooks and refused to start - the one case
-# under systemd where a bare wm_die reaches nobody (see wm_launch_failure's
-# own comment in bin/lib/common.sh). Never deleted here: only a subsequent
-# successful launch clears it, so a pilot who ran doctor cannot mistake that
-# for "wingman starts now".
+# $WM_HOME/last-launch-failure is written by bin/lib/orchestrator-
+# bootstrap.sh (docs/analysis/2026-08-18-remove-bin-wingman-launcher-
+# spec.md, §4.5) when it could not reconcile a guard transport and the
+# orchestrator's own session is denied every tool call over it - the one
+# case under systemd where a plain stderr message reaches nobody (see
+# wm_launch_failure's own comment in bin/lib/common.sh). Never deleted here:
+# only a subsequent successful bootstrap clears it, so a pilot who ran
+# doctor cannot mistake that for "the orchestrator's guards are wired now".
 if [ -f "$WM_HOME/last-launch-failure" ]; then
   # Parsed with bash parameter expansion rather than `sed ... \t`, whose `\t`
   # is a GNU extension - BSD/macOS sed treats it as a literal "t", silently
@@ -843,6 +850,121 @@ else
       wm_err "failed to register denial-report Stop hook"
     fi
   fi
+fi
+
+# --- orchestrator guard-transport reconcile, non-Claude descriptors, user
+# scope (docs/analysis/2026-08-18-remove-bin-wingman-launcher-spec.md, §4.5)
+# --------------------------------------------------------------------------
+# claude's own guard transport is registered above (the delegation/artifact/
+# merge/etc. hooks, all via $WM_LIB/install-user-hook.py) and, separately,
+# ships project-scoped with this repo's own .claude/settings.json (hooks/
+# session-init.sh, hooks/orchestrator-guard-sync-gate.sh) - no action needed
+# here for claude. codex, grok, opencode, and pi have never had ANY
+# reconcile path reach a real machine before this migration: bin/lib/guard-
+# transport.sh's own wm_guard_transport_sync existed, but its only caller was
+# bin/wingman's orchestrator launch, itself gated behind a continuity-
+# transport refusal that ran BEFORE the guard-transport install for every
+# non-claude agent - so the install code was live but unreachable in
+# practice (confirmed: no other caller exists anywhere in this codebase,
+# crew-side included). This is the fix: the SAME reconcile+self-test every
+# non-Claude orchestrator's own bootstrap (bin/lib/orchestrator-bootstrap.sh)
+# performs on its own first tool call, offered here too as the interactive,
+# no-tool-call-needed path bin/doctor already provides for every other guard
+# hook - the acceptance bar the migration's own design (§4.5) is built
+# around ("no manual setup beyond whatever bin/doctor already offers to do
+# interactively from inside the session").
+#
+# Unconditional per descriptor (matching the crew-command-vocabulary check's
+# own precedent below, which never gates on whether the CLI is even
+# installed): a machine with no codex/grok/opencode/pi binary on PATH simply
+# gets wm_guard_transport_sync's own "not on PATH" message as a warning, the
+# same as any other missing-optional-dependency finding in this script -
+# never a hard failure (these four are optional orchestrator choices, not
+# required dependencies of using wingman on claude).
+_wm_gt_check() {
+  _wgtc_agent="$1"
+  ( wm_agent_resolve "$_wgtc_agent" 2>/dev/null ) >/dev/null 2>&1 || {
+    wm_warn "$_wgtc_agent: no agent descriptor found (bin/lib/agents/$_wgtc_agent.sh) - skipping"
+    return
+  }
+  # wm_agent_resolve sets shell variables in the CALLING shell, so this
+  # cannot run inside the subshell used for the existence probe above -
+  # resolve for real, here, in this function's own scope.
+  wm_agent_resolve "$_wgtc_agent"
+  # wm_guard_transport_sync is itself both the reconcile AND the verify step
+  # (every branch installs/writes THEN self-tests, unconditionally, every
+  # call - unlike claude's own sections above, which have a genuinely
+  # separate --check probe before deciding whether to install anything) - so
+  # a fresh, never-configured machine already succeeds on this FIRST call,
+  # having just installed everything it needed to. The "not installed"
+  # branch below is therefore reached only by a problem retrying the
+  # identical operation will not fix on its own (a missing binary, a broken
+  # hook script, grok's own env-var precondition) - offered anyway, since
+  # the operator may fix the underlying cause and want to retry without
+  # re-running doctor from scratch.
+  if _wgtc_out="$(wm_guard_transport_sync "$WM_AGENT_GUARD_TRANSPORT" "$WM_REPO" 2>&1)"; then
+    wm_ok "$_wgtc_agent's guard transport ($WM_AGENT_GUARD_TRANSPORT) is installed and self-tests correctly"
+    # A stale "fail" cache entry from an earlier, broken bootstrap attempt
+    # could still be sitting under $WM_HOME/orchestrator-bootstrap/ (the
+    # orchestrator's own PreToolUse gate, hooks/lib/guard_dispatch.py's own
+    # _orchestrator_bootstrap_gate, reads that cache before ever calling
+    # this function again) even though THIS check just confirmed everything
+    # is fine now - clear it unconditionally on success (not just after a
+    # retry that needed one) so the very next tool call re-bootstraps clean
+    # rather than replaying a now-stale failure.
+    rm -rf "$WM_HOME/orchestrator-bootstrap" 2>/dev/null
+    unset _wgtc_agent _wgtc_out
+    return
+  fi
+  # A missing binary (codex/pi's own reconcile genuinely needs the real CLI
+  # on PATH; grok/opencode need neither, so this branch for them is never a
+  # missing-binary case) is an environment fact, not a problem doctor found
+  # - reported at wm_warn's own "optional, skip" tone throughout, never
+  # escalated to wm_err's red X the way a genuinely broken install is below.
+  # Retrying would not help (the binary is still absent), so no offer to fix
+  # is made for this specific case.
+  case "$_wgtc_out" in
+    *"is not on PATH"*)
+      wm_warn "$_wgtc_agent's guard transport ($WM_AGENT_GUARD_TRANSPORT) skipped - $_wgtc_out"
+      unset _wgtc_agent _wgtc_out
+      return
+      ;;
+  esac
+  wm_warn "$_wgtc_agent's guard transport ($WM_AGENT_GUARD_TRANSPORT) is not installed/verified: $_wgtc_out"
+  do_it=0
+  if [ "$AUTO_YES" = 1 ]; then
+    do_it=1
+  elif [ -t 0 ]; then
+    printf 'Register it now? (y/N) '
+    read ans
+    case "$ans" in y|Y|yes|YES) do_it=1 ;; esac
+  else
+    wm_warn "non-interactive; run: uv run --no-project $WM_REPO/bin/lib/orchestrator-bootstrap.sh --agent $_wgtc_agent --repo $WM_REPO"
+  fi
+  if [ "$do_it" = 1 ]; then
+    if _wgtc_out2="$(wm_guard_transport_sync "$WM_AGENT_GUARD_TRANSPORT" "$WM_REPO" 2>&1)"; then
+      wm_ok "registered and verified $_wgtc_agent's guard transport"
+      rm -rf "$WM_HOME/orchestrator-bootstrap" 2>/dev/null
+    else
+      wm_err "still could not register $_wgtc_agent's guard transport: $_wgtc_out2"
+    fi
+    unset _wgtc_out2
+  fi
+  unset _wgtc_agent _wgtc_out
+}
+# WM_DOCTOR_SKIP_ORCH_GUARD_TRANSPORTS=1 skips this whole block - a test-only
+# escape hatch (tests/doctor.test.sh calls `bin/doctor -y` many times to
+# exercise OTHER, unrelated sections; each of these four checks pays a real
+# self-test subprocess per transport, which adds up fast across repeated
+# calls - see tests/doctor-orchestrator-guard-transports.test.sh for the
+# dedicated coverage of this block itself, unskipped). Never set this in
+# real use: skipping it is exactly skipping the self-heal this block exists
+# to provide.
+if [ "${WM_DOCTOR_SKIP_ORCH_GUARD_TRANSPORTS:-0}" != 1 ]; then
+  for _wgtc_name in codex grok opencode pi; do
+    _wm_gt_check "$_wgtc_name"
+  done
+  unset _wgtc_name
 fi
 
 # --- the portable crew command vocabulary, user scope -----------------------

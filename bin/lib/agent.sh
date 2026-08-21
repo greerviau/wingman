@@ -23,9 +23,10 @@
 
 # Every WM_AGENT_* field a descriptor may define. wm_agent_resolve unsets this
 # whole set before sourcing a new descriptor, so a second resolve in the same
-# process (a test switching agents, or a future caller resolving both a crew
-# adapter and the orchestrator's own $WM_ORCH_AGENT adapter) never silently
-# inherits a stale value the new descriptor doesn't happen to override.
+# process (a test switching agents, or bin/lib/orchestrator-bootstrap.sh
+# resolving the orchestrator's own --agent after some other resolve already
+# ran in the same shell) never silently inherits a stale value the new
+# descriptor doesn't happen to override.
 WM_AGENT_FIELDS="
 WM_AGENT_BIN WM_AGENT_DISPLAY_NAME
 WM_AGENT_PREFLIGHT WM_AGENT_ENV_PREFIX WM_AGENT_ENV_UNSET

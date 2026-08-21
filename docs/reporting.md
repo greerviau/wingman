@@ -30,7 +30,7 @@ The same rule from the crew's side is `playbooks/_status-contract.md`'s "Self-re
 
 ## `direct_spawn_visibility`
 
-Read with `$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key direct_spawn_visibility`. Unanswered, or `$WINGMAN_RUN_ID` unset, defaults to `each-round`.
+Read with `$WINGMAN_STATE pref-get --run-id <run id> --key direct_spawn_visibility`. The run id is `$WINGMAN_RUN_ID` when genuinely set, else the harness-agnostic computed process identity (`bin/lib/harness-identity.sh`'s `wm_harness_process_identity`, run as its own Bash call) - **not** a bare `"$WINGMAN_RUN_ID"` reference in wingman's own top-level session, which nothing exports there and would resolve to empty. Unanswered, or genuinely no run id resolvable at all, defaults to `each-round`.
 
 It governs exactly one thing: a revise loop **wingman runs itself** by spawning members directly - a software-analyst and a reviewer it spawned, iterating via `crew-say` with no `lead` in between.
 
@@ -72,7 +72,7 @@ This covers restatement as well as emptiness. Before sending any status update, 
 
 ## Formatting links for a remote pilot
 
-The `remote` preference (`$WINGMAN_STATE pref-get --run-id "$WINGMAN_RUN_ID" --key remote`; exits nonzero when unanswered) governs how URLs are phrased. It is presentation-only - it never changes *what* is relayed, only how a URL within it reads - and it reuses the one cached answer rather than asking again.
+The `remote` preference (`$WINGMAN_STATE pref-get --run-id <run id> --key remote`; exits nonzero when unanswered) governs how URLs are phrased - the same run-id resolution as above (`$WINGMAN_RUN_ID` when genuinely set, else the computed process identity; never a bare `"$WINGMAN_RUN_ID"` reference from wingman's own top-level session). It is presentation-only - it never changes *what* is relayed, only how a URL within it reads - and it reuses the one cached answer rather than asking again.
 
 - **`true`** - format every URL as a markdown link with short, descriptive text (`[PR #29 ready for review](https://github.com/...)`). A bare URL is least usable read on a phone or in a browser.
 - **`false`, unanswered, or unaskable** - plain URLs, unchanged.

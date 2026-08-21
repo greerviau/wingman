@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/greerviau/wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/greerviau/wingman/actions/workflows/ci.yml)
 
-Wingman is a long-lived orchestrator session that runs a crew of agents for you. It resolves to an agent CLI the same way a crew member does - `claude` by default, and today the only one it can actually launch on, since none of `codex`/`grok`/`opencode`/`pi` has a wired fleet-continuity (wake-loop) mechanism yet for it to resume itself after a long wait.
+Wingman is a long-lived orchestrator session that runs a crew of agents for you. It is harness-agnostic: `cd` into the repo and run whichever agent CLI you want as your orchestrator - `claude`, `codex`, `grok`, `opencode`, or `pi`, the same five a crew member can already run on via `--agent`. Guard enforcement, crew spawning, and status commands all work the same on any of the five. Two things stay claude-exclusive today: fleet continuity (the wake loop that resumes the orchestrator's own session automatically after a long wait), since none of the other four has a wired mechanism for it yet; and onboarding-preferences/Artifact-publish enforcement, which are registered project-scoped for claude only and have no rendered equivalent for the other four yet. Both gaps are named plainly, once, by the orchestrator's own bootstrap, rather than refusing to start.
 You (the pilot) give it high-level directives - *"implement this feature,"* *"investigate this issue,"* *"what's my crew doing?"* - and it delegates the real work, tracks status, and surfaces only real decisions to you.
 It orchestrates; it never does the heavy lifting itself.
 
@@ -28,13 +28,13 @@ See [`docs/architecture.md`](docs/architecture.md) for how each piece works.
 ```
 git clone https://github.com/greerviau/wingman.git
 cd wingman
-bin/wingman          # recommended; plain `claude` also works
+claude               # or codex, grok, opencode, pi - whichever you have
 ```
 
-Run `bin/doctor -y` once, up front, to install missing dependencies and register wingman's guard hooks; `bin/wingman` then discovers your sibling repos with zero config and starts the tmux-server liveness guardian (it reconciles guard-hook registration on every launch, but does not install dependencies for you the way `bin/doctor` does).
-Then give it a directive. All you need up front is `git` and `claude` - the one CLI wingman's own session actually launches on today (see above).
+Run `bin/doctor -y` once, up front, to install missing dependencies and register wingman's guard hooks for every harness you use. From there, no launcher is needed: the orchestrator bootstraps itself on its own first action - guard-hook enforcement, self-pane registration, and the tmux-server liveness guardian all wire up automatically, self-healing even if `bin/doctor` was never run (claude gets this eagerly at session start via a project-scoped hook that ships with the repo; the other four get it on their own first tool call).
+Then give it a directive. All you need up front is `git` and whichever agent CLI you want to drive it with.
 
-> `bin/wingman` is a thin launcher: it pre-adds sibling repos (`--add-dir`), mints a run id so preferences are asked once per run, and wires up Remote Control disconnect detection. Plain `claude` works too, with less - see [the launcher docs](docs/configuration.md#the-wingman-launcher).
+> No launcher wraps the orchestrator. `git clone`, `cd`, and run your harness directly - see [self-bootstrapping](docs/configuration.md#the-orchestrators-own-self-bootstrap) for exactly what wires up automatically and what to do if it doesn't.
 
 ## Driving wingman
 
@@ -138,7 +138,7 @@ GitHub Actions runs the same suite on every pull request, and on every push to `
 ## Learn more
 
 - [architecture.md](docs/architecture.md) - the core model: the wake loop, the deliverable lifecycle, and the crew hierarchy.
-- [configuration.md](docs/configuration.md) - the settings file, the launcher, the spawn recipe, model selection, and state in `~/.wingman/`.
+- [configuration.md](docs/configuration.md) - the settings file, the orchestrator's own self-bootstrap, the spawn recipe, model selection, and state in `~/.wingman/`.
 - [reporting.md](docs/reporting.md) - report altitude, self-report vs verified state, and the visibility preferences.
 - [guards.md](docs/guards.md) - the mechanical guards, the preferences gate, checkout freshness, and autonomous mode.
 - [runbooks/incidents.md](docs/runbooks/incidents.md) - what to do on a stalled, mass-death, outage, or usage-limit fire.

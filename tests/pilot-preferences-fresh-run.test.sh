@@ -9,10 +9,13 @@
 # exported into wingman's own session. Two properties keep that class of bug
 # out, and both are asserted here rather than assumed:
 #
-#   - The test never re-derives the escape command by hand. It sources the same
-#     bin/lib/common.sh that bin/wingman sources, so $WINGMAN_STATE here is the
-#     string a real session gets by construction, and it pins the
-#     single-definition invariant that makes that legitimate.
+#   - The test never re-derives the escape command by hand. It sources
+#     bin/lib/common.sh directly, so $WINGMAN_STATE here is the canonical
+#     string, and it pins the single-definition invariant that makes that
+#     legitimate: hooks/session-init.sh independently composes the same
+#     value (there is no launcher any more to export one - docs/analysis/
+#     2026-08-18-remove-bin-wingman-launcher-spec.md, §4.4) and must never
+#     silently drift from it.
 #   - Every accepted command is then actually RUN. The guard accepting a shape
 #     and the shape working are two different claims, and issue #49 lived in
 #     exactly that gap.
@@ -30,7 +33,8 @@ set -u
 # must be the ONLY thing that puts WINGMAN_STATE in this environment.
 unset WINGMAN_STATE
 
-# The same file bin/wingman sources on its first line, so WINGMAN_STATE and
+# The canonical definition every consumer (including hooks/session-init.sh's
+# own self-bootstrap composition) must agree with, so WINGMAN_STATE and
 # WM_STATE_PY below are the real session-facing values, never a copy.
 # shellcheck source=/dev/null
 . "$TEST_REPO/bin/lib/common.sh"
@@ -43,11 +47,24 @@ assert_true "common.sh exports a non-empty WINGMAN_STATE" '[ -n "$WINGMAN_STATE"
 assert_contains "WINGMAN_STATE names the state engine" "$WINGMAN_STATE" "wm-state.py"
 
 # The single-definition invariant that makes sourcing common.sh a legitimate
-# stand-in for a real session: bin/wingman must not build a WINGMAN_STATE of its
-# own. Reintroduce a second definition there and this test fails rather than
-# silently exercising the wrong string.
-assert_false "bin/wingman defines no WINGMAN_STATE of its own" \
-  "grep -q 'WINGMAN_STATE=' \"$TEST_REPO/bin/wingman\""
+# stand-in for a real session: hooks/session-init.sh's own self-bootstrap
+# composition (docs/configuration.md's "The orchestrator's own self-
+# bootstrap") must land on the identical value, not a hand-rolled second
+# definition that could silently drift. Run it for real (a bare SessionStart
+# payload, isolated $WINGMAN_HOME/$WM_CLAUDE_USER_SETTINGS so it can't touch
+# anything real) and extract the WINGMAN_STATE= line from its own
+# additionalContext text.
+test_new_home
+export CLAUDE_PROJECT_DIR="$TEST_REPO"
+_si_ctx="$(echo '{}' | WINGMAN_RUN_ID="fresh-run-si-check" bash "$TEST_REPO/hooks/session-init.sh" | wm_py -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["hookSpecificOutput"]["additionalContext"])
+')"
+_si_state="$(printf '%s\n' "$_si_ctx" | grep -oE 'WINGMAN_STATE="[^"]*"' | sed 's/^WINGMAN_STATE="//; s/"$//')"
+assert_eq "hooks/session-init.sh composes the identical \$WINGMAN_STATE value common.sh defines" \
+  "$_si_state" "$WINGMAN_STATE"
+unset CLAUDE_PROJECT_DIR
 
 SID="sess-fresh-run"
 

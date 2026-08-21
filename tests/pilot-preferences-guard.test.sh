@@ -106,10 +106,12 @@ assert_eq "the expanded uv form of prefs-list is allowed" "$out" ""
 
 # The truly literal, UNexpanded `$WINGMAN_STATE ...` string - what the hook
 # actually receives, since hooks see the command before shell expansion. With
-# the variable exported (bin/wingman exports it for wingman's own session),
-# cmd_match expands it from the hook environment and the call is allowed;
-# without it, the segment stays unresolved and the deny stands (never a wrong
-# allow).
+# the variable exported (nothing exports it for wingman's own top-level
+# session any more - this simulates a session that has resolved and exported
+# it itself, per docs/configuration.md's "The orchestrator's own self-
+# bootstrap"), cmd_match expands it from the hook environment and the call is
+# allowed; without it, the segment stays unresolved and the deny stands
+# (never a wrong allow).
 export WINGMAN_STATE="uv run --no-project --quiet $TEST_REPO/bin/lib/wm-state.py"
 out="$(run_bash "\$WINGMAN_STATE prefs-list --run-id \\\"\$WINGMAN_RUN_ID\\\"")"
 assert_eq "the literal unexpanded \$WINGMAN_STATE prefs-list is allowed" "$out" ""

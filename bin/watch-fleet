@@ -987,6 +987,13 @@ esac
 # releasing it is always rm -f the file, then rmdir the now-empty dir - a bare
 # rmdir would fail (ENOTEMPTY) and leak the lock permanently.
 release_claim() { rm -f "$CLAIMLOCK/owner" 2>/dev/null; rmdir "$CLAIMLOCK" 2>/dev/null; }
+# Ownership-checked wrapper for the trap below: safe to invoke on ANY signal
+# at ANY point in the claim attempt, including before this process has
+# written (or even created) $CLAIMLOCK at all, and including after it lost
+# the internal write race to a true-concurrent claimant - in both cases
+# $CLAIMLOCK/owner will not read back this process's own pid, so nothing is
+# released. Only the actual, current owner ever clears its own lock.
+_claim_release_if_owned() { [ "$(cat "$CLAIMLOCK/owner" 2>/dev/null)" = "$$" ] && release_claim; }
 # CLAIM_STALE_AGE must stay comfortably under the 50-try/0.1s retry budget -
 # not equal to it - to absorb whole-second mtime-vs-now truncation while still
 # requiring a directory to be many multiples of the sub-second legitimate-
@@ -1009,17 +1016,26 @@ _claim_start="$(date +%s)"
 _claim_deadline=30
 _claim_tries=0
 _claim_reclaimed=0
+# Registered before the very first mkdir attempt, not after it succeeds: a
+# SIGTERM/SIGINT landing between mkdir returning and a trap that only covers
+# EXIT being registered is not caught by that EXIT trap at all (EXIT fires on
+# a process's own natural termination, never on an unrelated signal killing
+# it out from under a still-running command) - orphaning $CLAIMLOCK with a
+# now-dead owner that the reclaim path below cannot distinguish from a
+# genuinely wedged claimant reusing that pid. Registering both here, before
+# any mkdir attempt, and making the handler itself ownership-checked, covers
+# every timing uniformly: a signal before mkdir, between mkdir and the owner
+# write, or after losing the internal write race below all correctly release
+# nothing (the owner file never names this pid), while a signal after a
+# genuine win correctly releases it. This also retires the old "trap - EXIT"
+# cancel-on-lost-race dance below - the ownership check makes it redundant.
+trap _claim_release_if_owned EXIT
+trap '_claim_release_if_owned; exit 143' INT TERM
 while :; do
   if mkdir "$CLAIMLOCK" 2>/dev/null; then
-    # Registered the instant mkdir succeeds, before the verification below can
-    # fail - so this process's own dir is always reclaimed on exit, even if it
-    # turns out to have lost the internal write race (never a permanent wedge
-    # with no one left to clean it up).
-    trap release_claim EXIT
     echo "$$" > "$CLAIMLOCK/owner" 2>/dev/null
     sleep 0.1
     [ "$(cat "$CLAIMLOCK/owner" 2>/dev/null)" = "$$" ] && break
-    trap - EXIT   # lost the internal race; the presumed winner's own trap cleans up
   fi
   _claim_tries=$((_claim_tries+1))
   if [ "$_claim_tries" -ge 50 ]; then
